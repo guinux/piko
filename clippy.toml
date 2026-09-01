@@ -1,0 +1,11 @@
+# Keep in sync with `rust-version` in the root Cargo.toml.
+#
+# Enables clippy's `incompatible_msrv`, which flags standard-library APIs stabilised after
+# this version. It is the cheap half of the MSRV gate and NOT sufficient on its own: it
+# reads `#[stable(since = ...)]` on library items, so it does not see post-MSRV *language*
+# features at all (a let-chain under msrv = "1.85" produces no diagnostic whatsoever —
+# measured, not assumed). Only a real `cargo +<msrv> check --workspace` catches those.
+#
+# It also stops clippy suggesting MSRV-too-new constructs, e.g. `collapsible_if` proposing
+# a let-chain.
+msrv = "1.90"

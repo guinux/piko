@@ -1,0 +1,44 @@
+[package]
+name = "piko-db"
+version = "0.1.0"
+description = "Reader for the alpm-db local package database"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Exposes the test-fixture builder to downstream crates and integration tests.
+fixture = ["dep:tempfile"]
+
+[dependencies]
+alpm-common.workspace = true
+alpm-compress.workspace = true
+alpm-db.workspace = true
+alpm-mtree.workspace = true
+alpm-repo-db.workspace = true
+alpm-types.workspace = true
+# Required: piko inflates `mtree` itself, against a bound, rather than letting
+# `alpm-mtree` do it unbounded internally.
+flate2.workspace = true
+glob.workspace = true
+tar.workspace = true
+tempfile = { workspace = true, optional = true }
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Only for the `O_NOFOLLOW | O_NONBLOCK` open flags, whose values are platform-specific.
+libc.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+tempfile.workspace = true
+libdeflater = "1"
+rayon = "1"
+# Self dev-dependency so integration tests get the fixture builder without `fixture`
+# becoming a default feature (which would pull tempfile into production builds).
+piko-db = { path = ".", features = ["fixture"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,85 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/piko-db",
+    "crates/piko-db-write",
+    "crates/piko-net",
+    "crates/piko-sig",
+    "crates/piko-sig-write",
+    "crates/piko-txn",
+    "crates/piko",
+    "crates/piko-key",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/nuxgui/piko"
+authors = ["piko contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+
+[workspace.lints.clippy]
+# Sizes and counts read off disk are attacker-influenced; silent wrapping is a bug.
+arithmetic_side_effects = "deny"
+indexing_slicing = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[workspace.dependencies]
+alpm-types = "0.11"
+# The same library libalpm itself verifies with.
+gpgme = "0.11"
+alpm-db = "0.2"
+# We would only need `default-features = false` here because the default `creation` feature is
+# only needed to *write* mtree files, piko only reads them.
+# But  it does not build, because of an upstream bug.
+alpm-mtree = "0.3"
+alpm-common = "0.2"
+# For repository databases. Only for `CompressionDecoder`.
+# `TarballReader` cannot be bounded, so `tar` is a
+# direct dependency too and piko drives `tar::Archive` itself.
+alpm-compress = "0.1"
+alpm-repo-db = "0.1"
+alpm-pkginfo = "0.6"
+flate2 = "1"
+glob = "0.3"
+libc = "0.2"
+# `openat`-based path resolution for extraction. `unsafe_code = "forbid"` rules out calling
+# `libc::openat` directly.
+# `process` is for `chroot` and `umask`. See `piko_txn::exec`.
+rustix = { version = "1.1", default-features = false, features = ["fs", "process"] }
+tar = "0.4"
+thiserror = "2"
+# rustls + platform-verifier: keeps piko's TLS stack pure Rust while still validating
+# against the system CA store, same as libcurl/pacman.
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+time = "0.3"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+# CLI-only progress bar/spinner for downloads and transaction steps
+indicatif = "0.18"
+# CLI-only Ctrl+C handling for cancelling an in-progress download.
+ctrlc = "3"
+# CLI-only ANSI styling for the transaction progress display.
+console = "0.16"
+
+piko-db = { path = "crates/piko-db", version = "0.1.0" }
+piko-db-write = { path = "crates/piko-db-write", version = "0.1.0" }
+piko-net = { path = "crates/piko-net", version = "0.1.0" }
+piko-sig = { path = "crates/piko-sig", version = "0.1.0" }
+piko-sig-write = { path = "crates/piko-sig-write", version = "0.1.0" }
+piko-txn = { path = "crates/piko-txn", version = "0.1.0" }
+
+[profile.release]
+# A package manager runs as root; keep overflow checks on in release builds.
+overflow-checks = true
+codegen-units = 1
+lto = "fat"

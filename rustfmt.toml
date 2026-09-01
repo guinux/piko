@@ -1,0 +1,14 @@
+edition = "2024"
+max_width = 100
+
+# The repository was written in this style long before the formatter was enforced, and this is
+# the setting that says so: it lets every construct stay on one line up to `max_width` instead
+# of applying rustfmt's much narrower per-construct defaults (`fn_call_width = 60`,
+# `chain_width = 60`, `struct_lit_width = 18`, …).
+#
+# Measured, not guessed. Against the tree as it stood when `cargo fmt` was first enforced:
+# rustfmt's defaults wanted 1140 hunks, six hand-tuned width knobs wanted 552, and this single
+# setting wanted 438 — the smallest of the three, and one option rather than six magic numbers.
+# A formatter that has to be argued with in six places is one that disagrees with the code; this
+# one mostly agrees with it.
+use_small_heuristics = "Max"

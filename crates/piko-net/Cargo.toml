@@ -1,0 +1,25 @@
+[package]
+name = "piko-net"
+version = "0.1.0"
+description = "Downloading and refreshing repository databases"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `PackageFileName`, for naming a package download.
+alpm-types.workspace = true
+piko-db.workspace = true
+piko-db-write.workspace = true
+piko-sig.workspace = true
+thiserror.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+
+[dev-dependencies]
+piko-db.workspace = true
+tempfile.workspace = true

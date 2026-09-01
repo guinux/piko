@@ -1,0 +1,41 @@
+[package]
+name = "piko"
+version = "0.1.0"
+description = "A simple, secure ALPM package manager"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+alpm-mtree.workspace = true
+alpm-types.workspace = true
+clap.workspace = true
+console.workspace = true
+ctrlc.workspace = true
+# `HoldPkg` entries are shell globs, matched with pacman's own bare `fnmatch` rather than
+# libalpm's `_alpm_fnmatch_patterns` — see `cmd::removal::is_held` for why the two differ.
+glob.workspace = true
+indicatif.workspace = true
+piko-db.workspace = true
+piko-db-write.workspace = true
+piko-net.workspace = true
+piko-sig.workspace = true
+piko-txn.workspace = true
+# The CLI has failure modes no library crate has a type for — an unreadable `pacman.conf`,
+# a mistyped repository name, a rejected repository signature.
+thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+# Scriptlet and hook execution can only be exercised where the `piko` binary exists, because
+# that binary *is* the exec helper — see `tests/side_effects.rs`.
+tar.workspace = true
+tempfile.workspace = true
+# `install` resolves package names through a repository database, so the same test binary
+# needs a way to build one — see `piko-db/src/fixture.rs`.
+piko-db = { workspace = true, features = ["fixture"] }
+
+[lints]
+workspace = true

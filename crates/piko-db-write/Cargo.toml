@@ -1,0 +1,22 @@
+[package]
+name = "piko-db-write"
+version = "0.1.0"
+description = "Writer for the alpm-db local package database: the db.lck lock and atomic entry writes"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alpm-types.workspace = true
+# `O_NOFOLLOW` on the atomic write's temporary file; see `local::create_temp`.
+libc.workspace = true
+piko-db.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

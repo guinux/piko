@@ -1,0 +1,50 @@
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2025-0058 — `custom_derive` is unmaintained.
+    # Reached only as gpgme -> conv -> custom_derive. It is an *unmaintained* advisory, not a
+    # vulnerability`.
+    # Revisit when gpgme drops `conv`. This entry exists so the decision is visible.
+    "RUSTSEC-2025-0058",
+]
+
+[licenses]
+version = 2
+# Kept to exactly what `cargo deny list` reports across the dependency tree, so an
+# unexpected license shows up as a new failure rather than being silently pre-approved.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    # rustls, ring — ureq's TLS provider.
+    "ISC",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    # The bzip2 library's own (BSD-style, permissive) license — added with `alpm-compress`.
+    # Not to be confused with a GPL "bzip2" package; `cargo deny list` reports it under this
+    # exact SPDX-ish identifier.
+    "bzip2-1.0.6",
+    # gpgme, gpgme-sys, gpg-error, libgpg-error-sys.
+    # The obligation it does create is on *distributing a built
+    # binary*: recipients must be able to relink against a modified libgpgme.
+    "LGPL-2.1",
+    # webpki-roots, pulled in by ureq's `rustls` feature.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,0 +1,20 @@
+[package]
+name = "piko-sig"
+version = "0.1.0"
+description = "OpenPGP signature verification for piko, against a GnuPG keyring"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gpgme.workspace = true
+piko-db.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

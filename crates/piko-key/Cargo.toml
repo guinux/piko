@@ -1,0 +1,18 @@
+[package]
+name = "piko-key"
+version = "0.1.0"
+description = "Bootstraps and administers the GnuPG keyring piko verifies ALPM signatures against"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+piko-db.workspace = true
+piko-sig.workspace = true
+piko-sig-write.workspace = true
+clap.workspace = true

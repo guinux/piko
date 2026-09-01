@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - run: pacman -Syu --noconfirm rust gpgme
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - run: pacman -Syu --noconfirm rust gpgme
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - run: pacman -Syu --noconfirm rust gpgme
+      # Deliberately not `-- --ignored`: those tests (real_system.rs, repo_real_system.rs,
+      # config_real_system.rs, write_real_system.rs) expect a real Arch installation with an
+      # existing package history and a populated pacman.conf. A freshly provisioned
+      # container has neither, even though pacman itself is present.
+      - run: cargo test --workspace
+
+  deny:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-deny shells out to git to clone the RustSec advisory database; base-devel does
+      # not pull it in on its own.
+      - run: pacman -Syu --noconfirm rust gpgme git
+      # cargo-deny is not in the official Arch repositories.
+      - run: cargo install cargo-deny --locked
+      - run: cargo deny check
+
+  msrv:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - run: pacman -Syu --noconfirm gpgme
+      # Arch's `rust` package tracks rolling release and is always newer than the pinned
+      # MSRV, so the toolchain comes from rustup instead. rustup conflicts with the
+      # rust/cargo/rustfmt packages on Arch, hence the removal first.
+      - run: pacman -Rns --noconfirm rust cargo || true
+      - run: pacman -Syu --noconfirm rustup
+      - run: rustup toolchain install 1.90 --profile minimal
+      - run: cargo +1.90 check --workspace --all-targets

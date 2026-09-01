@@ -1,0 +1,32 @@
+[package]
+name = "piko-txn"
+version = "0.1.0"
+description = "Commit engine for piko"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alpm-compress.workspace = true
+alpm-pkginfo.workspace = true
+alpm-types.workspace = true
+# `O_NOFOLLOW` on the journal's temporary file; see `journal::atomic_write`.
+libc.workspace = true
+piko-db.workspace = true
+piko-db-write.workspace = true
+piko-net.workspace = true
+piko-sig.workspace = true
+rustix.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# The local-database side of conflict detection needs a database to ask, and `DbFixture`
+# builds throwaway ones. Tests use fixtures in a tempdir, never real system paths.
+piko-db = { workspace = true, features = ["fixture"] }
+tempfile.workspace = true
