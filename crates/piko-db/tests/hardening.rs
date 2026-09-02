@@ -1,6 +1,7 @@
 //! Security properties of the database reader, exercised through the public API.
 //!
-//! These test the claims made in `docs/libalpm-compat.md` §4–§7. They are written against a
+//! These test the security claims: bounded reads, no symlink traversal,
+//! no blocking on a non-regular file, and a bounded entry count. They are written against a
 //! real filesystem rather than unit-tested internals, because the properties are about what
 //! actually happens when the process opens a hostile path.
 

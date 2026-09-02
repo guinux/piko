@@ -368,7 +368,9 @@ fn run(cli: &Cli) -> Result<ExitCode, Error> {
             )
         }
         Command::Report => cmd::txn::report(&resolve_dbpath(cli, &config), &mut out),
-        Command::Conf => cmd::conf::conf_dump(require_pacman_config(cli, &config)?, &mut out),
+        Command::Conf { directive } => {
+            cmd::conf::conf(require_pacman_config(cli, &config)?, directive.as_deref(), &mut out)
+        }
     };
 
     // A broken pipe is what `piko list | head` looks like. It is not a failure.

@@ -1,9 +1,9 @@
 //! Security properties of the repository database reader, exercised through the public API.
 //!
 //! Mirrors `tests/hardening.rs`, extended for two properties specific to a repository archive.
-//! One is bounded decompression (`alpm-compress` has no size cap of its own — see
-//! `docs/libalpm-compat.md`). The other is the `.db`/`.files` version-skew defence documented
-//! on [`piko_db::Error::FilesVersionSkew`].
+//! One is bounded decompression, which piko does itself because `alpm-compress` has no size
+//! cap of its own. The other is the `.db`/`.files` version-skew defence documented on
+//! [`piko_db::Error::FilesVersionSkew`].
 
 #![allow(
     clippy::unwrap_used,
@@ -260,7 +260,7 @@ fn a_targeted_file_lookup_is_also_bounded_by_the_inflated_limit() {
 /// Every `RepoPackage` a `RepoDatabase` produces shares one `Arc<FilesSource>`. A package
 /// from a *different* database must never be resolved against it — that would silently
 /// serve one repository's file list under another's name. That is exactly what keying
-/// `FilesArena` by name and version (§18) exists to prevent, one layer down.
+/// `FilesArena` by name and version exists to prevent, one layer down.
 #[test]
 fn file_lists_rejects_a_package_that_did_not_come_from_this_database() {
     let fixture = RepoFixture::new();

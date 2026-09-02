@@ -719,8 +719,8 @@ mod tests {
         assert!(first.to_string().contains("desc"));
     }
 
-    /// The whole point of §108, end to end: pacman prints a `%URL%` `url::Url` refuses, so
-    /// piko must still be able to read the package it belongs to.
+    /// The whole point of the `%URL%` split, end to end: pacman prints a `%URL%` `url::Url`
+    /// refuses, so piko must still be able to read the package it belongs to.
     #[test]
     fn an_unparsable_url_does_not_make_the_package_unreadable() {
         let db = DbFixture::new();

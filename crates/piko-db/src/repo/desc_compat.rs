@@ -369,8 +369,8 @@ Foobar McFooface <foobar@mcfooface.org>
         assert_eq!(RepoDescView::new(&desc, &DescUrl::default()).name().as_ref(), "foo");
     }
 
-    /// §108, on the repository side: a `%URL%` `url::Url` refuses must not cost the entry its
-    /// `%FILENAME%`, which is what an install downloads.
+    /// The repository side of the `%URL%` split: a `%URL%` `url::Url` refuses must not cost
+    /// the entry its `%FILENAME%`, which is what an install downloads.
     #[test]
     fn an_unparsable_url_leaves_the_file_name_readable() {
         let text = MINIMAL_DESC_V1.replace("https://example.org/", "www.example.org");

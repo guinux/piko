@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(b.iter().collect::<Vec<_>>(), ["usr/lib/foo!", "usr/lib/foo/"]);
         assert!(
             libalpm_intersection(&a, &b).is_empty(),
-            "the premise of §53 no longer holds: the merge found the pair"
+            "the premise of this test no longer holds: the merge found the pair"
         );
         assert_eq!(a.intersection(&b), ["usr/lib/foo"]);
     }

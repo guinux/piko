@@ -5,7 +5,7 @@
 //! piko once had this check, then removed it on the belief that libalpm verifies a sync
 //! database only at download. That belief was wrong: `sync_db_validate` (`be_sync.c:71`) runs
 //! both at registration (`be_sync.c:758`) and after a download (`be_sync.c:248`). The check is
-//! back for that reason. See `docs/libalpm-compat.md` §62.
+//! back for that reason.
 //!
 //! The subtle half is `a_repository_that_declares_no_sig_level_is_still_verified`. A repository
 //! section with no `SigLevel` directive keeps the parser's `USE_DEFAULT` sentinel (bit 31) in

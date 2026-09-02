@@ -714,8 +714,8 @@ fn spell(files: &[PathBuf]) -> Vec<String> {
 /// [`Error::UnreadableEntry`] if the installed entry exists but its `%FILES%` or `%BACKUP%`
 /// cannot be read. Defaulting to an empty list is not an option here: the install is about to
 /// delete that entry, so an empty list would leave every file it owned on disk with nothing
-/// recording who put them there. That is the exact shape of the bug §57 records, in the one
-/// place where it destroys data. Raising it at `verify` also keeps the promise `Verified`
+/// recording who put them there. That is the exact shape of the cached-emptiness bug, in the
+/// one place where it destroys data. Raising it at `verify` also keeps the promise `Verified`
 /// makes: the commit does not fail for something that could have been read up front.
 fn superseded(installed: Option<&LocalPackage>) -> Result<Option<Superseded>> {
     let Some(package) = installed else { return Ok(None) };
@@ -1906,7 +1906,7 @@ mod tests {
     /// `add.c:333`'s `if(backup)` sits outside the `notouch || needbackup` branch, so libalpm
     /// records a hash for every backup file it extracted — including one that was simply not
     /// on the system before. piko used to record none at all, because `install_step` passed
-    /// `Filters::default()`, which left `is_backup` always false. See §82.
+    /// `Filters::default()`, which left `is_backup` always false.
     #[test]
     fn a_fresh_install_records_the_backup_hash() {
         let cache = tempfile::tempdir().unwrap();

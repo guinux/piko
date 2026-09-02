@@ -567,7 +567,7 @@ fn a_broken_hook_file_is_reported_and_skipped() {
 /// `Exec` their own package owns, and only 8 declare a `Depends`, so `Depends` is not what
 /// protects them. libalpm reads the hook directories inside `_alpm_hook_run` (`hook.c:536`),
 /// called once before the transaction and once after (`trans.c:202`, `trans.c:238`). So the
-/// `PostTransaction` pass simply never finds the file. See `docs/libalpm-compat.md` §92.
+/// `PostTransaction` pass simply never finds the file.
 ///
 /// The two halves are asserted together on purpose. Without the `PreTransaction` hook running,
 /// the absence of the `PostTransaction` one would prove nothing: a trigger that never matched
@@ -1201,9 +1201,9 @@ fn serve_many(bodies: std::collections::HashMap<String, Vec<u8>>) -> (String, Ar
 /// The guard for a real trap. Package downloads happen in a `prefetch` phase ahead of the
 /// per-package loop, so a `was_cached` check asked inside that loop would answer "yes" for
 /// everything, reporting a run that fetched the whole transaction as one that fetched nothing.
-/// That is `-w`'s §98 regression in reverse. `download_only` collects the answer before
-/// `prefetch` runs; this test says so out loud. Three packages, so more than one worker has
-/// something to do.
+/// That is `-w`'s verification regression in reverse. `download_only` collects the answer
+/// before `prefetch` runs; this test says so out loud. Three packages, so more than one worker
+/// has something to do.
 #[test]
 fn download_only_reports_parallel_downloads_as_downloads_not_cache_hits() {
     let names = ["foo", "bar", "baz"];
@@ -1307,7 +1307,7 @@ fn download_only_downloads_without_installing() {
 ///
 /// libalpm does the same. `check_validity` (`sync.c:1275`) runs before `_alpm_sync_load`
 /// returns on `ALPM_TRANS_FLAG_DOWNLOADONLY` (`sync.c:1279`), and piko did not. This test pins
-/// that. See `docs/libalpm-compat.md` §98.
+/// that.
 ///
 /// The package is pre-cached rather than served, which checks the same thing for the same
 /// reason: `check_validity` runs over `_alpm_filecache_find`'s answer, so a file already in the

@@ -1200,7 +1200,7 @@ mod tests {
             // list is what is walked, so the count depends on which side is which.
             vec![target("a", &["usr/lib/foo", "usr/lib/foo/"]), target("b", &["usr/lib/foo"])],
             vec![target("a", &["usr/lib/foo"]), target("b", &["usr/lib/foo", "usr/lib/foo/"])],
-            // The byte-order trap from §53: `!` sorts between a name and its trailing slash.
+            // The byte-order trap: `!` sorts between a name and its trailing slash.
             vec![target("a", &["usr/lib/foo"]), target("b", &["usr/lib/foo!", "usr/lib/foo/"])],
             // Many paths per target, so the sort has runs longer than one to group.
             vec![

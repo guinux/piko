@@ -500,8 +500,8 @@ impl RepoDatabase {
         // built once in `build` and cloned into each one. A package that does not share it
         // came from a different `RepoDatabase` (or a different `open` of the same archive),
         // and must never be resolved against this one's arena. Doing so would silently
-        // cross two repositories' file lists — the same class of mistake §18 catches one
-        // layer down, at a point before any archive is even touched.
+        // cross two repositories' file lists — the same class of mistake the `.db`/`.files`
+        // version-skew check catches one layer down, before any archive is even touched.
         let (ours, foreign): (Vec<_>, Vec<_>) = packages
             .into_iter()
             .enumerate()

@@ -207,8 +207,9 @@ mod tests {
         assert_eq!(view.name().as_ref(), "foo", "shared fields work across versions");
     }
 
-    /// The point of §108: a `%URL%` `url::Url` refuses costs the URL its normalized form,
-    /// and nothing else. libalpm prints such a value verbatim, so the bytes must survive.
+    /// The point of the `%URL%` split: a `%URL%` `url::Url` refuses costs the URL its
+    /// normalized form, and nothing else. libalpm prints such a value verbatim, so the bytes
+    /// must survive.
     #[test]
     fn an_unparsable_url_leaves_every_other_field_readable() {
         let text = MINIMAL_DESC_V1.replace("https://example.org/", "www.example.org");

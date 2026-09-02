@@ -7,16 +7,15 @@
 //! # What these exist for
 //!
 //! `fetch` learned to inspect the HTTP status after a `304` truncated a live database to zero
-//! bytes (`docs/libalpm-compat.md` §66a). ureq turns 4xx and 5xx into `Err` but returns 3xx as
-//! `Ok` with an empty body. `fetch_signature` never got the same guard. An empty file reached
-//! GPGME and came back as "No data (gpg error 58)", which names the wrong culprit. Nothing was
-//! destroyed, so the bug went unnoticed. The refresh simply failed for a reason the user could
-//! not act on.
+//! bytes. ureq turns 4xx and 5xx into `Err` but returns 3xx as `Ok` with an empty body.
+//! `fetch_signature` never got the same guard. An empty file reached GPGME and came back as
+//! "No data (gpg error 58)", which names the wrong culprit. Nothing was destroyed, so the bug
+//! went unnoticed. The refresh simply failed for a reason the user could not act on.
 //!
 //! The stale-signature test covers a different question. A repository database changes content
 //! under a fixed name, so a `.sig` left from an earlier refresh vouches for bytes that no
-//! longer exist. piko itself never reads that file; signatures are checked at download (§62).
-//! Pacman verifies at open, though, and shares `/var/lib/pacman/sync` with piko. Leaving the
+//! longer exist. piko itself never reads that file; it checks a signature at download and at
+//! open. Pacman verifies at open too, and shares `/var/lib/pacman/sync` with piko. Leaving the
 //! stale file there makes the next `pacman -Sy` reject a database piko installed correctly.
 
 #![allow(
@@ -127,7 +126,7 @@ fn keyring() -> Option<(tempfile::TempDir, Keyring)> {
     Some((home, opened))
 }
 
-/// §66a's guard, in the path that never had it. The message must name the status.
+/// The `304` guard, in the path that never had it. The message must name the status.
 #[test]
 fn a_not_modified_answer_to_a_signature_request_is_reported_as_such() {
     let dir = tempfile::tempdir().unwrap();

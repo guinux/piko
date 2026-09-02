@@ -117,7 +117,7 @@ pub fn files(extraction: &Extraction) -> Record {
     record.set("FILES", paths);
 
     // pacman writes `<path>\t<md5>`. `write::Record` keeps the line verbatim, tab included,
-    // because that is what makes a `(null)` hash survive a rewrite (§40).
+    // because that is what makes a `(null)` hash survive a rewrite.
     let backups: Vec<String> = extraction
         .backup_hashes
         .iter()

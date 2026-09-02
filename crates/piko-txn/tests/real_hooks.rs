@@ -12,9 +12,8 @@
 //! Every one of these files was installed by a package and is parsed by pacman on every
 //! transaction. So pacman's *silence* is the check. If piko refuses one, or splits its `Exec`
 //! into a program that is not on this system, piko is wrong: pacman has been running them for
-//! months. This is the same shape of oracle file-conflict detection uses (see
-//! `docs/libalpm-compat.md` §56). It is also the only oracle available, since there is no
-//! `pacman --print-hooks`.
+//! months. This is the same shape of oracle file-conflict detection uses. It is also the only
+//! oracle available, since there is no `pacman --print-hooks`.
 
 #![allow(
     clippy::unwrap_used,

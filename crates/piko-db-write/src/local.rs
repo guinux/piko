@@ -1038,7 +1038,7 @@ mod tests {
         let name = entry("foo-1.0.0-1");
         writer.create_entry(&name).unwrap();
 
-        // The record has a URL a URL parser would normalize, and a group, so both §40
+        // The record has a URL a URL parser would normalize, and a group, so both round-trip
         // hazards are live.
         let original = "%NAME%\nfoo\n\n%URL%\nhttps://archlinux.org\n\n%SIZE%\n10\n\n\
                         %GROUPS%\ng\n\n%DEPENDS%\nbar\n\n";

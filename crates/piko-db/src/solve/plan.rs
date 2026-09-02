@@ -887,8 +887,8 @@ mod tests {
             plan.fidelity()
         );
 
-        // The count on its own is what §52 measured to be uninformative; the report has to
-        // name what it counted, or the same always-on failure cannot be told from a real hit.
+        // The count on its own was measured to be uninformative; the report has to name what
+        // it counted, or the same always-on failure cannot be told from a real hit.
         let [divergence] = plan.divergences() else {
             panic!("the counted requirement must be named: {:?}", plan.divergences())
         };
@@ -904,8 +904,8 @@ mod tests {
         assert_eq!(relation.as_deref(), Some("virtual"), "the index must reach the relation");
     }
 
-    /// The bug §52 measured: `encode` emits a requirement for every `%DEPENDS%` entry of every
-    /// candidate in the cone, the cone holds the whole installed set, and "every installed
+    /// The bug this filter closes: `encode` emits a requirement for every `%DEPENDS%` entry of
+    /// every candidate in the cone, the cone holds the whole installed set, and "every installed
     /// package must remain" keeps all of it selected — so an unrelated quirk anywhere on the
     /// system used to be counted as a divergence of *every* plan, whatever the plan was.
     ///

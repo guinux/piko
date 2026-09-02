@@ -550,8 +550,8 @@ pub enum Fidelity {
     /// - A provider selected for some other requirement already satisfied this one, so the
     ///   preferred candidate was never needed. pacman succeeds here too, with a plan of the
     ///   same size or larger. Its own answer depends on the order targets are named on the
-    ///   command line; this one does not. See §52, the case measured on real data
-    ///   (`piko plan cl-hu-dwim-stefil`).
+    ///   command line; this one does not. `piko plan cl-hu-dwim-stefil` is the case measured
+    ///   on real data.
     ///
     /// The count is of requirements, not of packages. [`FidelityReport::diverged`] names them.
     Diverged {
@@ -623,7 +623,7 @@ impl FidelityReport {
 ///    was the installed copy of `foo`, and whose selected satisfier is `foo` from a
 ///    repository, has not diverged. That is what an upgrade *is*, and during `-Su` it
 ///    describes most of the transaction. Counting those made a clean 59-package sysupgrade
-///    report 28 divergences (§39).
+///    report 28 divergences.
 /// 2. **Only requirements libalpm would have raised at all.** [`encode`] emits a requirement
 ///    for every `%DEPENDS%` entry of every candidate in the cone. The cone is seeded with the
 ///    whole installed set, and "every installed package must remain" keeps all of them
@@ -634,7 +634,7 @@ impl FidelityReport {
 ///    requirement any of them answers is not a departure from the descent: libalpm never
 ///    walked it.
 ///
-///    - an installed package the transaction keeps (§52),
+///    - an installed package the transaction keeps,
 ///    - a package the user named, which is in the list before resolution starts,
 ///    - a provider pulled in for an *earlier* `%DEPENDS%` entry of the same dependent, since
 ///      libalpm resolves one package's dependencies in declaration order.
@@ -646,7 +646,7 @@ impl FidelityReport {
 /// queue order also decides which provider arrives first, and reproducing that would mean
 /// running a second resolver alongside the one whose answer is being audited. The measured
 /// false positives came from the inner loop: `cl-alexandria` declares `cl-asdf` before
-/// `common-lisp`, so `ecl` answers both and `clisp` is never tried (§52).
+/// `common-lisp`, so `ecl` answers both and `clisp` is never tried.
 #[must_use]
 pub fn fidelity(
     universe: &Universe<'_>,

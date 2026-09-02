@@ -494,8 +494,8 @@ impl Refresher {
         // Only 200 carries a signature, and the status must be checked rather than assumed.
         // `http_status_as_error` turns 4xx and 5xx into `Err`, which the arms above rely on,
         // but not 3xx: ureq returns those as `Ok` with an empty body. That is the exact shape
-        // of the bug that once truncated a live database (§66a), and this path never had the
-        // guard `fetch` gained then. Without this check, an empty file reaches GPGME, which
+        // of the bug that once truncated a live database, and this path never had the guard
+        // `fetch` gained then. Without this check, an empty file reaches GPGME, which
         // reports "No data (gpg error 58)" and names the wrong culprit.
         let status = response.status().as_u16();
         if status != 200 {
@@ -578,9 +578,9 @@ impl Refresher {
             Signature::Downloaded(signature) => signature.commit()?,
             // The server says there is none, and a database changes content under a fixed
             // name, so any `.sig` still sitting there vouches for bytes that have just been
-            // replaced. Nothing in piko reads it (signatures are checked at download, §62),
-            // but pacman verifies at open and shares this directory, so leaving it behind
-            // makes the next `pacman -Sy` reject a database piko installed correctly.
+            // replaced. Nothing in piko reads it, since piko checks a signature at download
+            // and at open, but pacman verifies at open and shares this directory, so leaving it
+            // behind makes the next `pacman -Sy` reject a database piko installed correctly.
             //
             // Failure is ignored on purpose. The database is already in place and correct.
             // Refusing the whole refresh because a stale file could not be unlinked would turn

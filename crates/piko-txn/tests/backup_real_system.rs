@@ -26,8 +26,7 @@
 //!
 //! `%BACKUP%` used to be **empty for every package piko installed**. `install_step` passed
 //! `Filters::default()`, whose `is_backup` always answered no. The whole mechanism was
-//! implemented and unit-tested, but a transaction never once reached it. See
-//! `docs/libalpm-compat.md` §82.
+//! implemented and unit-tested, but a transaction never once reached it.
 
 #![allow(
     clippy::unwrap_used,
@@ -220,7 +219,7 @@ fn recorded_backup_hashes_match_what_pacman_recorded() {
         // A path pacman records only as `(null)` is one it never hashed. The `.PKGINFO`
         // declares `backup = <path>` for a path the package does not ship — measured on
         // `gdm`. piko records only paths it actually extracted, so it has nothing to say
-        // about such paths. This is the documented divergence. See §82.
+        // about such paths. This is the documented divergence.
         for path in theirs_unhashed {
             null_hashes.push(format!("{name}: {path}"));
             assert!(
@@ -254,7 +253,7 @@ fn recorded_backup_hashes_match_what_pacman_recorded() {
     if !null_hashes.is_empty() {
         eprintln!(
             "{} path(s) declared `backup =` but never shipped; pacman wrote `(null)`, \
-             piko records nothing at all (§82):",
+             piko records nothing at all:",
             null_hashes.len()
         );
         for line in &null_hashes {
