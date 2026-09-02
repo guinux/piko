@@ -34,4 +34,4 @@ pub mod populate;
 
 pub use admin::{ImportSummary, InitOutcome, KeyInfo, KeyringAdmin, OwnerTrust};
 pub use error::{Error, Result};
-pub use populate::{PopulateSummary, discover_keyrings};
+pub use populate::{PopulateSummary, SideFile, SkippedLine, discover_keyrings};

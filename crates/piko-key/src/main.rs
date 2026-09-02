@@ -42,7 +42,9 @@ fn run(cli: &Cli, out: &mut impl std::io::Write) -> ExitCode {
             commands::lsign_key(&gpgdir, keyids, *noconfirm, out)
         }
         Command::ListKeys { keyids } => commands::list_keys(&gpgdir, keyids, out),
-        Command::Delete { keyids, noconfirm } => commands::delete(&gpgdir, keyids, *noconfirm, out),
+        Command::Delete { keyids, secret, noconfirm } => {
+            commands::delete(&gpgdir, keyids, *secret, *noconfirm, out)
+        }
         Command::Verify { signature, file } => {
             commands::verify(&gpgdir, signature, file.as_deref(), out)
         }

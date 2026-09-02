@@ -53,6 +53,22 @@ pub enum Error {
         keyid: String,
     },
 
+    /// A delete would also have deleted a secret key, and the caller did not allow that.
+    ///
+    /// The message names the flag, not the GPGME failure. [`Error::NoMasterKey`] names
+    /// `piko-key init` for the same reason: the caller's next step is the useful part. GPGME
+    /// reports `GPG_ERR_CONFLICT` here, which says nothing about that next step.
+    #[error(
+        "the key {keyid} in the keyring at {} has a secret key; pass --secret to delete it too",
+        home.display()
+    )]
+    SecretKeyRefused {
+        /// The keyring directory.
+        home: PathBuf,
+        /// The key that was not deleted.
+        keyid: String,
+    },
+
     /// A `populate` source file (`<name>.gpg`, `-trusted`, or `-revoked`) could not be used.
     #[error("failed to use keyring file {}: {reason}", path.display())]
     PopulateFile {

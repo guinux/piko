@@ -16,3 +16,7 @@ piko-db.workspace = true
 piko-sig.workspace = true
 piko-sig-write.workspace = true
 clap.workspace = true
+
+[dev-dependencies]
+gpgme.workspace = true
+tempfile.workspace = true

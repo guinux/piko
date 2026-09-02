@@ -1515,9 +1515,11 @@ name = "piko-key"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "gpgme",
  "piko-db",
  "piko-sig",
  "piko-sig-write",
+ "tempfile",
 ]
 
 [[package]]

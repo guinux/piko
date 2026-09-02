@@ -158,6 +158,9 @@ impl KeyringAdmin {
     /// an already-initialized keyring changes nothing and reports
     /// `InitOutcome { master_key_created: false }`.
     ///
+    /// This call sets the mode only on a directory it created itself. An existing keyring keeps
+    /// its current mode. See [`create_keyring_dir`].
+    ///
     /// The master key is RSA-4096, certify-capable, unprotected (no passphrase — this keyring
     /// is meant to be usable by an unattended `piko install`, exactly like pacman's own
     /// keyring), with no expiry. It exists only to locally sign ([`Self::lsign`]) other keys;
@@ -168,21 +171,18 @@ impl KeyringAdmin {
     /// [`Error::Gpgme`] if the directory cannot be created, or key generation fails.
     pub fn init(home: impl AsRef<Path>) -> Result<(Self, InitOutcome)> {
         let home = home.as_ref().to_path_buf();
-        std::fs::create_dir_all(&home).map_err(|source| Error::Gpgme {
-            path: home.clone(),
-            action: "create the keyring directory",
-            message: source.to_string(),
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).map_err(
-                |source| Error::Gpgme {
-                    path: home.clone(),
-                    action: "set the keyring directory's permissions",
-                    message: source.to_string(),
-                },
-            )?;
+        if create_keyring_dir(&home)? {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |source| Error::Gpgme {
+                        path: home.clone(),
+                        action: "set the keyring directory's permissions",
+                        message: source.to_string(),
+                    },
+                )?;
+            }
         }
 
         let admin = Self { home };
@@ -249,10 +249,13 @@ impl KeyringAdmin {
         // `find_secret_keys` matches substrings across every user ID field, not just email —
         // require the exact identity so an unrelated key mentioning "piko@localhost" in a
         // comment can never be mistaken for piko's own master key.
-        let master = candidates
-            .filter_map(std::result::Result::ok)
-            .find(|key| key.user_ids().any(|uid| uid.id().ok() == Some(MASTER_KEY_USERID)));
-        Ok(master)
+        for candidate in candidates {
+            let candidate = self.readable(candidate)?;
+            if candidate.user_ids().any(|uid| uid.id().ok() == Some(MASTER_KEY_USERID)) {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
     }
 
     /// As [`Self::find_master_key`], failing with [`Error::NoMasterKey`] instead of `None`.
@@ -314,9 +317,11 @@ impl KeyringAdmin {
         let master = self.master_key(&mut context)?;
         let target = self.get_key(&mut context, fingerprint)?;
 
-        let already_signed = target.user_ids().next().is_some_and(|uid| {
-            uid.signature(&master).is_some_and(|sig| !sig.is_bad() && !sig.is_revocation())
-        });
+        // `UserId::signature` returns only a usable certification. It already drops a bad
+        // one, a revocation, and one whose status is not `NO_ERROR` (`gpgme-0.11.0`
+        // `keys.rs:622`). Its presence alone answers "already signed".
+        let already_signed =
+            target.user_ids().next().is_some_and(|uid| uid.signature(&master).is_some());
         if already_signed {
             return Ok(false);
         }
@@ -341,17 +346,27 @@ impl KeyringAdmin {
         Ok(true)
     }
 
-    /// Sets ownertrust on `fingerprint`.
+    /// Sets ownertrust on `fingerprint`. A no-op if the key already carries `level`. It then
+    /// returns `false` rather than setting it again, as [`Self::lsign`] and [`Self::disable`]
+    /// do.
+    ///
+    /// Each call that is not a no-op drives a whole `gpgme_op_interact` session. `populate`
+    /// calls this once per `-trusted` line on every run. An already-populated keyring now runs
+    /// none of those sessions. The saving also fixes what `PopulateSummary::trust_set` counts.
+    /// It now means how many keys the call changed, not how many lines it read.
     ///
     /// # Errors
     ///
     /// [`Error::KeyNotFound`] if `fingerprint` is not in the keyring. [`Error::Gpgme`] if
     /// `level` is [`OwnerTrust::Unknown`] or [`OwnerTrust::Undefined`] — neither is settable
     /// through GnuPG's trust menu, see [`OwnerTrust::interactive_digit`].
-    pub fn set_owner_trust(&self, fingerprint: &str, level: OwnerTrust) -> Result<()> {
+    pub fn set_owner_trust(&self, fingerprint: &str, level: OwnerTrust) -> Result<bool> {
         let digit = level.interactive_digit()?;
         let mut context = self.context()?;
         let target = self.get_key(&mut context, fingerprint)?;
+        if OwnerTrust::from(target.owner_trust()) == level {
+            return Ok(false);
+        }
         context
             .interact(
                 &target,
@@ -366,7 +381,8 @@ impl KeyringAdmin {
                 path: self.home.clone(),
                 action: "set ownertrust on",
                 message: source.to_string(),
-            })
+            })?;
+        Ok(true)
     }
 
     /// Disables `fingerprint`: GnuPG will not use it to satisfy a signature check, without
@@ -404,15 +420,30 @@ impl KeyringAdmin {
     /// matching secret key — piko's own master key included — so it is never removed by
     /// accident.
     ///
+    /// piko decides this refusal, rather than GnuPG. GPGME rejects the same case on its own,
+    /// but reports only `GPG_ERR_CONFLICT`. That message names neither the key nor the next
+    /// step. This method searches the secret keyring first, and returns
+    /// [`Error::SecretKeyRefused`] instead.
+    ///
+    /// The cost of the mistake is why the refusal is explicit. piko's master key signs every
+    /// local certification in the keyring. A deleted master key therefore leaves every key
+    /// [`Self::lsign`] certified without a trust path.
+    ///
     /// # Errors
     ///
     /// [`Error::KeyNotFound`] if `fingerprint` is not in the keyring.
+    /// [`Error::SecretKeyRefused`] if the key has a secret key and `allow_secret` is `false`.
     pub fn delete(&self, fingerprint: &str, allow_secret: bool) -> Result<()> {
         let mut context = self.context()?;
         let target = self.get_key(&mut context, fingerprint)?;
         let mut flags = gpgme::DeleteKeyFlags::empty();
         if allow_secret {
             flags |= gpgme::DeleteKeyFlags::ALLOW_SECRET;
+        } else if context.get_secret_key(fingerprint).is_ok() {
+            return Err(Error::SecretKeyRefused {
+                home: self.home.clone(),
+                keyid: fingerprint.to_owned(),
+            });
         }
         context.delete_key_with_flags(&target, flags).map_err(|source| Error::Gpgme {
             path: self.home.clone(),
@@ -427,13 +458,72 @@ impl KeyringAdmin {
     ///
     /// [`Error::Gpgme`] if GnuPG cannot be run.
     pub fn list_keys(&self) -> Result<Vec<KeyInfo>> {
+        self.find_keys(&[])
+    }
+
+    /// Every public key that matches one of `patterns`. An empty `patterns` matches every key,
+    /// so this is also what [`Self::list_keys`] calls.
+    ///
+    /// GnuPG does the matching, through `gpgme_op_keylist_ext`. A pattern is a fingerprint, a
+    /// short or long key ID, an email address, or a user ID substring. `gpg --list-keys` accepts
+    /// the same set, and treats hex case-insensitively.
+    ///
+    /// A caller must not filter [`Self::list_keys`] itself instead. A substring test over the
+    /// fingerprint matches no email address. It matches no lowercase fingerprint either, because
+    /// GPGME reports hex in upper case. It also matches anywhere in the fingerprint, while GnuPG
+    /// anchors a key ID at the end. [`Self::describe_key`] makes the same point for the
+    /// single-key case.
+    ///
+    /// Unlike [`Self::describe_key`], an ambiguous pattern is not an error here. It lists every
+    /// key it matches, as `gpg --list-keys` does.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Gpgme`] if GnuPG cannot be run.
+    pub fn find_keys(&self, patterns: &[String]) -> Result<Vec<KeyInfo>> {
         let mut context = self.context()?;
-        let keys = context.keys().map_err(|source| Error::Gpgme {
-            path: self.home.clone(),
-            action: "list keys in",
-            message: source.to_string(),
+        let keys = context.find_keys(patterns.iter().map(String::as_str)).map_err(|source| {
+            Error::Gpgme {
+                path: self.home.clone(),
+                action: "list keys in",
+                message: source.to_string(),
+            }
         })?;
-        keys.filter_map(std::result::Result::ok).map(|key| self.describe(&key)).collect()
+        keys.map(|key| self.describe(&self.readable(key)?)).collect()
+    }
+
+    /// Resolves one key by `keyid`, then describes it. `keyid` is a fingerprint, a short or
+    /// long key ID, an email address, or any other pattern GnuPG accepts.
+    ///
+    /// Use this lookup to show a user which key an operation will change. It calls the same
+    /// [`Self::get_key`] every mutating operation here calls. A caller that filters
+    /// [`Self::list_keys`] instead runs a second resolver, and the two can name different keys.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyNotFound`] if `keyid` matches no key, or matches more than one.
+    pub fn describe_key(&self, keyid: &str) -> Result<KeyInfo> {
+        let mut context = self.context()?;
+        let key = self.get_key(&mut context, keyid)?;
+        self.describe(&key)
+    }
+
+    /// Unwraps one entry of a GPGME key listing.
+    ///
+    /// A listing can yield an error in place of a key. Such an entry, dropped, silently
+    /// truncates the answer. [`Self::find_keys`] would return a short list.
+    /// [`Self::find_master_key`] would report no master key, and [`Self::init`] would then
+    /// generate a second one. Design principle 3 rules out both. The error is the answer.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Gpgme`] carrying what GnuPG said.
+    fn readable(&self, entry: std::result::Result<gpgme::Key, gpgme::Error>) -> Result<gpgme::Key> {
+        entry.map_err(|source| Error::Gpgme {
+            path: self.home.clone(),
+            action: "read a key from",
+            message: source.to_string(),
+        })
     }
 
     fn describe(&self, key: &gpgme::Key) -> Result<KeyInfo> {
@@ -461,7 +551,19 @@ impl KeyringAdmin {
     ///
     /// [`Error::Gpgme`] if GnuPG cannot be run.
     pub fn update_trustdb(&self) -> Result<()> {
-        self.list_keys().map(drop)
+        let mut context = self.context()?;
+        let keys = context.keys().map_err(|source| Error::Gpgme {
+            path: self.home.clone(),
+            action: "list keys in",
+            message: source.to_string(),
+        })?;
+        // Walked, not collected. [`Self::list_keys`] would allocate a `KeyInfo` per key, with a
+        // `String` per user ID, and drop all of it. GnuPG recomputes validity as it produces
+        // each key. The walk alone is therefore the whole effect.
+        for key in keys {
+            drop(self.readable(key)?);
+        }
+        Ok(())
     }
 
     /// Looks up `fingerprint` (or any GnuPG-accepted key identifier), failing with
@@ -472,6 +574,40 @@ impl KeyringAdmin {
             home: self.home.clone(),
             keyid: fingerprint.to_owned(),
         })
+    }
+}
+
+/// Creates `home`. Returns `true` if this call created it, and `false` if it already existed.
+///
+/// [`KeyringAdmin::init`] reads that answer before it sets mode `0700`. Only a directory piko
+/// created itself gets piko's mode.
+///
+/// An existing keyring keeps its current mode. The default `home` is `/etc/pacman.d/gnupg`,
+/// which piko shares with pacman. `pacman-key --init` creates that directory `0755`
+/// (`pacman-key.sh.in:225`), and leaves `pubring.gpg` and `trustdb.gpg` world-readable. It does
+/// so on purpose. It supports `--list-keys` and `--verify` for an unprivileged user. It also
+/// checks that both files stay readable (`pacman-key.sh.in:269`). `0700` is correct for a
+/// keyring piko creates. It is not correct for a directory another tool created, from a call
+/// that reports no change.
+///
+/// An existing symlink to a directory counts as existing. pacman-key tests for existence, not
+/// for a directory. Its own comment gives the reason: "someone may want to use a symlink here".
+fn create_keyring_dir(home: &Path) -> Result<bool> {
+    let describe = |source: std::io::Error| Error::Gpgme {
+        path: home.to_path_buf(),
+        action: "create the keyring directory",
+        message: source.to_string(),
+    };
+    match std::fs::create_dir(home) {
+        Ok(()) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        // A missing parent, not a missing leaf. `create_dir_all` creates the whole chain.
+        // The leaf is still new, so it still gets piko's mode.
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(home).map_err(describe)?;
+            Ok(true)
+        }
+        Err(source) => Err(describe(source)),
     }
 }
 
@@ -623,6 +759,41 @@ mod tests {
         assert!(after.iter().all(|key| key.fingerprint != fingerprint));
     }
 
+    /// Ultimate is the one level GnuPG asks an extra confirmation for. No other test drives
+    /// that prompt, so this is what checks `edit_ownertrust.set_ultimate.okay`'s own name.
+    #[test]
+    fn ultimate_answers_gnupgs_extra_confirmation() {
+        let Some(admin) = fast_admin() else { return };
+        let Some((foreign_path, fingerprint)) = foreign_public_key() else { return };
+        admin.import(&foreign_path).unwrap();
+
+        assert!(admin.set_owner_trust(&fingerprint, OwnerTrust::Ultimate).unwrap());
+
+        let keys = admin.list_keys().unwrap();
+        let foreign = keys.iter().find(|key| key.fingerprint == fingerprint).unwrap();
+        assert_eq!(foreign.owner_trust, OwnerTrust::Ultimate);
+    }
+
+    /// `set_owner_trust` joins `lsign` and `disable` in reporting whether it changed anything.
+    /// A second call must drive no `gpgme_op_interact` session at all.
+    #[test]
+    fn set_owner_trust_is_idempotent() {
+        let Some(admin) = fast_admin() else { return };
+        let Some((foreign_path, fingerprint)) = foreign_public_key() else { return };
+        admin.import(&foreign_path).unwrap();
+
+        assert!(
+            admin.set_owner_trust(&fingerprint, OwnerTrust::Full).unwrap(),
+            "first is a change"
+        );
+        assert!(
+            !admin.set_owner_trust(&fingerprint, OwnerTrust::Full).unwrap(),
+            "the second call must find the level already set"
+        );
+        // A different level is still a change.
+        assert!(admin.set_owner_trust(&fingerprint, OwnerTrust::Marginal).unwrap());
+    }
+
     #[test]
     fn lsign_and_set_owner_trust_refuse_a_key_that_is_not_in_the_keyring() {
         let Some(admin) = fast_admin() else { return };
@@ -656,6 +827,19 @@ mod tests {
         assert_eq!(OwnerTrust::from_file_code(7), None);
     }
 
+    /// `update_trustdb` walks the keyring without building a `KeyInfo` for each key. The walk
+    /// is the whole effect. The only thing left to check is that it still succeeds, and still
+    /// reaches every key.
+    #[test]
+    fn update_trustdb_walks_the_keyring() {
+        let Some(admin) = fast_admin() else { return };
+        let Some((foreign_path, _)) = foreign_public_key() else { return };
+        admin.import(&foreign_path).unwrap();
+
+        admin.update_trustdb().unwrap();
+        assert_eq!(admin.list_keys().unwrap().len(), 2, "the walk must not change the keyring");
+    }
+
     #[test]
     fn open_refuses_a_missing_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -671,5 +855,52 @@ mod tests {
         // standing in for a real one) must find it rather than generating a second master key.
         let (_, outcome) = KeyringAdmin::init(admin.home()).unwrap();
         assert!(!outcome.master_key_created, "{outcome:?}");
+    }
+
+    /// `init` reports an existing keyring as unchanged. It must therefore leave the mode
+    /// alone. The default keyring is pacman's own, at mode `0755`. See [`create_keyring_dir`].
+    #[test]
+    fn init_does_not_remode_an_existing_keyring() {
+        let Some(admin) = fast_admin() else { return };
+        std::fs::set_permissions(admin.home(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        KeyringAdmin::init(admin.home()).unwrap();
+
+        let mode = std::fs::metadata(admin.home()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "an existing keyring's mode is its owner's business");
+    }
+
+    #[test]
+    fn init_creates_a_new_keyring_at_0700() {
+        let parent = tempfile::tempdir().unwrap();
+        // Two levels deep, so this exercises the `create_dir_all` branch.
+        let home = parent.path().join("missing").join("gnupg");
+        assert!(create_keyring_dir(&home).unwrap(), "a fresh directory must report as created");
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(!create_keyring_dir(&home).unwrap(), "the second call must report as existing");
+        let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    /// `describe_key` must resolve every identifier GnuPG resolves. The CLI's confirmation
+    /// prompt must name the same key `lsign` and `delete` will change.
+    #[test]
+    fn describe_key_resolves_the_same_identifiers_the_operations_do() {
+        let Some(admin) = fast_admin() else { return };
+        let Some((foreign_path, fingerprint)) = foreign_public_key() else { return };
+        admin.import(&foreign_path).unwrap();
+
+        let by_fingerprint = admin.describe_key(&fingerprint).unwrap();
+        assert_eq!(by_fingerprint.fingerprint, fingerprint);
+
+        // An email address. GnuPG resolves it, but no fingerprint contains it as text.
+        let by_email = admin.describe_key("foreign@example.invalid").unwrap();
+        assert_eq!(by_email.fingerprint, fingerprint);
+
+        // A hex slice from the middle of a fingerprint is not a key ID. It must not resolve.
+        let middle = fingerprint.get(8..16).unwrap();
+        let err = admin.describe_key(middle).unwrap_err();
+        assert!(matches!(err, Error::KeyNotFound { .. }), "{err:?}");
     }
 }

@@ -71,10 +71,16 @@ pub enum Command {
         keyids: Vec<String>,
     },
 
-    /// Delete one or more keys from the keyring.
+    /// Delete one or more keys from the keyring. Deletes public keys only, unless `--secret`.
     Delete {
         /// Fingerprints (or any GnuPG-accepted identifier) of the keys to delete.
         keyids: Vec<String>,
+
+        /// Also delete a key's secret key, piko's own master key included. Without this
+        /// flag, piko refuses a key that has one. The master key signs every local
+        /// certification in the keyring. A deleted master key leaves those keys untrusted.
+        #[arg(long)]
+        secret: bool,
 
         /// Skip the confirmation prompt and proceed as if the user answered yes.
         #[arg(long)]
