@@ -766,14 +766,13 @@ fn installed_state(entry: &EntryName, package: &LocalPackage) -> Result<Supersed
 /// a `readdir` of every installed package — ~1200 of them on this machine — repeated for every
 /// package a `-Rcs` removes.
 ///
-/// **This is a structural change, not a bug fix, and the difference is worth stating.** Moving
-/// the `%BACKUP%` read from the step up to `verify` looks like it closes a hole in what
-/// `Verified` promises, because the step used to read it *after* `pre_remove` had already run.
-/// It does not close a hole: `%FILES%` and `%BACKUP%` are one `files` file behind a single
-/// `Lazy<DbFiles>` in `LocalPackage`. Forcing the file list — which `verify` already did — had
-/// always forced the backup list with it, so `backups()` could not fail where `file_list()`
-/// had succeeded. See `a_malformed_backup_hash_makes_the_whole_entry_unreadable_at_verify`,
-/// which pins that.
+/// **Reading `%BACKUP%` here rather than in the step is a structural change, not a bug fix,
+/// and the difference is worth stating.** It looks like it closes a hole in what `Verified`
+/// promises, since a step reads its entry after `pre_remove` has already run. It closes
+/// nothing: `%FILES%` and `%BACKUP%` are one `files` file behind a single `Lazy<DbFiles>` in
+/// `LocalPackage`. Forcing the file list — which `verify` does — forces the backup list with
+/// it, so `backups()` cannot fail where `file_list()` succeeded. See
+/// `a_malformed_backup_hash_makes_the_whole_entry_unreadable_at_verify`, which pins that.
 #[derive(Clone, Debug)]
 struct Doomed {
     /// Its `%FILES%` and `%BACKUP%`, read exactly as an upgrade reads the version it replaces.
@@ -1365,11 +1364,11 @@ mod tests {
 
     /// An unopenable local database keeps its cause typed, rather than stringified.
     ///
-    /// This used to be an `Error::Io` carrying `io::Error::other(error.to_string())`. The
-    /// message a user read was `failed to open <path>`. That named the wrong failure: a commit
-    /// engine that cannot open the database has not failed at I/O in any way the
-    /// `IoAction::Open` verb describes. Worse, the `piko_db::Error` underneath was gone for
-    /// good, flattened into an opaque string no caller could match on at any depth.
+    /// An `Error::Io` carrying `io::Error::other(error.to_string())` would read as `failed to
+    /// open <path>`, which names the wrong failure: a commit engine that cannot open the
+    /// database has not failed at I/O in any way the `IoAction::Open` verb describes. It also
+    /// flattens the `piko_db::Error` underneath into an opaque string no caller can match on
+    /// at any depth.
     ///
     /// Asserted on shape rather than wording. The downcast is to `Box<piko_db::Error>`, not to
     /// `piko_db::Error`, because `#[source]` on a boxed field yields the box. See that
@@ -1431,10 +1430,9 @@ mod tests {
 
     /// A `.PKGINFO` piko cannot record fails at `verify`, not half-way through the commit.
     ///
-    /// This is a regression test with a history. The parse used to happen *after* `install`
-    /// had extracted the payload. A `packager` line without an `<email>` then failed the
-    /// transaction with the package's file already in the root and the journal already on
-    /// disk. Both assertions below are the ones that used to fail.
+    /// The parse must run before `install` extracts the payload. Otherwise a `packager` line
+    /// without an `<email>` fails the transaction with the package's file already in the root
+    /// and the journal already on disk. The two assertions below pin exactly that.
     #[test]
     fn an_unrecordable_pkginfo_fails_before_the_root_is_touched() {
         let name = "foo-1.0.0-1-x86_64.pkg.tar";
@@ -1905,8 +1903,8 @@ mod tests {
     ///
     /// `add.c:333`'s `if(backup)` sits outside the `notouch || needbackup` branch, so libalpm
     /// records a hash for every backup file it extracted — including one that was simply not
-    /// on the system before. piko used to record none at all, because `install_step` passed
-    /// `Filters::default()`, which left `is_backup` always false.
+    /// on the system before. This is what `install_step`'s `Filters` are for: a default
+    /// `Filters` leaves `is_backup` always false, and then no fresh install records a hash.
     #[test]
     fn a_fresh_install_records_the_backup_hash() {
         let cache = tempfile::tempdir().unwrap();

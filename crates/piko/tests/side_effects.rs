@@ -640,10 +640,10 @@ fn a_hook_the_removal_deletes_does_not_run_afterwards() {
 
 /// An install of a newer version must leave exactly one entry.
 ///
-/// This is a regression test with a measured origin. `install_step` used to remove only an
-/// entry whose name and version both matched the incoming package, so an upgrade left
-/// `foo-1.0.0-1` and `foo-2.0.0-1` side by side. The reader, finding two entries for one name,
-/// then kept the older one, and the database reported a version that was not on disk.
+/// `install_step` must remove the entry installed under this name, whatever its version.
+/// Matching on name *and* version leaves `foo-1.0.0-1` and `foo-2.0.0-1` side by side after an
+/// upgrade. The reader, finding two entries for one name, then keeps the older one, and the
+/// database reports a version that is not on disk.
 #[test]
 #[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn upgrading_replaces_the_entry_rather_than_adding_one() {

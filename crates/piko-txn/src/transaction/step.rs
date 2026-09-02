@@ -139,9 +139,9 @@ pub(super) fn install_step(
 
     let writer = LocalDbWriter::new(step.dbpath, step.lock, Limits::default())?;
     // The entry being replaced is the one installed **under this name**, whatever its version.
-    // An earlier version of this code removed only an entry with the *new* name and version.
-    // That left `foo-1.0.0-1` and `foo-2.0.0-1` side by side after an upgrade, and the reader
-    // then reported the older of the two.
+    // Removing only an entry with the *new* name and version leaves `foo-1.0.0-1` and
+    // `foo-2.0.0-1` side by side after an upgrade, and the reader then reports the older of
+    // the two.
     let previous = step.package.replaces.as_ref().map(|old| &old.entry);
     writer.replace_entry(previous, entry)?;
 
@@ -150,7 +150,7 @@ pub(super) fn install_step(
     // `EntryWrite` pays one directory `fsync` for the whole entry and overlaps the data ones.
     // Measured: 260 ms -> 113 ms for a 42-package upgrade on btrfs (`docs/perf-study.md`
     // §4.2). It also gives a stronger crash-safety property: no member of this entry becomes
-    // visible until every member's data is durable. An interruption can no longer leave a new
+    // visible until every member's data is durable, so an interruption cannot leave a new
     // `desc` beside an old `files`.
     let mut staged = writer.entry_write(entry);
     staged.record(&record::desc(&step.package.info, &step.package.raw, &facts))?;

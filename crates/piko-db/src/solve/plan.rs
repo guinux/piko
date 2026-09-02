@@ -652,8 +652,8 @@ mod tests {
     /// the cache crosses no network at all.
     ///
     /// `compute_download_size` (`sync.c:310`) drops such a candidate to zero the same way.
-    /// Before this, `piko install` announced the full figure for a plan it already had entirely
-    /// on disk, and drew a progress bar that could never move — which read as re-downloading.
+    /// Announcing the full figure for a plan already entirely on disk draws a progress bar
+    /// that can never move, which reads as re-downloading.
     #[test]
     fn a_cached_candidate_costs_nothing_to_download() {
         let scenario = Scenario::new()
@@ -904,14 +904,15 @@ mod tests {
         assert_eq!(relation.as_deref(), Some("virtual"), "the index must reach the relation");
     }
 
-    /// The bug this filter closes: `encode` emits a requirement for every `%DEPENDS%` entry of
-    /// every candidate in the cone, the cone holds the whole installed set, and "every installed
-    /// package must remain" keeps all of it selected — so an unrelated quirk anywhere on the
-    /// system used to be counted as a divergence of *every* plan, whatever the plan was.
+    /// What the scope filter is for: `encode` emits a requirement for every `%DEPENDS%` entry
+    /// of every candidate in the cone, the cone holds the whole installed set, and "every
+    /// installed package must remain" keeps all of it selected. So without the filter, an
+    /// unrelated quirk anywhere on the system counts as a divergence of every plan, whatever
+    /// the plan is.
     ///
     /// Here `host` already has `impl-b` answering its `virtual` dependency, while `impl-a`
     /// outranks it in preference order. libalpm never re-resolves `host`, so installing an
-    /// unrelated package must report `Greedy`. Before the scope filter this reported
+    /// unrelated package must report `Greedy`. Without the filter this reports
     /// `Diverged { requirements: 1 }`.
     #[test]
     fn a_pre_existing_provider_choice_is_not_a_divergence_of_an_unrelated_plan() {

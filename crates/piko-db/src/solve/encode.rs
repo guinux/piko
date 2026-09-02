@@ -884,12 +884,11 @@ pub fn solve_with_removals(
 ///    Run to a fixpoint, because rescuing one package can rescue its dependencies too.
 ///
 /// The seeding in phase 2 is the part that is easy to get wrong and impossible to spot
-/// without real data. An earlier version of this function swept *every* orphan on the
-/// system — any installed dependency nothing needed any more — on the reasoning that it
-/// converges to the same fixpoint. It does not. A system accumulates orphans that have
-/// nothing to do with the package being removed: `pacman -Rs amberol` removes one package
-/// where that version removed eighty-one. `-Rs` is scoped to the targets' own dependencies,
-/// not to tidiness.
+/// without real data. Sweeping *every* orphan on the system — any installed dependency
+/// nothing needs any more — looks like it converges to the same fixpoint. It does not. A
+/// system accumulates orphans that have nothing to do with the package being removed:
+/// `pacman -Rs amberol` removes one package where a whole-system sweep removes eighty-one.
+/// `-Rs` is scoped to the targets' own dependencies, not to tidiness.
 #[must_use]
 pub fn recurse_unneeded(
     universe: &Universe<'_>,

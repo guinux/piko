@@ -350,10 +350,10 @@ impl KeyringAdmin {
     /// returns `false` rather than setting it again, as [`Self::lsign`] and [`Self::disable`]
     /// do.
     ///
-    /// Each call that is not a no-op drives a whole `gpgme_op_interact` session. `populate`
-    /// calls this once per `-trusted` line on every run. An already-populated keyring now runs
-    /// none of those sessions. The saving also fixes what `PopulateSummary::trust_set` counts.
-    /// It now means how many keys the call changed, not how many lines it read.
+    /// Each call that is not a no-op drives a whole `gpgme_op_interact` session, and
+    /// `populate` calls this once per `-trusted` line on every run. So an already-populated
+    /// keyring runs none of those sessions. The no-op is also what makes
+    /// `PopulateSummary::trust_set` count keys the call changed, rather than lines it read.
     ///
     /// # Errors
     ///
@@ -681,14 +681,15 @@ mod tests {
 
     /// As [`foreign_public_key`], but with a second user ID.
     ///
-    /// Guards against a real, if narrow, regression: an earlier `already_signed` check required
-    /// *every* user ID to carry a certification, but certifying only ever covers the primary
-    /// one (measured, see [`KeyringAdmin::lsign`]'s doc comment) — so that check could never be
-    /// satisfied, and every `populate` re-signed the same key. This test alone would not have
-    /// caught it: the false idempotency only showed up across separate processes (a fresh
-    /// `gpg-agent` interaction each time), not within one already-warmed-up test process, which
-    /// is how it first surfaced — through the `piko-key` binary run twice from a shell, not
-    /// `cargo test`. Kept anyway, since it still pins the intended behavior directly.
+    /// Guards a narrow case: an `already_signed` check that requires *every* user ID to carry
+    /// a certification can never be satisfied, because certifying only ever covers the primary
+    /// one (measured, see [`KeyringAdmin::lsign`]'s doc comment). Every `populate` then
+    /// re-signs the same key.
+    ///
+    /// This test pins the intended behavior, but does not on its own prove it. False
+    /// idempotency shows up only across separate processes, each with a fresh `gpg-agent`
+    /// interaction — not within one already-warmed-up test process. Run the `piko-key` binary
+    /// twice from a shell to see that half.
     fn foreign_public_key_with_two_uids() -> Option<(PathBuf, String)> {
         let home = tempfile::tempdir().ok()?;
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).ok()?;

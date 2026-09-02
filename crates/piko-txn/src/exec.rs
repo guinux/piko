@@ -346,10 +346,9 @@ pub fn helper_main(
     // to the root instead of an absolute one — gstreamer's `post_upgrade` does exactly that,
     // running `setcap` on `usr/lib/gstreamer-1.0/gst-ptp-helper` with no leading slash. Such a
     // path only resolves correctly when the working directory is guaranteed to be `/`,
-    // regardless of whether `--root /` needed an actual `chroot(2)` call. An earlier version of
-    // this function nested the `chdir` inside the `if`. That left it running from whatever
-    // directory launched piko instead, breaking any scriptlet that relied on a root-relative
-    // path when `--root` was `/`.
+    // regardless of whether `--root /` needed an actual `chroot(2)` call. Nesting the `chdir`
+    // inside the `if` leaves it running from whatever directory launched piko, which breaks
+    // any scriptlet that relies on a root-relative path when `--root` is `/`.
     let resolved = std::fs::canonicalize(root).map_err(|error| {
         format!("could not resolve the root {}: {error}", Path::new(root).display())
     })?;

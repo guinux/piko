@@ -417,11 +417,10 @@ mod tests {
     #[test]
     fn buildinfo_and_pkginfo_entries_are_not_checked_or_counted() {
         let root = TempDir::new().unwrap();
-        // Neither is ever extracted under `root`. If piko checked them like ordinary root
-        // entries, both would report as missing. This was a real bug, caught against a live
-        // system: `piko check pacman` reported ".BUILDINFO"/".PKGINFO" as missing, where
-        // `pacman -Qkk pacman` reports nothing for them at all, and excludes them from its
-        // own total-files count.
+        // Neither is ever extracted under `root`, so checking them like ordinary root
+        // entries reports both as missing. Measured against a live system: `pacman -Qkk
+        // pacman` reports nothing for ".BUILDINFO" or ".PKGINFO" at all, and excludes both
+        // from its own total-files count.
         let stanza = "./.BUILDINFO type=file uid=0 gid=0 mode=644 time=1.0 size=1 \
                        sha256digest=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\n\
                        ./.PKGINFO type=file uid=0 gid=0 mode=644 time=1.0 size=1 \

@@ -9,12 +9,12 @@
 //!
 //! # What these exist for
 //!
-//! A `304 Not Modified` used to destroy the local database. ureq returns 304 as `Ok` with an
-//! empty body rather than as `Err(StatusCode(304))`, so a successful conditional request
-//! looked like a successful download of nothing, and installing it truncated a working
-//! `core.db` to zero bytes. This was observed against a real mirror, not caught by any test.
-//! Signature verification cannot catch it either, because with `DatabaseOptional` and no
-//! signature there is nothing to contradict an empty file.
+//! A mishandled `304 Not Modified` destroys the local database. ureq returns 304 as `Ok`
+//! with an empty body rather than as `Err(StatusCode(304))`, so a successful conditional
+//! request looks like a successful download of nothing, and installing it truncates a working
+//! `core.db` to zero bytes — seen against a real mirror. Signature verification cannot catch
+//! it: with `DatabaseOptional` and no signature there is nothing to contradict an empty file.
+//! Only a test at this level can.
 //!
 //! Both halves are pinned here: that a 304 leaves the database alone, and that a 200 with an
 //! empty body is refused rather than installed.

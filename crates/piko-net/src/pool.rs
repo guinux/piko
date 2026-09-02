@@ -54,8 +54,8 @@ pub(crate) struct Job<'a, T> {
 /// rather than draining the queue. Items no worker ever claimed come back as `on_cancel()`.
 ///
 /// With `workers <= 1`, nothing is spawned. Everything runs inline on the calling thread. This
-/// is the path `ParallelDownloads = 1` takes, and the reason that setting behaves exactly as it
-/// did before this module existed.
+/// is the path `ParallelDownloads = 1` takes, and the reason that setting behaves exactly as a
+/// serial downloader does.
 pub(crate) fn run<T, R>(
     items: &[T],
     schedule: &[usize],

@@ -195,13 +195,11 @@ impl RepositoryConfig {
     /// this module's repo scratch state starts every repository at), not
     /// [`SigLevel::default()`].
     ///
-    /// An earlier version of this method tested `sig_level == SigLevel::default()`. That test
-    /// never matched: `SigLevel::default()` is the zero value, but `USE_DEFAULT` is bit 31. As a
-    /// result, a repository that set nothing silently read as `SigLevel = Never`, regardless of
-    /// what `[options]` actually said. `sig_level::apply_values` clears the sentinel bit the
-    /// moment a repository's own `SigLevel` directive is parsed at all. Testing for the bit,
-    /// rather than for equality to one constant, is what correctly separates "unset" from
-    /// "explicitly set".
+    /// Test for the sentinel **bit**. `sig_level == SigLevel::default()` never matches:
+    /// `SigLevel::default()` is the zero value, while `USE_DEFAULT` is bit 31. Under that test
+    /// a repository that set nothing reads as `SigLevel = Never`, whatever `[options]` says.
+    /// `sig_level::apply_values` clears the sentinel the moment a repository's own `SigLevel`
+    /// directive is parsed at all, which is what separates "unset" from "explicitly set".
     #[must_use]
     pub fn effective_sig_level(&self, global: SigLevel) -> SigLevel {
         if self.sig_level.contains(SigLevel::USE_DEFAULT) { global } else { self.sig_level }

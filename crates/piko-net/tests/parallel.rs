@@ -9,16 +9,16 @@
 //!
 //! # What these exist for
 //!
-//! Concurrency turns three properties that used to hold by construction into properties that
-//! now need an explicit assertion:
+//! A serial downloader holds three properties by construction. Concurrency turns each into a
+//! property that needs an explicit assertion:
 //!
 //! - **Results stay in input order.** A caller reads failures in configuration order. With
-//!   several transfers in flight, completion order no longer matches it.
+//!   several transfers in flight, completion order does not match it.
 //! - **Work spreads across mirrors.** The per-host cap is a starting offset, not a semaphore.
 //!   The only way to confirm it holds is to watch how many connections each mirror sees at once.
-//! - **`ParallelDownloads = 1` stays unchanged.** The whole design rests on one worker running
-//!   the same code path that shipped before this change. A test that pins the peak at one
-//!   connection keeps that claim honest.
+//! - **`ParallelDownloads = 1` stays serial.** The whole design rests on one worker running
+//!   the same code path a serial downloader runs. A test that pins the peak at one connection
+//!   keeps that claim honest.
 //!
 //! Unlike `conditional.rs` and `package.rs`, the servers here accept many connections and
 //! answer each on its own thread. A single-connection-at-a-time server cannot observe

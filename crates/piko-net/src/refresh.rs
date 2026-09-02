@@ -311,9 +311,8 @@ impl Refresher {
         // server's own `Last-Modified` when it downloaded the file. Sending back the exact
         // value the server issued is not merely tidy: measured against mirror.thekinrar.fr, a
         // date later than its `Last-Modified` gets a full 200 even though RFC 7232 §3.3 asks
-        // for 304, while the exact value gets 304 (3/3, at -1h/exact/+1h/+1d). An earlier
-        // version of this sent our own download time instead, and that never saved a
-        // transfer.
+        // for 304, while the exact value gets 304 (3/3, at -1h/exact/+1h/+1d). Sending piko's
+        // own download time instead never saves a transfer.
         let since = if force { None } else { last_modified(&destination) };
 
         let mut attempts = Vec::new();
@@ -393,12 +392,12 @@ impl Refresher {
 
         // The status is inspected explicitly, and only 200 yields a body to install.
         //
-        // This was a data-destroying bug. ureq returns 304 as `Ok` with an empty body, not as
-        // `Err(StatusCode(304))`, which an earlier version of this code assumed. A successful
-        // conditional request therefore looked like a successful download of nothing, and
-        // committing it truncated the live database to zero bytes. This was observed against
-        // a real mirror. Nothing downstream could have caught it: with no signature to
-        // contradict it, an empty file verifies fine under `DatabaseOptional`.
+        // Treating any non-error response as a body destroys data. ureq returns 304 as `Ok`
+        // with an empty body, not as `Err(StatusCode(304))`. A successful conditional request
+        // then looks like a successful download of nothing, and committing it truncates the
+        // live database to zero bytes — observed against a real mirror. Nothing downstream
+        // catches it: with no signature to contradict it, an empty file verifies fine under
+        // `DatabaseOptional`.
         match response.status().as_u16() {
             200 => {}
             304 => return Ok(None),
@@ -1062,8 +1061,8 @@ mod tests {
         assert_eq!(http_date(1_709_164_800), "Thu, 29 Feb 2024 00:00:00 GMT");
     }
 
-    /// The two halves must be exact inverses, or a stamped file sends back a value the
-    /// server does not recognize. That is precisely the bug this pairing exists to fix.
+    /// The two halves must be exact inverses, or a stamped file sends back a value the server
+    /// does not recognize. That is the whole point of pairing them.
     #[test]
     fn parsing_and_formatting_round_trip() {
         for seconds in [0_u64, 1_000_000_000, 1_755_000_000, 1_709_164_800, 1_787_133_475] {
@@ -1084,8 +1083,8 @@ mod tests {
         for bad in [
             "",
             "not a date",
-            // A locale-translated date. This made an earlier measurement of this behavior
-            // meaningless.
+            // A locale-translated date. A measurement taken under a non-English locale is
+            // meaningless without this case.
             "mar., 18 aout 2026 18:18:06 GMT",
             // Obsolete formats: valid HTTP, deliberately unsupported, must not misparse.
             "Tuesday, 18-Aug-26 18:18:06 GMT",

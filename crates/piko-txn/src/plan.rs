@@ -228,9 +228,8 @@ pub struct DownloadOnlyOutcome {
 /// `Transaction::verify` uses, and under the same per-repository policy. libalpm does this:
 /// `check_validity` (`sync.c:1275`) runs *before* `_alpm_sync_load` returns on
 /// `ALPM_TRANS_FLAG_DOWNLOADONLY` (`sync.c:1279`), so `pacman -Sw` refuses a package it would
-/// refuse to install. An earlier version of this function left that check out. `-w` then filled
-/// a cache with bytes nothing had vouched for, and deferred the complaint to an install that
-/// might happen on another day.
+/// refuse to install. Leaving the check out fills a cache with bytes nothing has vouched for,
+/// and defers the complaint to an install that might happen on another day.
 ///
 /// The one thing not transcribed is libalpm's *phase* order. It downloads every package and
 /// then validates them all. This function checks each one as it arrives, matching
@@ -241,9 +240,9 @@ pub struct DownloadOnlyOutcome {
 /// `on_outcome` is called once per package, in `steps` order, immediately after it is located
 /// and checked, before the next one is attempted. This lets a caller report progress as it
 /// happens rather than only once every package has been handled. `cache` is asked *before*
-/// each lookup so a caller can tell the two cases apart. An earlier version asked after
-/// `prefetch` had already filled the cache, so a cache hit was reported as a download, making
-/// every run of this function look like it re-fetched everything it already had.
+/// each lookup so a caller can tell the two cases apart. Asking after `prefetch` has filled
+/// the cache reports every hit as a download, which makes each run look like it re-fetched
+/// everything it already had.
 ///
 /// # Errors
 ///

@@ -107,8 +107,8 @@ pub(crate) fn print_diagnostics(universe: &Universe<'_>, built: &Plan) {
 ///
 /// This is not a failure. Both situations that produce a divergence still leave pacman able to
 /// plan the transaction. pacman simply plans a different one, of the same size or larger, and
-/// its answer depends on the order targets were named — this one does not. An earlier version
-/// of this note claimed "pacman would have failed here".
+/// its answer depends on the order targets were named — this one does not. It is not a case
+/// pacman would have failed on.
 fn print_divergences(universe: &Universe<'_>, built: &Plan) {
     let Fidelity::Diverged { requirements } = built.fidelity() else { return };
 

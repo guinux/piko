@@ -240,10 +240,10 @@ mod tests {
 
     /// A planted temporary is discarded, never written through.
     ///
-    /// An earlier version of this test asserted that `create` fails. That assertion was wrong:
-    /// `create_temp` deliberately unlinks a leftover and retries once, so a crashed write does
-    /// not wedge the path forever. The property that actually matters is the one asserted
-    /// here: the symlink's target stays untouched, so nothing was followed.
+    /// This does not assert that `create` fails. `create_temp` deliberately unlinks a
+    /// leftover and retries once, so a crashed write does not wedge the path forever. The
+    /// property that matters is the one asserted here: the symlink's target stays untouched,
+    /// so nothing was followed.
     #[test]
     fn a_planted_temporary_is_discarded_not_followed() {
         let dir = tempfile::tempdir().unwrap();

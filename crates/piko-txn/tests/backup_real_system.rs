@@ -24,9 +24,10 @@
 //!
 //! # Why this test exists at all
 //!
-//! `%BACKUP%` used to be **empty for every package piko installed**. `install_step` passed
-//! `Filters::default()`, whose `is_backup` always answered no. The whole mechanism was
-//! implemented and unit-tested, but a transaction never once reached it.
+//! `%BACKUP%` recording is reachable only through `install_step`'s `Filters`. A default
+//! `Filters` answers no to `is_backup`, and then every package piko installs records an
+//! **empty** `%BACKUP%`. Unit tests do not catch that: the mechanism itself passes them while
+//! no transaction ever reaches it. This test runs the transaction.
 
 #![allow(
     clippy::unwrap_used,

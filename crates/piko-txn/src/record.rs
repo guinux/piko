@@ -42,8 +42,8 @@ pub struct InstallFacts {
 /// `%URL%` is copied from `raw` rather than from `info`. `alpm-pkginfo` parses the field into
 /// a `url::Url`, which *normalises* it: `https://archlinux.org` becomes
 /// `https://archlinux.org/`. libalpm copies the string through untouched. Building from the
-/// parsed value once wrote a `desc` that differed from pacman's, measured at 11 of 120 real
-/// packages before this was fixed.
+/// parsed value writes a `desc` that differs from pacman's, measured at 11 of 120 real
+/// packages.
 #[must_use]
 pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Record {
     let mut record = Record::new(RecordKind::Desc);

@@ -136,11 +136,10 @@ struct Staging {
     /// The created directory and the script's name within it, for the final `unlink`.
     ///
     /// This is a second [`crate::rootfs::Resolved`] rather than a flag, because the two
-    /// removals happen in *different* directories. An earlier version of this struct held only
-    /// `tmp`'s descriptor, so it tried to unlink `tmp/.INSTALL`. That path does not exist: the
-    /// real script sits one directory deeper. The unlink silently did nothing, the real script
-    /// stayed in place, and `rmdir` then failed with `ENOTEMPTY`. Every scriptlet would have
-    /// leaked a directory into the root.
+    /// removals happen in *different* directories. Holding only `tmp`'s descriptor would
+    /// unlink `tmp/.INSTALL`, a path that does not exist — the real script sits one directory
+    /// deeper. The unlink then does nothing, the script stays in place, `rmdir` fails with
+    /// `ENOTEMPTY`, and every scriptlet leaks a directory into the root.
     script: Option<crate::rootfs::Resolved>,
 }
 
