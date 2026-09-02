@@ -117,20 +117,40 @@ pub fn signing_policy(cli: &Cli, config: &ConfigCache) -> (PathBuf, piko_db::con
 /// followed by every configured `HookDir`, so a file in `/etc/pacman.d/hooks` overrides the
 /// system copy of the same name.
 ///
-/// These are host paths, not paths inside `--root`. That is measurable rather than arguable:
-/// `pacman-conf --root=/mnt DBPath` answers `/mnt/var/lib/pacman/`, and
-/// `pacman-conf --root=/mnt HookDir` answers `/etc/pacman.d/hooks/`. The hook command runs
-/// inside the root; the hook file does not come from it.
-pub fn hook_dirs(cli: &Cli, config: &ConfigCache, override_dirs: &[PathBuf]) -> Vec<PathBuf> {
+/// The system directory is resolved inside `root`; a configured `HookDir` is a host path.
+/// libalpm draws that same line. `alpm_initialize` builds its own default by joining the root
+/// to `SYSHOOKDIR`, so `pacman -r /mnt` reads `/mnt/usr/share/libalpm/hooks/`.
+/// `alpm_option_add_hookdir` joins nothing, so a `HookDir` from the config stays as written.
+///
+/// `pacman-conf --root=/mnt HookDir` answers `/etc/pacman.d/hooks/`, which is not evidence
+/// against this. It reports the configured directive, never libalpm's root-joined default.
+pub fn hook_dirs(
+    cli: &Cli,
+    config: &ConfigCache,
+    override_dirs: &[PathBuf],
+    root: &Path,
+) -> Vec<PathBuf> {
     if !override_dirs.is_empty() {
         return override_dirs.to_vec();
     }
 
-    let mut dirs = vec![PathBuf::from(piko_txn::hook::SYSTEM_HOOK_DIR)];
+    let mut dirs = vec![join_root(root, Path::new(piko_txn::hook::SYSTEM_HOOK_DIR))];
     if let Ok(parsed) = config.get(cli) {
         dirs.extend(parsed.options.hook_dirs.iter().cloned());
     }
     dirs
+}
+
+/// Joins an absolute system path onto `root`, the way libalpm concatenates its root with
+/// `SYSHOOKDIR`.
+///
+/// `Path::join` replaces the whole path when the argument is absolute, which would hand back
+/// the host directory. Stripping the leading separator first is what makes the join happen.
+fn join_root(root: &Path, path: &Path) -> PathBuf {
+    match path.strip_prefix("/") {
+        Ok(relative) => root.join(relative),
+        Err(_) => root.join(path),
+    }
 }
 
 /// The `NoExtract` and `NoUpgrade` patterns from the parsed `pacman.conf`.
@@ -303,21 +323,20 @@ pub fn open_repo_by_name(
 ///
 /// # The verdict is not an I/O error, and must not be spelled as one
 ///
-/// A real defect this fixes, not a tidy-up. The verdict used to be wrapped in
-/// [`piko_db::Error::Io`] with `IoAction::Open`, because that was the only error type
-/// [`open_repo_by_name`] could return. So piko announced a rejected database as:
+/// [`Error::SignatureRejected`] and [`Error::SignatureUncheckable`] exist so that both
+/// spellings are accurate. Do not route either back through [`piko_db::Error::Io`] to save a
+/// type, however convenient it is that [`open_repo_by_name`] already returns one. A rejected
+/// database would then announce itself as:
 ///
 /// ```text
 /// piko: error: failed to open /var/lib/pacman/sync/core.db
 ///   caused by: signature rejected: the signature is invalid
 /// ```
 ///
-/// The archive had opened fine. The first line named the wrong failure, and did so for the
-/// one message in the program that says a mirror may be tampered with. Worse,
-/// [`open_all_repos`] prints only the top line of a skipped repository's error, so there it
-/// read as a plain "failed to open" with the signature never mentioned at all.
-/// [`Error::SignatureRejected`] and [`Error::SignatureUncheckable`] exist so both spellings
-/// are accurate. Do not route this back through an I/O variant to save a type.
+/// The archive opened fine. That first line names the wrong failure, for the one message in
+/// the program that says a mirror may be tampered with. [`open_all_repos`] then makes it
+/// worse: it prints only the top line of a skipped repository's error, so the signature is
+/// never mentioned at all.
 ///
 /// Caching the `Keyring` in [`ConfigCache`] to avoid opening it once per repository would
 /// save about 3 µs per extra repository, not enough to justify the complexity.
@@ -335,8 +354,8 @@ fn verify_repo_archive(
     // Through `RepositoryConfig::effective_sig_level`, never by reading `sig_level` directly.
     // A repository that declares no `SigLevel` of its own keeps the parser's `USE_DEFAULT`
     // sentinel (bit 31) rather than the global value, so using the raw field would read a
-    // sentinel as though it were a policy. That was a real bug in an earlier version of this
-    // function. This function must share the rule rather than restate it.
+    // sentinel as though it were a policy. This function must share the rule rather than
+    // restate it.
     let level = parsed
         .repositories
         .iter()
@@ -518,6 +537,63 @@ mod tests {
         let dirs = cache_dirs(&ConfigCache::default(), &cli);
 
         assert_eq!(dirs, vec![PathBuf::from("/from/config/")]);
+    }
+
+    /// libalpm joins its root to `SYSHOOKDIR`, so a new root reads its own copy. This is what
+    /// keeps a hook from running before the target owns the program it calls.
+    #[test]
+    fn the_system_hook_directory_is_resolved_inside_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_conf(dir.path(), "[options]\n");
+        let cli = cli(&["--config", &path]);
+
+        let dirs = hook_dirs(&cli, &ConfigCache::default(), &[], Path::new("/mnt"));
+
+        assert_eq!(dirs.first().unwrap(), &PathBuf::from("/mnt/usr/share/libalpm/hooks"));
+    }
+
+    /// A root of `/` must leave the system directory exactly where it already was.
+    #[test]
+    fn the_running_system_reads_the_unprefixed_system_hook_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_conf(dir.path(), "[options]\n");
+        let cli = cli(&["--config", &path]);
+
+        let dirs = hook_dirs(&cli, &ConfigCache::default(), &[], Path::new("/"));
+
+        assert_eq!(dirs.first().unwrap(), &PathBuf::from(piko_txn::hook::SYSTEM_HOOK_DIR));
+    }
+
+    /// `alpm_option_add_hookdir` joins nothing, so a configured `HookDir` stays a host path
+    /// even under `--root`.
+    #[test]
+    fn a_configured_hookdir_is_not_resolved_inside_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_conf(dir.path(), "[options]\nHookDir = /etc/pacman.d/hooks/\n");
+        let cli = cli(&["--config", &path]);
+
+        let dirs = hook_dirs(&cli, &ConfigCache::default(), &[], Path::new("/mnt"));
+
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/mnt/usr/share/libalpm/hooks"),
+                PathBuf::from("/etc/pacman.d/hooks/"),
+            ]
+        );
+    }
+
+    /// `--hookdir` replaces the whole list, so the root never reaches it.
+    #[test]
+    fn hookdir_replaces_the_list_and_is_taken_as_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_conf(dir.path(), "[options]\nHookDir = /etc/pacman.d/hooks/\n");
+        let cli = cli(&["--config", &path]);
+        let override_dirs = [PathBuf::from("/only/this/")];
+
+        let dirs = hook_dirs(&cli, &ConfigCache::default(), &override_dirs, Path::new("/mnt"));
+
+        assert_eq!(dirs, vec![PathBuf::from("/only/this/")]);
     }
 
     /// The flag must not need a readable config. A caller installing into a new root names

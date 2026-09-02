@@ -337,26 +337,29 @@ fn run(cli: &Cli) -> Result<ExitCode, Error> {
             noscriptlet,
             hookdir,
             noconfirm,
-        } => cmd::txn::remove(
-            &root.clone().unwrap_or_else(|| resolve_root_dir(cli, &config)),
-            &resolve_dbpath(cli, &config),
-            cache_dirs(&config, cli),
-            packages,
-            cmd::txn::RemoveOptions {
-                no_save: *nosave,
-                recursive: *recursive,
-                cascade: *cascade,
-                nodeps: *nodeps,
-                patterns: path_patterns(cli, &config),
-                hold_pkg: hold_pkg(cli, &config),
-                noconfirm: *noconfirm,
-            },
-            cmd::txn::SideEffects {
-                scriptlets: !*noscriptlet,
-                hook_dirs: hook_dirs(cli, &config, hookdir),
-            },
-            &mut out,
-        ),
+        } => {
+            let root = root.clone().unwrap_or_else(|| resolve_root_dir(cli, &config));
+            cmd::txn::remove(
+                &root,
+                &resolve_dbpath(cli, &config),
+                cache_dirs(&config, cli),
+                packages,
+                cmd::txn::RemoveOptions {
+                    no_save: *nosave,
+                    recursive: *recursive,
+                    cascade: *cascade,
+                    nodeps: *nodeps,
+                    patterns: path_patterns(cli, &config),
+                    hold_pkg: hold_pkg(cli, &config),
+                    noconfirm: *noconfirm,
+                },
+                cmd::txn::SideEffects {
+                    scriptlets: !*noscriptlet,
+                    hook_dirs: hook_dirs(cli, &config, hookdir, &root),
+                },
+                &mut out,
+            )
+        }
         Command::Refresh { repos, force } => {
             let (cancel, _mode) = crate::signal::install_cancel_handler();
             cmd::refresh::refresh(
@@ -480,7 +483,7 @@ fn sync(
             sig_level: signing.1,
             side_effects: cmd::txn::SideEffects {
                 scriptlets: !args.noscriptlet,
-                hook_dirs: hook_dirs(cli, config, args.hookdir),
+                hook_dirs: hook_dirs(cli, config, args.hookdir, args.root),
             },
             patterns: path_patterns(cli, config),
             noconfirm: args.noconfirm,

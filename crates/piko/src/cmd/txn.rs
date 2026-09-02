@@ -81,8 +81,9 @@ pub struct SideEffects {
     pub scriptlets: bool,
     /// Where to read `.hook` files from, in increasing priority.
     ///
-    /// **Host paths**, not paths inside `--root` — see `crate::context::hook_dirs`. Empty runs
-    /// no hooks.
+    /// The system directory is resolved inside `--root`; a configured `HookDir` is a host
+    /// path. `crate::context::hook_dirs` explains why libalpm draws that line. Empty runs no
+    /// hooks.
     pub hook_dirs: Vec<PathBuf>,
 }
 
