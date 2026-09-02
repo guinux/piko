@@ -24,6 +24,17 @@ pub struct Cli {
     #[arg(long, global = true, default_value = DEFAULT_CONFIG_PATH, value_name = "PATH")]
     pub config: PathBuf,
 
+    /// Directory to read and download package files from. Repeatable, in decreasing
+    /// priority.
+    ///
+    /// Each directory given here comes before the `CacheDir` list from the parsed
+    /// pacman.conf, rather than replacing it, the same way pacman's flag of the same name
+    /// does. A package downloads into the first directory, and every directory is searched
+    /// for a package already there. With no `--cachedir` and no readable config, this is
+    /// `/var/cache/pacman/pkg`.
+    #[arg(long = "cachedir", global = true, value_name = "PATH")]
+    pub cache_dir: Vec<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -545,5 +556,16 @@ pub enum Command {
     /// a directive absent from the file still shows its default value, the same way
     /// `pacman-conf` does. Then it prints one `[reponame]` block per configured repository,
     /// in the order they appear in the file (this is repository priority order).
-    Conf,
+    ///
+    /// One directive name prints that directive's value alone instead, with no `[options]`
+    /// header and no name. A directive holding several values prints one per line. A flag
+    /// directive prints its own name when set, and nothing when unset. The name is matched
+    /// without regard to case, the same way `pacman-conf` matches it. An unknown name is an
+    /// error. A repository directive (`Server`, `Usage`) is not a name this accepts, since
+    /// only the `[options]` section is queried.
+    Conf {
+        /// The directive to print, for example `DBPath`. Prints every directive when
+        /// omitted.
+        directive: Option<String>,
+    },
 }

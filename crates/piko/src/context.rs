@@ -58,16 +58,33 @@ impl ConfigCache {
     }
 }
 
-/// The configured `CacheDir` list, or pacman's default if the config cannot be read.
+/// The `CacheDir` list: every `--cachedir` first, then the parsed config's, else pacman's
+/// default if the config cannot be read.
+///
+/// `--cachedir` prepends; it does not replace. This is measured, not assumed. `pacman -Sc`
+/// with `--cachedir /tmp/CLI1 --cachedir /tmp/CLI2` over a config naming `/tmp/FROMCONF`
+/// reports all three, in that order. `--hookdir` is the flag that replaces its list
+/// ([`hook_dirs`]), so the two flags differ here on purpose.
+///
+/// The order carries the behavior. A package downloads into the first directory
+/// (`piko_txn::CacheDirSource`), while every directory is searched for an existing file. So
+/// `piko install --root /mnt --cachedir /mnt/var/cache/pacman/pkg` writes into the new root
+/// and still reads the host cache, which is what pacman does.
 ///
 /// A package source needs at least one directory. An empty list would report every package
 /// missing with an error naming nowhere it looked, so a failure falls back rather than
 /// producing one.
 pub fn cache_dirs(config: &ConfigCache, cli: &Cli) -> Vec<PathBuf> {
-    match config.get(cli) {
-        Ok(config) if !config.options.cache_dirs.is_empty() => config.options.cache_dirs.clone(),
-        _ => vec![PathBuf::from(piko_db::config::DEFAULT_CACHE_DIR)],
+    let mut dirs = cli.cache_dir.clone();
+
+    if let Ok(config) = config.get(cli) {
+        dirs.extend(config.options.cache_dirs.iter().cloned());
     }
+
+    if dirs.is_empty() {
+        dirs.push(PathBuf::from(piko_db::config::DEFAULT_CACHE_DIR));
+    }
+    dirs
 }
 
 /// Resolves the keyring directory and the fallback `SigLevel` packages this transaction
@@ -448,3 +465,72 @@ impl std::fmt::Display for ConfigUnavailable {
 }
 
 impl std::error::Error for ConfigUnavailable {}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a failing assertion in a test should abort it loudly"
+)]
+mod tests {
+    use clap::Parser as _;
+
+    use super::*;
+
+    /// Parses `args` as a `piko` command line, with `conf` as a subcommand that needs no
+    /// database.
+    fn cli(args: &[&str]) -> Cli {
+        let mut argv = vec!["piko"];
+        argv.extend_from_slice(args);
+        argv.push("conf");
+        Cli::parse_from(argv)
+    }
+
+    /// Writes `text` as a `pacman.conf` under `dir`, and returns its path as a string.
+    fn write_conf(dir: &Path, text: &str) -> String {
+        let path = dir.join("pacman.conf");
+        std::fs::write(&path, text).unwrap();
+        path.display().to_string()
+    }
+
+    /// Measured against `pacman -Sc`: two `--cachedir` flags over a config naming one
+    /// directory report all three, command line first.
+    #[test]
+    fn cachedir_comes_before_the_configured_list_rather_than_replacing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_conf(dir.path(), "[options]\nCacheDir = /from/config/\n");
+        let cli = cli(&["--config", &path, "--cachedir", "/a/", "--cachedir", "/b/"]);
+
+        let dirs = cache_dirs(&ConfigCache::default(), &cli);
+
+        assert_eq!(
+            dirs,
+            vec![PathBuf::from("/a/"), PathBuf::from("/b/"), PathBuf::from("/from/config/")]
+        );
+    }
+
+    #[test]
+    fn without_cachedir_the_configured_list_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_conf(dir.path(), "[options]\nCacheDir = /from/config/\n");
+        let cli = cli(&["--config", &path]);
+
+        let dirs = cache_dirs(&ConfigCache::default(), &cli);
+
+        assert_eq!(dirs, vec![PathBuf::from("/from/config/")]);
+    }
+
+    /// The flag must not need a readable config. A caller installing into a new root names
+    /// both `--config` and `--cachedir`, and an unreadable config must not turn that into
+    /// the host cache directory alone.
+    #[test]
+    fn cachedir_applies_even_when_the_config_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.conf");
+        let cli = cli(&["--config", &missing.display().to_string(), "--cachedir", "/a/"]);
+
+        let dirs = cache_dirs(&ConfigCache::default(), &cli);
+
+        assert_eq!(dirs, vec![PathBuf::from("/a/")]);
+    }
+}
