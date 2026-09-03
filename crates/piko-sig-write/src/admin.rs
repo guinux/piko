@@ -1,6 +1,7 @@
 //! Creating a keyring, importing keys into it, and granting or revoking their trust.
 
 use std::{
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -9,6 +10,17 @@ use crate::{
     edit::ScriptedInteractor,
     error::{Error, Result},
 };
+
+/// The agent socket GnuPG binds inside a keyring directory, when no runtime directory is
+/// available to hold it.
+const AGENT_SOCKET: &str = "S.gpg-agent";
+
+/// The longest agent socket path GnuPG will bind, in bytes.
+///
+/// `sockaddr_un::sun_path` is 108 bytes on Linux, and GnuPG keeps a margin for the longer
+/// names it derives from this one (`S.gpg-agent.extra`, `.browser`, `.ssh`). Measured by
+/// bisection against GnuPG 2.4: 98 binds, 99 reports "socket name … is too long".
+const MAX_AGENT_SOCKET_LEN: usize = 98;
 
 /// The identity piko's own local signing key is generated and found under.
 ///
@@ -153,6 +165,40 @@ pub struct KeyringAdmin {
 }
 
 impl KeyringAdmin {
+    /// Builds an [`Error::Gpgme`], naming the socket-path limit when that limit is what
+    /// stopped an agent from starting.
+    ///
+    /// GPGME reports every such failure as `No agent running`, because `gpg-agent` writes the
+    /// real reason to a stderr GPGME discards. That message names nothing a caller can act
+    /// on.
+    ///
+    /// The reason worth recovering is the keyring path itself. GnuPG binds the agent socket
+    /// in `/run/user/<uid>/gnupg` when that directory exists, and falls back to the keyring
+    /// home when it does not — inside a user namespace mapped to root, in a container, or in
+    /// any process whose runtime directory is absent. `sockaddr_un` then bounds the path.
+    /// Measured against GnuPG 2.4 on Linux: a `<home>/S.gpg-agent` of 98 bytes binds, 99
+    /// fails.
+    ///
+    /// The check runs only after GnuPG has already refused, never before. A long keyring path
+    /// is perfectly usable whenever the standard socket directory exists, so testing the
+    /// length up front would refuse a working keyring.
+    fn agent_error(&self, action: &'static str, source: &gpgme::Error) -> Error {
+        let mut message = source.to_string();
+        if source.code() == gpgme::Error::NO_AGENT.code() {
+            let socket = self.home.join(AGENT_SOCKET);
+            let length = socket.as_os_str().as_encoded_bytes().len();
+            if length > MAX_AGENT_SOCKET_LEN {
+                message = format!(
+                    "{message}; the agent socket {} would be {length} bytes, over the {} \
+                     GnuPG binds, so no agent can start here. Use a shorter --gpgdir.",
+                    socket.display(),
+                    MAX_AGENT_SOCKET_LEN,
+                );
+            }
+        }
+        Error::Gpgme { path: self.home.clone(), action, message }
+    }
+
     /// Creates `home` (mode `0700`) if it does not exist yet, and generates piko's local
     /// master signing key inside it if none exists yet. Idempotent: calling this again against
     /// an already-initialized keyring changes nothing and reports
@@ -172,18 +218,12 @@ impl KeyringAdmin {
     pub fn init(home: impl AsRef<Path>) -> Result<(Self, InitOutcome)> {
         let home = home.as_ref().to_path_buf();
         if create_keyring_dir(&home)? {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).map_err(
-                    |source| Error::Gpgme {
-                        path: home.clone(),
-                        action: "set the keyring directory's permissions",
-                        message: source.to_string(),
-                    },
-                )?;
-            }
+            set_mode(&home, KEYRING_DIR_MODE, "set the keyring directory's permissions")?;
         }
+        // Before any GPGME context opens. An existing `pubring.gpg` is what makes GnuPG use
+        // the legacy keyring format rather than creating `pubring.kbx` beside it, and
+        // `pacman-key` reads only the former.
+        write_layout(&home)?;
 
         let admin = Self { home };
         let mut context = admin.context()?;
@@ -198,14 +238,21 @@ impl KeyringAdmin {
                         Duration::ZERO,
                         gpgme::CreateKeyFlags::CERT | gpgme::CreateKeyFlags::NOPASSWD,
                     )
-                    .map_err(|source| Error::Gpgme {
-                        path: admin.home.clone(),
-                        action: "generate the master key",
-                        message: source.to_string(),
-                    })?;
+                    .map_err(|source| admin.agent_error("generate the master key", &source))?;
                 true
             }
         };
+
+        // `pacman-key` runs `gpg --update-trustdb` for the same reason: `check_keyring`
+        // refuses a keyring whose `trustdb.gpg` it cannot read, and a fresh home has none
+        // until something writes trust.
+        let trustdb = admin.home.join(TRUSTDB);
+        if !trustdb.exists() {
+            admin.update_trustdb()?;
+        }
+        if trustdb.exists() {
+            set_mode(&trustdb, READABLE_MODE, "set the trust database's permissions")?;
+        }
 
         Ok((admin, InitOutcome { master_key_created }))
     }
@@ -326,11 +373,9 @@ impl KeyringAdmin {
             return Ok(false);
         }
 
-        context.add_signer(&master).map_err(|source| Error::Gpgme {
-            path: self.home.clone(),
-            action: "select the master key as signer",
-            message: source.to_string(),
-        })?;
+        context
+            .add_signer(&master)
+            .map_err(|source| self.agent_error("select the master key as signer", &source))?;
         context
             .sign_key_with_flags(
                 &target,
@@ -338,11 +383,7 @@ impl KeyringAdmin {
                 Duration::ZERO,
                 gpgme::KeySigningFlags::LOCAL,
             )
-            .map_err(|source| Error::Gpgme {
-                path: self.home.clone(),
-                action: "locally sign",
-                message: source.to_string(),
-            })?;
+            .map_err(|source| self.agent_error("locally sign", &source))?;
         Ok(true)
     }
 
@@ -577,18 +618,152 @@ impl KeyringAdmin {
     }
 }
 
+/// The trust database `pacman-key`'s `check_keyring` insists on reading.
+const TRUSTDB: &str = "trustdb.gpg";
+
+/// The mode `pacman-key --init` gives the keyring directory (`pacman-key.sh.in:225`).
+const KEYRING_DIR_MODE: u32 = 0o755;
+
+/// The mode `pacman-key --init` gives `pubring.gpg` and `trustdb.gpg`
+/// (`pacman-key.sh.in:231`).
+const READABLE_MODE: u32 = 0o644;
+
+/// The empty files `pacman-key --init` lays down, with the mode it gives each
+/// (`pacman-key.sh.in:228-232`).
+///
+/// `pubring.gpg` carries the layout decision. GnuPG 2.1 and later create `pubring.kbx`
+/// instead, unless a `pubring.gpg` is already there. `pacman-key` tests `-r pubring.gpg` and
+/// refuses the keyring outright when it is absent, so a keyring without one is one
+/// `pacman-key` cannot read at all.
+///
+/// `secring.gpg` is a GnuPG 1.x artifact that 2.1 and later ignore; private keys live in
+/// `private-keys-v1.d`. `pacman-key` still creates it, and an empty file mode `0600` costs
+/// nothing.
+const LAYOUT_FILES: &[(&str, u32)] = &[("pubring.gpg", READABLE_MODE), ("secring.gpg", 0o600)];
+
+/// The `gpg.conf` options `pacman-key --init` adds (`pacman-key.sh.in:238-246`).
+///
+/// `no-self-sigs-only` is left out. `pacman-key` adds it only for GnuPG 2.2.17 and later, and
+/// an option GnuPG does not recognize makes *every* later invocation fail rather than warn.
+/// The gate costs a version parse for a keyserver option piko never reaches: `piko-key` has no
+/// `--recv-keys` or `--refresh-keys`.
+const GPG_CONF_OPTIONS: &[&str] = &[
+    "no-greeting",
+    "no-permission-warning",
+    "keyserver-options timeout=10",
+    "keyserver-options import-clean",
+];
+
+/// The `gpg-agent.conf` option `pacman-key --init` adds (`pacman-key.sh.in:252`).
+const GPG_AGENT_CONF_OPTIONS: &[&str] = &["disable-scdaemon"];
+
+/// Lays down the files `pacman-key --init` creates beside the keys, if they are absent.
+///
+/// A file another tool wrote is left exactly as it is, mode included, for the reason
+/// [`create_keyring_dir`] gives about the directory itself. Only what this call creates gets
+/// a mode from piko.
+fn write_layout(home: &Path) -> Result<()> {
+    for (name, mode) in LAYOUT_FILES {
+        let path = home.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => set_mode(&path, *mode, "set a keyring file's permissions")?,
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(Error::Gpgme {
+                    path,
+                    action: "create a keyring file",
+                    message: source.to_string(),
+                });
+            }
+        }
+    }
+
+    ensure_conf_options(&home.join("gpg.conf"), GPG_CONF_OPTIONS)?;
+    ensure_conf_options(&home.join("gpg-agent.conf"), GPG_AGENT_CONF_OPTIONS)
+}
+
+/// Appends every option of `options` that `path` does not already carry.
+///
+/// This is `add_gpg_conf_option` (`pacman-key.sh.in:173`), which matches an option already
+/// present in any of three shapes: bare, commented out, or followed by a value. So a user who
+/// wrote `# no-greeting` or changed a timeout keeps their line, and a repeated `init` appends
+/// nothing.
+fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
+    let describe = |action: &'static str| {
+        move |source: std::io::Error| Error::Gpgme {
+            path: path.to_path_buf(),
+            action,
+            message: source.to_string(),
+        }
+    };
+
+    let existed = path.exists();
+    let current = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => return Err(describe("read a keyring configuration file")(source)),
+    };
+
+    let mut appended = String::new();
+    for option in options {
+        if current.lines().chain(appended.lines()).any(|line| carries_option(line, option)) {
+            continue;
+        }
+        appended.push_str(option);
+        appended.push('\n');
+    }
+
+    if appended.is_empty() && existed {
+        return Ok(());
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(describe("open a keyring configuration file"))?;
+    std::io::Write::write_all(&mut file, appended.as_bytes())
+        .map_err(describe("write a keyring configuration file"))?;
+    if !existed {
+        set_mode(path, READABLE_MODE, "set a keyring configuration file's permissions")?;
+    }
+    Ok(())
+}
+
+/// Whether `line` already carries `option`, in any of the shapes `add_gpg_conf_option`
+/// accepts.
+///
+/// Its regular expression is `^[[:space:]#]*<option>([[:space:]].*)*$`: any run of spaces and
+/// `#` first, then the option, then either nothing or a space and anything.
+fn carries_option(line: &str, option: &str) -> bool {
+    let bare = line.trim_start_matches([' ', '\t', '#']);
+    match bare.strip_prefix(option) {
+        Some("") => true,
+        Some(rest) => rest.starts_with([' ', '\t']),
+        None => false,
+    }
+}
+
+/// Sets `path`'s mode, naming `action` if that fails.
+fn set_mode(path: &Path, mode: u32, action: &'static str) -> Result<()> {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|source| {
+        Error::Gpgme { path: path.to_path_buf(), action, message: source.to_string() }
+    })
+}
+
 /// Creates `home`. Returns `true` if this call created it, and `false` if it already existed.
 ///
-/// [`KeyringAdmin::init`] reads that answer before it sets mode `0700`. Only a directory piko
-/// created itself gets piko's mode.
+/// [`KeyringAdmin::init`] reads that answer before it sets [`KEYRING_DIR_MODE`]. Only a
+/// directory piko created itself gets a mode from piko; an existing keyring keeps its own.
 ///
-/// An existing keyring keeps its current mode. The default `home` is `/etc/pacman.d/gnupg`,
-/// which piko shares with pacman. `pacman-key --init` creates that directory `0755`
-/// (`pacman-key.sh.in:225`), and leaves `pubring.gpg` and `trustdb.gpg` world-readable. It does
-/// so on purpose. It supports `--list-keys` and `--verify` for an unprivileged user. It also
-/// checks that both files stay readable (`pacman-key.sh.in:269`). `0700` is correct for a
-/// keyring piko creates. It is not correct for a directory another tool created, from a call
-/// that reports no change.
+/// The mode is `pacman-key --init`'s `0755` (`pacman-key.sh.in:225`), not something stricter.
+/// The default `home` is `/etc/pacman.d/gnupg`, a directory piko shares with pacman rather
+/// than owns. pacman keeps `pubring.gpg` and `trustdb.gpg` world-readable on purpose, so
+/// `--list-keys` and `--verify` work for an unprivileged user, and `check_keyring`
+/// (`pacman-key.sh.in:262`) refuses the keyring when either stops being readable. A private
+/// keyring is not a stricter version of this one. It is one the rest of the system cannot
+/// use. Secret key material stays private either way: GnuPG keeps it in
+/// `private-keys-v1.d`, which it creates `0700` itself.
 ///
 /// An existing symlink to a directory counts as existing. pacman-key tests for existence, not
 /// for a directory. Its own comment gives the reason: "someone may want to use a symlink here".
@@ -635,6 +810,96 @@ mod tests {
     ///
     /// `None` if GnuPG cannot be reached at all here, the same graceful skip
     /// `piko-sig/tests/signed_database.rs` uses.
+    /// `pacman-key`'s `check_keyring` (`pacman-key.sh.in:262`) refuses a keyring whose
+    /// `pubring.gpg` or `trustdb.gpg` it cannot read. Without both, `archlinux-keyring`'s
+    /// `.INSTALL` scriptlet takes its `pacman-key -l` guard as a no and populates nothing, so
+    /// a new root ends up with an empty keyring and cannot verify any later package.
+    #[test]
+    fn init_lays_down_the_layout_pacman_key_insists_on() {
+        let Some(admin) = fast_admin() else { return };
+        let home = admin.home().to_path_buf();
+        for name in ["pubring.gpg", "secring.gpg", "gpg.conf", "gpg-agent.conf"] {
+            std::fs::remove_file(home.join(name)).ok();
+        }
+
+        KeyringAdmin::init(&home).unwrap();
+
+        let mode =
+            |name: &str| std::fs::metadata(home.join(name)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("pubring.gpg"), READABLE_MODE);
+        assert_eq!(mode("secring.gpg"), 0o600);
+        assert_eq!(mode(TRUSTDB), READABLE_MODE);
+        assert_eq!(mode("gpg.conf"), READABLE_MODE);
+        assert_eq!(mode("gpg-agent.conf"), READABLE_MODE);
+    }
+
+    /// The directory is shared with pacman, which needs it readable. A keyring only piko can
+    /// open is one `pacman-key` refuses.
+    #[test]
+    fn a_keyring_piko_creates_is_readable_by_everyone() {
+        let parent = tempfile::tempdir().unwrap();
+        let home = parent.path().join("gnupg");
+
+        let Ok((_, _)) = KeyringAdmin::init(&home) else { return };
+
+        let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, KEYRING_DIR_MODE);
+    }
+
+    /// A second `init` must append nothing, and must leave a line the user edited alone.
+    #[test]
+    fn conf_options_are_added_once_and_never_over_an_existing_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("gpg.conf");
+        std::fs::write(&conf, "# no-greeting\nkeyserver-options timeout=99\n").unwrap();
+
+        ensure_conf_options(&conf, GPG_CONF_OPTIONS).unwrap();
+        let after_first = std::fs::read_to_string(&conf).unwrap();
+        ensure_conf_options(&conf, GPG_CONF_OPTIONS).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), after_first);
+        // Commented out counts as present, exactly as `add_gpg_conf_option` reads it.
+        assert_eq!(after_first.lines().filter(|l| l.contains("no-greeting")).count(), 1);
+        // `add_gpg_conf_option` matches the whole option *and its value*, so a different
+        // value is a different option and both lines end up present. GnuPG takes the last
+        // one. This is `pacman-key`'s own behavior, reproduced rather than improved on.
+        assert!(after_first.contains("keyserver-options timeout=99"), "{after_first}");
+        assert!(after_first.contains("keyserver-options timeout=10"), "{after_first}");
+        // An option that was genuinely absent is added.
+        assert!(after_first.contains("no-permission-warning"), "{after_first}");
+    }
+
+    /// The hint fires only on `NO_AGENT`, and only when the keyring's own path is what
+    /// prevents a socket. Both halves matter: a long keyring path is fine wherever the
+    /// runtime socket directory exists, so a hint that fires on length alone would blame a
+    /// working keyring.
+    #[test]
+    fn a_missing_agent_names_the_socket_limit_only_when_the_path_is_the_cause() {
+        let long = PathBuf::from("/").join("x".repeat(MAX_AGENT_SOCKET_LEN));
+        let admin = KeyringAdmin { home: long.clone() };
+        assert!(
+            long.join(AGENT_SOCKET).as_os_str().as_encoded_bytes().len() > MAX_AGENT_SOCKET_LEN,
+            "the fixture must exceed the limit"
+        );
+
+        let named = admin.agent_error("generate the master key", &gpgme::Error::NO_AGENT);
+        let other = admin.agent_error("generate the master key", &gpgme::Error::GENERAL);
+
+        assert!(named.to_string().contains("would be"), "{named}");
+        assert!(named.to_string().contains("S.gpg-agent"), "{named}");
+        assert!(!other.to_string().contains("would be"), "{other}");
+    }
+
+    /// A keyring short enough to hold a socket reports what GnuPG said, and nothing more.
+    #[test]
+    fn a_missing_agent_under_a_short_path_adds_no_hint() {
+        let admin = KeyringAdmin { home: PathBuf::from("/tmp/k") };
+
+        let error = admin.agent_error("locally sign", &gpgme::Error::NO_AGENT);
+
+        assert!(!error.to_string().contains("would be"), "{error}");
+    }
+
     fn fast_admin() -> Option<KeyringAdmin> {
         let home = tempfile::tempdir().ok()?;
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).ok()?;
