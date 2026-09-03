@@ -66,10 +66,10 @@ impl ConfigCache {
 /// reports all three, in that order. `--hookdir` is the flag that replaces its list
 /// ([`hook_dirs`]), so the two flags differ here on purpose.
 ///
-/// The order carries the behavior. A package downloads into the first directory
-/// (`piko_txn::CacheDirSource`), while every directory is searched for an existing file. So
-/// `piko install --root /mnt --cachedir /mnt/var/cache/pacman/pkg` writes into the new root
-/// and still reads the host cache, which is what pacman does.
+/// The order carries the behavior. A package downloads into the first *usable* directory
+/// (`piko_txn::select_download_dir`), while every directory is searched for an existing file.
+/// So `piko install --root /mnt --cachedir /mnt/var/cache/pacman/pkg` writes into the new
+/// root and still reads the host cache, which is what pacman does.
 ///
 /// A package source needs at least one directory. An empty list would report every package
 /// missing with an error naming nowhere it looked, so a failure falls back rather than

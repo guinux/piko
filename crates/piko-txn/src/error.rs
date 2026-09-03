@@ -300,6 +300,16 @@ pub enum Error {
         source: Box<piko_db::Error>,
     },
 
+    /// No configured cache directory can receive a download.
+    #[error(
+        "no configured cache directory can be written into ({})",
+        rejected.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+    )]
+    NoWritableCacheDir {
+        /// Every directory considered, and why each one was refused.
+        rejected: Vec<crate::source::RejectedCacheDir>,
+    },
+
     /// A source was configured with a path that cannot be used.
     #[error("{} is not a usable package source: {reason}", path.display())]
     UnusableSource {

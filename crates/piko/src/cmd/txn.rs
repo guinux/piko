@@ -274,6 +274,7 @@ pub fn install(
             return ExitCode::FAILURE;
         }
     };
+    report_download_dir(&steplist, source.download_dir());
 
     if options.download_only {
         let code = download_only(&source, &cache, &steps, &verification, &policy_overrides, out);
@@ -303,6 +304,28 @@ pub fn install(
         settings,
         out,
     )
+}
+
+/// Reports what the download-directory selection passed over, and whether it created one.
+///
+/// libalpm logs both at `ALPM_LOG_DEBUG` (`util.c:916`, `:924`). piko has no debug channel,
+/// and a configured `CacheDir` silently ignored is exactly the mistake worth naming. Both
+/// facts are absent in the ordinary case, so a normal run prints nothing.
+///
+/// Written through `StepList::suspend`, because the download rows are already live by the
+/// time this runs and a bare `eprintln!` would be overdrawn mid-line.
+fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::DownloadDir) {
+    if dir.rejected().is_empty() && !dir.created() {
+        return;
+    }
+    steplist.suspend(|| {
+        for rejected in dir.rejected() {
+            eprintln!("piko: warning: {rejected}");
+        }
+        if dir.created() {
+            eprintln!("piko: warning: no {} cache exists, creating...", dir.path().display());
+        }
+    });
 }
 
 /// Downloads every missing package named in `steps` into the cache, installing nothing.

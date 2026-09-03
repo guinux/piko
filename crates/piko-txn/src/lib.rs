@@ -36,6 +36,7 @@ pub use plan::{
 pub use remove::{RemovalContext, RemovalDisposition, decide_removal, pacsave_rotation};
 pub use rootfs::{Resolved, RootDir, UnsafePath};
 pub use source::{
-    CacheDirSource, DownloadTarget, DownloadingSource, Location, PackageSource, Skipped,
+    CacheDirSource, DownloadDir, DownloadTarget, DownloadingSource, Location, PackageSource,
+    RejectedCacheDir, RejectionReason, Skipped, select_download_dir,
 };
 pub use transaction::{Patterns, Report, Step, Transaction};

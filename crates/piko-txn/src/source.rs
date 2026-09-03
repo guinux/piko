@@ -14,6 +14,7 @@
 use std::{
     collections::HashMap,
     fmt,
+    os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
 };
 
@@ -148,6 +149,158 @@ pub trait PackageSource: fmt::Debug + Send + Sync {
     fn prefetch(&self, _file_names: &[PackageFileName]) -> Result<()> {
         Ok(())
     }
+}
+
+/// Why a configured cache directory cannot receive a download.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RejectionReason {
+    /// The path exists and is not a directory.
+    NotADirectory,
+    /// The path is a directory this process may not write into.
+    NotWritable,
+    /// The directory carries none of the owner, group or other write bits.
+    NoWriteBits,
+    /// The path did not exist and could not be created.
+    CreateFailed(std::io::ErrorKind),
+}
+
+impl fmt::Display for RejectionReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotADirectory => f.write_str("not a directory"),
+            Self::NotWritable => f.write_str("not writable"),
+            Self::NoWriteBits => f.write_str("no write bits set"),
+            Self::CreateFailed(kind) => write!(f, "could not be created: {kind}"),
+        }
+    }
+}
+
+/// A configured cache directory a download cannot be written into.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RejectedCacheDir {
+    /// The directory as it was configured.
+    pub path: PathBuf,
+    /// Why it cannot receive a download.
+    pub reason: RejectionReason,
+}
+
+impl fmt::Display for RejectedCacheDir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "skipping cache directory {} ({})", self.path.display(), self.reason)
+    }
+}
+
+/// The cache directory a download will be written into.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DownloadDir {
+    path: PathBuf,
+    created: bool,
+    rejected: Vec<RejectedCacheDir>,
+}
+
+impl DownloadDir {
+    /// The chosen directory.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Whether this directory did not exist and was created.
+    #[must_use]
+    pub const fn created(&self) -> bool {
+        self.created
+    }
+
+    /// The directories passed over to reach this one, in configured order.
+    ///
+    /// Empty in the ordinary case. When it is not, it explains why a download landed
+    /// somewhere other than the first configured directory.
+    #[must_use]
+    pub fn rejected(&self) -> &[RejectedCacheDir] {
+        &self.rejected
+    }
+}
+
+/// Chooses the cache directory a download is written into, creating it if it is absent.
+///
+/// This transcribes `_alpm_filecache_setup` (`util.c:904`). `directories` is walked in order
+/// and the first usable entry wins: an absent one is created, while a non-directory, one this
+/// process may not write into, and one with no write bit set are all passed over.
+///
+/// The *search* list is a different question and stays complete. [`CacheDirSource`] reads
+/// every configured directory, including the ones passed over here, so a read-only cache is
+/// still read and a package already in one is never fetched again.
+///
+/// This creates a directory, so it belongs to a caller that is about to download. Keep it out
+/// of [`CacheDirSource::new`], which `piko plan` and `piko remove` both build without ever
+/// fetching anything.
+///
+/// # Errors
+///
+/// [`Error::NoWritableCacheDir`] when no entry is usable. It names every directory and why
+/// each one was refused.
+pub fn select_download_dir(directories: &[PathBuf]) -> Result<DownloadDir> {
+    let mut rejected = Vec::new();
+
+    for directory in directories {
+        // The stat follows a final symlink, as libalpm's does, and for the reason
+        // `CacheDirSource` documents: the path comes from configuration, not from an
+        // untrusted directory entry.
+        let metadata = match std::fs::metadata(directory) {
+            Ok(metadata) => metadata,
+            // libalpm does not separate "absent" from "unstatable" here either: both mean
+            // there is nothing usable yet, and creating is the only way to find out.
+            Err(_) => match create_cache_dir(directory) {
+                Ok(()) => {
+                    return Ok(DownloadDir { path: directory.clone(), created: true, rejected });
+                }
+                Err(source) => {
+                    let reason = RejectionReason::CreateFailed(source.kind());
+                    rejected.push(RejectedCacheDir { path: directory.clone(), reason });
+                    continue;
+                }
+            },
+        };
+
+        if !metadata.is_dir() {
+            let reason = RejectionReason::NotADirectory;
+            rejected.push(RejectedCacheDir { path: directory.clone(), reason });
+            continue;
+        }
+        if rustix::fs::access(directory, rustix::fs::Access::WRITE_OK).is_err() {
+            let reason = RejectionReason::NotWritable;
+            rejected.push(RejectedCacheDir { path: directory.clone(), reason });
+            continue;
+        }
+        // A separate question from the access check above, and libalpm asks both
+        // (`util.c:925` then `:928`). The access check answers "may this process write
+        // here", which root and `CAP_DAC_OVERRIDE` answer yes to whatever the mode says.
+        // This one is a fact about the directory.
+        if metadata.permissions().mode() & 0o222 == 0 {
+            let reason = RejectionReason::NoWriteBits;
+            rejected.push(RejectedCacheDir { path: directory.clone(), reason });
+            continue;
+        }
+
+        return Ok(DownloadDir { path: directory.clone(), created: false, rejected });
+    }
+
+    Err(Error::NoWritableCacheDir { rejected })
+}
+
+/// Creates a cache directory and every missing parent, mode `0755` before the umask.
+///
+/// `_alpm_makepath_mode` (`util.c:111`) sets the umask to zero around the `mkdir` to land on
+/// exactly `0755`. This does not: the umask is process-global state, and piko downloads in
+/// parallel, so clearing it opens a window where a file another thread creates becomes
+/// world-accessible. A permission difference in the restrictive direction does not pay for
+/// that race.
+fn create_cache_dir(directory: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    builder.mode(0o755);
+    builder.create(directory)
 }
 
 /// Finds packages in pacman's own download cache.
@@ -285,14 +438,15 @@ pub struct DownloadTarget {
 /// Finds package files in the cache; downloads a miss before reporting one.
 ///
 /// This wraps a [`CacheDirSource`]. A cache hit is served exactly as before, with unchanged
-/// behavior. A miss is looked up in `targets` and, if found, downloaded into the *first*
-/// configured cache directory (pacman's own convention for a download's destination) via
-/// `piko-net`. It comes back as an ordinary [`Location`]. **Nothing is verified here** — see
+/// behavior. A miss is looked up in `targets` and, if found, downloaded through `piko-net`
+/// into the first *usable* configured cache directory ([`select_download_dir`], pacman's own
+/// convention for a download's destination). It comes back as an ordinary [`Location`].
+/// **Nothing is verified here** — see
 /// `piko_net::refresh::Refresher::fetch_package_with_progress`'s documentation for why that
 /// responsibility stays with whoever calls `Keyring::check` afterward.
 pub struct DownloadingSource {
     cache: CacheDirSource,
-    download_dir: PathBuf,
+    download_dir: DownloadDir,
     refresher: piko_net::Refresher,
     targets: HashMap<String, DownloadTarget>,
     cancel: piko_net::Cancel,
@@ -314,7 +468,11 @@ impl fmt::Debug for DownloadingSource {
 
 impl DownloadingSource {
     /// Builds a source over `directories` (searched in order, exactly as [`CacheDirSource`]
-    /// would), downloading a miss named in `targets` into the first of them.
+    /// would), downloading a miss named in `targets` into the first usable one.
+    ///
+    /// This is where [`select_download_dir`] runs, and the only place it does. The directory
+    /// it may create is created here rather than in [`CacheDirSource::new`], so a command that
+    /// only reads the cache never writes to disk.
     ///
     /// `progress` is called synchronously for every download event. This is the same narrow
     /// exception `piko-net` documents on [`piko_net::Event`].
@@ -322,7 +480,8 @@ impl DownloadingSource {
     /// # Errors
     ///
     /// [`Error::UnusableSource`] if `directories` is empty, for the same reason
-    /// [`CacheDirSource::new`] refuses it.
+    /// [`CacheDirSource::new`] refuses it. [`Error::NoWritableCacheDir`] if none of them can
+    /// receive a download.
     pub fn new(
         directories: impl IntoIterator<Item = PathBuf>,
         targets: HashMap<String, DownloadTarget>,
@@ -330,14 +489,9 @@ impl DownloadingSource {
         concurrency: piko_net::Concurrency,
         progress: impl Fn(piko_net::Event) + Send + Sync + 'static,
     ) -> Result<Self> {
-        let directories: Vec<PathBuf> = directories.into_iter().collect();
-        let Some(download_dir) = directories.first().cloned() else {
-            return Err(Error::UnusableSource {
-                path: PathBuf::new(),
-                reason: "no cache directories were configured".to_owned(),
-            });
-        };
+        // `CacheDirSource::new` refuses an empty list, so the selection never sees one.
         let cache = CacheDirSource::new(directories)?;
+        let download_dir = select_download_dir(cache.directories())?;
         Ok(Self {
             cache,
             download_dir,
@@ -347,6 +501,12 @@ impl DownloadingSource {
             concurrency,
             progress: Box::new(progress),
         })
+    }
+
+    /// Where a download will be written, and what was passed over to get there.
+    #[must_use]
+    pub const fn download_dir(&self) -> &DownloadDir {
+        &self.download_dir
     }
 }
 
@@ -370,7 +530,7 @@ impl PackageSource for DownloadingSource {
         let path = self
             .refresher
             .fetch_package_with_progress(
-                &self.download_dir,
+                self.download_dir.path(),
                 file_name,
                 &target.repo_name,
                 &target.servers,
@@ -425,7 +585,7 @@ impl PackageSource for DownloadingSource {
         }
 
         let results = self.refresher.fetch_packages(
-            &self.download_dir,
+            self.download_dir.path(),
             &wanted,
             self.concurrency,
             &self.cancel,
@@ -452,6 +612,195 @@ mod tests {
     use super::*;
 
     const PACKAGE: &str = "foo-1.0.0-1-x86_64.pkg.tar.zst";
+
+    /// Sets `path`'s mode, so a test can build a directory the selection must pass over.
+    fn chmod(path: &Path, mode: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn the_first_usable_cache_directory_is_chosen() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+
+        let chosen =
+            select_download_dir(&[first.path().to_path_buf(), second.path().to_path_buf()])
+                .unwrap();
+
+        assert_eq!(chosen.path(), first.path());
+        assert!(!chosen.created());
+        assert!(chosen.rejected().is_empty());
+    }
+
+    /// `_alpm_makepath` creates every missing parent, so this does too.
+    #[test]
+    fn a_missing_cache_directory_is_created_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let wanted = dir.path().join("var/cache/pacman/pkg");
+
+        let chosen = select_download_dir(std::slice::from_ref(&wanted)).unwrap();
+
+        assert_eq!(chosen.path(), wanted);
+        assert!(chosen.created());
+        assert!(wanted.is_dir());
+        let mode = std::fs::metadata(&wanted).unwrap().permissions().mode() & 0o777;
+        // `0o755` before the umask, which only takes bits away.
+        assert_eq!(mode & !0o755, 0, "{mode:o} has a bit 0o755 does not");
+    }
+
+    #[test]
+    fn a_cache_directory_that_is_a_file_is_passed_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"").unwrap();
+        let good = tempfile::tempdir().unwrap();
+
+        let chosen = select_download_dir(&[file.clone(), good.path().to_path_buf()]).unwrap();
+
+        assert_eq!(chosen.path(), good.path());
+        assert_eq!(
+            chosen.rejected(),
+            [RejectedCacheDir { path: file, reason: RejectionReason::NotADirectory }]
+        );
+    }
+
+    /// libalpm asks two questions about write access, in this order: may this process write
+    /// here (`util.c:925`), then does the directory carry any write bit at all
+    /// (`util.c:928`). The order decides which reason a `0o500` directory reports. An
+    /// ordinary process is refused by the first, while root and anything holding
+    /// `CAP_DAC_OVERRIDE` pass it and are refused by the second. Either way the directory is
+    /// passed over, which is the property that matters, so this pins the skip and accepts
+    /// the reason the running process implies.
+    #[test]
+    fn a_cache_directory_that_cannot_be_written_into_is_passed_over() {
+        let locked = tempfile::tempdir().unwrap();
+        chmod(locked.path(), 0o500);
+        let writable_anyway = std::fs::File::create(locked.path().join("probe")).is_ok();
+        let good = tempfile::tempdir().unwrap();
+
+        let chosen =
+            select_download_dir(&[locked.path().to_path_buf(), good.path().to_path_buf()]).unwrap();
+
+        assert_eq!(chosen.path(), good.path());
+        assert_eq!(chosen.rejected().len(), 1);
+        let rejected = chosen.rejected().first().unwrap();
+        assert_eq!(rejected.path, locked.path());
+        let expected = if writable_anyway {
+            RejectionReason::NoWriteBits
+        } else {
+            RejectionReason::NotWritable
+        };
+        assert_eq!(rejected.reason, expected);
+        chmod(locked.path(), 0o700);
+    }
+
+    #[test]
+    fn a_cache_directory_that_cannot_be_created_is_passed_over() {
+        let parent = tempfile::tempdir().unwrap();
+        chmod(parent.path(), 0o500);
+        let wanted = parent.path().join("pkg");
+        if std::fs::create_dir(&wanted).is_ok() {
+            chmod(parent.path(), 0o700);
+            return;
+        }
+        let good = tempfile::tempdir().unwrap();
+
+        let chosen = select_download_dir(&[wanted.clone(), good.path().to_path_buf()]).unwrap();
+
+        assert_eq!(chosen.path(), good.path());
+        assert_eq!(chosen.rejected().len(), 1);
+        assert!(matches!(
+            chosen.rejected().first().map(|r| r.reason),
+            Some(RejectionReason::CreateFailed(_))
+        ));
+        chmod(parent.path(), 0o700);
+    }
+
+    /// `_alpm_makepath` treats `EEXIST` as success, so libalpm accepts a dangling symlink and
+    /// fails at the first transfer instead. `create_dir_all` re-checks `is_dir`, so this is
+    /// passed over.
+    #[test]
+    fn a_dangling_symlink_cache_directory_is_passed_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("cache");
+        std::os::unix::fs::symlink(dir.path().join("absent"), &link).unwrap();
+        let good = tempfile::tempdir().unwrap();
+
+        let chosen = select_download_dir(&[link, good.path().to_path_buf()]).unwrap();
+
+        assert_eq!(chosen.path(), good.path());
+        assert_eq!(chosen.rejected().len(), 1);
+    }
+
+    /// Only the chosen directory is created. A later one is never touched.
+    #[test]
+    fn a_directory_after_the_chosen_one_is_never_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+
+        let chosen = select_download_dir(&[first.clone(), second.clone()]).unwrap();
+
+        assert_eq!(chosen.path(), first);
+        assert!(first.is_dir());
+        assert!(!second.exists());
+    }
+
+    #[test]
+    fn no_usable_cache_directory_is_an_error_naming_every_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        std::fs::write(&file, b"").unwrap();
+        let locked = tempfile::tempdir().unwrap();
+        chmod(locked.path(), 0o500);
+
+        let error = select_download_dir(&[file.clone(), locked.path().to_path_buf()]).unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains(&file.display().to_string()), "{message}");
+        assert!(message.contains(&locked.path().display().to_string()), "{message}");
+        assert!(message.contains("not a directory"), "{message}");
+        // "not writable" for an ordinary process, "no write bits set" under
+        // `CAP_DAC_OVERRIDE`; both name the same refusal.
+        assert!(
+            message.contains("not writable") || message.contains("no write bits set"),
+            "{message}"
+        );
+        chmod(locked.path(), 0o700);
+    }
+
+    /// The search list is a different question from the write destination. A cache that
+    /// cannot receive a download is still read, so a package already in it is never fetched
+    /// again.
+    #[test]
+    fn the_search_list_keeps_every_directory_when_one_is_not_writable() {
+        let locked = tempfile::tempdir().unwrap();
+        write(locked.path(), PACKAGE, b"cached");
+        chmod(locked.path(), 0o500);
+        let good = tempfile::tempdir().unwrap();
+
+        let source = DownloadingSource::new(
+            [locked.path().to_path_buf(), good.path().to_path_buf()],
+            HashMap::new(),
+            piko_net::Cancel::default(),
+            piko_net::Concurrency::new(1),
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(source.download_dir().path(), good.path());
+        assert_eq!(source.cache.directories().len(), 2);
+        // The unwritable directory is still searched, so the cached package is found there.
+        assert_eq!(source.locate(&file_name()).unwrap().path(), locked.path().join(PACKAGE));
+        chmod(locked.path(), 0o700);
+    }
+
+    #[test]
+    fn an_empty_cache_directory_list_is_still_refused() {
+        let error = CacheDirSource::new([]).unwrap_err();
+
+        assert!(matches!(error, Error::UnusableSource { .. }), "{error}");
+    }
 
     fn file_name() -> PackageFileName {
         PackageFileName::from_str(PACKAGE).unwrap()
