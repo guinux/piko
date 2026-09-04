@@ -799,8 +799,6 @@ fn path_arg(path: &Path) -> std::ffi::CString {
     reason = "a failing assertion in a test should abort it loudly"
 )]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
     use super::*;
 
     /// A `KeyringAdmin` whose master key is ed25519, not `init`'s real RSA-4096 — this exercises
