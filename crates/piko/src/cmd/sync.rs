@@ -19,10 +19,10 @@ use crate::output::emit;
 /// a column across the whole listing, computed in one pass before anything prints — the same
 /// two-pass shape `cmd::plan::column_widths`/`print_steps` uses.
 ///
-/// There is no icon column here, unlike `cmd::plan::StepKind` or `cmd::search`'s checkmark:
+/// There is no icon column here, unlike `crate::style::ChangeKind` or `cmd::search`'s checkmark:
 /// both exist to tell rows of different kinds apart, and every row here is the same kind (an
 /// upgrade). The new version is still colored blue, the same tone
-/// `cmd::plan::StepKind::Upgrade` uses, so an upgrade reads the same way in `piko plan` and
+/// `crate::style::ChangeKind::Upgrade` uses, so an upgrade reads the same way in `piko plan` and
 /// `piko check-updates` — echoed by value, not by shared code. The old version is dimmed,
 /// matching `cmd::plan`'s treatment of a `Step::Change`'s `from` version.
 ///

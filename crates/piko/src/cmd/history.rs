@@ -9,7 +9,7 @@ use std::{path::Path, process::ExitCode};
 use piko_txn::history::{Action, Outcome, Query, Record};
 
 use crate::output::{emit, report as report_error};
-use crate::style::checkmark;
+use crate::style::{ChangeKind, checkmark};
 
 /// What `piko history` was asked to show.
 #[derive(Clone, Debug)]
@@ -35,17 +35,19 @@ pub fn history(
     options: Options,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
-    let (since, until) =
-        match (parse_when(options.since.as_deref()), parse_when(options.until.as_deref())) {
-            (Ok(since), Ok(until)) => (since, until),
-            (Err(bad), _) | (_, Err(bad)) => {
-                eprintln!(
-                    "piko: error: {bad} is not a time this understands; use YYYY-MM-DD or \
+    let (since, until) = match (
+        parse_when(options.since.as_deref(), Bound::Start),
+        parse_when(options.until.as_deref(), Bound::End),
+    ) {
+        (Ok(since), Ok(until)) => (since, until),
+        (Err(bad), _) | (_, Err(bad)) => {
+            eprintln!(
+                "piko: error: {bad} is not a time this understands; use YYYY-MM-DD or \
                  YYYY-MM-DDTHH:MM:SS+ZZZZ"
-                );
-                return ExitCode::FAILURE;
-            }
-        };
+            );
+            return ExitCode::FAILURE;
+        }
+    };
 
     let store = piko_txn::history::store::path(dbpath);
     let query = Query { last: options.last, packages: options.packages.clone(), since, until };
@@ -74,8 +76,16 @@ pub fn history(
         return unfinished_note(dbpath, out);
     }
 
-    for record in &records {
-        let code = print_record(record, &options, out);
+    // One pass over every action that will actually print, before the first line. Widths that
+    // grew block by block would make an early transaction's columns wrong once a later, wider
+    // one appeared — the rule `cmd::plan::column_widths` and `cmd::search` both follow.
+    let widths = Widths::over(&records, &options);
+    for (index, record) in records.iter().enumerate() {
+        // A block is several lines now, so the blocks need separating. Not before the first.
+        if index > 0 && !options.quiet {
+            emit!(out, "");
+        }
+        let code = print_record(record, &options, widths, out);
         if code != ExitCode::SUCCESS {
             return code;
         }
@@ -86,58 +96,113 @@ pub fn history(
     unfinished_note(dbpath, out)
 }
 
+/// How wide the verb and name columns must be for every printed line to align.
+///
+/// Computed over the whole listing, not per transaction. See the call site.
+#[derive(Clone, Copy, Debug, Default)]
+struct Widths {
+    verb: usize,
+    name: usize,
+}
+
+impl Widths {
+    /// Measures every action that [`print_record`] will actually print.
+    fn over(records: &[Record], options: &Options) -> Self {
+        let mut widths = Self::default();
+        if options.quiet {
+            return widths;
+        }
+        for action in records.iter().flat_map(|record| shown_actions(record, options)) {
+            widths.verb = widths.verb.max(verb(action).len());
+            widths.name = widths.name.max(action.name().len());
+        }
+        widths
+    }
+}
+
+/// The actions of `record` that the listing will show.
+///
+/// `--package` names what the reader is asking about, so the detail is narrowed to it. The
+/// transaction is still reported whole — a package upgraded as part of a 400-package `-Syu`
+/// should not print the other 399 to say so, and the header's count says how big it was.
+fn shown_actions<'a>(record: &'a Record, options: &'a Options) -> impl Iterator<Item = &'a Action> {
+    record.actions.iter().filter(|action| {
+        options.packages.is_empty() || options.packages.iter().any(|name| name == action.name())
+    })
+}
+
 /// Prints one transaction.
 ///
 /// Returns an [`ExitCode`] rather than nothing, following the convention
 /// [`crate::style::render_list_field`] sets: `emit!` returns from its enclosing function on a
 /// write failure, so a helper that writes has to hand that decision back to its caller.
-fn print_record(record: &Record, options: &Options, out: &mut impl std::io::Write) -> ExitCode {
+fn print_record(
+    record: &Record,
+    options: &Options,
+    widths: Widths,
+    out: &mut impl std::io::Write,
+) -> ExitCode {
     // The same spelling the log line carries, in the same time zone, so a line here can be
     // found in `pacman.log` by searching for it.
     let when = record.started.map_or_else(
         || "unknown date".to_owned(),
         |epoch| piko_txn::history::render_timestamp(epoch, options.offset),
     );
-    let (summary, scale) = headline(record);
+
+    // The count answers a question the detail below cannot: how big was the transaction this
+    // line came from. So it shows only when there is no full detail to count — under
+    // `--quiet`, and under `--package`, which narrows the detail to what was asked about.
+    let hidden = options.quiet || !options.packages.is_empty();
+    let count = match record.actions.len() {
+        count if hidden && count > 1 => format!("  ({count} packages)"),
+        _ => String::new(),
+    };
+    // `--quiet` is one line per transaction, so the command line stays on it: there is no
+    // detail below for it to compete with. Otherwise it goes on its own line, below.
+    //
+    // A transaction whose records held no command line — most of pacman's — falls back to
+    // naming its single action, which is what the detail lines would have said. That is not the
+    // duplication this rendering exists to remove: under `--quiet` there are no detail lines,
+    // and a row saying only "something happened at 16:30" is worth nothing.
+    let inline = if options.quiet {
+        match (&record.command, record.actions.as_slice()) {
+            (Some(command), _) => format!("  {command}"),
+            (None, [action]) => format!("  {}", action.log_message()),
+            (None, _) => String::new(),
+        }
+    } else {
+        String::new()
+    };
 
     emit!(
         out,
-        "{} {} {} {}{}",
+        "{} {}  {}{inline}{}",
         outcome_mark(&record.outcome),
         console::Style::new().dim().apply_to(when),
         console::Style::new().cyan().apply_to(format!("[{}]", record.tool)),
-        summary,
-        console::Style::new().dim().apply_to(scale),
+        console::Style::new().dim().apply_to(count),
     );
 
     if options.quiet {
         return ExitCode::SUCCESS;
     }
 
-    // `--package` names what the reader is asking about, so the detail is narrowed to it. The
-    // transaction is still shown whole in its first line — a package upgraded as part of a
-    // 400-package `-Syu` should not print the other 399 to say so.
-    let shown: Vec<&Action> = record
-        .actions
-        .iter()
-        .filter(|action| {
-            options.packages.is_empty() || options.packages.iter().any(|name| name == action.name())
-        })
-        .collect();
+    // Indented to where the verbs start, so it reads as a caption hanging under the header
+    // rather than as one more action. Never truncated: it is the record of what was actually
+    // typed, and a history that abbreviates that is a history that has to be double-checked.
+    if let Some(command) = &record.command {
+        emit!(out, "    {}", console::Style::new().dim().apply_to(command));
+    }
 
-    // Padded as plain text before being colored: a `StyledObject`'s ANSI codes throw off a
-    // `{:width$}` built around the colored string. Same reason `plan.rs` and `search.rs` pad
-    // first.
-    let verb_width = shown.iter().map(|a| a.verb().len()).max().unwrap_or(0);
-    let name_width = shown.iter().map(|a| a.name().len()).max().unwrap_or(0);
-    for action in shown {
-        emit!(
-            out,
-            "    {} {} {}",
-            console::Style::new().dim().apply_to(format!("{:<verb_width$}", action.verb())),
-            format!("{:<name_width$}", action.name()),
-            console::Style::new().dim().apply_to(versions(action)),
-        );
+    let Widths { verb: verb_width, name: name_width } = widths;
+    for action in shown_actions(record, options) {
+        let kind = kind_of(action);
+        // Padded as plain text before being colored. A `StyledObject` writes its ANSI codes
+        // straight through `write!` rather than `Formatter::pad`, so an outer `{:width$}`
+        // around a styled value pads the escapes. Same reason as `plan.rs`.
+        let prefix = kind.prefix(&format!("{:<verb_width$}", verb(action)));
+        let name = action.name();
+        emit!(out, "  {prefix} {name:name_width$} {}", versions(action, kind));
     }
 
     if let Outcome::Failed { reason } = &record.outcome {
@@ -152,11 +217,34 @@ fn print_record(record: &Record, options: &Options, out: &mut impl std::io::Writ
     ExitCode::SUCCESS
 }
 
+/// The shared icon-and-color vocabulary an action renders as.
+const fn kind_of(action: &Action) -> ChangeKind {
+    match action {
+        Action::Installed { .. } => ChangeKind::Install,
+        Action::Upgraded { .. } => ChangeKind::Upgrade,
+        Action::Downgraded { .. } => ChangeKind::Downgrade,
+        Action::Reinstalled { .. } => ChangeKind::Reinstall,
+        Action::Removed { .. } => ChangeKind::Remove,
+    }
+}
+
+/// The word, past tense — this command reports what already happened, where `piko plan`
+/// previews what will. [`piko_txn::history::Action::verb`] is that word, and is what both
+/// records write, so the screen and the files cannot disagree about it.
+fn verb(action: &Action) -> &'static str {
+    action.verb()
+}
+
 /// The version column: `1.0.0-1`, or `1.0.0-1 -> 1.1.0-1` where the version changed.
-fn versions(action: &Action) -> String {
+///
+/// The version the package ended at carries the kind's color, and the one it came from is
+/// dimmed — the same two-tone shape `cmd::plan` gives a `Step::Change`, so a line reads the
+/// same whether piko is proposing the change or reporting it.
+fn versions(action: &Action, kind: ChangeKind) -> String {
+    let to = kind.style().apply_to(action.version());
     match action.previous() {
-        Some(from) => format!("{from} -> {}", action.version()),
-        None => action.version().to_owned(),
+        Some(from) => format!("{} -> {to}", console::Style::new().dim().apply_to(from)),
+        None => to.to_string(),
     }
 }
 
@@ -167,33 +255,6 @@ fn outcome_mark(outcome: &Outcome) -> console::StyledObject<String> {
         Outcome::Failed { .. } => console::Style::new().red().apply_to("✗".to_owned()),
         Outcome::Interrupted => console::Style::new().yellow().apply_to("!".to_owned()),
     }
-}
-
-/// The first line's two halves: what the transaction was, and how big it was.
-///
-/// The scale is separate because it is dimmed, and because it must still show when
-/// `--package` has narrowed the detail below it to one line. A package upgraded as part of a
-/// 400-package `-Syu` reads very differently from one upgraded on its own.
-fn headline(record: &Record) -> (String, String) {
-    let scale = match record.actions.len() {
-        0 | 1 => String::new(),
-        count => format!("({count} packages)"),
-    };
-    let summary = match (&record.command, record.actions.as_slice()) {
-        // The command line says most, when either record held one.
-        (Some(command), _) => command.clone(),
-        (None, [action]) => action.log_message(),
-        (None, []) => "no packages".to_owned(),
-        // Nothing to say that the scale does not already say.
-        (None, _) => String::new(),
-    };
-    let scale = if summary.is_empty() { scale } else { prefix_space(scale) };
-    (summary, scale)
-}
-
-/// `text` with a leading space, or an empty string unchanged.
-fn prefix_space(text: String) -> String {
-    if text.is_empty() { text } else { format!(" {text}") }
 }
 
 /// Reports an unfinished transaction, if the database still records one.
@@ -220,17 +281,48 @@ fn unfinished_note(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
     }
 }
 
-/// Parses `--since`/`--until`: a full timestamp, or a bare `YYYY-MM-DD` meaning its midnight.
+/// Which end of the range a `--since`/`--until` value bounds.
+///
+/// It decides what a bare date means, and only that. A full timestamp is taken as written
+/// either way.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Bound {
+    /// `--since`: the earliest transaction to keep.
+    Start,
+    /// `--until`: the latest transaction to keep.
+    End,
+}
+
+/// The last second of a day, from its midnight.
+const DAY_END: i64 = 24 * 60 * 60 - 1;
+
+/// Parses `--since`/`--until`: a full timestamp, or a bare `YYYY-MM-DD` naming a whole day.
+///
+/// **A bare date names the day, not the instant it begins.** Both bounds are inclusive, so
+/// `--since 2026-08-23` starts at that day's midnight and `--until 2026-08-23` runs to its
+/// last second. Reading both ends as midnight would make `--until 2026-08-23` exclude every
+/// transaction of the 23rd, and `--since D --until D` return nothing for any day — which is
+/// the one range a reader is most likely to ask for.
 ///
 /// A bare date is read in UTC rather than in the local zone. The alternative is to make a
 /// filter's meaning depend on where the machine is, for a flag whose whole job is to cut a
 /// list roughly in half.
-fn parse_when(text: Option<&str>) -> Result<Option<i64>, String> {
+fn parse_when(text: Option<&str>, bound: Bound) -> Result<Option<i64>, String> {
     let Some(text) = text else {
         return Ok(None);
     };
-    let full = if text.contains('T') { text.to_owned() } else { format!("{text}T00:00:00+0000") };
-    piko_txn::history::parse_timestamp(&full).map(Some).ok_or_else(|| text.to_owned())
+    // A spelled-out time is exact, and is used as it was written. Widening it to the end of
+    // its day would ignore what the caller took the trouble to say.
+    if text.contains('T') {
+        return piko_txn::history::parse_timestamp(text).map(Some).ok_or_else(|| text.to_owned());
+    }
+
+    let midnight = piko_txn::history::parse_timestamp(&format!("{text}T00:00:00+0000"))
+        .ok_or_else(|| text.to_owned())?;
+    Ok(Some(match bound {
+        Bound::Start => midnight,
+        Bound::End => midnight.saturating_add(DAY_END),
+    }))
 }
 
 #[cfg(test)]
@@ -243,23 +335,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_bare_date_is_read_as_its_utc_midnight() {
-        assert_eq!(parse_when(Some("1970-01-01")).unwrap(), Some(0));
+    fn a_bare_date_starts_a_range_at_its_utc_midnight() {
+        assert_eq!(parse_when(Some("1970-01-01"), Bound::Start).unwrap(), Some(0));
     }
 
+    /// The bug this pins: `--until <date>` read as midnight excluded the whole day it named.
     #[test]
-    fn a_full_timestamp_is_read_as_written() {
-        assert_eq!(parse_when(Some("1970-01-01T02:00:00+0200")).unwrap(), Some(0));
+    fn a_bare_date_ends_a_range_at_its_last_second() {
+        assert_eq!(parse_when(Some("1970-01-01"), Bound::End).unwrap(), Some(86_399));
+    }
+
+    /// `--since D --until D` is the range a reader asks for most often, and it has to contain
+    /// the whole of day D.
+    #[test]
+    fn one_bare_date_on_both_bounds_covers_that_whole_day() {
+        let start = parse_when(Some("2026-08-23"), Bound::Start).unwrap().unwrap();
+        let end = parse_when(Some("2026-08-23"), Bound::End).unwrap().unwrap();
+        // 16:29:28+0200 on that day — a real transaction from this machine's log.
+        let inside = piko_txn::history::parse_timestamp("2026-08-23T16:29:28+0200").unwrap();
+        assert!((start..=end).contains(&inside), "{start} ..= {end} misses {inside}");
+        // And nothing from the neighbouring days.
+        let before = piko_txn::history::parse_timestamp("2026-08-22T23:59:59+0000").unwrap();
+        let after = piko_txn::history::parse_timestamp("2026-08-24T00:00:00+0000").unwrap();
+        assert!(!(start..=end).contains(&before));
+        assert!(!(start..=end).contains(&after));
+    }
+
+    /// A time the caller spelled out is exact at both bounds. Widening it to the end of its
+    /// day would ignore what they took the trouble to say.
+    #[test]
+    fn a_full_timestamp_is_read_as_written_at_either_bound() {
+        for bound in [Bound::Start, Bound::End] {
+            assert_eq!(parse_when(Some("1970-01-01T02:00:00+0200"), bound).unwrap(), Some(0));
+        }
     }
 
     #[test]
     fn an_unparseable_time_names_itself() {
-        assert_eq!(parse_when(Some("last tuesday")), Err("last tuesday".to_owned()));
+        assert_eq!(parse_when(Some("last tuesday"), Bound::Start), Err("last tuesday".to_owned()));
+        assert_eq!(parse_when(Some("last tuesday"), Bound::End), Err("last tuesday".to_owned()));
     }
 
     #[test]
     fn no_filter_is_no_bound() {
-        assert_eq!(parse_when(None).unwrap(), None);
+        assert_eq!(parse_when(None, Bound::Start).unwrap(), None);
+        assert_eq!(parse_when(None, Bound::End).unwrap(), None);
     }
 
     fn record_with(command: Option<&str>, actions: Vec<Action>) -> Record {
@@ -282,34 +402,95 @@ mod tests {
         Action::Installed { name: name.to_owned(), version: "1.0.0-1".to_owned() }
     }
 
-    /// A transaction with no recorded command line still has to describe itself.
+    /// Every action maps to the icon and color its kind gets in `piko plan`. A reader who has
+    /// seen a plan must not have to learn a second vocabulary to read a history.
     #[test]
-    fn a_headline_describes_a_transaction_with_no_command() {
-        assert_eq!(
-            headline(&record_with(None, Vec::new())),
-            ("no packages".to_owned(), String::new())
-        );
-        assert_eq!(
-            headline(&record_with(None, vec![installed("foo")])),
-            ("installed foo (1.0.0-1)".to_owned(), String::new())
-        );
-        // The count alone; repeating it as a summary as well says the same thing twice.
-        assert_eq!(
-            headline(&record_with(None, vec![installed("foo"), installed("bar")])),
-            (String::new(), "(2 packages)".to_owned())
-        );
+    fn every_action_maps_to_its_kind() {
+        let cases = [
+            (installed("foo"), ChangeKind::Install),
+            (
+                Action::Upgraded {
+                    name: "foo".to_owned(),
+                    from: "1.0.0-1".to_owned(),
+                    to: "1.1.0-1".to_owned(),
+                },
+                ChangeKind::Upgrade,
+            ),
+            (
+                Action::Downgraded {
+                    name: "foo".to_owned(),
+                    from: "1.1.0-1".to_owned(),
+                    to: "1.0.0-1".to_owned(),
+                },
+                ChangeKind::Downgrade,
+            ),
+            (
+                Action::Reinstalled { name: "foo".to_owned(), version: "1.0.0-1".to_owned() },
+                ChangeKind::Reinstall,
+            ),
+            (
+                Action::Removed { name: "foo".to_owned(), version: "1.0.0-1".to_owned() },
+                ChangeKind::Remove,
+            ),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(kind_of(&action), expected, "{action:?}");
+        }
     }
 
-    /// The scale must survive `--package` narrowing the detail below it, which is the case it
-    /// exists for.
+    /// The two directions are the pair most worth telling apart, and the pair a careless
+    /// mapping would collapse. They must not share a glyph.
     #[test]
-    fn a_headline_keeps_the_scale_beside_a_command_line() {
-        assert_eq!(
-            headline(&record_with(Some("piko update"), vec![installed("foo"), installed("bar")])),
-            ("piko update".to_owned(), " (2 packages)".to_owned())
-        );
+    fn an_upgrade_and_a_downgrade_do_not_share_a_glyph() {
+        let up = Action::Upgraded {
+            name: "foo".to_owned(),
+            from: "1.0.0-1".to_owned(),
+            to: "1.1.0-1".to_owned(),
+        };
+        let down = Action::Downgraded {
+            name: "foo".to_owned(),
+            from: "1.1.0-1".to_owned(),
+            to: "1.0.0-1".to_owned(),
+        };
+        assert_ne!(kind_of(&up).icon(), kind_of(&down).icon());
     }
 
+    /// The count answers what the detail cannot, so it must not appear beside the detail. The
+    /// widths pass is the cheapest place to observe that the two modes differ.
+    #[test]
+    fn widths_are_measured_only_when_the_detail_prints() {
+        let records = vec![record_with(None, vec![installed("a-very-long-package-name")])];
+        let listing = Options {
+            last: None,
+            packages: Vec::new(),
+            since: None,
+            until: None,
+            quiet: false,
+            offset: piko_txn::LocalOffset::UTC,
+        };
+        assert!(Widths::over(&records, &listing).name > 0);
+        assert_eq!(Widths::over(&records, &Options { quiet: true, ..listing }).name, 0);
+    }
+
+    /// `--package` narrows the detail, so the widths must be measured over what survives it,
+    /// not over every action the transaction held.
+    #[test]
+    fn widths_follow_the_package_filter() {
+        let records =
+            vec![record_with(None, vec![installed("a-very-long-package-name"), installed("foo")])];
+        let options = Options {
+            last: None,
+            packages: vec!["foo".to_owned()],
+            since: None,
+            until: None,
+            quiet: false,
+            offset: piko_txn::LocalOffset::UTC,
+        };
+        assert_eq!(Widths::over(&records, &options).name, "foo".len());
+    }
+
+    /// Both sides of a version change are shown. Styling is off in a captured buffer, so the
+    /// text is exactly what a piped `piko history` prints.
     #[test]
     fn a_changed_version_shows_both_sides() {
         let action = Action::Upgraded {
@@ -317,6 +498,11 @@ mod tests {
             from: "1.0.0-1".to_owned(),
             to: "1.1.0-1".to_owned(),
         };
-        assert_eq!(versions(&action), "1.0.0-1 -> 1.1.0-1");
+        assert_eq!(versions(&action, ChangeKind::Upgrade), "1.0.0-1 -> 1.1.0-1");
+    }
+
+    #[test]
+    fn an_unchanged_version_shows_once() {
+        assert_eq!(versions(&installed("foo"), ChangeKind::Install), "1.0.0-1");
     }
 }

@@ -15,6 +15,7 @@ use piko_db::{
 };
 
 use crate::output::{emit, report};
+use crate::style::ChangeKind;
 
 /// How the step list is rendered.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -247,80 +248,45 @@ fn render(
     print_steps(universe, built, format, out)
 }
 
-/// What a step does to a package. One definition of the icon, verb, and color it renders as in
-/// [`print_steps`]'s line-by-line listing and its summary tally. Shared rather than matched
-/// twice, so the listing and the summary cannot disagree about a kind's name or color.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum StepKind {
-    Install,
-    Upgrade,
-    Downgrade,
-    Reinstall,
-    Remove,
+/// The kind a [`Change`] renders as. The icon and color live in [`crate::style::ChangeKind`],
+/// which `piko history` reads the same way.
+const fn kind_of(change: Change) -> ChangeKind {
+    match change {
+        Change::Upgrade => ChangeKind::Upgrade,
+        Change::Downgrade => ChangeKind::Downgrade,
+        Change::Reinstall => ChangeKind::Reinstall,
+    }
 }
 
-impl StepKind {
-    const fn from_change(change: Change) -> Self {
-        match change {
-            Change::Upgrade => Self::Upgrade,
-            Change::Downgrade => Self::Downgrade,
-            Change::Reinstall => Self::Reinstall,
-        }
+/// The word, present tense, left-padded to 9 characters.
+///
+/// `downgrade`/`reinstall`, the longest, need no padding; the rest line up under them. No word
+/// here is shortened to fit. The tense is this command's own: a plan says what *will* happen.
+/// `piko history` pads its own past-tense set to its own width.
+const fn verb(kind: ChangeKind) -> &'static str {
+    match kind {
+        ChangeKind::Install => "install  ",
+        ChangeKind::Upgrade => "upgrade  ",
+        ChangeKind::Downgrade => "downgrade",
+        ChangeKind::Reinstall => "reinstall",
+        ChangeKind::Remove => "remove   ",
     }
+}
 
-    const fn icon(self) -> &'static str {
-        match self {
-            Self::Install => "+",
-            Self::Upgrade => "↑",
-            Self::Downgrade => "↓",
-            Self::Reinstall => "↻",
-            Self::Remove => "-",
-        }
+/// The bare word, for the summary tally ("N to install", "M to upgrade", …).
+const fn name(kind: ChangeKind) -> &'static str {
+    match kind {
+        ChangeKind::Install => "install",
+        ChangeKind::Upgrade => "upgrade",
+        ChangeKind::Downgrade => "downgrade",
+        ChangeKind::Reinstall => "reinstall",
+        ChangeKind::Remove => "remove",
     }
+}
 
-    /// The word, left-padded to 9 characters. `downgrade`/`reinstall`, the longest, need no
-    /// padding; the rest line up under them. No word here is shortened to fit.
-    const fn verb(self) -> &'static str {
-        match self {
-            Self::Install => "install  ",
-            Self::Upgrade => "upgrade  ",
-            Self::Downgrade => "downgrade",
-            Self::Reinstall => "reinstall",
-            Self::Remove => "remove   ",
-        }
-    }
-
-    /// The bare word, for the summary tally ("N to install", "M to upgrade", …).
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Install => "install",
-            Self::Upgrade => "upgrade",
-            Self::Downgrade => "downgrade",
-            Self::Reinstall => "reinstall",
-            Self::Remove => "remove",
-        }
-    }
-
-    /// A reinstall changes nothing, so it stays dim instead of taking its own color. A downgrade
-    /// is a regression worth flagging, not just narrating, so it gets amber instead of a neutral
-    /// tone. This detects terminal support the same way [`crate::progress`]'s `checkmark()`
-    /// does. Piped output, and every test that captures into a `Vec<u8>`, gets plain text with
-    /// no ANSI codes.
-    fn style(self) -> console::Style {
-        let style = console::Style::new();
-        match self {
-            Self::Install => style.green(),
-            Self::Upgrade => style.blue(),
-            Self::Downgrade => style.yellow(),
-            Self::Reinstall => style.dim(),
-            Self::Remove => style.red(),
-        }
-    }
-
-    /// The colored `"{icon} {verb}"` a line starts with.
-    fn prefix(self) -> console::StyledObject<String> {
-        self.style().apply_to(format!("{} {}", self.icon(), self.verb()))
-    }
+/// The colored `"{icon} {verb}"` a line starts with.
+fn prefix(kind: ChangeKind) -> console::StyledObject<String> {
+    kind.prefix(self::verb(kind))
 }
 
 /// How many steps of each kind a plan has. Tallied once while [`print_steps`] prints the
@@ -335,26 +301,27 @@ struct Tally {
 }
 
 impl Tally {
-    fn bump(&mut self, kind: StepKind) {
+    fn bump(&mut self, kind: ChangeKind) {
         let count = match kind {
-            StepKind::Install => &mut self.install,
-            StepKind::Upgrade => &mut self.upgrade,
-            StepKind::Downgrade => &mut self.downgrade,
-            StepKind::Reinstall => &mut self.reinstall,
-            StepKind::Remove => &mut self.remove,
+            ChangeKind::Install => &mut self.install,
+            ChangeKind::Upgrade => &mut self.upgrade,
+            ChangeKind::Downgrade => &mut self.downgrade,
+            ChangeKind::Reinstall => &mut self.reinstall,
+            ChangeKind::Remove => &mut self.remove,
         };
         *count = count.saturating_add(1);
     }
 
-    /// Every non-zero count, in the same order [`StepKind`]'s other methods use — install,
+    /// Every non-zero count, in the same order [`ChangeKind`]'s variants are declared in —
+    /// install,
     /// upgrade, downgrade, reinstall, remove.
-    fn counted(&self) -> impl Iterator<Item = (StepKind, usize)> {
+    fn counted(&self) -> impl Iterator<Item = (ChangeKind, usize)> {
         [
-            (StepKind::Install, self.install),
-            (StepKind::Upgrade, self.upgrade),
-            (StepKind::Downgrade, self.downgrade),
-            (StepKind::Reinstall, self.reinstall),
-            (StepKind::Remove, self.remove),
+            (ChangeKind::Install, self.install),
+            (ChangeKind::Upgrade, self.upgrade),
+            (ChangeKind::Downgrade, self.downgrade),
+            (ChangeKind::Reinstall, self.reinstall),
+            (ChangeKind::Remove, self.remove),
         ]
         .into_iter()
         .filter(|(_, count)| *count > 0)
@@ -423,12 +390,12 @@ pub(crate) fn print_steps(
             Format::Full => match step {
                 Step::Remove { package } => {
                     let (name, version) = render(*package);
-                    let kind = StepKind::Remove;
+                    let kind = ChangeKind::Remove;
                     tally.bump(kind);
                     emit!(
                         out,
                         "{} {name:name_width$} {}",
-                        kind.prefix(),
+                        prefix(kind),
                         // Padded before styling, not after. A `StyledObject` writes its ANSI
                         // codes straight through `write!`, not `Formatter::pad`. So an outer
                         // `{:width$}` around a styled value pads the wrong thing, or silently
@@ -438,24 +405,24 @@ pub(crate) fn print_steps(
                 }
                 Step::Install { candidate, .. } => {
                     let (name, version) = render(*candidate);
-                    let kind = StepKind::Install;
+                    let kind = ChangeKind::Install;
                     tally.bump(kind);
                     emit!(
                         out,
                         "{} {name:name_width$} {}",
-                        kind.prefix(),
+                        prefix(kind),
                         kind.style().apply_to(format!("{version:<version_width$}"))
                     );
                 }
                 Step::Change { from, to, kind } => {
                     let (name, new) = render(*to);
                     let (_, old) = render(*from);
-                    let kind = StepKind::from_change(*kind);
+                    let kind = kind_of(*kind);
                     tally.bump(kind);
                     emit!(
                         out,
                         "{} {name:name_width$} {} -> {}",
-                        kind.prefix(),
+                        prefix(kind),
                         console::style(format!("{old:<version_width$}")).dim(),
                         kind.style().apply_to(new)
                     );
@@ -469,7 +436,7 @@ pub(crate) fn print_steps(
         let counts = tally
             .counted()
             .map(|(kind, count)| {
-                kind.style().apply_to(format!("{count} to {}", kind.name())).to_string()
+                kind.style().apply_to(format!("{count} to {}", name(kind))).to_string()
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -495,7 +462,7 @@ pub(crate) fn print_steps(
 
 /// Renders a signed byte count, so a transaction that frees space reads as such. Colored to
 /// match: green for a net decrease, amber for a net increase. These are the same tones
-/// [`StepKind::style`] uses for a removal-flavored and an install-flavored number.
+/// [`ChangeKind::style`] uses for a removal-flavored and an install-flavored number.
 fn signed_size(delta: i64) -> console::StyledObject<String> {
     if delta < 0 {
         console::Style::new()

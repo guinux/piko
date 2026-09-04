@@ -1658,8 +1658,103 @@ fn history_filters_by_package_and_shortens_with_quiet() {
     assert!(filtered.contains("1 transaction(s)"), "{filtered}");
     assert!(!filtered.contains("linux"), "{filtered}");
 
+    // A detail line is indented and carries its kind's icon. `--quiet` is one line per
+    // transaction, so no such line may appear.
     let quiet = text(&run_history(&sandbox, &["--package", "vim", "--quiet"]));
-    assert!(!quiet.contains("    installed"), "detail survived --quiet:\n{quiet}");
+    assert!(!quiet.contains("  + installed"), "detail survived --quiet:\n{quiet}");
+    assert_eq!(quiet.lines().filter(|line| line.contains("vim")).count(), 1, "{quiet}");
+}
+
+/// The detail lines carry the icon and the past-tense verb `piko plan` and `piko history`
+/// share, so an install, a removal and an upgrade are told apart by shape, not only by a word.
+#[test]
+fn history_marks_each_kind_with_its_own_icon() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.path("pacman.log"),
+        "[2026-09-03T16:19:48+0200] [ALPM] transaction started\n\
+         [2026-09-03T16:19:49+0200] [ALPM] installed vim (9.1-1)\n\
+         [2026-09-03T16:19:49+0200] [ALPM] removed nano (8.0-1)\n\
+         [2026-09-03T16:19:49+0200] [ALPM] upgraded linux (6.1-1 -> 6.2-1)\n\
+         [2026-09-03T16:19:49+0200] [ALPM] downgraded mesa (25.0-1 -> 24.9-1)\n\
+         [2026-09-03T16:19:49+0200] [ALPM] reinstalled glibc (2.44-1)\n\
+         [2026-09-03T16:19:50+0200] [ALPM] transaction completed\n",
+    )
+    .unwrap();
+
+    let seen = text(&run_history(&sandbox, &[]));
+    for expected in ["+ installed", "- removed", "↑ upgraded", "↓ downgraded", "↻ reinstalled"]
+    {
+        assert!(seen.contains(expected), "missing {expected}:\n{seen}");
+    }
+}
+
+/// The duplication this rendering exists to remove. A transaction with one action and no
+/// recorded command line used to print that action in the header and again below it.
+#[test]
+fn a_single_action_is_reported_exactly_once() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.path("pacman.log"),
+        "[2026-09-03T16:19:48+0200] [ALPM] transaction started\n\
+         [2026-09-03T16:19:49+0200] [ALPM] installed vim (9.1-1)\n\
+         [2026-09-03T16:19:50+0200] [ALPM] transaction completed\n",
+    )
+    .unwrap();
+
+    let seen = text(&run_history(&sandbox, &[]));
+    assert_eq!(seen.lines().filter(|line| line.contains("vim")).count(), 1, "{seen}");
+}
+
+/// The package count says how big a transaction was, which the detail below already shows. So
+/// it appears only where that detail is hidden or narrowed.
+#[test]
+fn the_package_count_appears_only_where_the_detail_does_not() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.path("pacman.log"),
+        "[2026-09-03T16:19:47+0200] [PACMAN] Running 'pacman -Syu'\n\
+         [2026-09-03T16:19:48+0200] [ALPM] transaction started\n\
+         [2026-09-03T16:19:49+0200] [ALPM] installed vim (9.1-1)\n\
+         [2026-09-03T16:19:49+0200] [ALPM] installed nano (8.0-1)\n\
+         [2026-09-03T16:19:50+0200] [ALPM] transaction completed\n",
+    )
+    .unwrap();
+
+    let full = text(&run_history(&sandbox, &[]));
+    assert!(!full.contains("(2 packages)"), "the count doubled the detail:\n{full}");
+
+    let quiet = text(&run_history(&sandbox, &["--quiet"]));
+    assert!(quiet.contains("(2 packages)"), "{quiet}");
+
+    let filtered = text(&run_history(&sandbox, &["--package", "vim"]));
+    assert!(filtered.contains("(2 packages)"), "{filtered}");
+}
+
+/// The command line goes on its own line and is never shortened. It is the record of what was
+/// actually typed, and a history that abbreviates it has to be double-checked elsewhere.
+#[test]
+fn the_command_line_is_printed_whole_on_its_own_line() {
+    let sandbox = Sandbox::new();
+    let long = "pacman --upgrade --noconfirm -- \
+                /home/guillaume/.cache/paru/clone/claude-code/claude-code-2.1.259-1-x86_64.pkg.tar.zst";
+    std::fs::write(
+        sandbox.path("pacman.log"),
+        format!(
+            "[2026-09-03T16:19:47+0200] [PACMAN] Running '{long}'\n\
+             [2026-09-03T16:19:48+0200] [ALPM] transaction started\n\
+             [2026-09-03T16:19:49+0200] [ALPM] upgraded claude-code (2.1.250-1 -> 2.1.259-1)\n\
+             [2026-09-03T16:19:50+0200] [ALPM] transaction completed\n"
+        ),
+    )
+    .unwrap();
+
+    let seen = text(&run_history(&sandbox, &[]));
+    let command_line =
+        seen.lines().find(|line| line.contains("claude-code-2.1.259")).expect("the command line");
+    assert_eq!(command_line.trim(), long, "the command line was altered:\n{seen}");
+    // Its own line: the header above it carries the timestamp, and does not carry this.
+    assert!(!command_line.contains("2026-09-03T16:19:47"), "{seen}");
 }
 
 /// `--since` and `--until` cut the list by start time.
@@ -1682,6 +1777,12 @@ fn history_filters_by_date() {
 
     let until = text(&run_history(&sandbox, &["--until", "2026-09-04"]));
     assert!(until.contains("linux") && !until.contains("vim"), "{until}");
+
+    // A bare date names the whole day at both ends, so the day a transaction ran is a range
+    // that contains it. Read as two midnights, this returns nothing at all.
+    let one_day = text(&run_history(&sandbox, &["--since", "2026-09-05", "--until", "2026-09-05"]));
+    assert!(one_day.contains("vim"), "a single-day range excluded its own day:\n{one_day}");
+    assert!(!one_day.contains("linux"), "{one_day}");
 }
 
 /// `-n` keeps the newest transactions, and `--all` overrides it.

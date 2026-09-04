@@ -57,6 +57,67 @@ pub(crate) fn info_url(
     }
 }
 
+/// What a transaction does to one package.
+///
+/// The icon and the color, and nothing else. The *word* stays with each command module:
+/// `piko plan` conjugates in the present ("upgrade", about to happen) and `piko history` in
+/// the past ("upgraded", already done). Sharing the glyph is what makes a plan line and a
+/// history line read alike; sharing the word would make one of them lie about its tense.
+///
+/// This is the second thing in this module, after [`checkmark`], that more than one command
+/// module needs with the exact same meaning. `cmd::search`'s green ✓ and `cmd::files`'s dimmed
+/// name are still local vocabularies, and stay where they are.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChangeKind {
+    /// Nothing of this name was installed.
+    Install,
+    /// A lower version was installed.
+    Upgrade,
+    /// A higher version was installed.
+    Downgrade,
+    /// The same version was installed.
+    Reinstall,
+    /// The package is no longer installed.
+    Remove,
+}
+
+impl ChangeKind {
+    /// The one glyph a line starts with.
+    pub(crate) const fn icon(self) -> &'static str {
+        match self {
+            Self::Install => "+",
+            Self::Upgrade => "↑",
+            Self::Downgrade => "↓",
+            Self::Reinstall => "↻",
+            Self::Remove => "-",
+        }
+    }
+
+    /// A reinstall changes nothing, so it stays dim instead of taking its own color. A
+    /// downgrade is a regression worth flagging, not just narrating, so it gets amber instead
+    /// of a neutral tone. This detects terminal support the same way [`checkmark`] does:
+    /// piped output, and every test that captures into a `Vec<u8>`, gets plain text with no
+    /// ANSI codes.
+    pub(crate) fn style(self) -> console::Style {
+        let style = console::Style::new();
+        match self {
+            Self::Install => style.green(),
+            Self::Upgrade => style.blue(),
+            Self::Downgrade => style.yellow(),
+            Self::Reinstall => style.dim(),
+            Self::Remove => style.red(),
+        }
+    }
+
+    /// The colored `"{icon} {word}"` a line starts with.
+    ///
+    /// `word` is the caller's, already padded to its module's column width — the tense differs
+    /// between the two callers, and so does the width the longest word in each set demands.
+    pub(crate) fn prefix(self, word: &str) -> console::StyledObject<String> {
+        self.style().apply_to(format!("{} {word}", self.icon()))
+    }
+}
+
 /// Prints a `piko info` list field, wrapping `items` at `per_line` per line.
 ///
 /// A line past the first is indented to the column [`info_label`]'s value starts at, not to
