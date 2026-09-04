@@ -50,7 +50,9 @@ pub const DEFAULT_ROOT_DIR: &str = "/";
 /// database path is a frontend decision, not an ALPM one (see `crates/piko/src/context.rs`).
 /// `pub` so that caller does not have to hardcode this string a second time.
 pub const DEFAULT_DB_PATH: &str = "/var/lib/pacman/";
-const DEFAULT_LOG_FILE: &str = "/var/log/pacman.log";
+
+/// pacman's default `LogFile`. `pub` for the same reason as [`DEFAULT_DB_PATH`].
+pub const DEFAULT_LOG_FILE: &str = "/var/log/pacman.log";
 
 /// pacman's default `GPGDir`. `pub` for the same reason as [`DEFAULT_DB_PATH`].
 pub const DEFAULT_GPG_DIR: &str = "/etc/pacman.d/gnupg/";

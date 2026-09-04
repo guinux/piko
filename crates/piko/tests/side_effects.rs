@@ -198,8 +198,10 @@ impl Sandbox {
         std::fs::write(
             dir.path().join("pacman.conf"),
             format!(
-                "[options]\nCacheDir = {}/\nSigLevel = Never\n\n[test]\nSigLevel = Never\n{server_line}",
-                dir.path().join("cache").display()
+                "[options]\nCacheDir = {}/\nLogFile = {}\nSigLevel = Never\n\n[test]\n\
+                 SigLevel = Never\n{server_line}",
+                dir.path().join("cache").display(),
+                dir.path().join("pacman.log").display()
             ),
         )
         .unwrap();
@@ -219,6 +221,17 @@ impl Sandbox {
             text.replace("[options]\n", &format!("[options]\nParallelDownloads = {count}\n")),
         )
         .unwrap();
+    }
+
+    /// The transaction log this sandbox's `pacman.conf` names, or an empty string if nothing
+    /// wrote one.
+    fn log(&self) -> String {
+        std::fs::read_to_string(self.path("pacman.log")).unwrap_or_default()
+    }
+
+    /// The history store beside this sandbox's database, or an empty string.
+    fn history(&self) -> String {
+        std::fs::read_to_string(self.path("db/piko-history")).unwrap_or_default()
     }
 
     fn write_hook(&self, name: &str, body: &str) {
@@ -1502,4 +1515,298 @@ fn populate_shell(root: &Path) -> bool {
         let _ = std::fs::copy(source, root.join("usr/lib").join(name));
     }
     root.join("bin/sh").exists()
+}
+
+// ---------------------------------------------------------------------------
+// The transaction records: `pacman.log` and `<dbpath>/piko-history`.
+//
+// Every sandbox writes a `LogFile` into its own temporary directory, so these read the same
+// two files a real run writes and never touch `/var/log/pacman.log`.
+// ---------------------------------------------------------------------------
+
+/// Runs `piko history` against a sandbox, with the given extra arguments.
+fn run_history(sandbox: &Sandbox, extra: &[&str]) -> Output {
+    Command::new(PIKO)
+        .arg("history")
+        .arg("--config")
+        .arg(sandbox.path("pacman.conf"))
+        .arg("--dbpath")
+        .arg(sandbox.path("db"))
+        .args(extra)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// The line a `piko install` writes before it does anything, matching pacman's own
+/// `Running '…'`. It is the only evidence in the log of *what was asked for*, as opposed to
+/// what happened.
+#[test]
+fn the_command_line_reaches_the_log_before_anything_is_planned() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    drop(sandbox.install("1.0.0-1", &[]));
+
+    let log = sandbox.log();
+    assert!(log.contains("[PIKO] Running '"), "{log}");
+    assert!(log.contains(" install "), "{log}");
+}
+
+/// A transaction a `PreTransaction` hook refuses has still started. It must be recorded as a
+/// failure rather than left looking like a run that never happened — that is the state the
+/// journal is deleted for, and the log is what remains to say so.
+#[test]
+fn a_refused_transaction_is_recorded_as_failed() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    sandbox.write_hook(
+        "10-abort.hook",
+        "[Trigger]\nOperation = Install\nType = Package\nTarget = foo\n\n\
+         [Action]\nWhen = PreTransaction\nExec = /bin/false\nAbortOnFail\n",
+    );
+
+    let output = sandbox.install("1.0.0-1", &[]);
+    assert!(!output.status.success(), "{}", text(&output));
+
+    let log = sandbox.log();
+    assert!(log.contains("[PIKO] transaction started (id "), "{log}");
+    assert!(log.contains("[PIKO] transaction failed"), "{log}");
+    assert!(!log.contains("installed foo"), "a refused transaction reported an install:\n{log}");
+
+    let history = sandbox.history();
+    assert!(history.contains("end failed "), "{history}");
+    assert!(!history.contains("installed foo"), "{history}");
+}
+
+/// The log the user configured is the only file written. A run must not fall back to
+/// `/var/log/pacman.log`, and must not invent a location of its own.
+#[test]
+fn nothing_is_written_outside_the_configured_log() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    drop(sandbox.install("1.0.0-1", &[]));
+
+    assert!(sandbox.path("pacman.log").is_file(), "the configured log was not written");
+    assert!(!sandbox.path("root/var/log/pacman.log").exists(), "a second log appeared");
+}
+
+/// A `LogFile` whose directory does not exist is a warning, not a failure. libalpm raises
+/// `ALPM_ERR_BADPERMS` here; piko does not, because the history store beside the database is
+/// the record that must not be lost, and refusing would break bootstrapping a fresh root.
+#[test]
+fn an_unwritable_log_warns_and_the_transaction_still_runs() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    sandbox.write_repo(&[("foo", "1.0.0-1", &[])]);
+
+    let output = sandbox.run_install(
+        &["foo"],
+        &["--logfile", &sandbox.path("no/such/directory/pacman.log").display().to_string()],
+    );
+    let seen = text(&output);
+
+    assert!(seen.contains("cannot write the transaction log"), "no warning was printed:\n{seen}");
+    // The transaction itself is unaffected: it fails only for the reason it would have failed
+    // anyway (extraction needs `CAP_CHOWN` in this fixture), never for the log.
+    assert!(!seen.contains("no transactions"), "{seen}");
+}
+
+/// `piko history` reads the shared log, so pacman's own transactions show up beside piko's.
+/// Nothing here writes through piko: the point is that the log is the interface.
+#[test]
+fn history_reports_a_transaction_pacman_wrote() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.path("pacman.log"),
+        "[2026-09-03T16:19:47+0200] [PACMAN] Running 'pacman -Syu'\n\
+         [2026-09-03T16:19:48+0200] [ALPM] transaction started\n\
+         [2026-09-03T16:19:49+0200] [ALPM] upgraded linux (6.1-1 -> 6.2-1)\n\
+         [2026-09-03T16:19:50+0200] [ALPM] transaction completed\n",
+    )
+    .unwrap();
+
+    let output = run_history(&sandbox, &[]);
+    let seen = text(&output);
+
+    assert!(output.status.success(), "{seen}");
+    assert!(seen.contains("[ALPM]"), "the tool that acted was not named:\n{seen}");
+    assert!(seen.contains("pacman -Syu"), "{seen}");
+    assert!(seen.contains("upgraded"), "{seen}");
+    assert!(seen.contains("linux"), "{seen}");
+}
+
+/// `--package` keeps only the transactions that touched a package, and `--quiet` drops the
+/// per-package detail while keeping one line per transaction.
+#[test]
+fn history_filters_by_package_and_shortens_with_quiet() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.path("pacman.log"),
+        "[2026-09-03T16:19:48+0200] [ALPM] transaction started\n\
+         [2026-09-03T16:19:49+0200] [ALPM] installed linux (6.2-1)\n\
+         [2026-09-03T16:19:50+0200] [ALPM] transaction completed\n\
+         [2026-09-04T16:19:48+0200] [ALPM] transaction started\n\
+         [2026-09-04T16:19:49+0200] [ALPM] installed vim (9.1-1)\n\
+         [2026-09-04T16:19:50+0200] [ALPM] transaction completed\n",
+    )
+    .unwrap();
+
+    let all = text(&run_history(&sandbox, &[]));
+    assert!(all.contains("2 transaction(s)"), "{all}");
+
+    let filtered = text(&run_history(&sandbox, &["--package", "vim"]));
+    assert!(filtered.contains("1 transaction(s)"), "{filtered}");
+    assert!(!filtered.contains("linux"), "{filtered}");
+
+    let quiet = text(&run_history(&sandbox, &["--package", "vim", "--quiet"]));
+    assert!(!quiet.contains("    installed"), "detail survived --quiet:\n{quiet}");
+}
+
+/// `--since` and `--until` cut the list by start time.
+#[test]
+fn history_filters_by_date() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.path("pacman.log"),
+        "[2026-09-03T16:19:48+0000] [ALPM] transaction started\n\
+         [2026-09-03T16:19:49+0000] [ALPM] installed linux (6.2-1)\n\
+         [2026-09-03T16:19:50+0000] [ALPM] transaction completed\n\
+         [2026-09-05T16:19:48+0000] [ALPM] transaction started\n\
+         [2026-09-05T16:19:49+0000] [ALPM] installed vim (9.1-1)\n\
+         [2026-09-05T16:19:50+0000] [ALPM] transaction completed\n",
+    )
+    .unwrap();
+
+    let since = text(&run_history(&sandbox, &["--since", "2026-09-04"]));
+    assert!(since.contains("vim") && !since.contains("linux"), "{since}");
+
+    let until = text(&run_history(&sandbox, &["--until", "2026-09-04"]));
+    assert!(until.contains("linux") && !until.contains("vim"), "{until}");
+}
+
+/// `-n` keeps the newest transactions, and `--all` overrides it.
+#[test]
+fn history_keeps_the_newest_and_all_overrides_it() {
+    let sandbox = Sandbox::new();
+    let mut log = String::new();
+    for day in 1..=5 {
+        log.push_str(&format!(
+            "[2026-09-0{day}T10:00:00+0000] [ALPM] transaction started\n\
+             [2026-09-0{day}T10:00:01+0000] [ALPM] installed p{day} (1-1)\n\
+             [2026-09-0{day}T10:00:02+0000] [ALPM] transaction completed\n"
+        ));
+    }
+    std::fs::write(sandbox.path("pacman.log"), log).unwrap();
+
+    let last_two = text(&run_history(&sandbox, &["-n", "2"]));
+    assert!(last_two.contains("2 transaction(s)"), "{last_two}");
+    assert!(last_two.contains("p5") && last_two.contains("p4"), "{last_two}");
+    assert!(!last_two.contains("p1"), "{last_two}");
+
+    let all = text(&run_history(&sandbox, &["-n", "2", "--all"]));
+    assert!(all.contains("5 transaction(s)"), "{all}");
+}
+
+/// An empty history says so, and names what it read. "Nothing happened" and "piko looked in
+/// the wrong place" are different answers, and a user cannot tell them apart otherwise.
+#[test]
+fn an_empty_history_names_the_files_it_read() {
+    let sandbox = Sandbox::new();
+    let seen = text(&run_history(&sandbox, &[]));
+    assert!(seen.contains("no transactions recorded"), "{seen}");
+    assert!(seen.contains("pacman.log"), "{seen}");
+    assert!(seen.contains("piko-history"), "{seen}");
+}
+
+/// A time `--since` cannot read is refused by name, rather than silently ignored.
+#[test]
+fn an_unreadable_since_is_refused() {
+    let sandbox = Sandbox::new();
+    let output = run_history(&sandbox, &["--since", "last tuesday"]);
+    assert!(!output.status.success());
+    assert!(text(&output).contains("last tuesday"), "{}", text(&output));
+}
+
+/// A history run must never write. It is a report, and the two files it reads are the record
+/// of what actually happened.
+#[test]
+fn history_writes_nothing() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.path("pacman.log"),
+        "[2026-09-03T16:19:48+0200] [ALPM] transaction started\n\
+         [2026-09-03T16:19:50+0200] [ALPM] transaction completed\n",
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(sandbox.path("pacman.log")).unwrap();
+
+    drop(run_history(&sandbox, &[]));
+
+    assert_eq!(std::fs::read_to_string(sandbox.path("pacman.log")).unwrap(), before);
+    assert!(!sandbox.path("db/piko-history").exists(), "history wrote a store");
+    assert!(!sandbox.path("db/db.lck").exists(), "history took the lock");
+}
+
+/// The whole record of a completed install, in both files.
+///
+/// Ignored for the same reason every other applying test here is: extraction applies the
+/// archive's ownership (`0:0` in these fixtures), which needs `CAP_CHOWN`.
+#[test]
+#[ignore = "requires root: install applies the archive's ownership, which needs CAP_CHOWN"]
+fn a_completed_install_is_recorded_in_both_records() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    let output = sandbox.install("1.0.0-1", &[]);
+    assert!(output.status.success(), "{}", text(&output));
+
+    let log = sandbox.log();
+    let started = log.find("[PIKO] transaction started").expect("a start line");
+    let installed = log.find("[PIKO] installed foo (1.0.0-1)").expect("an install line");
+    let completed = log.find("[PIKO] transaction completed").expect("an end line");
+    assert!(started < installed && installed < completed, "out of order:\n{log}");
+
+    let history = sandbox.history();
+    assert!(history.contains("installed foo 1.0.0-1"), "{history}");
+    assert!(history.contains("end completed "), "{history}");
+    assert!(history.contains("command "), "{history}");
+
+    // The journal is gone; the history is what remains.
+    assert!(!sandbox.path("db/piko-journal").exists(), "a journal was left behind");
+
+    let seen = text(&run_history(&sandbox, &[]));
+    assert!(seen.contains("installed") && seen.contains("foo"), "{seen}");
+    assert!(seen.contains("1 transaction(s)"), "{seen}");
+}
+
+/// The verb must come from a version comparison. An upgrade and a downgrade of the same
+/// package are told apart by direction, not by which ran second.
+#[test]
+#[ignore = "requires root: install applies the archive's ownership, which needs CAP_CHOWN"]
+fn an_upgrade_and_a_downgrade_are_named_by_direction() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    write_package(&sandbox.path("cache"), "1.1.0-1", None);
+    assert!(sandbox.install("1.0.0-1", &[]).status.success());
+
+    sandbox.write_repo(&[("foo", "1.1.0-1", &[])]);
+    assert!(sandbox.run_update(&["foo"], &["--norefresh"]).status.success());
+    assert!(sandbox.log().contains("upgraded foo (1.0.0-1 -> 1.1.0-1)"), "{}", sandbox.log());
+
+    sandbox.write_repo(&[("foo", "1.0.0-1", &[])]);
+    assert!(sandbox.run_update(&["foo"], &["--norefresh", "--downgrade"]).status.success());
+    assert!(sandbox.log().contains("downgraded foo (1.1.0-1 -> 1.0.0-1)"), "{}", sandbox.log());
+}
+
+/// A removal is recorded with the version that went away, which nothing else on the system
+/// records once the entry is gone.
+#[test]
+#[ignore = "requires root: install applies the archive's ownership, which needs CAP_CHOWN"]
+fn a_removal_is_recorded_with_the_version_that_went() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    assert!(sandbox.install("1.0.0-1", &[]).status.success());
+    assert!(sandbox.run_remove(&["foo"], &["--noconfirm"], None).status.success());
+
+    assert!(sandbox.log().contains("removed foo (1.0.0-1)"), "{}", sandbox.log());
+    assert!(sandbox.history().contains("removed foo 1.0.0-1"), "{}", sandbox.history());
 }

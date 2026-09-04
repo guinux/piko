@@ -35,6 +35,15 @@ pub struct Cli {
     #[arg(long = "cachedir", global = true, value_name = "PATH")]
     pub cache_dir: Vec<PathBuf>,
 
+    /// Path to the transaction log. Defaults to `LogFile` from the parsed pacman.conf (see
+    /// `--config`); falls back to `/var/log/pacman.log` with a warning if that cannot be
+    /// read.
+    ///
+    /// This is the log pacman writes too. piko appends to the same file, in the same format,
+    /// under its own `[PIKO]` caller name. `history` reads it back.
+    #[arg(long = "logfile", global = true, value_name = "PATH")]
+    pub log_file: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -549,6 +558,45 @@ pub enum Command {
     /// was applied. piko keeps no copy of overwritten files, so there is nothing to roll back
     /// to. See `docs/locking.md` and the `journal` module.
     Report,
+
+    /// Show the transactions this system has run, newest last.
+    ///
+    /// Reads the transaction log (`--logfile`, or `LogFile` from pacman.conf), which pacman
+    /// writes too, so this covers transactions run by either tool. Each is shown with the
+    /// tool that ran it, the command line when the log recorded one, and what it did.
+    ///
+    /// piko's own transactions carry more than the log format can hold — the exact command
+    /// line, the `.pacnew` files left behind, why a transaction failed. That detail comes from
+    /// `<dbpath>/piko-history` and is merged in where it exists.
+    ///
+    /// Read-only. It reports; it changes nothing, and it cannot undo a transaction.
+    History {
+        /// Show at most this many transactions. The newest are kept.
+        #[arg(short = 'n', long, value_name = "COUNT", default_value_t = 20)]
+        last: usize,
+
+        /// Show only transactions that touched this package. Repeatable.
+        #[arg(short, long, value_name = "NAME")]
+        package: Vec<String>,
+
+        /// Show only transactions that started at or after this time, as `YYYY-MM-DD` or a
+        /// full `YYYY-MM-DDTHH:MM:SS+ZZZZ`.
+        #[arg(long, value_name = "WHEN")]
+        since: Option<String>,
+
+        /// Show only transactions that started at or before this time, in the same formats
+        /// `--since` takes.
+        #[arg(long, value_name = "WHEN")]
+        until: Option<String>,
+
+        /// Show every transaction, ignoring `--last`.
+        #[arg(short, long)]
+        all: bool,
+
+        /// Print one line per transaction, with no per-package detail.
+        #[arg(short, long)]
+        quiet: bool,
+    },
 
     /// Parse and dump a pacman.conf-style configuration file.
     ///

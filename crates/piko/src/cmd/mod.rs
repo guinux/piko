@@ -8,6 +8,7 @@
 pub mod check;
 pub mod conf;
 pub mod files;
+pub mod history;
 pub mod info;
 pub mod list;
 pub mod local;

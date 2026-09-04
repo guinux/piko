@@ -24,6 +24,9 @@ piko-sig.workspace = true
 rustix.workspace = true
 tar.workspace = true
 thiserror.workspace = true
+# Timestamps for `pacman.log` and the transaction history. Formatting is done by hand;
+# only the calendar arithmetic and the local UTC offset come from here.
+time.workspace = true
 
 [dev-dependencies]
 # The local-database side of conflict detection needs a database to ask, and `DbFixture`

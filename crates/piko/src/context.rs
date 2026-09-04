@@ -221,6 +221,60 @@ pub fn resolve_dbpath(cli: &Cli, config: &ConfigCache) -> PathBuf {
     }
 }
 
+/// Resolves the effective transaction log: `--logfile` if given, else `LogFile` from the
+/// parsed pacman.conf, else the hardcoded default with a warning if that cannot be read.
+///
+/// The same three-step resolution [`resolve_dbpath`] uses, and for the same reason: a
+/// transaction should still be recorded when the config is unreadable, rather than silently
+/// recorded nowhere.
+pub fn resolve_log_file(cli: &Cli, config: &ConfigCache) -> PathBuf {
+    if let Some(log_file) = &cli.log_file {
+        return log_file.clone();
+    }
+
+    match config.get(cli) {
+        Ok(config) => config.options.log_file.clone(),
+        Err(error) => {
+            eprintln!(
+                "piko: warning: failed to read {} ({error}); falling back to {}",
+                cli.config.display(),
+                piko_db::config::DEFAULT_LOG_FILE
+            );
+            PathBuf::from(piko_db::config::DEFAULT_LOG_FILE)
+        }
+    }
+}
+
+/// Builds the transaction record for this invocation: the shared `LogFile` and the history
+/// store beside `dbpath`, stamped with the command line that asked for it.
+///
+/// `offset` must be the value captured at the top of `main`. See [`piko_txn::LocalOffset`] for
+/// why it cannot be read later.
+pub fn recording(
+    cli: &Cli,
+    config: &ConfigCache,
+    dbpath: &Path,
+    offset: piko_txn::LocalOffset,
+) -> piko_txn::Recording {
+    piko_txn::Recording::new(dbpath, Some(resolve_log_file(cli, config)), offset)
+        .command(self::command_line())
+}
+
+/// This invocation's command line, as one line.
+///
+/// pacman's frontend records the same thing, reassembled the same way. An argument holding
+/// whitespace is quoted so the line can be read back as the command it was, which matters for
+/// a package file path — the one argument that routinely contains a space.
+fn command_line() -> String {
+    std::env::args_os()
+        .map(|argument| {
+            let text = argument.to_string_lossy().into_owned();
+            if text.contains(char::is_whitespace) { format!("'{text}'") } else { text }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Opens the local database with the options `cli` requested, printing scan diagnostics.
 ///
 /// Diagnostics are warnings: the database opened, and the packages it did find are usable.

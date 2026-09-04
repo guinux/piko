@@ -24,6 +24,7 @@ use crate::{
     exec::Runner,
     extract::{Ownership, PackageLimits},
     hash::MAX_BACKUP_BYTES,
+    history::now,
     install::{Extraction, Filters},
     progress::Event,
     record::{self, InstallFacts},
@@ -410,19 +411,4 @@ fn remove_files(root: &RootDir, removal: &Removal<'_>) -> (usize, Vec<PathBuf>) 
 fn trim_trailing_slash(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     PathBuf::from(text.strip_suffix('/').unwrap_or(&text))
-}
-
-/// Seconds since the epoch, honoring `SOURCE_DATE_EPOCH`.
-///
-/// libalpm does the same (`add.c:415`), so a reproducible build environment produces a
-/// reproducible `%INSTALLDATE%`.
-fn now() -> i64 {
-    if let Some(value) = std::env::var_os("SOURCE_DATE_EPOCH")
-        && let Some(parsed) = value.to_str().and_then(|text| text.trim().parse::<i64>().ok())
-    {
-        return parsed;
-    }
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(0))
 }

@@ -22,7 +22,12 @@ use crate::output::emit;
 
 /// `piko info --installed <name>...`: each named package's metadata from the installed
 /// database only.
-pub fn installed(db: &LocalDatabase, names: &[String], out: &mut impl std::io::Write) -> ExitCode {
+pub fn installed(
+    db: &LocalDatabase,
+    names: &[String],
+    offset: piko_txn::LocalOffset,
+    out: &mut impl std::io::Write,
+) -> ExitCode {
     let mut ok = true;
 
     for (index, name) in names.iter().enumerate() {
@@ -34,7 +39,7 @@ pub fn installed(db: &LocalDatabase, names: &[String], out: &mut impl std::io::W
             ok = false;
             continue;
         };
-        if local::info(db, package, out) != ExitCode::SUCCESS {
+        if local::info(db, package, offset, out) != ExitCode::SUCCESS {
             ok = false;
         }
     }
@@ -44,7 +49,12 @@ pub fn installed(db: &LocalDatabase, names: &[String], out: &mut impl std::io::W
 
 /// `piko info <name>... --repo <name>`: each named package's metadata from a single repository
 /// database archive only.
-pub fn repo(db: &RepoDatabase, names: &[String], out: &mut impl std::io::Write) -> ExitCode {
+pub fn repo(
+    db: &RepoDatabase,
+    names: &[String],
+    offset: piko_txn::LocalOffset,
+    out: &mut impl std::io::Write,
+) -> ExitCode {
     let mut ok = true;
 
     for (index, name) in names.iter().enumerate() {
@@ -56,7 +66,7 @@ pub fn repo(db: &RepoDatabase, names: &[String], out: &mut impl std::io::Write) 
             ok = false;
             continue;
         };
-        if crate::cmd::repo::repo_info(db, package, out) != ExitCode::SUCCESS {
+        if crate::cmd::repo::repo_info(db, package, offset, out) != ExitCode::SUCCESS {
             ok = false;
         }
     }
@@ -78,6 +88,7 @@ pub fn installed_then_repos(
     local: &LocalDatabase,
     dbs: &[RepoDatabase],
     names: &[String],
+    offset: piko_txn::LocalOffset,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let mut ok = true;
@@ -88,13 +99,13 @@ pub fn installed_then_repos(
         }
         match resolve_installed_or_repo(local, dbs, name) {
             Some(LocalOrRepo::Local(package)) => {
-                if self::local::info(local, package, out) != ExitCode::SUCCESS {
+                if self::local::info(local, package, offset, out) != ExitCode::SUCCESS {
                     ok = false;
                 }
             }
             Some(LocalOrRepo::Repo(index, package)) => {
                 if let Some(db) = dbs.get(index)
-                    && crate::cmd::repo::repo_info(db, package, out) != ExitCode::SUCCESS
+                    && crate::cmd::repo::repo_info(db, package, offset, out) != ExitCode::SUCCESS
                 {
                     ok = false;
                 }

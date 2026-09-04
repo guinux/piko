@@ -31,6 +31,18 @@ use piko_txn::{
 
 use crate::output::{emit, report as report_error};
 
+/// Writes one frontend line to the transaction log, warning if it cannot be written.
+///
+/// The counterpart of pacman's `[PACMAN]` lines: what the user ran, and the two markers a
+/// refresh and a sysupgrade put in the log before any transaction starts. A log that cannot
+/// be written is a warning here for the same reason it is one inside a transaction — the
+/// command the user asked for still runs. See [`piko_txn::history`].
+pub fn note(recording: &piko_txn::Recording, message: &str) {
+    if let Err(problem) = piko_txn::history::note(recording, message) {
+        eprintln!("piko: warning: {problem}");
+    }
+}
+
 /// The install-side options, gathered so the entry point keeps a readable signature.
 #[derive(Clone, Debug, Default)]
 pub struct InstallOptions {
@@ -85,6 +97,9 @@ pub struct SideEffects {
     /// path. `crate::context::hook_dirs` explains why libalpm draws that line. Empty runs no
     /// hooks.
     pub hook_dirs: Vec<PathBuf>,
+    /// Where the transaction is recorded: the `LogFile` pacman shares, and the history store
+    /// beside the database. The default records nothing.
+    pub recording: piko_txn::Recording,
 }
 
 /// What `install` resolves targets against, gathered so the entry point keeps a readable
@@ -294,6 +309,7 @@ pub fn install(
         scriptlets: options.side_effects.scriptlets,
         hook_dirs: options.side_effects.hook_dirs.clone(),
         patterns: options.patterns,
+        recording: options.side_effects.recording.clone(),
     };
     run(
         root,
@@ -485,6 +501,7 @@ pub fn remove(
         // `NoUpgrade` is not install-only: `should_skip_file` (`remove.c:592`) consults it
         // before deleting, so a file the user told piko never to touch survives a removal.
         patterns: options.patterns,
+        recording: side_effects.recording.clone(),
         ..Settings::default()
     };
     run(
@@ -666,6 +683,8 @@ struct Settings {
     hook_dirs: Vec<PathBuf>,
     /// `NoExtract`/`NoUpgrade`, obeyed by extraction, by removal, and by the hook triggers.
     patterns: piko_txn::Patterns,
+    /// Where the transaction records what it does.
+    recording: piko_txn::Recording,
 }
 
 /// The live step list `run` drives, bundled so its own parameter count stays under clippy's
@@ -729,7 +748,8 @@ fn run(
         .policy_overrides(settings.policy_overrides)
         .scriptlets(settings.scriptlets)
         .hook_dirs(settings.hook_dirs)
-        .patterns(settings.patterns);
+        .patterns(settings.patterns)
+        .recording(settings.recording);
 
     let mut verify_driver = crate::progress::VerifyDriver::new(
         progress.steplist,
@@ -808,6 +828,12 @@ fn report_side_effects(report: &piko_txn::Report) {
     // Printed after the run, not before it, because the hook files are read once per phase
     // inside the transaction. That is the same reason every other hook diagnostic here is late.
     for problem in &report.hook_problems {
+        eprintln!("piko: warning: {problem}");
+    }
+
+    // Neither record can fail a transaction, so a problem with one arrives here rather than
+    // as an error. See `piko_txn::history`.
+    for problem in &report.history_problems {
         eprintln!("piko: warning: {problem}");
     }
 

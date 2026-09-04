@@ -14,6 +14,7 @@ pub mod error;
 pub mod exec;
 pub mod extract;
 pub mod hash;
+pub mod history;
 pub mod hook;
 pub mod install;
 pub mod journal;
@@ -29,6 +30,7 @@ pub mod transaction;
 pub use conflict::{Blocker, Check, FileConflict, filelist::FileList};
 pub use error::{Error, Result};
 pub use extract::{BackupAction, Disposition, EntryContext};
+pub use history::{Action, LocalOffset, Recording};
 pub use install::{Extraction, Filters, install};
 pub use plan::{
     DownloadOnlyOutcome, download_only, download_targets, install_steps, verification_from,

@@ -175,20 +175,33 @@ pub fn human_size(bytes: u64) -> String {
     indicatif::BinaryBytes(bytes).to_string()
 }
 
-/// Renders a Unix timestamp as an unambiguous UTC date and time, e.g.
-/// `"Mon 09 Dec 2024 09:40:42 UTC"`.
+/// Renders a Unix timestamp as a date and time in `offset`, e.g.
+/// `"Mon 09 Dec 2024 10:40:42 +0100"`.
 ///
-/// piko has no way to resolve the local timezone without either `unsafe` or a much heavier
-/// dependency such as `chrono-tz`. `time`'s `local-offset` feature carries a documented
-/// soundness caveat around concurrent `setenv`, and this workspace forbids `unsafe_code`
-/// outright. UTC sidesteps the trade-off and is never ambiguous.
-pub fn human_date(timestamp: i64) -> String {
-    let Ok(date_time) = time::OffsetDateTime::from_unix_timestamp(timestamp) else {
+/// `offset` is the machine's own UTC offset, captured at the top of `main` — see
+/// [`piko_txn::LocalOffset`] for why it is read there and carried, rather than read here.
+/// pacman renders the same two fields through `localtime` (`package.c`), so this prints the
+/// wall clock a `pacman -Qi` on the same machine prints.
+///
+/// The zone is spelled as a numeric offset rather than an abbreviation. An abbreviation needs
+/// a time-zone database piko does not carry, and it is ambiguous on top of that: `CST` names
+/// three different zones. A numeric offset never is.
+pub fn human_date(timestamp: i64, offset: piko_txn::LocalOffset) -> String {
+    let Ok(instant) = time::OffsetDateTime::from_unix_timestamp(timestamp) else {
+        return format!("{timestamp} (timestamp out of range)");
+    };
+    // A timestamp near the end of the representable range can leave it once shifted into the
+    // local zone. That is a rendering failure, not a reason to panic, so it reports itself the
+    // same way an unrepresentable timestamp above does.
+    let Some(date_time) = time::UtcOffset::from_whole_seconds(offset.seconds())
+        .ok()
+        .and_then(|zone| instant.checked_to_offset(zone))
+    else {
         return format!("{timestamp} (timestamp out of range)");
     };
 
     format!(
-        "{} {:02} {} {} {:02}:{:02}:{:02} UTC",
+        "{} {:02} {} {} {:02}:{:02}:{:02} {}",
         short_weekday(date_time.weekday()),
         date_time.day(),
         short_month(date_time.month()),
@@ -196,7 +209,18 @@ pub fn human_date(timestamp: i64) -> String {
         date_time.hour(),
         date_time.minute(),
         date_time.second(),
+        numeric_offset(offset),
     )
+}
+
+/// Renders a UTC offset as `+0100`, the spelling `date`(1) and ISO 8601 both use.
+fn numeric_offset(offset: piko_txn::LocalOffset) -> String {
+    let seconds = offset.seconds();
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let magnitude = seconds.unsigned_abs();
+    let hours = magnitude / 3600;
+    let minutes = (magnitude % 3600) / 60;
+    format!("{sign}{hours:02}{minutes:02}")
 }
 
 /// The three-letter English abbreviation of `day`.
@@ -237,6 +261,8 @@ fn short_month(month: time::Month) -> &'static str {
     reason = "a failing assertion in a test should abort it loudly"
 )]
 mod tests {
+    use piko_txn::LocalOffset;
+
     use super::*;
 
     #[test]
@@ -264,26 +290,57 @@ mod tests {
         assert!(rendered.ends_with("EiB"), "{rendered}");
     }
 
+    /// The offset is part of the output, so a `+0000` reading is as unambiguous as any other.
     #[test]
     fn human_date_renders_the_unix_epoch() {
-        assert_eq!(human_date(0), "Thu 01 Jan 1970 00:00:00 UTC");
+        assert_eq!(human_date(0, LocalOffset::UTC), "Thu 01 Jan 1970 00:00:00 +0000");
     }
 
     /// The build date from `fixture::MINIMAL_DESC_V1`.
     #[test]
     fn human_date_renders_a_real_timestamp() {
-        assert_eq!(human_date(1_733_737_242), "Mon 09 Dec 2024 09:40:42 UTC");
+        assert_eq!(human_date(1_733_737_242, LocalOffset::UTC), "Mon 09 Dec 2024 09:40:42 +0000");
     }
 
     /// The install date of `pacman` on the real system this was built against.
     #[test]
     fn human_date_renders_another_real_timestamp() {
-        assert_eq!(human_date(1_778_057_192), "Wed 06 May 2026 08:46:32 UTC");
+        assert_eq!(human_date(1_778_057_192, LocalOffset::UTC), "Wed 06 May 2026 08:46:32 +0000");
+    }
+
+    /// The same instant as the test above, read in Paris summer time: two hours later on the
+    /// clock, and the same second on the wire.
+    #[test]
+    fn human_date_shifts_the_clock_into_the_offset() {
+        assert_eq!(
+            human_date(1_778_057_192, LocalOffset::from_seconds(7200)),
+            "Wed 06 May 2026 10:46:32 +0200"
+        );
+    }
+
+    /// A negative offset crosses back over midnight, so it exercises the date as well as the
+    /// clock.
+    #[test]
+    fn human_date_renders_a_negative_offset() {
+        assert_eq!(
+            human_date(0, LocalOffset::from_seconds(-18000)),
+            "Wed 31 Dec 1969 19:00:00 -0500"
+        );
+    }
+
+    /// A half-hour zone (`Asia/Kolkata`) has minutes in its offset, which a whole-hour
+    /// rendering would drop.
+    #[test]
+    fn human_date_renders_an_offset_with_minutes() {
+        assert_eq!(
+            human_date(0, LocalOffset::from_seconds(19800)),
+            "Thu 01 Jan 1970 05:30:00 +0530"
+        );
     }
 
     #[test]
     fn human_date_reports_out_of_range_timestamps_without_panicking() {
-        let rendered = human_date(i64::MAX);
+        let rendered = human_date(i64::MAX, LocalOffset::UTC);
         assert!(rendered.contains("out of range"), "{rendered}");
     }
 }

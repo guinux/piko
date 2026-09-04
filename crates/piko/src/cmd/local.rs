@@ -75,9 +75,12 @@ fn yes_no(value: bool) -> &'static str {
     if value { "Yes" } else { "No" }
 }
 
+/// `offset` is the UTC offset the two date fields are rendered in, captured in `main`. See
+/// [`crate::output::human_date`].
 pub fn info(
     local: &LocalDatabase,
     package: &LocalPackage,
+    offset: piko_txn::LocalOffset,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let desc = match package.desc() {
@@ -116,8 +119,8 @@ pub fn info(
     field_list!(out, "Replaces        :", desc.replaces(), 5);
     emit!(out, "{} {}", info_label("Installed Size  :"), human_size(desc.installed_size()));
     emit!(out, "{} {}", info_label("Packager        :"), desc.packager());
-    emit!(out, "{} {}", info_label("Build Date      :"), human_date(desc.build_date()));
-    emit!(out, "{} {}", info_label("Install Date    :"), human_date(desc.install_date()));
+    emit!(out, "{} {}", info_label("Build Date      :"), human_date(desc.build_date(), offset));
+    emit!(out, "{} {}", info_label("Install Date    :"), human_date(desc.install_date(), offset));
     emit!(
         out,
         "{} {}",

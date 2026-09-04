@@ -28,8 +28,8 @@ use piko_txn::CacheDirSource;
 use crate::cli::{Cli, Command};
 use crate::context::{
     ConfigCache, cache_dirs, hold_pkg, hook_dirs, open_all_repos, open_local_db, open_repo_by_name,
-    open_repo_db, open_repos_for_packages, parse_repo_arg, path_patterns, require_pacman_config,
-    resolve_dbpath, resolve_root_dir, signing_policy,
+    open_repo_db, open_repos_for_packages, parse_repo_arg, path_patterns, recording,
+    require_pacman_config, resolve_dbpath, resolve_log_file, resolve_root_dir, signing_policy,
 };
 use crate::error::Error;
 use crate::output::report;
@@ -42,9 +42,13 @@ fn main() -> ExitCode {
         return code;
     }
 
+    // Read here, before anything spawns a thread. `time` refuses to read the local UTC offset
+    // from a multi-threaded process, and piko is multi-threaded by the time a transaction runs
+    // — see `piko_txn::LocalOffset`. Every timestamp piko writes is rendered in this value.
+    let offset = piko_txn::LocalOffset::capture();
     let cli = Cli::parse();
 
-    match run(&cli) {
+    match run(&cli, offset) {
         Ok(code) => code,
         Err(error) => {
             report(&error);
@@ -73,7 +77,7 @@ fn exec_helper() -> Option<ExitCode> {
     Some(ExitCode::FAILURE)
 }
 
-fn run(cli: &Cli) -> Result<ExitCode, Error> {
+fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
     // stdout is locked once and buffered here, because `piko list` writes over a thousand
     // lines.
     let stdout = io::stdout();
@@ -148,18 +152,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Error> {
                 cmd::info::repo(
                     &open_repo_by_name(&dbpath, &repo, cli, &config)?,
                     packages,
+                    offset,
                     &mut out,
                 )
             }
             None if *installed => {
-                cmd::info::installed(&open_local_db(cli, &config)?, packages, &mut out)
+                cmd::info::installed(&open_local_db(cli, &config)?, packages, offset, &mut out)
             }
             None => {
                 let local = open_local_db(cli, &config)?;
                 let missing: Vec<String> =
                     packages.iter().filter(|name| local.get_str(name).is_none()).cloned().collect();
                 let dbs = open_repos_for_packages(cli, &config, &missing)?;
-                cmd::info::installed_then_repos(&local, &dbs, packages, &mut out)
+                cmd::info::installed_then_repos(&local, &dbs, packages, offset, &mut out)
             }
         },
         Command::Check { packages } => {
@@ -291,6 +296,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Error> {
                     hookdir,
                     noconfirm: *noconfirm,
                     download_only: *download_only,
+                    offset,
                 },
                 &mut out,
             )?
@@ -323,6 +329,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Error> {
                     hookdir,
                     noconfirm: *noconfirm,
                     download_only: *download_only,
+                    offset,
                 },
                 &mut out,
             )?
@@ -339,6 +346,11 @@ fn run(cli: &Cli) -> Result<ExitCode, Error> {
             noconfirm,
         } => {
             let root = root.clone().unwrap_or_else(|| resolve_root_dir(cli, &config));
+            let record = recording(cli, &config, &resolve_dbpath(cli, &config), offset);
+            cmd::txn::note(
+                &record,
+                &format!("Running '{}'", record.command.as_deref().unwrap_or("piko")),
+            );
             cmd::txn::remove(
                 &root,
                 &resolve_dbpath(cli, &config),
@@ -356,11 +368,18 @@ fn run(cli: &Cli) -> Result<ExitCode, Error> {
                 cmd::txn::SideEffects {
                     scriptlets: !*noscriptlet,
                     hook_dirs: hook_dirs(cli, &config, hookdir, &root),
+                    recording: record.clone(),
                 },
                 &mut out,
             )
         }
         Command::Refresh { repos, force } => {
+            let record = recording(cli, &config, &resolve_dbpath(cli, &config), offset);
+            cmd::txn::note(
+                &record,
+                &format!("Running '{}'", record.command.as_deref().unwrap_or("piko")),
+            );
+            cmd::txn::note(&record, "synchronizing package lists");
             let (cancel, _mode) = crate::signal::install_cancel_handler();
             cmd::refresh::refresh(
                 require_pacman_config(cli, &config)?,
@@ -371,6 +390,19 @@ fn run(cli: &Cli) -> Result<ExitCode, Error> {
             )
         }
         Command::Report => cmd::txn::report(&resolve_dbpath(cli, &config), &mut out),
+        Command::History { last, package, since, until, all, quiet } => cmd::history::history(
+            &resolve_log_file(cli, &config),
+            &resolve_dbpath(cli, &config),
+            cmd::history::Options {
+                last: (!*all).then_some(*last),
+                packages: package.clone(),
+                since: since.clone(),
+                until: until.clone(),
+                quiet: *quiet,
+                offset,
+            },
+            &mut out,
+        ),
         Command::Conf { directive } => {
             cmd::conf::conf(require_pacman_config(cli, &config)?, directive.as_deref(), &mut out)
         }
@@ -425,6 +457,9 @@ struct SyncArgs<'a> {
     noconfirm: bool,
     /// `-w`/`--downloadonly`.
     download_only: bool,
+    /// The UTC offset every timestamp is rendered in, captured in `main` — see
+    /// [`piko_txn::LocalOffset`].
+    offset: piko_txn::LocalOffset,
 }
 
 /// Runs `piko install` or `piko update`. It gathers everything either needs from the
@@ -457,7 +492,15 @@ fn sync(
     let parsed = require_pacman_config(cli, config)?;
     let local = open_local_db(cli, config)?;
     let dbpath = resolve_dbpath(cli, config);
+    let record = recording(cli, config, &dbpath, args.offset);
+    // pacman's frontend logs the same two lines, in the same order and at the same points
+    // (`Running '…'` at startup, `starting full system upgrade` for `-u`).
+    cmd::txn::note(&record, &format!("Running '{}'", record.command.as_deref().unwrap_or("piko")));
+    if args.sysupgrade.is_some() {
+        cmd::txn::note(&record, "starting full system upgrade");
+    }
     let pre_cancel = if args.refresh {
+        cmd::txn::note(&record, "synchronizing package lists");
         let (cancel, mode) = crate::signal::install_cancel_handler();
         let code = cmd::refresh::refresh(parsed, &dbpath, &[], args.force, &cancel);
         if code != ExitCode::SUCCESS {
@@ -484,6 +527,7 @@ fn sync(
             side_effects: cmd::txn::SideEffects {
                 scriptlets: !args.noscriptlet,
                 hook_dirs: hook_dirs(cli, config, args.hookdir, args.root),
+                recording: record.clone(),
             },
             patterns: path_patterns(cli, config),
             noconfirm: args.noconfirm,

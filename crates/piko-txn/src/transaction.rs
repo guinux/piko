@@ -40,6 +40,7 @@ use crate::{
     error::{Error, Result},
     exec::Runner,
     extract::{Ownership, PackageLimits},
+    history::{Outcome as HistoryOutcome, Recorder, Recording},
     hook::{self, Hooks, When},
     install::Extraction,
     journal::{Intent, Journal},
@@ -105,6 +106,11 @@ pub struct Report {
     /// libalpm does the same: `_alpm_hook_run` re-runs `_alpm_hook_validate` on every call, so
     /// pacman prints such a warning twice too.
     pub hook_problems: Vec<hook::Problem>,
+    /// Everything that went wrong recording the transaction.
+    ///
+    /// Returned rather than raised: neither `pacman.log` nor the history store may fail a
+    /// transaction. See [`crate::history`].
+    pub history_problems: Vec<crate::history::Problem>,
 }
 
 /// One scriptlet function that piko ran.
@@ -351,7 +357,7 @@ pub struct Verified {
     summary: hook::Summary,
 }
 
-/// The lock is held and the journal is written.
+/// The lock is held, the journal is written, and the records are open.
 #[derive(Debug)]
 pub struct Staged<'lock> {
     steps: Vec<Step>,
@@ -360,6 +366,12 @@ pub struct Staged<'lock> {
     skip_remove: std::collections::BTreeSet<PathBuf>,
     summary: hook::Summary,
     journal: Journal,
+    /// Where this transaction records what it does. Opened with the journal, before the
+    /// first mutation, so an unwritable `LogFile` is reported while nothing has changed.
+    ///
+    /// An `Option` so the commit can take it out of the state: the ending is then written
+    /// from one place, after the apply loop has returned however it returned.
+    recorder: Option<Recorder>,
     lock: &'lock DbLock,
 }
 
@@ -377,6 +389,7 @@ pub struct Transaction<S> {
     patterns: Patterns,
     scriptlets: bool,
     hook_dirs: Vec<PathBuf>,
+    recording: Recording,
     state: S,
 }
 
@@ -399,6 +412,8 @@ impl Transaction<Planned> {
             // install` behaves like pacman. A library caller has to say so explicitly.
             scriptlets: false,
             hook_dirs: Vec::new(),
+            // Records nothing by default, like `scriptlets`. A library caller opts in.
+            recording: Recording::default(),
             state: Planned { steps },
         }
     }
@@ -485,6 +500,17 @@ impl Transaction<Planned> {
     #[must_use]
     pub fn patterns(mut self, patterns: Patterns) -> Self {
         self.patterns = patterns;
+        self
+    }
+
+    /// Records what the transaction does, into `pacman.log` and the history store.
+    ///
+    /// The default records nothing, the same posture [`Transaction::scriptlets`] takes: a
+    /// library caller says where its records go, or gets none. Neither record can fail a
+    /// transaction — see [`crate::history`].
+    #[must_use]
+    pub fn recording(mut self, recording: Recording) -> Self {
+        self.recording = recording;
         self
     }
 
@@ -673,6 +699,7 @@ impl Transaction<Planned> {
             patterns: self.patterns,
             scriptlets: self.scriptlets,
             hook_dirs: self.hook_dirs,
+            recording: self.recording,
             state: Verified {
                 steps: self.state.steps,
                 packages,
@@ -807,12 +834,19 @@ impl Transaction<Verified> {
     /// `lock` must be the lock for this transaction's `dbpath`. The check belongs here rather
     /// than at the first write, because a lock over the wrong database protects nothing.
     ///
+    /// The transaction's records are opened here too, beside the journal and for the same
+    /// reason: an unwritable `LogFile` is worth reporting while nothing has changed yet.
+    /// Unlike the journal, a record that cannot be opened does not stop the transaction — see
+    /// [`crate::history`].
+    ///
     /// # Errors
     ///
     /// [`Error::Io`] if the journal cannot be written.
     pub fn stage(self, lock: &DbLock) -> Result<Transaction<Staged<'_>>> {
         let intents: Vec<Intent> = self.state.steps.iter().map(Step::intent).collect();
         let journal = Journal::begin(&self.dbpath, &self.root_path, &intents)?;
+        let recorder =
+            Recorder::open(&self.recording, &self.root_path, &self.dbpath, crate::history::now());
 
         Ok(Transaction {
             root_path: self.root_path,
@@ -826,6 +860,7 @@ impl Transaction<Verified> {
             patterns: self.patterns,
             scriptlets: self.scriptlets,
             hook_dirs: self.hook_dirs,
+            recording: self.recording,
             state: Staged {
                 steps: self.state.steps,
                 packages: self.state.packages,
@@ -833,6 +868,7 @@ impl Transaction<Verified> {
                 skip_remove: self.state.skip_remove,
                 summary: self.state.summary,
                 journal,
+                recorder: Some(recorder),
                 lock,
             },
         })
@@ -849,6 +885,10 @@ impl Transaction<Staged<'_>> {
     ///
     /// [`Error::Io`] if the journal cannot be removed.
     pub fn abandon(self) -> Result<()> {
+        // Nothing was applied, so nothing is recorded — not even a `transaction failed` line.
+        // A refused transaction must not look like one that ran, in the log any more than in
+        // the journal.
+        drop(self.state.recorder.map(Recorder::abandon));
         self.state.journal.finish()
     }
 
@@ -874,7 +914,47 @@ impl Transaction<Staged<'_>> {
     /// # Errors
     ///
     /// As [`Staged::commit`].
-    pub fn commit_with_progress(self, progress: &mut dyn FnMut(Event<'_>)) -> Result<Report> {
+    pub fn commit_with_progress(mut self, progress: &mut dyn FnMut(Event<'_>)) -> Result<Report> {
+        // Taken out of the state, so the ending is written from exactly one place however
+        // `apply` returns. Scattering it over each `?` is how one exit path eventually stops
+        // writing an ending and a completed transaction reads as an interrupted one.
+        let mut recorder = self.state.recorder.take();
+        if let Some(recorder) = recorder.as_mut() {
+            recorder.started();
+        }
+
+        let mut result = {
+            // Every event reaches the records and the caller alike. Driving the records from
+            // the event stream is what keeps them behind the journal: `StepFinished` is
+            // emitted only once `journal.completed` has returned, so nothing can be recorded
+            // that the journal does not already know.
+            let mut observed = |event: Event<'_>| {
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.observe(&event);
+                }
+                progress(event);
+            };
+            self.apply(&mut observed)
+        };
+
+        let problems = recorder.map_or_else(Vec::new, |recorder| {
+            let outcome = match &result {
+                Ok(_) => HistoryOutcome::Completed,
+                Err(error) => HistoryOutcome::Failed { reason: error.to_string() },
+            };
+            recorder.finish(outcome, crate::history::now())
+        });
+        if let Ok(report) = result.as_mut() {
+            report.history_problems = problems;
+        }
+        result
+    }
+
+    /// Applies every step, reporting through `progress`.
+    ///
+    /// Split out of [`Staged::commit_with_progress`] so that its every `?` still passes
+    /// through one place that writes the transaction's ending.
+    fn apply(self, progress: &mut dyn FnMut(Event<'_>)) -> Result<Report> {
         let root = RootDir::open(&self.root_path)?;
         let mut state = self.state;
         let mut report = Report::default();
