@@ -13,7 +13,7 @@ use alpm_types::{
 };
 
 use crate::{
-    desc_compat::{self, DescUrl, UnknownSection, UnknownSectionPolicy},
+    desc_compat::{self, TakenFields, UnknownSection, UnknownSectionPolicy},
     entry_name::EntryName,
     error::{Error, IoAction, Result, SharedError},
     fs_util,
@@ -82,9 +82,10 @@ impl std::fmt::Display for Inconsistency {
 #[derive(Debug)]
 struct LoadedDesc {
     desc: DbDescFile,
-    /// `%URL%`, taken out of the text before the upstream parse so a value `url::Url` refuses
-    /// cannot make the whole file unreadable. See [`crate::desc_compat::take_url`].
-    url: DescUrl,
+    /// `%URL%` and `%PACKAGER%`, taken out of the text before the upstream parse so a value
+    /// their typed conversion refuses cannot make the whole file unreadable. See
+    /// [`crate::desc_compat::take_fields`].
+    taken: TakenFields,
     inconsistencies: Vec<Inconsistency>,
 }
 
@@ -240,7 +241,7 @@ impl LocalPackage {
     /// If the file cannot be read or parsed. The failure is cached and returned again by
     /// every later call.
     pub fn desc(&self) -> std::result::Result<DescView<'_>, SharedError> {
-        self.load_desc().map(|loaded| DescView::new(&loaded.desc, &loaded.url))
+        self.load_desc().map(|loaded| DescView::new(&loaded.desc, &loaded.taken))
     }
 
     /// The sections every caller needs, without the full typed parse.
@@ -382,13 +383,12 @@ impl LocalPackage {
         let text = &eager.text;
         self.desc.get_or_load(|| {
             use alpm_common::MetadataFile as _;
-            let (text, raw_url) = desc_compat::take_url(text);
-            let url = DescUrl::new(raw_url);
+            let (text, taken) = desc_compat::take_fields(text);
             let desc = DbDescFile::from_str_with_schema(&text, None).map_err(|source| {
                 Error::Desc { path: fs_util::join(&self.dir, DESC_FILE), source }
             })?;
 
-            let view = DescView::new(&desc, &url);
+            let view = DescView::new(&desc, &taken);
             let mut inconsistencies = Vec::new();
             if view.name() != self.name() {
                 inconsistencies.push(Inconsistency::NameMismatch {
@@ -406,7 +406,7 @@ impl LocalPackage {
                 eager.unknown_sections.iter().cloned().map(Inconsistency::UnknownDescSection),
             );
 
-            Ok(LoadedDesc { desc, url, inconsistencies })
+            Ok(LoadedDesc { desc, taken, inconsistencies })
         })
     }
 
@@ -539,6 +539,27 @@ mod tests {
             Limits::default(),
             UnknownSectionPolicy::default(),
         )
+    }
+
+    /// A package built by makepkg with no `PACKAGER` set must stay fully readable. Both
+    /// parsers convert every section or none, so this one value would otherwise cost the
+    /// entry its `desc` entirely.
+    #[test]
+    fn a_package_built_with_makepkgs_default_packager_is_readable() {
+        let db = DbFixture::new();
+        let body = MINIMAL_DESC_V1.replace(
+            "Foobar McFooface <foobar@mcfooface.org>",
+            crate::desc_compat::UNKNOWN_PACKAGER,
+        );
+        db.package("foo-1.0.0-1").desc(&body).files(MINIMAL_FILES).build();
+
+        let package = package_at(&db, "foo-1.0.0-1");
+        let desc = package.desc().unwrap();
+
+        assert!(desc.packager().is_none());
+        assert_eq!(desc.packager_raw(), Some(crate::desc_compat::UNKNOWN_PACKAGER));
+        assert_eq!(desc.description().to_string(), "An example package");
+        assert!(package.check_consistency().unwrap().is_empty());
     }
 
     #[test]

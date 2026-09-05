@@ -15,7 +15,7 @@ use alpm_types::{
     PackageDescription, PackageFileName, PackageRelation, Packager, RelationOrSoname, Url,
 };
 
-use crate::desc_compat::DescUrl;
+use crate::desc_compat::TakenFields;
 
 /// Whether `keyword` is a section this build recognises in a repository `desc`.
 pub(crate) fn is_known_section(keyword: &str) -> bool {
@@ -29,7 +29,7 @@ pub(crate) fn is_known_section(keyword: &str) -> bool {
 #[derive(Clone, Copy, Debug)]
 pub struct RepoDescView<'a> {
     inner: &'a RepoDescFile,
-    url: &'a DescUrl,
+    taken: &'a TakenFields,
 }
 
 /// Generates accessors that read the same field from either schema version.
@@ -65,16 +65,17 @@ macro_rules! shared_copy_field {
 }
 
 impl<'a> RepoDescView<'a> {
-    /// Wraps a parsed repository `desc` and the `%URL%` taken out of it before parsing.
-    pub(crate) const fn new(inner: &'a RepoDescFile, url: &'a DescUrl) -> Self {
-        Self { inner, url }
+    /// Wraps a parsed repository `desc` and the fields taken out of it before parsing.
+    pub(crate) const fn new(inner: &'a RepoDescFile, taken: &'a TakenFields) -> Self {
+        Self { inner, taken }
     }
 
     /// The underlying schema-tagged value, for callers that need the distinction.
     ///
     /// Its `url` field is always `None`: `%URL%` is blanked before the upstream parser sees
     /// the text, so [`RepoDescView::url`] and [`RepoDescView::url_raw`] are the only sources
-    /// for it.
+    /// for it. Its `packager` field can likewise hold a substitute — read
+    /// [`RepoDescView::packager`] and [`RepoDescView::packager_raw`] rather than it.
     #[must_use]
     pub const fn as_inner(&self) -> &'a RepoDescFile {
         self.inner
@@ -103,8 +104,6 @@ impl<'a> RepoDescView<'a> {
         licenses: license -> &'a [License],
         /// `%ARCH%`, the architecture the package was built for.
         architecture: arch -> &'a Architecture,
-        /// `%PACKAGER%`.
-        packager: packager -> &'a Packager,
         /// `%REPLACES%`.
         replaces: replaces -> &'a [PackageRelation],
         /// `%CONFLICTS%`.
@@ -130,19 +129,42 @@ impl<'a> RepoDescView<'a> {
         build_date: build_date -> BuildDate,
     }
 
+    /// `%PACKAGER%`, the identity that built the package.
+    ///
+    /// `None` when the value is makepkg's
+    /// [`UNKNOWN_PACKAGER`](crate::desc_compat::UNKNOWN_PACKAGER) default, which carries no
+    /// email address and so cannot become an `alpm_types::Packager`.
+    /// [`RepoDescView::packager_raw`] still has it.
+    #[must_use]
+    pub fn packager(&self) -> Option<&'a Packager> {
+        if self.taken.packager.is_unknown() {
+            return None;
+        }
+        Some(match self.inner {
+            RepoDescFile::V1(desc) => &desc.packager,
+            RepoDescFile::V2(desc) => &desc.packager,
+        })
+    }
+
+    /// `%PACKAGER%` exactly as the `desc` holds it, which is what libalpm reports.
+    #[must_use]
+    pub fn packager_raw(&self) -> Option<&'a str> {
+        self.taken.packager.raw()
+    }
+
     /// `%URL%`, the upstream project URL, normalized by `url::Url`.
     ///
     /// `None` when the section is absent, empty, or holds a value `url::Url` refuses. That
     /// last case does not make the entry unreadable, and [`RepoDescView::url_raw`] still has it.
     #[must_use]
     pub const fn url(&self) -> Option<&'a Url> {
-        self.url.parsed()
+        self.taken.url.parsed()
     }
 
     /// `%URL%` exactly as the `desc` holds it, which is what libalpm reports.
     #[must_use]
     pub fn url_raw(&self) -> Option<&'a str> {
-        self.url.raw()
+        self.taken.url.raw()
     }
 
     /// `%MD5SUM%`.
@@ -188,6 +210,10 @@ mod tests {
     use std::str::FromStr as _;
 
     use super::*;
+    use crate::desc_compat::UNKNOWN_PACKAGER;
+
+    /// The `%PACKAGER%` [`MINIMAL_DESC_V1`] carries.
+    const FOOFACE: &str = "Foobar McFooface <foobar@mcfooface.org>";
 
     /// A real-shaped v1 `desc`, close to the `acl` entry read from `core.db` while planning
     /// this module. It has every mandatory v1 field, `%MD5SUM%` included.
@@ -243,16 +269,16 @@ Foobar McFooface <foobar@mcfooface.org>
         RepoDescFile::from_str(text).unwrap()
     }
 
-    /// Parses an entry the way [`crate::repo::RepoPackage`] does: `%URL%` taken out first.
-    fn parse_with_url(text: &str) -> (RepoDescFile, DescUrl) {
-        let (text, raw_url) = crate::desc_compat::take_url(text);
-        (parse(&text), DescUrl::new(raw_url))
+    /// Parses an entry the way [`crate::repo::RepoPackage`] does: taken fields removed first.
+    fn parse_with_taken(text: &str) -> (RepoDescFile, TakenFields) {
+        let (text, taken) = crate::desc_compat::take_fields(text);
+        (parse(&text), taken)
     }
 
     #[test]
     fn view_exposes_every_field_of_a_v1_desc() {
-        let (desc, url) = parse_with_url(MINIMAL_DESC_V1);
-        let view = RepoDescView::new(&desc, &url);
+        let (desc, taken) = parse_with_taken(MINIMAL_DESC_V1);
+        let view = RepoDescView::new(&desc, &taken);
 
         assert_eq!(view.name().as_ref(), "foo");
         assert_eq!(view.version().to_string(), "1.0.0-1");
@@ -313,9 +339,30 @@ Foobar McFooface <foobar@mcfooface.org>
 ";
 
     #[test]
+    fn packager_is_both_typed_and_raw() {
+        let (desc, taken) = parse_with_taken(MINIMAL_DESC_V1);
+        let view = RepoDescView::new(&desc, &taken);
+
+        assert_eq!(view.packager().map(ToString::to_string).as_deref(), Some(FOOFACE));
+        assert_eq!(view.packager_raw(), Some(FOOFACE));
+    }
+
+    /// A locally built package added to a repository with `repo-add` carries makepkg's
+    /// default. It must not cost the entry every other section.
+    #[test]
+    fn makepkgs_default_packager_has_no_typed_form_but_keeps_its_bytes() {
+        let (desc, taken) = parse_with_taken(&MINIMAL_DESC_V1.replace(FOOFACE, UNKNOWN_PACKAGER));
+        let view = RepoDescView::new(&desc, &taken);
+
+        assert!(view.packager().is_none());
+        assert_eq!(view.packager_raw(), Some(UNKNOWN_PACKAGER));
+        assert_eq!(view.name().as_ref(), "foo", "every other section still reads");
+    }
+
+    #[test]
     fn view_flattens_a_v2_desc_which_has_no_md5sum() {
-        let (desc, url) = parse_with_url(MINIMAL_DESC_V2);
-        let view = RepoDescView::new(&desc, &url);
+        let (desc, taken) = parse_with_taken(MINIMAL_DESC_V2);
+        let view = RepoDescView::new(&desc, &taken);
 
         assert!(view.is_v2());
         assert!(view.md5_checksum().is_none(), "a v2 desc has no %MD5SUM%");
@@ -366,7 +413,7 @@ Foobar McFooface <foobar@mcfooface.org>
         assert_eq!(unknown.first().map(|s| s.keyword.as_str()), Some("FUTURE_THING"));
 
         let desc = parse(&filtered);
-        assert_eq!(RepoDescView::new(&desc, &DescUrl::default()).name().as_ref(), "foo");
+        assert_eq!(RepoDescView::new(&desc, &TakenFields::default()).name().as_ref(), "foo");
     }
 
     /// The repository side of the `%URL%` split: a `%URL%` `url::Url` refuses must not cost
@@ -374,8 +421,8 @@ Foobar McFooface <foobar@mcfooface.org>
     #[test]
     fn an_unparsable_url_leaves_the_file_name_readable() {
         let text = MINIMAL_DESC_V1.replace("https://example.org/", "www.example.org");
-        let (desc, url) = parse_with_url(&text);
-        let view = RepoDescView::new(&desc, &url);
+        let (desc, taken) = parse_with_taken(&text);
+        let view = RepoDescView::new(&desc, &taken);
 
         assert_eq!(view.url(), None);
         assert_eq!(view.url_raw(), Some("www.example.org"));

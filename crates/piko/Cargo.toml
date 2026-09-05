@@ -31,6 +31,7 @@ time.workspace = true
 [dev-dependencies]
 # Scriptlet and hook execution can only be exercised where the `piko` binary exists, because
 # that binary *is* the exec helper — see `tests/side_effects.rs`.
+rustix.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 # `install` resolves package names through a repository database, so the same test binary

@@ -15,7 +15,7 @@ use alpm_types::{
     PackageValidation, Packager, RelationOrSoname, Url,
 };
 
-use crate::desc_compat::DescUrl;
+use crate::desc_compat::TakenFields;
 
 /// Read-only access to a `desc` file, independent of its schema version.
 ///
@@ -23,7 +23,7 @@ use crate::desc_compat::DescUrl;
 #[derive(Clone, Copy, Debug)]
 pub struct DescView<'a> {
     inner: &'a DbDescFile,
-    url: &'a DescUrl,
+    taken: &'a TakenFields,
 }
 
 /// Generates accessors that read the same field from either schema version.
@@ -59,15 +59,17 @@ macro_rules! shared_copy_field {
 }
 
 impl<'a> DescView<'a> {
-    /// Wraps a parsed `desc` and the `%URL%` that was taken out of it before parsing.
-    pub(crate) const fn new(inner: &'a DbDescFile, url: &'a DescUrl) -> Self {
-        Self { inner, url }
+    /// Wraps a parsed `desc` and the fields taken out of it before parsing.
+    pub(crate) const fn new(inner: &'a DbDescFile, taken: &'a TakenFields) -> Self {
+        Self { inner, taken }
     }
 
     /// The underlying schema-tagged value, for callers that need the distinction.
     ///
     /// Its `url` field is always `None`: `%URL%` is blanked before the upstream parser sees
     /// the text, so [`DescView::url`] and [`DescView::url_raw`] are the only sources for it.
+    /// Its `packager` field can likewise hold a substitute — read [`DescView::packager`] and
+    /// [`DescView::packager_raw`] rather than it.
     #[must_use]
     pub const fn as_inner(&self) -> &'a DbDescFile {
         self.inner
@@ -95,8 +97,6 @@ impl<'a> DescView<'a> {
         description: description -> &'a PackageDescription,
         /// `%ARCH%`, the architecture the package was built for.
         architecture: arch -> &'a Architecture,
-        /// `%PACKAGER%`.
-        packager: packager -> &'a Packager,
         /// `%GROUPS%`.
         groups: groups -> &'a [Group],
         /// `%LICENSE%`.
@@ -126,6 +126,29 @@ impl<'a> DescView<'a> {
         install_reason: reason -> PackageInstallReason,
     }
 
+    /// `%PACKAGER%`, the identity that built the package.
+    ///
+    /// `None` when the value is makepkg's
+    /// [`UNKNOWN_PACKAGER`](crate::desc_compat::UNKNOWN_PACKAGER) default, which carries no
+    /// email address and so cannot become an `alpm_types::Packager`.
+    /// [`DescView::packager_raw`] still has it.
+    #[must_use]
+    pub fn packager(&self) -> Option<&'a Packager> {
+        if self.taken.packager.is_unknown() {
+            return None;
+        }
+        Some(match self.inner {
+            DbDescFile::V1(desc) => &desc.packager,
+            DbDescFile::V2(desc) => &desc.packager,
+        })
+    }
+
+    /// `%PACKAGER%` exactly as the `desc` holds it, which is what libalpm reports.
+    #[must_use]
+    pub fn packager_raw(&self) -> Option<&'a str> {
+        self.taken.packager.raw()
+    }
+
     /// `%URL%`, the upstream project URL, normalized by `url::Url`.
     ///
     /// The section is mandatory but its value may be empty, which is `None` here. So is a
@@ -133,13 +156,13 @@ impl<'a> DescView<'a> {
     /// [`DescView::url_raw`] still has it.
     #[must_use]
     pub const fn url(&self) -> Option<&'a Url> {
-        self.url.parsed()
+        self.taken.url.parsed()
     }
 
     /// `%URL%` exactly as the `desc` holds it, which is what libalpm reports.
     #[must_use]
     pub fn url_raw(&self) -> Option<&'a str> {
-        self.url.raw()
+        self.taken.url.raw()
     }
 
     /// `%XDATA%`, the extra data section.
@@ -165,18 +188,21 @@ mod tests {
     use alpm_types::{PackageInstallReason, PackageValidation};
 
     use super::*;
-    use crate::fixture::MINIMAL_DESC_V1;
+    use crate::{desc_compat::UNKNOWN_PACKAGER, fixture::MINIMAL_DESC_V1};
 
-    /// Parses a `desc` the way [`crate::LocalPackage`] does: `%URL%` taken out first.
-    fn parse(text: &str) -> (DbDescFile, DescUrl) {
-        let (text, raw_url) = crate::desc_compat::take_url(text);
-        (DbDescFile::from_str_with_schema(&text, None).unwrap(), DescUrl::new(raw_url))
+    /// The `%PACKAGER%` [`MINIMAL_DESC_V1`] carries.
+    const FOOFACE: &str = "Foobar McFooface <foobar@mcfooface.org>";
+
+    /// Parses a `desc` the way [`crate::LocalPackage`] does: the taken fields removed first.
+    fn parse(text: &str) -> (DbDescFile, TakenFields) {
+        let (text, taken) = crate::desc_compat::take_fields(text);
+        (DbDescFile::from_str_with_schema(&text, None).unwrap(), taken)
     }
 
     #[test]
     fn view_exposes_every_field_of_a_v1_desc() {
-        let (desc, url) = parse(MINIMAL_DESC_V1);
-        let view = DescView::new(&desc, &url);
+        let (desc, taken) = parse(MINIMAL_DESC_V1);
+        let view = DescView::new(&desc, &taken);
 
         assert_eq!(view.name().as_ref(), "foo");
         assert_eq!(view.version().to_string(), "1.0.0-1");
@@ -197,10 +223,31 @@ mod tests {
     }
 
     #[test]
+    fn packager_is_both_typed_and_raw() {
+        let (desc, taken) = parse(MINIMAL_DESC_V1);
+        let view = DescView::new(&desc, &taken);
+
+        assert_eq!(view.packager().map(ToString::to_string).as_deref(), Some(FOOFACE));
+        assert_eq!(view.packager_raw(), Some(FOOFACE));
+    }
+
+    /// makepkg's default has no email address, so no `Packager` can hold it. The bytes stay
+    /// reachable, which is what libalpm reports and what `piko info` prints.
+    #[test]
+    fn makepkgs_default_packager_has_no_typed_form_but_keeps_its_bytes() {
+        let (desc, taken) = parse(&MINIMAL_DESC_V1.replace(FOOFACE, UNKNOWN_PACKAGER));
+        let view = DescView::new(&desc, &taken);
+
+        assert!(view.packager().is_none());
+        assert_eq!(view.packager_raw(), Some(UNKNOWN_PACKAGER));
+        assert_eq!(view.name().as_ref(), "foo", "every other section still reads");
+    }
+
+    #[test]
     fn view_exposes_xdata_for_a_v2_desc() {
         let text = format!("{MINIMAL_DESC_V1}%XDATA%\npkgtype=pkg\n\n");
-        let (desc, url) = parse(&text);
-        let view = DescView::new(&desc, &url);
+        let (desc, taken) = parse(&text);
+        let view = DescView::new(&desc, &taken);
 
         assert!(view.is_v2());
         assert!(view.xdata().is_some());
@@ -213,8 +260,8 @@ mod tests {
     #[test]
     fn an_unparsable_url_leaves_every_other_field_readable() {
         let text = MINIMAL_DESC_V1.replace("https://example.org/", "www.example.org");
-        let (desc, url) = parse(&text);
-        let view = DescView::new(&desc, &url);
+        let (desc, taken) = parse(&text);
+        let view = DescView::new(&desc, &taken);
 
         assert_eq!(view.url(), None, "the value does not normalize");
         assert_eq!(view.url_raw(), Some("www.example.org"), "but the bytes are kept");
@@ -227,8 +274,8 @@ mod tests {
     #[test]
     fn an_empty_url_has_no_raw_value_either() {
         let text = MINIMAL_DESC_V1.replace("https://example.org/", "");
-        let (desc, url) = parse(&text);
-        let view = DescView::new(&desc, &url);
+        let (desc, taken) = parse(&text);
+        let view = DescView::new(&desc, &taken);
 
         assert_eq!(view.url(), None);
         assert_eq!(view.url_raw(), None);

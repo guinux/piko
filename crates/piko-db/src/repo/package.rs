@@ -21,21 +21,22 @@ use super::{
     repo_name::RepoName,
 };
 use crate::{
-    desc_compat::{self, DescUrl},
+    desc_compat::{self, TakenFields},
     entry_name::EntryName,
     error::{Error, SharedError},
     lazy::Lazy,
     limits::Limits,
 };
 
-/// A repository `desc` entry's full typed parse, plus the `%URL%` kept beside it.
+/// A repository `desc` entry's full typed parse, plus the fields kept beside it.
 ///
-/// `%URL%` is taken out of the text before the upstream parse, so a value `url::Url` refuses
-/// cannot make the entry unreadable. See [`crate::desc_compat::take_url`].
+/// `%URL%` and `%PACKAGER%` are taken out of the text before the upstream parse, so a value
+/// their typed conversion refuses cannot make the entry unreadable. See
+/// [`crate::desc_compat::take_fields`].
 #[derive(Debug)]
 pub(crate) struct LoadedDesc {
     desc: RepoDescFile,
-    url: DescUrl,
+    taken: TakenFields,
 }
 
 /// Where a package's file list comes from, and the shared, lazily-built store for it.
@@ -383,16 +384,16 @@ impl RepoPackage {
     pub fn desc(&self) -> std::result::Result<RepoDescView<'_>, SharedError> {
         self.desc
             .get_or_load(|| {
-                let (text, raw_url) = desc_compat::take_url(&self.raw);
+                let (text, taken) = desc_compat::take_fields(&self.raw);
                 let desc = RepoDescFile::from_str_with_schema(&text, None).map_err(|source| {
                     Error::RepoDescUnparsable {
                         entry: self.entry.as_str().to_owned(),
                         source: Box::new(source),
                     }
                 })?;
-                Ok(LoadedDesc { desc, url: DescUrl::new(raw_url) })
+                Ok(LoadedDesc { desc, taken })
             })
-            .map(|loaded| RepoDescView::new(&loaded.desc, &loaded.url))
+            .map(|loaded| RepoDescView::new(&loaded.desc, &loaded.taken))
     }
 
     /// Whether the deferred `desc` parse has already run.

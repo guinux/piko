@@ -1481,6 +1481,7 @@ dependencies = [
  "piko-net",
  "piko-sig",
  "piko-txn",
+ "rustix",
  "tar",
  "tempfile",
  "thiserror",

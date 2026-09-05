@@ -876,13 +876,10 @@ pub fn load_package(
             reason: "the package has no readable .PKGINFO".to_owned(),
         });
     };
-    let info =
-        <alpm_pkginfo::PackageInfo as std::str::FromStr>::from_str(&raw).map_err(|error| {
-            crate::Error::UnusableSource {
-                path: package.to_path_buf(),
-                reason: format!("its .PKGINFO is unreadable: {error}"),
-            }
-        })?;
+    let info = crate::pkginfo::parse(&raw).map_err(|error| crate::Error::UnusableSource {
+        path: package.to_path_buf(),
+        reason: format!("its .PKGINFO is unreadable: {error}"),
+    })?;
 
     let (name, version) = match &info {
         alpm_pkginfo::PackageInfo::V1(v1) => (v1.pkgname.to_string(), v1.pkgver.to_string()),

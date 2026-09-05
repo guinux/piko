@@ -48,6 +48,20 @@ fn write_package(cache: &Path, version: &str, script: Option<&str>) {
     write_package_with(cache, "foo", version, script, &[]);
 }
 
+/// As [`write_package`], but with the `0:0` a real package names.
+///
+/// Only [`chrooted_scriptlets_and_hooks_really_run`] wants this. It runs piko under
+/// `unshare --user --map-root-user`, where the running user *is* uid 0 and the outer uid has
+/// no mapping at all — so an archive naming the caller's own ids would fail the `chown` with
+/// `EINVAL`. Everywhere else the reverse holds; see [`package_tar`].
+fn write_package_as_root(cache: &Path, version: &str, script: Option<&str>) {
+    std::fs::write(
+        cache.join(format!("foo-{version}-x86_64.pkg.tar")),
+        package_tar_owned("foo", version, script, &[], 0, 0),
+    )
+    .unwrap();
+}
+
 /// As [`write_package`], shipping `extra` payload paths on top of the usual `usr/bin/<name>`,
 /// for a package named `name` rather than always `foo`.
 ///
@@ -70,14 +84,44 @@ fn write_package_with(
 /// Builds the bytes of a `foo`-shaped package archive, without writing it anywhere. Shared by
 /// [`write_package_with`] (which puts it straight in the cache) and a download test (which
 /// serves the same bytes over HTTP instead).
+///
+/// # Why the archive is owned by the caller
+///
+/// An install always extracts under `Ownership::FromArchive`, so every member is `chown`ed to
+/// the ids the archive names. A real package names `0:0`, which needs `CAP_CHOWN`. Naming the
+/// running user's own ids instead keeps the whole path reachable from an ordinary test: a
+/// `chown` to one's own uid and gid needs no privilege, and Linux still runs the same
+/// `chown_common` that clears `S_ISUID`/`S_ISGID`. So the ordering these tests sit downstream
+/// of stays exercised, rather than skipped.
+///
+/// The one test that needs `0:0` instead uses [`write_package_as_root`], which says why.
 fn package_tar(name: &str, version: &str, script: Option<&str>, extra: &[(&str, &str)]) -> Vec<u8> {
+    package_tar_owned(
+        name,
+        version,
+        script,
+        extra,
+        u64::from(rustix::process::getuid().as_raw()),
+        u64::from(rustix::process::getgid().as_raw()),
+    )
+}
+
+/// [`package_tar`], with the ownership every member names spelled out.
+fn package_tar_owned(
+    name: &str,
+    version: &str,
+    script: Option<&str>,
+    extra: &[(&str, &str)],
+    uid: u64,
+    gid: u64,
+) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
 
     let mut add = |path: &str, contents: &[u8], directory: bool| {
         let mut header = tar::Header::new_gnu();
         header.set_mode(if directory { 0o755 } else { 0o644 });
-        header.set_uid(0);
-        header.set_gid(0);
+        header.set_uid(uid);
+        header.set_gid(gid);
         header.set_mtime(0);
         header.set_size(contents.len() as u64);
         if directory {
@@ -423,7 +467,6 @@ pre_remove() {
 /// The chroot path itself is exercised by `chrooted_scriptlets_and_hooks_really_run`, which
 /// needs an unprivileged user namespace and is `#[ignore]`d.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn a_scriptlet_that_cannot_enter_the_root_fails_closed() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", Some(SCRIPT));
@@ -499,7 +542,6 @@ fn abort_on_fail_stops_the_transaction_before_anything_changes() {
 
 /// Without `AbortOnFail`, the same failing hook must not stop anything.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn a_failing_hook_without_abort_on_fail_is_only_a_warning() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", None);
@@ -519,7 +561,6 @@ fn a_failing_hook_without_abort_on_fail_is_only_a_warning() {
 
 /// A hook whose `Depends` nothing satisfies is skipped, and says so.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn an_unsatisfied_hook_dependency_skips_the_hook() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", None);
@@ -539,7 +580,6 @@ fn an_unsatisfied_hook_dependency_skips_the_hook() {
 
 /// A hook whose trigger does not match must not run at all.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn a_hook_for_another_package_does_not_run() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", None);
@@ -559,7 +599,6 @@ fn a_hook_for_another_package_does_not_run() {
 
 /// An unparseable hook file is reported and does not stop the transaction.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn a_broken_hook_file_is_reported_and_skipped() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", None);
@@ -586,7 +625,6 @@ fn a_broken_hook_file_is_reported_and_skipped() {
 /// the absence of the `PostTransaction` one would prove nothing: a trigger that never matched
 /// looks exactly the same.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn a_hook_the_removal_deletes_does_not_run_afterwards() {
     let sandbox = Sandbox::new();
     let hook = |when: &str| {
@@ -658,7 +696,6 @@ fn a_hook_the_removal_deletes_does_not_run_afterwards() {
 /// upgrade. The reader, finding two entries for one name, then keeps the older one, and the
 /// database reports a version that is not on disk.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn upgrading_replaces_the_entry_rather_than_adding_one() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", None);
@@ -689,7 +726,6 @@ fn upgrading_replaces_the_entry_rather_than_adding_one() {
 /// if everything both versions ship survives, holding the new content. A removal that ran after
 /// extraction instead of before would pass the first assertion and fail the second.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn upgrading_deletes_a_file_the_new_version_drops() {
     let sandbox = Sandbox::new();
     write_package_with(
@@ -731,7 +767,6 @@ fn upgrading_deletes_a_file_the_new_version_drops() {
 /// recording the named target as `Explicit` and the pulled-in package as `Depend`. This is what
 /// turns `install` from "extract this file" into "`piko plan` as a transaction".
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn installing_by_name_pulls_in_its_dependency() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
@@ -761,7 +796,6 @@ fn installing_by_name_pulls_in_its_dependency() {
 
 /// `--asdeps` must apply to the named target too, not only to what it pulls in.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn asdeps_downgrades_the_named_target_as_well() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
@@ -812,7 +846,6 @@ fn declining_the_install_prompt_changes_nothing() {
 
 /// `remove` shows the same kind of plan `install` does, and a declined answer removes nothing.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn declining_the_remove_prompt_changes_nothing() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
@@ -849,7 +882,6 @@ fn declining_the_remove_prompt_changes_nothing() {
 /// preset is 0 (`remove.c:143`). A script that removes a held package by accident is exactly
 /// what the directive exists to prevent, so the flag must not be an escape hatch from it.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn holdpkg_refuses_an_unattended_removal() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
@@ -877,7 +909,6 @@ fn holdpkg_refuses_an_unattended_removal() {
 /// assumed. pacman warns and asks about `HoldPkg` before displaying the target list
 /// (`remove.c:133-145`, above `display_targets`), so the warning is not buried under a plan.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn holdpkg_asks_and_an_explicit_yes_removes_the_package() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
@@ -907,7 +938,6 @@ fn holdpkg_asks_and_an_explicit_yes_removes_the_package() {
 /// prompt helper that ignored the default would pass the accept case above and still be wrong
 /// here.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn holdpkg_defaults_to_no_on_a_bare_enter() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
@@ -926,7 +956,6 @@ fn holdpkg_defaults_to_no_on_a_bare_enter() {
 /// The guard must stay silent, not merely harmless. An extra question on every unrelated
 /// removal would train users to answer it without reading.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn holdpkg_is_silent_for_a_package_it_does_not_name() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
@@ -951,7 +980,6 @@ fn holdpkg_is_silent_for_a_package_it_does_not_name() {
 /// builds its name list separately. That is the one place the guard could have been left out
 /// without any other test noticing.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn holdpkg_applies_to_the_nodeps_path_too() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
@@ -980,7 +1008,6 @@ fn holdpkg_applies_to_the_nodeps_path_too() {
 /// `sysupgrade` is one of exactly two fields that tell the two subcommands apart. The other,
 /// `as_deps`, is covered by `asdeps_downgrades_the_named_target_as_well`.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn update_downgrade_moves_a_package_backwards_and_nothing_else_does() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "2.0.0-1", None);
@@ -1014,7 +1041,6 @@ fn update_downgrade_moves_a_package_backwards_and_nothing_else_does() {
 /// A system already at the newest available version has nothing to do, and `update` must say
 /// so rather than showing an empty plan and asking about it.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn update_with_nothing_pending_reports_it() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
@@ -1030,7 +1056,6 @@ fn update_with_nothing_pending_reports_it() {
 /// `update` must apply a `%REPLACES%` pair: install the replacement and remove what it
 /// replaces, both shown in the plan before anything happens.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn update_applies_a_replaces_pair() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "old", "1.0.0-1", None, &[]);
@@ -1060,7 +1085,6 @@ fn update_applies_a_replaces_pair() {
 /// the same relax-and-retry the solver already applies to `install`, now exercised through a
 /// real upgrade rather than a fresh install.
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn update_removes_a_conflicting_package() {
     let sandbox = Sandbox::new();
     write_package_with(&sandbox.path("cache"), "bar", "1.0.0-1", None, &[]);
@@ -1258,7 +1282,6 @@ fn download_only_reports_parallel_downloads_as_downloads_not_cache_hits() {
 /// A package that is not in the cache is downloaded from the repository's `Server` before it
 /// is installed. This is the whole point of [`piko_txn::source::DownloadingSource`].
 #[test]
-#[ignore = "requires root: install now always applies the archive's ownership (0:0 in these fixtures), which needs CAP_CHOWN"]
 fn installing_a_package_not_in_the_cache_downloads_it() {
     let bytes = package_tar("foo", "1.0.0-1", None, &[]);
     let sandbox = Sandbox::with_server(&serve_once(bytes.clone()));
@@ -1389,8 +1412,8 @@ fn chrooted_scriptlets_and_hooks_really_run() {
         eprintln!("skipping: could not assemble a minimal /bin/sh in the test root");
         return;
     }
-    write_package(&sandbox.path("cache"), "1.0.0-1", Some(SCRIPT));
-    write_package(&sandbox.path("cache"), "2.0.0-1", Some(SCRIPT));
+    write_package_as_root(&sandbox.path("cache"), "1.0.0-1", Some(SCRIPT));
+    write_package_as_root(&sandbox.path("cache"), "2.0.0-1", Some(SCRIPT));
     sandbox.write_hook(
         "50-hello.hook",
         "[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = foo\n\n\
@@ -1606,9 +1629,9 @@ fn an_unwritable_log_warns_and_the_transaction_still_runs() {
     let seen = text(&output);
 
     assert!(seen.contains("cannot write the transaction log"), "no warning was printed:\n{seen}");
-    // The transaction itself is unaffected: it fails only for the reason it would have failed
-    // anyway (extraction needs `CAP_CHOWN` in this fixture), never for the log.
+    assert!(output.status.success(), "the log stopped the transaction:\n{seen}");
     assert!(!seen.contains("no transactions"), "{seen}");
+    assert!(sandbox.path("db/local/foo-1.0.0-1/desc").is_file(), "the install did not land");
 }
 
 /// `piko history` reads the shared log, so pacman's own transactions show up beside piko's.
@@ -1849,11 +1872,7 @@ fn history_writes_nothing() {
 }
 
 /// The whole record of a completed install, in both files.
-///
-/// Ignored for the same reason every other applying test here is: extraction applies the
-/// archive's ownership (`0:0` in these fixtures), which needs `CAP_CHOWN`.
 #[test]
-#[ignore = "requires root: install applies the archive's ownership, which needs CAP_CHOWN"]
 fn a_completed_install_is_recorded_in_both_records() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", None);
@@ -1882,7 +1901,6 @@ fn a_completed_install_is_recorded_in_both_records() {
 /// The verb must come from a version comparison. An upgrade and a downgrade of the same
 /// package are told apart by direction, not by which ran second.
 #[test]
-#[ignore = "requires root: install applies the archive's ownership, which needs CAP_CHOWN"]
 fn an_upgrade_and_a_downgrade_are_named_by_direction() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", None);
@@ -1901,7 +1919,6 @@ fn an_upgrade_and_a_downgrade_are_named_by_direction() {
 /// A removal is recorded with the version that went away, which nothing else on the system
 /// records once the entry is gone.
 #[test]
-#[ignore = "requires root: install applies the archive's ownership, which needs CAP_CHOWN"]
 fn a_removal_is_recorded_with_the_version_that_went() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", None);

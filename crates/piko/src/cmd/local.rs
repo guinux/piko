@@ -118,7 +118,7 @@ pub fn info(
     field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
     field_list!(out, "Replaces        :", desc.replaces(), 5);
     emit!(out, "{} {}", info_label("Installed Size  :"), human_size(desc.installed_size()));
-    emit!(out, "{} {}", info_label("Packager        :"), desc.packager());
+    emit!(out, "{} {}", info_label("Packager        :"), desc.packager_raw().unwrap_or_default());
     emit!(out, "{} {}", info_label("Build Date      :"), human_date(desc.build_date(), offset));
     emit!(out, "{} {}", info_label("Install Date    :"), human_date(desc.install_date(), offset));
     emit!(

@@ -8,9 +8,10 @@
 //! the checksum fields. Measured against this machine's real databases, that conversion costs
 //! **18x a raw `%KEYWORD%` section split**, and dominates opening either database.
 //!
-//! All-or-nothing is also why `%URL%` is taken out of the text before either parser sees it
-//! ([`crate::desc_compat::take_url`]): a value `url::Url` refuses would otherwise cost the
-//! `desc` every other section, down to the `%FILENAME%` an install downloads. See
+//! All-or-nothing is also why `%URL%` and `%PACKAGER%` are taken out of the text before
+//! either parser sees it ([`crate::desc_compat::take_fields`]): a value their typed
+//! conversion refuses would otherwise cost the `desc` every other section, down to the
+//! `%FILENAME%` an install downloads.
 //!
 //! Only a handful of sections are needed by everything. [`crate::solve::Universe`] reads the
 //! relation sections and `%GROUPS%` for every candidate in the universe, so deferring *those*

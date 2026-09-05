@@ -44,6 +44,10 @@ pub struct InstallFacts {
 /// `https://archlinux.org/`. libalpm copies the string through untouched. Building from the
 /// parsed value writes a `desc` that differs from pacman's, measured at 11 of 120 real
 /// packages.
+///
+/// `%PACKAGER%` is copied the same way, for a second reason on top of that one:
+/// [`crate::pkginfo::parse`] substitutes makepkg's default packager before the typed parse,
+/// so `info` holds a value the package file never carried.
 #[must_use]
 pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Record {
     let mut record = Record::new(RecordKind::Desc);
@@ -58,7 +62,7 @@ pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Record {
             one("URL", raw_field(raw, "url").unwrap_or_else(|| v1.url.to_string()));
             one("ARCH", v1.arch.to_string());
             one("BUILDDATE", v1.builddate.to_string());
-            one("PACKAGER", v1.packager.to_string());
+            one("PACKAGER", raw_field(raw, "packager").unwrap_or_else(|| v1.packager.to_string()));
             if v1.size.to_string() != "0" {
                 one("SIZE", v1.size.to_string());
             }
@@ -78,7 +82,7 @@ pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Record {
             one("URL", raw_field(raw, "url").unwrap_or_else(|| v2.url.to_string()));
             one("ARCH", v2.arch.to_string());
             one("BUILDDATE", v2.builddate.to_string());
-            one("PACKAGER", v2.packager.to_string());
+            one("PACKAGER", raw_field(raw, "packager").unwrap_or_else(|| v2.packager.to_string()));
             if v2.size.to_string() != "0" {
                 one("SIZE", v2.size.to_string());
             }
@@ -218,6 +222,22 @@ depend = bar
         assert_eq!(record.get("SIZE").unwrap(), ["123".to_owned()]);
         assert_eq!(record.get("DEPENDS").unwrap(), ["bar".to_owned()]);
         assert_eq!(record.get("INSTALLDATE").unwrap(), ["1733737243".to_owned()]);
+    }
+
+    /// The substitute [`crate::pkginfo::parse`] makes must never reach the database. pacman
+    /// writes what the package file says, and so does this.
+    #[test]
+    fn the_packager_written_is_the_one_the_package_file_carries() {
+        let raw = PKGINFO.replace(
+            "Foobar McFooface <foobar@mcfooface.org>",
+            piko_db::desc_compat::UNKNOWN_PACKAGER,
+        );
+        let record = desc(&crate::pkginfo::parse(&raw).unwrap(), &raw, &facts());
+
+        assert_eq!(
+            record.get("PACKAGER").unwrap(),
+            [piko_db::desc_compat::UNKNOWN_PACKAGER.to_owned()]
+        );
     }
 
     /// An explicit install writes no `%REASON%`, matching a freshly installed package.

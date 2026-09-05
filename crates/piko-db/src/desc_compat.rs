@@ -11,9 +11,9 @@
 //! [`filter_unknown_sections`] is deliberately reused by both rather than duplicated: the two
 //! formats have different keyword sets, but the identical section grammar.
 //!
-//! [`take_url`] and [`DescUrl`] are here for the same reason: `%URL%` is the one section both
-//! formats hand to a parser that can refuse a value libalpm prints verbatim, and both parsers
-//! convert every section or none.
+//! [`take_fields`] is here for the same reason: `%URL%` and `%PACKAGER%` are the two sections
+//! both formats hand to a parser that can refuse a value libalpm prints verbatim, and both
+//! parsers convert every section or none.
 
 use std::{borrow::Cow, str::FromStr as _};
 
@@ -88,38 +88,89 @@ pub(crate) fn filter_unknown_sections(
     (kept, unknown)
 }
 
-/// Splits `%URL%` out of a `desc`: the text to hand to the upstream parser, and the raw value.
+/// makepkg's default `%PACKAGER%`, on every locally built package whose builder set none.
 ///
-/// `alpm-db` and `alpm-repo-db` convert `%URL%` with `alpm_types::Url`, which is
-/// `url::Url::parse` and rejects anything without an absolute scheme. Both parsers convert
-/// every section or none, so a `%URL%` libalpm would print verbatim otherwise takes the whole
-/// `desc` down with it — and with it the package's name, its dependencies, and the file name
-/// an install needs.
+/// `makepkg` ends with `PACKAGER=${PACKAGER:-"Unknown Packager"}`, and `makepkg.conf` ships
+/// the variable commented out. libalpm copies the value through untouched
+/// (`be_local.c:786`, `be_sync.c:637`); `alpm_types::Packager` refuses it, because it carries
+/// no `<email>`.
+pub const UNKNOWN_PACKAGER: &str = "Unknown Packager";
+
+/// The value put in place of [`UNKNOWN_PACKAGER`] so the upstream parser accepts the section.
 ///
-/// The value lines are blanked, the header is not removed: `alpm-db` requires `%URL%` to be
-/// present, and accepts it empty. Only the first `%URL%` is touched, so a duplicated section
-/// still reaches the upstream parser and is still reported as one.
+/// It never leaves this module. [`DescPackager::is_unknown`] records that it was used, and
+/// [`DescPackager::raw`] keeps the bytes the file holds.
+const UNKNOWN_PACKAGER_SUBSTITUTE: &str = "Unknown Packager <unknown@example.invalid>";
+
+/// The `desc` fields taken out of the text before the upstream parser sees it.
+#[derive(Debug, Default)]
+pub(crate) struct TakenFields {
+    /// `%URL%`, blanked in the text and normalized here.
+    pub(crate) url: DescUrl,
+    /// `%PACKAGER%`, substituted in the text when it is [`UNKNOWN_PACKAGER`].
+    pub(crate) packager: DescPackager,
+}
+
+/// Rewrites the two `desc` sections whose value can cost the whole file, and returns them.
 ///
-/// Returns [`Cow::Borrowed`] when there is nothing to blank — an absent or already-empty
-/// section, which is every `desc` that has no URL to lose.
-pub(crate) fn take_url(text: &str) -> (Cow<'_, str>, Option<&str>) {
-    let Some(value) = first_url_value(text) else {
-        return (Cow::Borrowed(text), None);
+/// `alpm-db` and `alpm-repo-db` convert every section or none. So one value their typed
+/// conversion refuses takes the package's name, its dependencies, and the file name an install
+/// downloads down with it. Two sections reach that conversion carrying a value libalpm copies
+/// through untouched.
+///
+/// `%URL%` is converted with `alpm_types::Url`, which is `url::Url::parse` and rejects anything
+/// without an absolute scheme. Its value lines are dropped and its header kept: the section is
+/// mandatory, and accepted empty.
+///
+/// `%PACKAGER%` is converted with `alpm_types::Packager`, which demands a `<email>`. The
+/// section is mandatory *and* rejected when empty, so it cannot be blanked the same way; the
+/// value is replaced by one that parses. Only [`UNKNOWN_PACKAGER`] is replaced. Every other
+/// value `Packager` refuses still fails the file, because it is a defect in that file rather
+/// than a documented default of the tool that wrote it.
+///
+/// Only the first occurrence of each section is touched, so a duplicated one still reaches the
+/// upstream parser and is still reported as one.
+///
+/// Returns [`Cow::Borrowed`] when there is nothing to rewrite — no `%URL%` value to drop and a
+/// `%PACKAGER%` the upstream parser takes as it stands.
+pub(crate) fn take_fields(text: &str) -> (Cow<'_, str>, TakenFields) {
+    let raw_url = first_value(text, "URL");
+    let fields = TakenFields {
+        url: DescUrl::new(raw_url),
+        packager: DescPackager::new(first_value(text, "PACKAGER")),
     };
+    let substitute = fields.packager.is_unknown();
+    if raw_url.is_none() && !substitute {
+        return (Cow::Borrowed(text), fields);
+    }
 
     let mut kept = String::with_capacity(text.len());
     let mut in_url = false;
-    let mut passed = false;
+    let mut in_packager = false;
+    let mut url_done = false;
+    let mut packager_done = false;
+    let mut wrote_packager = false;
 
     for line in text.lines() {
         if let Some(keyword) = section_keyword(line) {
-            in_url = !passed && keyword == "URL";
-            passed |= in_url;
+            in_url = !url_done && keyword == "URL";
+            in_packager = substitute && !packager_done && keyword == "PACKAGER";
+            url_done |= in_url;
+            packager_done |= in_packager;
         } else if line.trim().is_empty() {
+            // A blank line ends the current block, whichever one it was.
             in_url = false;
+            in_packager = false;
         } else if in_url {
             // A scalar section holds one line, but drop the whole block rather than assume
             // it: libalpm ignores the extra lines too, since they match no `%KEYWORD%`.
+            continue;
+        } else if in_packager {
+            if !wrote_packager {
+                wrote_packager = true;
+                kept.push_str(UNKNOWN_PACKAGER_SUBSTITUTE);
+                kept.push('\n');
+            }
             continue;
         }
 
@@ -127,30 +178,58 @@ pub(crate) fn take_url(text: &str) -> (Cow<'_, str>, Option<&str>) {
         kept.push('\n');
     }
 
-    (Cow::Owned(kept), Some(value))
+    (Cow::Owned(kept), fields)
 }
 
-/// The first value line of the first `%URL%` section, if it has one.
-fn first_url_value(text: &str) -> Option<&str> {
-    let mut in_url = false;
+/// The first value line of the first `%KEYWORD%` section, if it has one.
+fn first_value<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let mut inside = false;
 
     for line in text.lines() {
-        if let Some(keyword) = section_keyword(line) {
-            if in_url {
+        if let Some(found) = section_keyword(line) {
+            if inside {
                 // The section ended at the next header, with no value line.
                 return None;
             }
-            in_url = keyword == "URL";
+            inside = found == keyword;
         } else if line.trim().is_empty() {
-            if in_url {
+            if inside {
                 return None;
             }
-        } else if in_url {
+        } else if inside {
             return Some(line);
         }
     }
 
     None
+}
+
+/// A `desc`'s `%PACKAGER%`, kept as written.
+///
+/// The raw value is the one libalpm has: `be_local.c:786` copies the string through untouched.
+/// [`DescPackager::is_unknown`] is set when that string is [`UNKNOWN_PACKAGER`], which no
+/// `alpm_types::Packager` can represent — there is no email address to hold.
+#[derive(Debug, Default)]
+pub(crate) struct DescPackager {
+    raw: Option<Box<str>>,
+    unknown: bool,
+}
+
+impl DescPackager {
+    /// Classifies `raw`, keeping the bytes either way.
+    pub(crate) fn new(raw: Option<&str>) -> Self {
+        Self { raw: raw.map(Box::from), unknown: raw == Some(UNKNOWN_PACKAGER) }
+    }
+
+    /// The value exactly as the `desc` holds it.
+    pub(crate) fn raw(&self) -> Option<&str> {
+        self.raw.as_deref()
+    }
+
+    /// Whether the value was [`UNKNOWN_PACKAGER`], and so was substituted before parsing.
+    pub(crate) const fn is_unknown(&self) -> bool {
+        self.unknown
+    }
 }
 
 /// A `desc`'s `%URL%`, kept as written and normalized separately.
@@ -233,7 +312,7 @@ mod tests {
         assert!(!filtered.contains("something"), "the block body must be dropped too");
 
         let desc = parse(&filtered);
-        assert_eq!(DescView::new(&desc, &DescUrl::default()).name().as_ref(), "foo");
+        assert_eq!(DescView::new(&desc, &TakenFields::default()).name().as_ref(), "foo");
     }
 
     /// `%MAKEDEPENDS%` and `%CHECKDEPENDS%` are read by libalpm but not modelled by
@@ -249,7 +328,10 @@ mod tests {
         assert_eq!(keywords, ["MAKEDEPENDS", "CHECKDEPENDS"]);
         assert!(!filtered.contains("cmake"));
         assert!(!filtered.contains("python-pytest"));
-        assert_eq!(DescView::new(&parse(&filtered), &DescUrl::default()).name().as_ref(), "foo");
+        assert_eq!(
+            DescView::new(&parse(&filtered), &TakenFields::default()).name().as_ref(),
+            "foo"
+        );
     }
 
     /// A dropped block must not swallow the section that follows it.
@@ -263,23 +345,30 @@ mod tests {
         assert!(!filtered.contains("ignored"));
     }
 
+    /// The `%URL%` half of [`take_fields`], with a helper naming what these tests read.
+    fn take_url(text: &str) -> (Cow<'_, str>, Option<String>) {
+        let (text, taken) = take_fields(text);
+        let url = taken.url.raw().map(str::to_owned);
+        (text, url)
+    }
+
     #[test]
     fn take_url_returns_the_value_and_blanks_the_section() {
         let (text, url) = take_url(MINIMAL_DESC_V1);
 
-        assert_eq!(url, Some("https://example.org/"));
+        assert_eq!(url.as_deref(), Some("https://example.org/"));
         assert!(text.contains("%URL%\n\n"), "the header stays, the value goes: {text:?}");
         assert!(!text.contains("example.org"));
         assert!(parse(&text).eq(&parse(&text)), "the blanked text still parses");
     }
 
     /// The section is mandatory for `alpm-db`, so blanking it must not remove it. This is the
-    /// measurement that decided the shape of `take_url`: an absent `%URL%` is `MissingSection`,
-    /// an empty one is `None`.
+    /// measurement that decided the shape of [`take_fields`]: an absent `%URL%` is
+    /// `MissingSection`, an empty one is `None`.
     #[test]
     fn a_desc_with_its_url_blanked_still_parses() {
         let (text, _) = take_url(MINIMAL_DESC_V1);
-        assert_eq!(DescView::new(&parse(&text), &DescUrl::default()).name().as_ref(), "foo");
+        assert_eq!(DescView::new(&parse(&text), &TakenFields::default()).name().as_ref(), "foo");
     }
 
     #[test]
@@ -299,7 +388,7 @@ mod tests {
     #[test]
     fn take_url_reads_a_value_that_ends_the_file() {
         let (text, url) = take_url("%NAME%\nfoo\n\n%URL%\nhttps://example.org/\n");
-        assert_eq!(url, Some("https://example.org/"));
+        assert_eq!(url.as_deref(), Some("https://example.org/"));
         assert!(!text.contains("example.org"));
     }
 
@@ -310,8 +399,74 @@ mod tests {
         let text = "%URL%\nhttps://example.org/\n\n%URL%\nhttps://other.example/\n\n";
         let (text, url) = take_url(text);
 
-        assert_eq!(url, Some("https://example.org/"));
+        assert_eq!(url.as_deref(), Some("https://example.org/"));
         assert!(text.contains("https://other.example/"), "{text:?}");
+    }
+
+    /// The `%PACKAGER%` value every locally built package carries when its builder set none.
+    ///
+    /// `alpm_types::Packager` refuses it for want of an `<email>`, and both parsers convert
+    /// every section or none, so without the substitution this whole `desc` is unreadable.
+    #[test]
+    fn makepkgs_default_packager_is_substituted_and_the_desc_parses() {
+        let source =
+            MINIMAL_DESC_V1.replace("Foobar McFooface <foobar@mcfooface.org>", UNKNOWN_PACKAGER);
+        let (text, taken) = take_fields(&source);
+
+        assert!(taken.packager.is_unknown());
+        assert_eq!(taken.packager.raw(), Some(UNKNOWN_PACKAGER));
+        assert_eq!(
+            DescView::new(&parse(&text), &taken).name().as_ref(),
+            "foo",
+            "the substitution is what lets every other section through"
+        );
+    }
+
+    /// The substitution is deliberately the only one. Any other value `Packager` refuses is a
+    /// defect in that file, not a documented default, and must still fail loudly.
+    #[test]
+    fn no_other_unparsable_packager_is_accepted() {
+        for value in ["Jane Doe", "Unknown Packager!", "unknown packager", "Unknown  Packager"] {
+            let source = MINIMAL_DESC_V1.replace("Foobar McFooface <foobar@mcfooface.org>", value);
+            let (text, taken) = take_fields(&source);
+
+            assert!(!taken.packager.is_unknown(), "{value:?}");
+            assert_eq!(taken.packager.raw(), Some(value));
+            assert!(
+                DbDescFile::from_str_with_schema(&text, None).is_err(),
+                "{value:?} must still fail the parse"
+            );
+        }
+    }
+
+    /// `%PACKAGER%` is mandatory *and* rejected when empty, so it is substituted rather than
+    /// blanked. This is the measurement that decided the difference from `%URL%`.
+    #[test]
+    fn an_empty_packager_is_not_a_way_to_pass() {
+        let source = MINIMAL_DESC_V1.replace("Foobar McFooface <foobar@mcfooface.org>", "");
+        assert!(DbDescFile::from_str_with_schema(&source, None).is_err());
+    }
+
+    #[test]
+    fn take_fields_borrows_when_the_packager_parses_as_it_stands() {
+        let text = "%NAME%\nfoo\n\n%PACKAGER%\nJane Doe <jane@example.org>\n\n";
+        let (kept, taken) = take_fields(text);
+
+        assert!(matches!(kept, Cow::Borrowed(_)), "no copy for a packager nothing refuses");
+        assert!(!taken.packager.is_unknown());
+    }
+
+    /// Only the first `%PACKAGER%` is substituted, for the reason the `%URL%` case gives:
+    /// swallowing the duplicate would turn a malformed file into a silent one.
+    #[test]
+    fn take_fields_leaves_a_second_packager_section_alone() {
+        let source =
+            format!("%PACKAGER%\n{UNKNOWN_PACKAGER}\n\n%PACKAGER%\n{UNKNOWN_PACKAGER}\n\n");
+        let (text, taken) = take_fields(&source);
+
+        assert!(taken.packager.is_unknown());
+        assert_eq!(text.matches(UNKNOWN_PACKAGER_SUBSTITUTE).count(), 1, "{text:?}");
+        assert!(text.contains(&format!("%PACKAGER%\n{UNKNOWN_PACKAGER}\n")), "{text:?}");
     }
 
     /// Without a blank line between them, the header itself must still end the skip.
