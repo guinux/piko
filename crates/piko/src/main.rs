@@ -267,7 +267,17 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 Some(cache) => cache,
                 None => &NoCache,
             };
-            cmd::plan::plan(&local, &opened, ignores, targets, mode, format, cache, &mut out)
+            cmd::plan::plan(
+                &local,
+                &opened,
+                ignores,
+                targets,
+                mode,
+                format,
+                cache,
+                &parsed.options.architecture,
+                &mut out,
+            )
         }
         Command::Why { package } => cmd::why::why(&open_local_db(cli, &config)?, package, &mut out),
         Command::Install {
@@ -522,8 +532,11 @@ fn sync(
         cmd::txn::InstallOptions {
             as_deps: args.as_deps,
             overwrite: args.overwrite.to_vec(),
-            gpg_dir: signing.0,
-            sig_level: signing.1,
+            gpg_dir: signing.gpg_dir,
+            sig_level: signing.sig_level,
+            local_file_sig_level: signing.local_file_sig_level,
+            remote_file_sig_level: signing.remote_file_sig_level,
+            architecture: parsed.options.architecture.clone(),
             side_effects: cmd::txn::SideEffects {
                 scriptlets: !args.noscriptlet,
                 hook_dirs: hook_dirs(cli, config, args.hookdir, args.root),

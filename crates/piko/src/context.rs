@@ -87,27 +87,57 @@ pub fn cache_dirs(config: &ConfigCache, cli: &Cli) -> Vec<PathBuf> {
     dirs
 }
 
-/// Resolves the keyring directory and the fallback `SigLevel` packages this transaction
-/// installs are held to.
+/// The keyring directory, and the three `SigLevel` directives a transaction can hold a
+/// package to.
 ///
-/// Returns plain `SigLevel`, not `LocalFileSigLevel`. The latter is pacman's directive for
-/// `pacman -U <path>`, a local file named directly on the command line, which piko has no
-/// mode for yet. Every `piko install`/`update` target is resolved through a configured
-/// repository, so the directive that actually applies is that repository's own `SigLevel`
-/// (`piko_db::config::RepositoryConfig::sig_level`). `cmd::txn::install` resolves that
-/// per-package and feeds it to `Transaction::policy_overrides`. What this function returns is
-/// only the fallback, for the defensive case of a candidate whose repository could not be
-/// resolved.
+/// Which one applies is decided per package, not per transaction, because pacman decides it
+/// per package. See [`signing_policy`].
+#[derive(Clone, Debug)]
+pub struct SigningPolicy {
+    /// `GPGDir`: where the keyring lives.
+    pub gpg_dir: PathBuf,
+    /// `SigLevel`: the fallback for a package whose repository could not be resolved.
+    pub sig_level: piko_db::config::SigLevel,
+    /// `LocalFileSigLevel`: for a package file named by path on the command line.
+    pub local_file_sig_level: piko_db::config::SigLevel,
+    /// `RemoteFileSigLevel`: for a package file named by URL on the command line.
+    pub remote_file_sig_level: piko_db::config::SigLevel,
+}
+
+/// Resolves the keyring directory and every `SigLevel` a transaction may need.
+///
+/// Three directives, three kinds of target, and pacman picks between them by how the target
+/// was written:
+///
+/// - A package resolved through a repository is held to *that repository's* own `SigLevel`
+///   (`piko_db::config::RepositoryConfig::effective_sig_level`). `cmd::txn::install` resolves
+///   it per candidate and feeds it to `Transaction::policy_overrides`.
+///   [`SigningPolicy::sig_level`] is only the fallback, for a candidate whose repository could
+///   not be resolved.
+/// - A package file named by path is held to `LocalFileSigLevel`.
+/// - A package file named by URL is held to `RemoteFileSigLevel`.
+///
+/// The split between the last two is `pacman -U`'s: `upgrade.c` partitions its targets on
+/// `strstr(i->data, "://")` and loads each half under its own directive. `piko_txn::classify`
+/// makes the same split.
 ///
 /// A config that cannot be read falls back to verifying nothing, which is the same fallback
 /// every other setting here takes. That is the weak direction, and it is stated plainly in
 /// `piko install`'s output rather than left implicit.
-pub fn signing_policy(cli: &Cli, config: &ConfigCache) -> (PathBuf, piko_db::config::SigLevel) {
+pub fn signing_policy(cli: &Cli, config: &ConfigCache) -> SigningPolicy {
     match config.get(cli) {
-        Ok(parsed) => (parsed.options.gpg_dir.clone(), parsed.options.sig_level),
-        Err(_) => {
-            (PathBuf::from(piko_db::config::DEFAULT_GPG_DIR), piko_db::config::SigLevel::default())
-        }
+        Ok(parsed) => SigningPolicy {
+            gpg_dir: parsed.options.gpg_dir.clone(),
+            sig_level: parsed.options.sig_level,
+            local_file_sig_level: parsed.options.local_file_sig_level,
+            remote_file_sig_level: parsed.options.remote_file_sig_level,
+        },
+        Err(_) => SigningPolicy {
+            gpg_dir: PathBuf::from(piko_db::config::DEFAULT_GPG_DIR),
+            sig_level: piko_db::config::SigLevel::default(),
+            local_file_sig_level: piko_db::config::SigLevel::default(),
+            remote_file_sig_level: piko_db::config::SigLevel::default(),
+        },
     }
 }
 

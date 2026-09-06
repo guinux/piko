@@ -413,6 +413,92 @@ pub fn open(location: &Location) -> Result<std::fs::File> {
     Ok(file)
 }
 
+/// Serves the package files named on the command line, and delegates everything else.
+///
+/// A `pacman -U` target is not in any cache directory and has no repository to download from.
+/// It is addressed the same way every other package is — by
+/// [`PackageFileName`](alpm_types::PackageFileName), built from its own `.PKGINFO` — and this
+/// source is what turns that name back into the path the user typed.
+///
+/// # Why a wrapper rather than a step in `Transaction`
+///
+/// Everything downstream of [`PackageSource::locate`] works on a path: signature checking,
+/// the archive walk, conflict detection, extraction. Making a file target a *source* rather
+/// than a second kind of step means none of that has to learn about it, and means a file
+/// target cannot accidentally take a shorter route through verification than a downloaded
+/// package does.
+///
+/// A named file wins over a cached or downloadable package of the same name. That is the same
+/// precedence [`piko_db::solve::UniverseOptions::files`] gives it when solving, and it must be
+/// the same in both places: a plan that chose the file and a source that served the cache
+/// copy would install something the user was never shown.
+#[derive(Debug)]
+pub struct FileSource {
+    files: HashMap<String, PathBuf>,
+    inner: Box<dyn PackageSource>,
+}
+
+impl FileSource {
+    /// Wraps `inner`, serving `files` — keyed by the name each one is addressed by — ahead of
+    /// it.
+    #[must_use]
+    pub fn new(files: HashMap<String, PathBuf>, inner: Box<dyn PackageSource>) -> Self {
+        Self { files, inner }
+    }
+}
+
+impl PackageSource for FileSource {
+    fn locate(&self, file_name: &PackageFileName) -> Result<Location> {
+        let Some(path) = self.files.get(&file_name.to_string()) else {
+            return self.inner.locate(file_name);
+        };
+        // Stat'ed rather than trusted. The file was read once at planning time and can have
+        // been replaced since, exactly as a cache entry can — see `Location`.
+        let metadata = std::fs::metadata(path)
+            .map_err(|source| Error::io(path, IoAction::Metadata, source))?;
+        if !metadata.is_file() {
+            return Err(Error::UnusableSource {
+                path: path.clone(),
+                reason: "not a regular file".to_owned(),
+            });
+        }
+        Ok(Location { path: path.clone(), size: metadata.len(), skipped: Vec::new() })
+    }
+
+    fn contains(&self, file_name: &PackageFileName) -> bool {
+        self.files.contains_key(&file_name.to_string()) || self.inner.contains(file_name)
+    }
+
+    /// Fetches only what this source does not already hold.
+    ///
+    /// A file named on the command line is never downloaded. Passing its name through would
+    /// send `DownloadingSource` looking for a repository it has no target for — harmless, but
+    /// it would report a download that is not going to happen.
+    fn prefetch(&self, file_names: &[PackageFileName]) -> Result<()> {
+        let remaining: Vec<PackageFileName> = file_names
+            .iter()
+            .filter(|file_name| !self.files.contains_key(&file_name.to_string()))
+            .cloned()
+            .collect();
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        self.inner.prefetch(&remaining)
+    }
+}
+
+/// A file already on disk contributes nothing to a plan's download size.
+///
+/// [`piko_db::solve::Solvable::download_size`] already answers `None` for a file candidate, so
+/// this is never the reason a file counts zero. It exists so that a caller which wraps its
+/// cache in a `FileSource` and passes the result as the size oracle gets a consistent answer
+/// either way.
+impl piko_db::solve::PackageCache for FileSource {
+    fn is_cached(&self, file_name: &PackageFileName) -> bool {
+        self.contains(file_name)
+    }
+}
+
 /// Where one package file can be downloaded from, and under what policy.
 #[derive(Clone, Debug)]
 pub struct DownloadTarget {
@@ -612,6 +698,58 @@ mod tests {
     use super::*;
 
     const PACKAGE: &str = "foo-1.0.0-1-x86_64.pkg.tar.zst";
+
+    /// A named file wins over a copy of the same package in a cache directory.
+    ///
+    /// The plan chose the file, so the source has to serve the file. If the two ever
+    /// disagreed, `piko install ./foo.pkg.tar.zst` would install the cached build while
+    /// showing the user the one they named.
+    #[test]
+    fn a_named_file_wins_over_a_cache_copy_of_the_same_package() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(cache_dir.path().join(PACKAGE), b"the cached build").unwrap();
+        let named = elsewhere.path().join("renamed-on-disk.pkg.tar.zst");
+        std::fs::write(&named, b"the build the user named").unwrap();
+
+        let inner = CacheDirSource::new([cache_dir.path().to_path_buf()]).unwrap();
+        let source =
+            FileSource::new(HashMap::from([(PACKAGE.to_owned(), named.clone())]), Box::new(inner));
+
+        let located = source.locate(&file_name()).unwrap();
+        assert_eq!(located.path(), named);
+        assert!(source.contains(&file_name()));
+    }
+
+    /// Anything not named falls through unchanged, so wrapping a source costs nothing when no
+    /// file was named.
+    #[test]
+    fn an_unnamed_package_falls_through_to_the_inner_source() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        std::fs::write(cache_dir.path().join(PACKAGE), b"the cached build").unwrap();
+
+        let inner = CacheDirSource::new([cache_dir.path().to_path_buf()]).unwrap();
+        let source = FileSource::new(HashMap::new(), Box::new(inner));
+
+        assert_eq!(source.locate(&file_name()).unwrap().path(), cache_dir.path().join(PACKAGE));
+    }
+
+    /// A named file that has since been deleted is reported against its own path, not as a
+    /// cache miss listing directories the user never mentioned.
+    #[test]
+    fn a_named_file_that_vanished_is_reported_against_its_own_path() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let inner = CacheDirSource::new([cache_dir.path().to_path_buf()]).unwrap();
+        let gone = cache_dir.path().join("gone.pkg.tar.zst");
+        let source =
+            FileSource::new(HashMap::from([(PACKAGE.to_owned(), gone.clone())]), Box::new(inner));
+
+        let error = source.locate(&file_name()).unwrap_err();
+        let Error::Io { path, .. } = &error else {
+            panic!("expected an I/O error naming the file, got {error:?}");
+        };
+        assert_eq!(path, &gone);
+    }
 
     /// Sets `path`'s mode, so a test can build a directory the selection must pass over.
     fn chmod(path: &Path, mode: u32) {

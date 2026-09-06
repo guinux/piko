@@ -137,12 +137,71 @@ fn print_divergences(universe: &Universe<'_>, built: &Plan) {
     }
 }
 
+/// Splits `targets` into names to resolve and package files to read.
+///
+/// The same classification `piko install` uses (`piko_txn::classify`), minus the one thing a
+/// preview must not do: fetching a URL. `piko plan` reads nothing but what is already here.
+///
+/// # Errors
+///
+/// Returns the [`ExitCode`] to exit with, having reported the failure.
+fn read_file_targets(
+    targets: &[String],
+    architecture: &[alpm_types::Architecture],
+) -> Result<(Vec<String>, Vec<piko_txn::FileTarget>), ExitCode> {
+    let limits = piko_txn::extract::PackageLimits::default();
+    // A preview verifies nothing, so the policy it loads a file under is never consulted.
+    // `SigLevel::default()` names that plainly rather than picking a directive that would
+    // suggest otherwise.
+    let policy = piko_sig::Policy::for_package(piko_db::config::SigLevel::default());
+
+    let mut names = Vec::new();
+    let mut files = Vec::new();
+    for target in targets {
+        match piko_txn::classify(target) {
+            piko_txn::TargetKind::Name(name) => names.push(name),
+            piko_txn::TargetKind::File(path) => {
+                match piko_txn::file_target::load(&path, policy, &limits) {
+                    Ok(loaded) => files.push(loaded),
+                    Err(error) => {
+                        report(&error);
+                        return Err(ExitCode::FAILURE);
+                    }
+                }
+            }
+            piko_txn::TargetKind::Url(url) => {
+                eprintln!(
+                    "piko: error: cannot plan {url}: previewing a package URL would have to \
+                     download it; use `piko install` instead"
+                );
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    }
+    // The same two refusals `piko install` makes, in the same order. A preview that plans
+    // what the install would refuse is worse than no preview: it is a wrong answer.
+    if let Err(error) = piko_txn::file_target::check_duplicates(&files) {
+        report(&error);
+        return Err(ExitCode::FAILURE);
+    }
+    if let Err(error) = piko_txn::file_target::check_architecture(&files, architecture) {
+        report(&error);
+        return Err(ExitCode::FAILURE);
+    }
+    Ok((names, files))
+}
+
 /// Plans a transaction over `targets`, printing what would change.
 ///
 /// `cache` decides only what the download size reports, not what the plan does. It is the
 /// caller's `CacheDir` list, not [`NoCache`](piko_db::solve::NoCache), so `piko plan foo` and
 /// `piko install foo` report the same number for the same plan. This parameter exists to
 /// prevent the two commands from disagreeing.
+///
+/// A target naming a package **file** is read and planned exactly as `piko install` reads it,
+/// so this previews a `pacman -U` too. A target naming a **URL** is refused instead: previewing
+/// it would mean downloading it, and a command whose whole purpose is to change nothing must
+/// not reach the network.
 #[allow(
     clippy::too_many_arguments,
     reason = "each parameter names one concern the caller must decide, the same justification \
@@ -156,13 +215,26 @@ pub fn plan(
     mode: Mode<'_>,
     format: Format,
     cache: &dyn PackageCache,
+    architecture: &[alpm_types::Architecture],
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let limits = Limits::default();
+    // Not in `-R` mode: a removal names installed packages, so every target there is a name
+    // and a path-shaped one is a mistake to report as "not installed" rather than to open.
+    let (names, files) = if matches!(mode, Mode::Remove { .. }) {
+        (targets.to_vec(), Vec::new())
+    } else {
+        match read_file_targets(targets, architecture) {
+            Ok(split) => split,
+            Err(code) => return code,
+        }
+    };
+    let file_candidates: Vec<&piko_db::solve::FilePackage> =
+        files.iter().map(piko_txn::FileTarget::candidate).collect();
     let universe = match Universe::build(
         local,
         repos.iter().map(|(usage, db)| (*usage, db)),
-        UniverseOptions::new().ignores(ignores).limits(limits),
+        UniverseOptions::new().ignores(ignores).limits(limits).files(&file_candidates),
     ) {
         Ok(universe) => universe,
         Err(error) => {
@@ -203,13 +275,23 @@ pub fn plan(
     }
 
     let request = Request::new().needed(matches!(mode, Mode::Install { needed: true, .. }));
-    let mut request = match resolve_targets(&universe, request, targets) {
+    let mut request = match resolve_targets(&universe, request, &names) {
         Ok(request) => request,
         Err(failure) => {
             report_target_resolution_failure(&failure);
             return ExitCode::FAILURE;
         }
     };
+    // Targeted by id, for the reason `cmd::txn::install` gives: a name would find whichever
+    // candidate the universe prefers rather than the file that was named.
+    let file_ids = universe.file_candidates();
+    if file_ids.len() != files.len() {
+        eprintln!("piko: internal error: the universe lost a package file candidate");
+        return ExitCode::FAILURE;
+    }
+    for id in file_ids {
+        request = request.target(id);
+    }
 
     // `-Su`: everything the repositories have moved on from becomes a target too. Each
     // `%REPLACES%` pair becomes a target plus the removal it displaces.

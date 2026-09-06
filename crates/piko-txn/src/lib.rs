@@ -13,6 +13,7 @@ pub mod conflict;
 pub mod error;
 pub mod exec;
 pub mod extract;
+pub mod file_target;
 pub mod hash;
 pub mod history;
 pub mod hook;
@@ -26,11 +27,13 @@ pub mod remove;
 pub mod rootfs;
 pub mod scriptlet;
 pub mod source;
+pub mod target;
 pub mod transaction;
 
 pub use conflict::{Blocker, Check, FileConflict, filelist::FileList};
 pub use error::{Error, Result};
 pub use extract::{BackupAction, Disposition, EntryContext};
+pub use file_target::FileTarget;
 pub use history::{Action, LocalOffset, Recording};
 pub use install::{Extraction, Filters, install};
 pub use plan::{
@@ -39,7 +42,8 @@ pub use plan::{
 pub use remove::{RemovalContext, RemovalDisposition, decide_removal, pacsave_rotation};
 pub use rootfs::{Resolved, RootDir, UnsafePath};
 pub use source::{
-    CacheDirSource, DownloadDir, DownloadTarget, DownloadingSource, Location, PackageSource,
-    RejectedCacheDir, RejectionReason, Skipped, select_download_dir,
+    CacheDirSource, DownloadDir, DownloadTarget, DownloadingSource, FileSource, Location,
+    PackageSource, RejectedCacheDir, RejectionReason, Skipped, select_download_dir,
 };
+pub use target::{TargetKind, classify};
 pub use transaction::{Patterns, Report, Step, Transaction};

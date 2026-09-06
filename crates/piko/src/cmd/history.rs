@@ -489,8 +489,18 @@ mod tests {
         assert_eq!(Widths::over(&records, &options).name, "foo".len());
     }
 
-    /// Both sides of a version change are shown. Styling is off in a captured buffer, so the
-    /// text is exactly what a piped `piko history` prints.
+    /// The text `versions` lays out, with any styling removed.
+    ///
+    /// A test harness captures `print!`, never file descriptor 1. So `console`, which decides
+    /// on color by testing whether that descriptor is a terminal, styles its output here
+    /// whenever the suite is run from one — and a styled version splits around an escape.
+    /// The subject of these two tests is the text. Which color each kind carries is
+    /// `ChangeKind`'s to test.
+    fn plain(action: &Action, kind: ChangeKind) -> String {
+        console::strip_ansi_codes(&versions(action, kind)).into_owned()
+    }
+
+    /// Both sides of a version change are shown.
     #[test]
     fn a_changed_version_shows_both_sides() {
         let action = Action::Upgraded {
@@ -498,11 +508,11 @@ mod tests {
             from: "1.0.0-1".to_owned(),
             to: "1.1.0-1".to_owned(),
         };
-        assert_eq!(versions(&action, ChangeKind::Upgrade), "1.0.0-1 -> 1.1.0-1");
+        assert_eq!(plain(&action, ChangeKind::Upgrade), "1.0.0-1 -> 1.1.0-1");
     }
 
     #[test]
     fn an_unchanged_version_shows_once() {
-        assert_eq!(versions(&installed("foo"), ChangeKind::Install), "1.0.0-1");
+        assert_eq!(plain(&installed("foo"), ChangeKind::Install), "1.0.0-1");
     }
 }

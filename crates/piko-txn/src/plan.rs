@@ -78,11 +78,20 @@ fn reason_for(
     }
 }
 
-/// The cache file name a repository candidate is installed from.
+/// The name a candidate's package file is addressed by.
+///
+/// For a repository candidate that is `%FILENAME%`, the name it is cached and downloaded
+/// under. For a package file named on the command line there is no `desc` to ask, so the name
+/// is rebuilt from the file's own `.PKGINFO` — the same rendering
+/// [`crate::file_target::load`] produced, so [`crate::source::FileSource`] finds the path
+/// again.
 fn file_name_of(universe: &Universe<'_>, id: SolvableId) -> Result<PackageFileName> {
     let Some(candidate) = universe.get(id) else {
         return Err(Error::PlanInconsistent { id });
     };
+    if let Some(file) = candidate.as_file() {
+        return Ok(file.file_name().clone());
+    }
     let Some(repo_package) = candidate.as_repository() else {
         // `Plan::assemble` only emits `Install`/`Change` for a candidate that is not already
         // the installed copy (`universe.rs`'s `incoming` filter). So this is unreachable unless
@@ -174,8 +183,8 @@ pub fn download_targets(
 /// each candidate's own repository policy, plus the per-file overrides `Transaction` should
 /// apply instead of the fallback wherever one is known.
 ///
-/// A keyring is opened when *either* the fallback or some repository's policy asks for
-/// checking, never only the fallback. A global `SigLevel = Never` with one repository
+/// A keyring is opened when *any* of the fallback, a repository's policy, or a file target's
+/// policy asks for checking — never only the fallback. A global `SigLevel = Never` with one repository
 /// overriding to `PackageRequired` must still verify that repository's packages, so looking at
 /// the fallback alone would silently skip it. A policy that asks for nothing anywhere needs no
 /// keyring at all, so a system without one still works. But the moment anything *does* ask, an
@@ -189,10 +198,17 @@ pub fn verification_from(
     gpg_dir: &Path,
     fallback_sig_level: piko_db::config::SigLevel,
     package_targets: &HashMap<String, DownloadTarget>,
+    file_targets: &[crate::FileTarget],
 ) -> Result<(Verification, HashMap<String, Policy>)> {
     let fallback = Policy::for_package(fallback_sig_level);
-    let policy_overrides: HashMap<String, Policy> =
+    let mut policy_overrides: HashMap<String, Policy> =
         package_targets.iter().map(|(name, target)| (name.clone(), target.policy)).collect();
+    // After the repository policies, and deliberately: a file named on the command line is
+    // governed by `LocalFileSigLevel`/`RemoteFileSigLevel` even when a repository happens to
+    // carry a package of the same name, because it is not that package.
+    for target in file_targets {
+        policy_overrides.insert(target.file_name().to_string(), target.policy());
+    }
 
     let needs_keyring = fallback.check || policy_overrides.values().any(|policy| policy.check);
     if !needs_keyring {

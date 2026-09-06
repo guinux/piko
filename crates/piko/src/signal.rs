@@ -18,10 +18,13 @@
 //!   its confirmation prompt in `PromptMode::during_prompt`, so Ctrl+C kills the process
 //!   immediately right there even though the same handler stays installed for the refresh
 //!   that already ran and the download phase that follows if the prompt is accepted.
-//! - `cmd::txn::install` installs its own handler only when `InstallOptions::pre_cancel` is
-//!   `None` (a plain `install`, or `update --norefresh`), right after its confirmation gate
-//!   passes — so nothing is installed yet while that prompt is up, and Ctrl+C already kills
-//!   the process by the OS's default disposition.
+//! - `cmd::txn::install` installs one before it fetches a package named by URL, because that
+//!   download necessarily precedes the plan and therefore the prompt. It then brackets the
+//!   prompt in `PromptMode::during_prompt` through the same `pre_cancel` slot, so Ctrl+C there
+//!   still kills the process on the first press.
+//! - Failing all of the above, `cmd::txn::install` installs its own handler right after its
+//!   confirmation gate passes — so nothing is installed yet while that prompt is up, and
+//!   Ctrl+C already kills the process by the OS's default disposition.
 
 /// Whether the installed `SIGINT` handler kills the process on the very first press, instead
 /// of requesting a graceful stop that only a second press escalates.

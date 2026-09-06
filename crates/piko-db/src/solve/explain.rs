@@ -194,6 +194,7 @@ fn describe(universe: &Universe<'_>, id: SolvableId) -> String {
                 crate::solve::Origin::Repository(index) => universe
                     .repository_name(index)
                     .map_or_else(|| "?".to_owned(), ToString::to_string),
+                crate::solve::Origin::File(_) => "file".to_owned(),
             };
             format!("{} {} ({origin})", solvable.name(), solvable.version())
         },

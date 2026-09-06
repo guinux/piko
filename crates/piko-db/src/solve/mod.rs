@@ -14,6 +14,7 @@ mod cache;
 mod clause;
 mod encode;
 mod explain;
+mod file;
 mod plan;
 mod removal;
 mod solver;
@@ -28,6 +29,7 @@ pub use encode::{
     resolve_targets, solve_with_removals, sysupgrade,
 };
 pub use explain::{Derivation, Fact};
+pub use file::FilePackage;
 pub use plan::{Change, Plan, PlanDiagnostic, Step};
 pub use removal::{RemovalFailure, RemovalOptions, plan_removal, removal_names};
 pub use solver::{Outcome, Solution, Solver, Unsatisfiable, core_kinds};

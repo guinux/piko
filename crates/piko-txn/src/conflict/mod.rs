@@ -902,6 +902,58 @@ pub fn load_package(
     })
 }
 
+/// Reads only a package archive's `.PKGINFO`, stopping as soon as it has it.
+///
+/// [`load_package`] answers what a *transaction* needs: the member list, the scriptlet, the
+/// `%BACKUP%` lines. Planning needs none of that. It needs the name, version and relations of
+/// a package file named on the command line, so that the solver can treat it as a candidate —
+/// and it needs them before the user has confirmed anything.
+///
+/// The archive is read a second time later, by [`load_package`] inside
+/// [`crate::Transaction::verify`]. That is deliberate: verification must read the bytes it is
+/// about to install, not trust a view taken earlier from a file that may since have changed.
+/// This one stops at `.PKGINFO`, so the duplicated cost is a few kilobytes rather than a
+/// second full decompression.
+///
+/// # Errors
+///
+/// [`crate::Error::UnusableSource`] if the archive has no readable `.PKGINFO`, or one that
+/// `alpm-pkginfo` refuses; otherwise [`crate::Error`] if the archive cannot be read.
+pub fn load_pkginfo(
+    package: &Path,
+    limits: &crate::extract::PackageLimits,
+) -> Result<(alpm_pkginfo::PackageInfo, String)> {
+    let mut pkginfo: Option<String> = None;
+
+    crate::extract::archive::walk_until(package, limits, |member, contents| {
+        if member.kind != crate::extract::archive::MemberKind::Metadata
+            || member.path != Path::new(".PKGINFO")
+        {
+            return Ok(crate::extract::archive::Flow::Continue);
+        }
+        let mut text = String::new();
+        // A `.PKGINFO` that is not valid UTF-8 leaves nothing to parse. It is reported below
+        // as the absence it amounts to.
+        let mut limited = std::io::Read::take(contents, MAX_PKGINFO_BYTES);
+        if std::io::Read::read_to_string(&mut limited, &mut text).is_ok() {
+            pkginfo = Some(text);
+        }
+        Ok(crate::extract::archive::Flow::Stop)
+    })?;
+
+    let Some(raw) = pkginfo else {
+        return Err(crate::Error::UnusableSource {
+            path: package.to_path_buf(),
+            reason: "the package has no readable .PKGINFO".to_owned(),
+        });
+    };
+    let info = crate::pkginfo::parse(&raw).map_err(|error| crate::Error::UnusableSource {
+        path: package.to_path_buf(),
+        reason: format!("its .PKGINFO is unreadable: {error}"),
+    })?;
+    Ok((info, raw))
+}
+
 /// Largest `.PKGINFO` this reads. It is a few kilobytes in practice.
 const MAX_PKGINFO_BYTES: u64 = 4 * 1024 * 1024;
 

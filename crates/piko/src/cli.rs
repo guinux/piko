@@ -310,8 +310,11 @@ pub enum Command {
     /// would fail — a first-choice provider that turns out to conflict — the solver backs out
     /// and reports that it did, rather than giving up.
     Plan {
-        /// The package(s) to plan for, each a dependency string (`foo`, `foo>=1.0`).
-        /// May be empty with `--sysupgrade`.
+        /// The package(s) to plan for: a dependency string (`foo`, `foo>=1.0`), or a path to
+        /// a package file. May be empty with `--sysupgrade`.
+        ///
+        /// A package URL is refused here, since previewing one would have to download it. Use
+        /// `piko install` for that.
         targets: Vec<String>,
 
         /// Skip a target whose installed version is already the one that would be installed.
@@ -360,11 +363,12 @@ pub enum Command {
 
     /// Install one or more packages.
     ///
-    /// Resolves every target through the configured repositories exactly as `piko plan` does:
-    /// a literal name or dependency string (`foo`, `foo>=1.0`) first, then a `%GROUPS%`
-    /// member expansion. It then plans the full transitive closure of dependencies,
-    /// conflicts, and replacements before installing any of it. `piko install foo` is
-    /// `piko plan foo` turned into a transaction.
+    /// Resolves a target naming a package exactly as `piko plan` does: through the configured
+    /// repositories, a literal name or dependency string (`foo`, `foo>=1.0`) first, then a
+    /// `%GROUPS%` member expansion. A target naming a package file is read from that file. It
+    /// then plans the full transitive closure of dependencies, conflicts, and replacements
+    /// before installing any of it. `piko install foo` is `piko plan foo` turned into a
+    /// transaction.
     ///
     /// A package already in a cache directory is used as-is. A missing one is downloaded from
     /// its own repository's configured servers, verified, and cached before installing. This
@@ -374,15 +378,26 @@ pub enum Command {
     /// `--config`), falling back to `/` with a warning if that cannot be read.
     ///
     /// Package signatures are checked according to the `SigLevel` of the repository each
-    /// package was resolved from. By default, an unsigned package is allowed and a signed one
-    /// must be trusted.
+    /// package was resolved from. A package file named by path is held to `LocalFileSigLevel`
+    /// instead, and one named by URL to `RemoteFileSigLevel`. By default, an unsigned package
+    /// is allowed and a signed one must be trusted.
+    ///
+    /// A named package file is `pacman -U`. Its own dependencies are still resolved from the
+    /// configured repositories, and it takes precedence over any repository build of the same
+    /// package. A URL is downloaded before the plan is shown, so `piko install <url>` reaches
+    /// the network before it asks for confirmation.
     #[command(visible_alias = "in")]
     Install {
         /// Where to install. Use `/` for the running system.
         #[arg(long)]
         root: Option<PathBuf>,
-        /// The package(s) to install, each a dependency string (`foo`, `foo>=1.0`) or a
-        /// `%GROUPS%` group name.
+        /// The package(s) to install: a dependency string (`foo`, `foo>=1.0`), a `%GROUPS%`
+        /// group name, a path to a package file, or its URL.
+        ///
+        /// A target is read as a package file when it contains `://` (a URL), when it
+        /// contains `/` (a path), or when it ends in `.pkg.tar[.gz|.bz2|.xz|.zst]` and names a
+        /// file that exists here. Anything else is a name. Write `./foo.pkg.tar.zst` to say
+        /// "the file" where both readings are possible.
         #[arg(required = true)]
         packages: Vec<String>,
         /// Record the named packages as dependencies rather than explicitly installed.

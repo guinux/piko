@@ -369,6 +369,55 @@ pub enum Error {
         reason: String,
     },
 
+    /// A package file was built for an architecture this machine is not configured to run.
+    ///
+    /// libalpm's `check_arch` (`trans.c:69`), which applies to every package a transaction
+    /// adds. It has nothing to say about a repository package — a `Server` URL names the
+    /// architecture it serves — so piko raises it only for a file named on the command line.
+    #[error(
+        "not built for {}: {}",
+        configured.join(" or "),
+        packages.join(", ")
+    )]
+    WrongArchitecture {
+        /// Each refused package, spelled `name (architecture)`.
+        packages: Vec<String>,
+        /// Every architecture `pacman.conf` configures.
+        configured: Vec<String>,
+    },
+
+    /// Two command-line targets name the same package.
+    ///
+    /// `ALPM_ERR_TRANS_DUP_TARGET` (`add.c:49`) and `ALPM_ERR_TRANS_DUP_FILENAME`
+    /// (`sync.c:470`), which are one question for a file target: its package name and its
+    /// file name are the same string.
+    #[error(
+        "{package} is named twice: {} and {}",
+        first.display(),
+        second.display()
+    )]
+    DuplicateTarget {
+        /// The package file name both targets render.
+        package: String,
+        /// The first path that named it.
+        first: PathBuf,
+        /// The second.
+        second: PathBuf,
+    },
+
+    /// A package URL cannot be turned into a download.
+    ///
+    /// piko fetches a URL through the same request a repository package uses, which addresses
+    /// a file by an `alpm_types::PackageFileName` under a server. A URL whose last component
+    /// is not such a name has nothing to fetch.
+    #[error("cannot fetch {url}: {reason}")]
+    InvalidPackageUrl {
+        /// The URL as the user wrote it.
+        url: String,
+        /// Why it cannot be used.
+        reason: String,
+    },
+
     /// The keyring a verification policy needs could not be opened.
     ///
     /// This is raised only when something actually asks for checking — see

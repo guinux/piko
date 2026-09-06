@@ -45,6 +45,7 @@ use crate::{
     depcmp,
     repo::{RepoDatabase, RepoName, RepoPackage},
     resolve::IgnoreList,
+    solve::FilePackage,
 };
 
 /// A dense identifier for one candidate package within a [`Universe`].
@@ -88,6 +89,12 @@ pub enum Origin {
     /// Available from the configured repository at this index, in `pacman.conf` order —
     /// which **is** priority order.
     Repository(usize),
+    /// Read from the package file at this index in
+    /// [`UniverseOptions::files`](crate::solve::UniverseOptions::files).
+    ///
+    /// The index is how a caller gets back from a solved plan to the path it named. Nothing
+    /// else can: a file candidate has no repository to look up and no `%FILENAME%` to match.
+    File(usize),
 }
 
 /// One candidate, resolved from a [`SolvableId`].
@@ -115,6 +122,7 @@ impl<'a> Solvable<'a> {
         match self.source {
             Source::Local { .. } => Origin::Installed,
             Source::Repo { index, .. } => Origin::Repository(index),
+            Source::File { index, .. } => Origin::File(index),
         }
     }
 
@@ -130,6 +138,7 @@ impl<'a> Solvable<'a> {
         match self.source {
             Source::Local { package, .. } => package.name(),
             Source::Repo { package, .. } => package.name(),
+            Source::File { package, .. } => package.name(),
         }
     }
 
@@ -139,6 +148,7 @@ impl<'a> Solvable<'a> {
         match self.source {
             Source::Local { package, .. } => package.version(),
             Source::Repo { package, .. } => package.version(),
+            Source::File { package, .. } => package.version(),
         }
     }
 
@@ -160,6 +170,7 @@ impl<'a> Solvable<'a> {
             Source::Repo { package, .. } => package.depends().map_err(|source| {
                 Error::PlanRepoDependsUnreadable { name: package.name().clone(), source }
             }),
+            Source::File { package, .. } => Ok(package.depends()),
         }
     }
 
@@ -177,7 +188,7 @@ impl<'a> Solvable<'a> {
     pub const fn installed_depends(&self) -> Option<&'a [RelationOrSoname]> {
         match self.source {
             Source::Local { eager, .. } => Some(eager.depends()),
-            Source::Repo { .. } => None,
+            Source::Repo { .. } | Source::File { .. } => None,
         }
     }
 
@@ -187,6 +198,7 @@ impl<'a> Solvable<'a> {
         match self.source {
             Source::Local { eager, .. } => eager.provides(),
             Source::Repo { package, .. } => package.provides(),
+            Source::File { package, .. } => package.provides(),
         }
     }
 
@@ -198,7 +210,7 @@ impl<'a> Solvable<'a> {
     pub fn install_reason(&self) -> Option<alpm_types::PackageInstallReason> {
         match self.source {
             Source::Local { eager, .. } => Some(eager.install_reason()),
-            Source::Repo { .. } => None,
+            Source::Repo { .. } | Source::File { .. } => None,
         }
     }
 
@@ -208,6 +220,7 @@ impl<'a> Solvable<'a> {
         match self.source {
             Source::Local { eager, .. } => eager.groups(),
             Source::Repo { package, .. } => package.groups(),
+            Source::File { package, .. } => package.groups(),
         }
     }
 
@@ -217,6 +230,7 @@ impl<'a> Solvable<'a> {
         match self.source {
             Source::Local { eager, .. } => eager.conflicts(),
             Source::Repo { package, .. } => package.conflicts(),
+            Source::File { package, .. } => package.conflicts(),
         }
     }
 
@@ -226,6 +240,7 @@ impl<'a> Solvable<'a> {
         match self.source {
             Source::Local { eager, .. } => eager.replaces(),
             Source::Repo { package, .. } => package.replaces(),
+            Source::File { package, .. } => package.replaces(),
         }
     }
 
@@ -236,6 +251,7 @@ impl<'a> Solvable<'a> {
         match self.source {
             Source::Local { eager, .. } => eager.installed_size(),
             Source::Repo { package, .. } => package.installed_size(),
+            Source::File { package, .. } => package.installed_size(),
         }
     }
 
@@ -245,7 +261,7 @@ impl<'a> Solvable<'a> {
     #[must_use]
     pub fn download_size(&self) -> Option<u64> {
         match self.source {
-            Source::Local { .. } => None,
+            Source::Local { .. } | Source::File { .. } => None,
             Source::Repo { package, .. } => Some(package.compressed_size()),
         }
     }
@@ -266,7 +282,7 @@ impl<'a> Solvable<'a> {
     pub const fn as_installed(&self) -> Option<&'a LocalPackage> {
         match self.source {
             Source::Local { package, .. } => Some(package),
-            Source::Repo { .. } => None,
+            Source::Repo { .. } | Source::File { .. } => None,
         }
     }
 
@@ -274,8 +290,20 @@ impl<'a> Solvable<'a> {
     #[must_use]
     pub const fn as_repository(&self) -> Option<&'a RepoPackage> {
         match self.source {
-            Source::Local { .. } => None,
+            Source::Local { .. } | Source::File { .. } => None,
             Source::Repo { package, .. } => Some(package),
+        }
+    }
+
+    /// The package file this candidate was read from, or `None` if it came from a database.
+    ///
+    /// This is how a caller gets from a solved step back to the file it named, together with
+    /// [`Origin::File`]'s index.
+    #[must_use]
+    pub const fn as_file(&self) -> Option<&'a FilePackage> {
+        match self.source {
+            Source::Local { .. } | Source::Repo { .. } => None,
+            Source::File { package, .. } => Some(package),
         }
     }
 }
@@ -298,8 +326,20 @@ impl<'a> Solvable<'a> {
 /// the *deferred* parse for all ~15 000 candidates, undoing the reason that split exists.
 #[derive(Clone, Copy, Debug)]
 enum Source<'a> {
-    Local { package: &'a LocalPackage, eager: EagerView<'a> },
-    Repo { index: usize, package: &'a RepoPackage },
+    Local {
+        package: &'a LocalPackage,
+        eager: EagerView<'a>,
+    },
+    Repo {
+        index: usize,
+        package: &'a RepoPackage,
+    },
+    /// A package file named on the command line. Every field is already converted, so no arm
+    /// below is fallible for it.
+    File {
+        index: usize,
+        package: &'a FilePackage,
+    },
 }
 
 /// How a [`Universe`] is built: which repositories count, and what is ignored.
@@ -312,11 +352,17 @@ pub struct UniverseOptions<'a> {
     usage: DbUsage,
     ignores: IgnoreList<'a>,
     limits: Limits,
+    files: &'a [&'a FilePackage],
 }
 
 impl Default for UniverseOptions<'_> {
     fn default() -> Self {
-        Self { usage: DbUsage::INSTALL, ignores: IgnoreList::default(), limits: Limits::default() }
+        Self {
+            usage: DbUsage::INSTALL,
+            ignores: IgnoreList::default(),
+            limits: Limits::default(),
+            files: &[],
+        }
     }
 }
 
@@ -355,6 +401,21 @@ impl<'a> UniverseOptions<'a> {
         self.limits = limits;
         self
     }
+
+    /// Adds package files as candidates, in the order the caller named them.
+    ///
+    /// Each becomes an [`Origin::File`] candidate whose index is its position in `files`.
+    /// They are interned between the installed set and the repositories, so
+    /// [`Universe::candidates_named`] and [`Universe::satisfiers`] prefer a named file over
+    /// any repository copy of the same package — as a target, and as the provider of another
+    /// package's dependency. That is `pacman -U`'s rule: the file named is the file installed.
+    ///
+    /// `IgnorePkg` does not apply to them. It never applies to a package the user named.
+    #[must_use]
+    pub const fn files(mut self, files: &'a [&'a FilePackage]) -> Self {
+        self.files = files;
+        self
+    }
 }
 
 /// Every package a transaction could involve, indexed for solving.
@@ -389,8 +450,9 @@ pub struct Universe<'a> {
 impl<'a> Universe<'a> {
     /// Indexes `local` together with `repos`, given in `pacman.conf` order.
     ///
-    /// Candidates are interned installed-set first, then repository by repository in the
-    /// order given, and within a repository in its own (name-sorted) order.
+    /// Candidates are interned installed-set first, then any package files given through
+    /// [`UniverseOptions::files`], then repository by repository in the order given, and
+    /// within a repository in its own (name-sorted) order.
     /// [`Universe::candidates_named`] returns it unchanged.
     ///
     /// # Errors
@@ -410,7 +472,9 @@ impl<'a> Universe<'a> {
         // an addition rather than an index. A counting bound must fire where it prevents the work.
         let total = admitted
             .iter()
-            .fold(local.len(), |count, (_, repository)| count.saturating_add(repository.len()));
+            .fold(local.len().saturating_add(options.files.len()), |count, (_, repository)| {
+                count.saturating_add(repository.len())
+            });
         if total > options.limits.solve_max_solvables {
             return Err(Error::TooManySolvables { max: options.limits.solve_max_solvables });
         }
@@ -422,6 +486,10 @@ impl<'a> Universe<'a> {
                 source,
             })?;
             sources.push(Source::Local { package, eager });
+        }
+        // Between the installed set and the repositories: see `UniverseOptions::files`.
+        for (index, package) in options.files.iter().enumerate() {
+            sources.push(Source::File { index, package });
         }
         for (index, (_, repository)) in admitted.iter().enumerate() {
             for package in *repository {
@@ -481,9 +549,9 @@ impl<'a> Universe<'a> {
                 self.conflicts_on.entry(conflict.name.as_ref()).or_default().push(id);
             }
 
-            // Only repository candidates. `pacman -S <group>` installs the group's members
-            // from a repository. An installed member is already accounted for by the "must
-            // remain" clause, not by being a target.
+            // Only candidates that are not already installed. `pacman -S <group>` installs
+            // the group's members from a repository. An installed member is already accounted
+            // for by the "must remain" clause, not by being a target.
             if !solvable.is_installed() {
                 for group in solvable.groups() {
                     self.groups.entry(group.as_ref()).or_default().push(id);
@@ -520,6 +588,28 @@ impl<'a> Universe<'a> {
                 .ok()
                 .map(|raw| Solvable { id: SolvableId(raw), source: *source })
         })
+    }
+
+    /// Every package-file candidate, in the order [`UniverseOptions::files`] gave them.
+    ///
+    /// A file target is targeted by id, never by name. Resolving it by name would find
+    /// whichever candidate this universe prefers — the file, by construction, but only for as
+    /// long as that construction holds. An id cannot drift.
+    ///
+    /// Nothing filters a file candidate out, so this is as long as the slice it was built
+    /// from. A caller that compares the two lengths is checking the invariant rather than
+    /// assuming it.
+    #[must_use]
+    pub fn file_candidates(&self) -> Vec<SolvableId> {
+        let mut found: Vec<(usize, SolvableId)> = self
+            .iter()
+            .filter_map(|solvable| match solvable.origin() {
+                Origin::File(index) => Some((index, solvable.id())),
+                Origin::Installed | Origin::Repository(_) => None,
+            })
+            .collect();
+        found.sort_unstable();
+        found.into_iter().map(|(_, id)| id).collect()
     }
 
     /// The `Usage` configured for the repository at `index`.
@@ -701,6 +791,35 @@ mod tests {
         .unwrap()
     }
 
+    /// `universe`, with package files named alongside the databases.
+    fn universe_with_files<'a>(
+        scenario: &'a BuiltScenario,
+        files: &'a [&'a FilePackage],
+    ) -> Universe<'a> {
+        Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new().files(files),
+        )
+        .unwrap()
+    }
+
+    /// A file candidate carrying nothing but an identity, and whatever `provides` is given.
+    fn file(name: &str, version: &str, provides: &[&str]) -> FilePackage {
+        let parsed: Name = name.parse().unwrap();
+        let parsed_version: FullVersion = version.parse().unwrap();
+        FilePackage::new(
+            crate::EntryName::new(&parsed, &parsed_version).unwrap(),
+            format!("{name}-{version}-x86_64.pkg.tar.zst").parse().unwrap(),
+            Vec::new(),
+            provides.iter().map(|text| relation(text)).collect(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            4096,
+        )
+    }
+
     fn relation(text: &str) -> RelationOrSoname {
         text.parse().unwrap()
     }
@@ -740,6 +859,68 @@ mod tests {
         let origins: Vec<_> =
             candidates.iter().map(|id| universe.get(*id).unwrap().origin()).collect();
         assert_eq!(origins, [Origin::Installed, Origin::Repository(0), Origin::Repository(1)]);
+    }
+
+    /// `pacman -U foo.pkg.tar.zst` installs the file, not the repository's build of the same
+    /// package. That is decided by interning order and nothing else, so it is pinned here.
+    #[test]
+    fn a_named_file_outranks_every_repository_copy_of_the_same_package() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("foo", "1.0.0-1"))
+            .repo("core", [PackageSpec::new("foo", "2.0.0-1")])
+            .build();
+        let named = [&file("foo", "3.0.0-1", &[])];
+        let universe = universe_with_files(&scenario, &named);
+
+        let origins: Vec<_> = universe
+            .candidates_named("foo")
+            .iter()
+            .map(|id| universe.get(*id).unwrap().origin())
+            .collect();
+        assert_eq!(origins, [Origin::Installed, Origin::File(0), Origin::Repository(0)]);
+    }
+
+    /// The same precedence when the file is not the target but the provider of someone else's
+    /// dependency. A plan that chose the file as a target and a repository build as a provider
+    /// would install two copies of one package.
+    #[test]
+    fn a_named_file_is_preferred_as_a_provider_too() {
+        let scenario = Scenario::new()
+            .repo("core", [PackageSpec::new("repo-impl", "1.0.0-1").provides(["virtual"])])
+            .build();
+        let named = [&file("file-impl", "1.0.0-1", &["virtual"])];
+        let universe = universe_with_files(&scenario, &named);
+
+        let found = universe.satisfiers(&relation("virtual"));
+        assert_eq!(names(&universe, &found), ["file-impl", "repo-impl"]);
+    }
+
+    /// A file is already on disk, so a plan containing one has nothing to fetch for it. This
+    /// is what keeps the download total honest without the cache oracle having to know about
+    /// package files at all.
+    #[test]
+    fn a_file_candidate_has_no_download_size() {
+        let scenario = Scenario::new().build();
+        let named = [&file("foo", "1.0.0-1", &[])];
+        let universe = universe_with_files(&scenario, &named);
+
+        let candidate = universe.get(universe.file_candidates()[0]).unwrap();
+        assert_eq!(candidate.download_size(), None);
+        assert_eq!(candidate.installed_size(), 4096);
+        assert!(!candidate.is_installed());
+        assert!(candidate.as_repository().is_none());
+        assert!(candidate.as_file().is_some());
+    }
+
+    /// Targeted by id, so the caller needs these back in the order it gave them.
+    #[test]
+    fn file_candidates_come_back_in_the_order_they_were_given() {
+        let scenario = Scenario::new().repo("core", [PackageSpec::new("z", "1.0.0-1")]).build();
+        let named = [&file("zzz", "1.0.0-1", &[]), &file("aaa", "1.0.0-1", &[])];
+        let universe = universe_with_files(&scenario, &named);
+
+        let ids = universe.file_candidates();
+        assert_eq!(names(&universe, &ids), ["zzz", "aaa"]);
     }
 
     #[test]

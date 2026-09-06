@@ -149,6 +149,36 @@ pub fn walk(
     limits: &PackageLimits,
     mut on_member: impl FnMut(&Member, &mut dyn Read) -> Result<()>,
 ) -> Result<()> {
+    walk_until(path, limits, |member, contents| {
+        on_member(member, contents)?;
+        Ok(Flow::Continue)
+    })
+}
+
+/// Whether [`walk_until`] should read the next member or stop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Flow {
+    /// Read the next member.
+    Continue,
+    /// Stop, without an error.
+    Stop,
+}
+
+/// [`walk`], for a caller that can answer its question before the archive ends.
+///
+/// Stopping early skips the decompression of everything after the member that answered. A
+/// `.PKGINFO` sits at the front of a package makepkg built, so a reader that only wants the
+/// metadata pays for a few kilobytes rather than for the whole archive. Every bound
+/// [`walk`] enforces still applies to what was read.
+///
+/// # Errors
+///
+/// As [`walk`].
+pub fn walk_until(
+    path: &Path,
+    limits: &PackageLimits,
+    mut on_member: impl FnMut(&Member, &mut dyn Read) -> Result<Flow>,
+) -> Result<()> {
     let mut file =
         std::fs::File::open(path).map_err(|source| Error::io(path, IoAction::Open, source))?;
 
@@ -197,7 +227,9 @@ pub fn walk(
         }
 
         let member = describe(&entry).map_err(classify)?;
-        on_member(&member, &mut entry)?;
+        if on_member(&member, &mut entry)? == Flow::Stop {
+            break;
+        }
     }
 
     Ok(())

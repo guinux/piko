@@ -23,8 +23,10 @@ use piko_db::solve::{
 use piko_db::{Limits, LocalDatabase};
 use piko_sig::Policy;
 use piko_txn::{
-    CacheDirSource, DownloadingSource, PackageSource, Step, Transaction,
+    CacheDirSource, DownloadingSource, FileSource, FileTarget, PackageSource, Step, TargetKind,
+    Transaction,
     conflict::Overwrite,
+    file_target,
     journal::{self, Intent},
     transaction::Verification,
 };
@@ -54,11 +56,19 @@ pub struct InstallOptions {
     pub gpg_dir: PathBuf,
     /// The fallback `SigLevel` for a package whose repository could not be resolved.
     ///
-    /// Plain `SigLevel`, not `LocalFileSigLevel`. See [`crate::context::signing_policy`]. Every
-    /// package this function actually installs is checked against its own repository's
-    /// `SigLevel` instead, resolved per candidate and fed to
+    /// A package resolved through a repository is checked against that repository's own
+    /// `SigLevel`, resolved per candidate and fed to
     /// [`piko_txn::Transaction::policy_overrides`]. This value is only the defensive fallback.
+    /// See [`crate::context::signing_policy`] for the three directives and which target each
+    /// one governs.
     pub sig_level: SigLevel,
+    /// `LocalFileSigLevel`: the policy for a package file named by path.
+    pub local_file_sig_level: SigLevel,
+    /// `RemoteFileSigLevel`: the policy for a package file named by URL.
+    pub remote_file_sig_level: SigLevel,
+    /// `pacman.conf`'s `Architecture`, for `check_arch` on a package file. Empty skips the
+    /// check, as it does in libalpm.
+    pub architecture: Vec<alpm_types::Architecture>,
     /// What the transaction is allowed to run.
     pub side_effects: SideEffects,
     /// `pacman.conf`'s `NoExtract` and `NoUpgrade`.
@@ -77,7 +87,8 @@ pub struct InstallOptions {
     /// A `SIGINT` handler already installed by an earlier step (`update`'s pre-refresh),
     /// reused instead of installing a second one. `ctrlc::set_handler` accepts exactly one
     /// registration per process; a second call would panic. `None` when nothing installed
-    /// one yet — `install` installs its own here.
+    /// one yet — `install` installs its own, either when it fetches a package URL or, failing
+    /// that, once its confirmation prompt has been answered.
     pub pre_cancel: Option<crate::signal::Handoff>,
 }
 
@@ -126,6 +137,12 @@ pub struct Catalog<'a> {
 /// plan foo` turned into a transaction — the same relationship `piko remove` already has with
 /// `piko plan -R` (see [`crate::cmd::removal`]) and `piko update` has with `piko plan -u`.
 ///
+/// A target that names a package **file** — a path, or a URL — is `pacman -U`. It is read
+/// before the plan is solved, joins the universe as a candidate the repositories do not carry,
+/// and wins over any repository package of the same name. Its dependencies are still resolved
+/// from the repositories, exactly as pacman's `-U` hands off to `_alpm_sync_prepare`. See
+/// [`piko_txn::classify`] for how a target is told apart from a name.
+///
 /// A package already in a cache directory is used as-is. A missing one is downloaded from its
 /// own repository's configured servers before installing. See [`DownloadingSource`].
 pub fn install(
@@ -134,7 +151,7 @@ pub fn install(
     cache_dirs: Vec<std::path::PathBuf>,
     catalog: Catalog<'_>,
     targets: &[String],
-    options: InstallOptions,
+    mut options: InstallOptions,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let limits = Limits::default();
@@ -151,13 +168,25 @@ pub fn install(
         }
     };
 
+    // Targets that name a file are read before anything else is planned, because the plan
+    // cannot be solved without them: they are candidates no repository carries. A URL is
+    // fetched here too, which is why this precedes the confirmation prompt — the same order
+    // `alpm_fetch_pkgurl` runs in, ahead of `trans_init` (`upgrade.c`).
+    let mut pre_cancel = options.pre_cancel.take();
+    let prepared =
+        match prepare_file_targets(targets, &cache, &catalog, &options, &mut pre_cancel, out) {
+            Ok(prepared) => prepared,
+            Err(code) => return code,
+        };
+    let file_candidates = prepared.candidates();
+
     let steplist = crate::progress::StepList::new();
     let resolving = steplist.spinner("Resolving dependencies");
 
     let universe = match Universe::build(
         catalog.local,
         catalog.repos.iter().map(|(usage, db)| (*usage, db)),
-        UniverseOptions::new().ignores(catalog.ignores).limits(limits),
+        UniverseOptions::new().ignores(catalog.ignores).limits(limits).files(&file_candidates),
     ) {
         Ok(universe) => universe,
         Err(error) => {
@@ -167,7 +196,7 @@ pub fn install(
         }
     };
 
-    let mut request = match resolve_targets(&universe, Request::new(), targets) {
+    let mut request = match resolve_targets(&universe, Request::new(), &prepared.names) {
         Ok(request) => request,
         Err(failure) => {
             crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
@@ -175,6 +204,19 @@ pub fn install(
             return ExitCode::FAILURE;
         }
     };
+
+    // Each file candidate is targeted by its id, not by a name. Resolving it by name would
+    // find whichever candidate the universe prefers, which is the file only by construction —
+    // and would silently install a repository package the day that construction changed.
+    let file_ids = universe.file_candidates();
+    if file_ids.len() != prepared.files.len() {
+        crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
+        eprintln!("piko: internal error: the universe lost a package file candidate");
+        return ExitCode::FAILURE;
+    }
+    for id in file_ids {
+        request = request.target(id);
+    }
 
     // The ids named on the command line, captured before `--sysupgrade` adds its own. These
     // decide `Explicit` vs `Depend` below. A package `-u` pulled in on its own was not named by
@@ -226,11 +268,12 @@ pub fn install(
     } else {
         "Proceed with installation? [Y/n] "
     };
-    // `update`'s pre-refresh step (`main::sync`) may already have a handler installed, for
-    // the refresh that just ran. Bracketing the prompt in `during_prompt` still kills the
-    // process on the first Ctrl+C here, exactly as when no handler exists yet (the `None`
-    // branch below) — nothing at the prompt itself needs a graceful stop.
-    let answered = match &options.pre_cancel {
+    // A handler may already be installed: by `update`'s pre-refresh step (`main::sync`), or by
+    // `prepare_file_targets` for a package URL it had to fetch. Both happened before this
+    // prompt, which is why there is one `pre_cancel` and one branch. Bracketing the prompt in
+    // `during_prompt` still kills the process on the first Ctrl+C here, exactly as when no
+    // handler exists yet (the `None` branch) — nothing at the prompt needs a graceful stop.
+    let answered = match &pre_cancel {
         Some(handoff) => handoff.mode.during_prompt(|| proceed(out, options.noconfirm, prompt)),
         None => proceed(out, options.noconfirm, prompt),
     };
@@ -238,12 +281,12 @@ pub fn install(
         return ExitCode::SUCCESS;
     }
 
-    // Only from here on can anything reach the network. See `crate::signal` for why this is
-    // not installed earlier: it would make Ctrl+C at the prompt above require two presses.
-    // `update`'s pre-refresh step already installed one when it refreshed ahead of this
-    // prompt; `pre_cancel` carries that registration so this does not install a second, which
+    // Only from here on can *this* step reach the network. See `crate::signal` for why a
+    // handler is not installed earlier than it has to be: it would make Ctrl+C at the prompt
+    // above require two presses. `pre_cancel` carries whatever registration an earlier step
+    // made — a pre-refresh, or a package URL fetch — so this does not install a second, which
     // `ctrlc::set_handler` would refuse.
-    let cancel = match options.pre_cancel {
+    let cancel = match pre_cancel {
         Some(handoff) => handoff.cancel,
         None => crate::signal::install_cancel_handler().0,
     };
@@ -259,18 +302,22 @@ pub fn install(
 
     let package_targets =
         piko_txn::download_targets(&universe, &built, catalog.configs, options.sig_level);
-    let (verification, policy_overrides) =
-        match piko_txn::verification_from(&options.gpg_dir, options.sig_level, &package_targets) {
-            Ok(result) => result,
-            Err(error) => {
-                report_error(&error);
-                eprintln!(
-                    "piko: note: set SigLevel = Never in pacman.conf to install without \
-                     checking signatures"
-                );
-                return ExitCode::FAILURE;
-            }
-        };
+    let (verification, policy_overrides) = match piko_txn::verification_from(
+        &options.gpg_dir,
+        options.sig_level,
+        &package_targets,
+        &prepared.files,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            report_error(&error);
+            eprintln!(
+                "piko: note: set SigLevel = Never in pacman.conf to install without \
+                 checking signatures"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
 
     // No row at all when nothing needs downloading: a removal-only plan, or one whose every
     // candidate is already in a cache directory, since `Plan::assemble` was given `cache`
@@ -290,9 +337,15 @@ pub fn install(
         }
     };
     report_download_dir(&steplist, source.download_dir());
+    // The named files go in front of the cache: the plan chose them, so the source must serve
+    // them. A `FileSource` with nothing in it is a pass-through, so this costs nothing when no
+    // file was named.
+    let named = prepared.paths_by_name();
+    let source = FileSource::new(named.clone(), Box::new(source));
 
     if options.download_only {
-        let code = download_only(&source, &cache, &steps, &verification, &policy_overrides, out);
+        let code =
+            download_only(&source, &cache, &named, &steps, &verification, &policy_overrides, out);
         if let Some(head) = rig.head {
             head.finish_and_clear();
         }
@@ -320,6 +373,172 @@ pub fn install(
         settings,
         out,
     )
+}
+
+/// The command line, split into what the solver resolves and what was read from a file.
+struct PreparedTargets {
+    /// Targets to resolve through the repositories, in the order they were given.
+    names: Vec<String>,
+    /// Every package file named, path and URL alike, in the order they were given.
+    files: Vec<FileTarget>,
+}
+
+impl PreparedTargets {
+    /// The solver's view of each named file, in the order they were given.
+    ///
+    /// `Universe` borrows these for as long as it lives, so they are collected once by the
+    /// caller and kept alongside it rather than rebuilt.
+    fn candidates(&self) -> Vec<&piko_db::solve::FilePackage> {
+        self.files.iter().map(FileTarget::candidate).collect()
+    }
+
+    /// Where each named file is, keyed by the name a plan step addresses it by.
+    fn paths_by_name(&self) -> HashMap<String, PathBuf> {
+        self.files
+            .iter()
+            .map(|target| (target.file_name().to_string(), target.path().to_path_buf()))
+            .collect()
+    }
+}
+
+/// Reads every target that names a package file, fetching the ones named by URL.
+///
+/// # Why this runs before the plan, and therefore before the prompt
+///
+/// A package file is a candidate the repositories do not carry. Nothing can be solved until
+/// its `.PKGINFO` has been read, and a URL cannot be read until it has been fetched. pacman
+/// has the same ordering for the same reason: `pacman_upgrade` calls `alpm_fetch_pkgurl` and
+/// then `alpm_pkg_load` for every target, all before `trans_init`.
+///
+/// So a `piko install <url>` downloads before it asks. `cancel` is threaded out through
+/// `pre_cancel` rather than kept here, so that the confirmation prompt later brackets itself
+/// in `PromptMode::during_prompt` — without that, Ctrl+C at the prompt would ask a finished
+/// download to stop instead of killing the process. See `crate::signal`.
+///
+/// # Errors
+///
+/// Returns the [`ExitCode`] to exit with. Every failure is reported before returning.
+fn prepare_file_targets(
+    targets: &[String],
+    cache: &CacheDirSource,
+    catalog: &Catalog<'_>,
+    options: &InstallOptions,
+    pre_cancel: &mut Option<crate::signal::Handoff>,
+    out: &mut impl std::io::Write,
+) -> Result<PreparedTargets, ExitCode> {
+    let classified: Vec<TargetKind> =
+        targets.iter().map(|target| piko_txn::classify(target)).collect();
+    let names: Vec<String> = classified
+        .iter()
+        .filter_map(|kind| match kind {
+            TargetKind::Name(name) => Some(name.clone()),
+            TargetKind::File(_) | TargetKind::Url(_) => None,
+        })
+        .collect();
+    if classified.iter().all(|kind| matches!(kind, TargetKind::Name(_))) {
+        return Ok(PreparedTargets { names, files: Vec::new() });
+    }
+
+    warn_about_ambiguous_targets(&classified, catalog);
+
+    // Only now, and only because a URL has to be fetched before the prompt. A plain
+    // `piko install ./foo.pkg.tar.zst` reads a local file and installs no handler here, so
+    // Ctrl+C at its prompt still kills the process by the OS's default disposition.
+    let has_url = classified.iter().any(|kind| matches!(kind, TargetKind::Url(_)));
+    if has_url && pre_cancel.is_none() {
+        let (cancel, mode) = crate::signal::install_cancel_handler();
+        *pre_cancel = Some(crate::signal::Handoff { cancel, mode });
+    }
+
+    let package_limits = piko_txn::extract::PackageLimits::default();
+    let mut files = Vec::new();
+    for kind in &classified {
+        let loaded = match kind {
+            TargetKind::Name(_) => continue,
+            TargetKind::File(path) => file_target::load(
+                path,
+                Policy::for_package(options.local_file_sig_level),
+                &package_limits,
+            ),
+            TargetKind::Url(url) => {
+                let path = fetch_package_url(url, cache, options, pre_cancel, out)?;
+                file_target::load(
+                    &path,
+                    Policy::for_package(options.remote_file_sig_level),
+                    &package_limits,
+                )
+            }
+        };
+        match loaded {
+            Ok(target) => files.push(target),
+            Err(error) => {
+                report_error(&error);
+                return Err(ExitCode::FAILURE);
+            }
+        }
+    }
+
+    if let Err(error) = file_target::check_duplicates(&files) {
+        report_error(&error);
+        return Err(ExitCode::FAILURE);
+    }
+    if let Err(error) = file_target::check_architecture(&files, &options.architecture) {
+        report_error(&error);
+        return Err(ExitCode::FAILURE);
+    }
+
+    Ok(PreparedTargets { names, files })
+}
+
+/// Downloads one package named by URL, and reports where it landed.
+///
+/// # Errors
+///
+/// Returns the [`ExitCode`] to exit with, having reported the failure.
+fn fetch_package_url(
+    url: &str,
+    cache: &CacheDirSource,
+    options: &InstallOptions,
+    pre_cancel: &Option<crate::signal::Handoff>,
+    out: &mut impl std::io::Write,
+) -> Result<PathBuf, ExitCode> {
+    // A `Cancel` that no handler will ever request, for the path where no URL forced one to be
+    // installed. It cannot happen — `prepare_file_targets` installs a handler before it calls
+    // this — and constructing one is cheaper than making the caller prove it.
+    let cancel =
+        pre_cancel.as_ref().map_or_else(piko_net::Cancel::new, |handoff| handoff.cancel.clone());
+
+    if writeln!(out, "fetching {url}").is_err() {
+        // Nothing has been fetched yet, so a broken pipe here just ends the run quietly.
+        return Err(ExitCode::SUCCESS);
+    }
+    let policy = Policy::for_package(options.remote_file_sig_level);
+    match piko_txn::file_target::fetch_url(url, cache, policy, &cancel, &|_| {}) {
+        Ok(path) => Ok(path),
+        Err(error) => {
+            report_error(&error);
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Names a target that could have been read as a package name as well as a path.
+///
+/// `piko_txn::classify`'s rule 3 resolves the ambiguity by existence on disk, which is right
+/// far more often than not — but silently. This says so, and only when the other reading is
+/// real: a repository that actually carries a package of that literal name. A file whose name
+/// no repository knows is not ambiguous at all, and warning about it would be noise on every
+/// ordinary `piko install foo-1.0-1-x86_64.pkg.tar.zst`.
+fn warn_about_ambiguous_targets(classified: &[TargetKind], catalog: &Catalog<'_>) {
+    for spelled in classified.iter().filter_map(TargetKind::ambiguous_name) {
+        if catalog.repos.iter().any(|(_, repository)| repository.get_str(spelled).is_some()) {
+            eprintln!(
+                "piko: warning: {spelled} names both a file here and a package in a \
+                 repository; installing the file (write ./{spelled} to silence this, or \
+                 move the file to install the package)"
+            );
+        }
+    }
 }
 
 /// Reports what the download-directory selection passed over, and whether it created one.
@@ -355,9 +574,16 @@ fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::Dow
 /// packages are still being downloaded, and there is nothing to gain from stopping early just
 /// because the terminal on the other end of `out` went away. A dead `out` is instead caught by
 /// the next `emit!` call after this returns, the same way a live commit handles it.
+/// `-w`, and the three things it can report about one package.
+///
+/// A package named on the command line as a file is neither downloaded nor found in a cache
+/// directory. Calling it either would be wrong, so `named` supplies the third verb. It is the
+/// set of names [`PreparedTargets::paths_by_name`] built, which is exactly the set
+/// [`FileSource`] serves.
 fn download_only(
-    source: &DownloadingSource,
+    source: &dyn PackageSource,
     cache: &CacheDirSource,
+    named: &HashMap<String, PathBuf>,
     steps: &[Step],
     verification: &Verification,
     policy_overrides: &HashMap<String, Policy>,
@@ -365,9 +591,16 @@ fn download_only(
 ) -> ExitCode {
     let result =
         piko_txn::download_only(source, cache, steps, verification, policy_overrides, |outcome| {
-            let verb = if outcome.was_cached { "already in cache:" } else { "downloaded" };
+            let name = outcome.package.to_string();
+            let verb = if named.contains_key(&name) {
+                "already here:"
+            } else if outcome.was_cached {
+                "already in cache:"
+            } else {
+                "downloaded"
+            };
             let checked = if outcome.verified { ", signature verified" } else { "" };
-            let _ = writeln!(out, "{verb} {} ({} bytes{checked})", outcome.package, outcome.size);
+            let _ = writeln!(out, "{verb} {name} ({} bytes{checked})", outcome.size);
         });
     match result {
         Ok(()) => ExitCode::SUCCESS,
