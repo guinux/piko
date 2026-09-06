@@ -445,6 +445,13 @@ fn text(output: &Output) -> String {
     )
 }
 
+/// What piko says when a scriptlet was attempted and did not succeed.
+///
+/// The exec helper reports its own reason and exits `ExitCode::FAILURE`, so this line reads
+/// the same whether the failure was the `chroot` or the `exec` that follows it. It is the
+/// evidence that the scriptlet was tried and its failure surfaced, rather than swallowed.
+const SCRIPTLET_FAILED: &str = "post_install scriptlet exited with status 1";
+
 const SCRIPT: &str = "\
 post_install() {
   echo \"POST_INSTALL $1\"
@@ -457,7 +464,11 @@ pre_remove() {
 }
 ";
 
-/// The root is a temporary directory and the tests are unprivileged, so `chroot` is refused.
+/// The root is a temporary directory holding only the package's own files, so the scriptlet
+/// cannot run. It fails at one of two points, and which one depends on the privileges of
+/// whoever runs the suite: `chroot` is refused without `CAP_SYS_CHROOT`, and where it is
+/// granted the `exec` that follows finds no `/bin/sh` inside the root. Both are the same
+/// answer, and `SCRIPTLET_FAILED` is what both spell.
 ///
 /// That is not a gap in coverage. It is the security property, asserted directly: the command
 /// must fail closed, never fall back to running on the host. Everything below therefore checks
@@ -475,9 +486,10 @@ fn a_scriptlet_that_cannot_enter_the_root_fails_closed() {
     let seen = text(&output);
 
     assert!(output.status.success(), "the install itself should still succeed:\n{seen}");
+    assert!(seen.contains(SCRIPTLET_FAILED), "the scriptlet's failure was not reported:\n{seen}");
     assert!(
-        seen.contains("could not enter the root"),
-        "the scriptlet did not report why it could not run:\n{seen}"
+        seen.contains("could not enter the root") || seen.contains("could not run /bin/sh"),
+        "the scriptlet failed for neither of the two reasons the root allows:\n{seen}"
     );
     assert!(
         !seen.contains("POST_INSTALL"),
@@ -514,8 +526,9 @@ fn a_package_without_a_scriptlet_runs_nothing() {
 
 /// A `PreTransaction` hook with `AbortOnFail` must stop the transaction with nothing written.
 ///
-/// It fails here because the chroot is refused, which is a perfectly good failure for the
-/// purpose: what is under test is that the *transaction* stops and leaves no trace.
+/// The hook fails because `/bin/false` cannot be reached inside a root that holds neither it
+/// nor a `chroot` this process may enter. That is a perfectly good failure for the purpose:
+/// what is under test is that the *transaction* stops and leaves no trace.
 #[test]
 fn abort_on_fail_stops_the_transaction_before_anything_changes() {
     let sandbox = Sandbox::new();
@@ -673,8 +686,8 @@ fn a_hook_the_removal_deletes_does_not_run_afterwards() {
     let seen = text(&output);
     assert!(output.status.success(), "{seen}");
 
-    // Both hooks fail, because the chroot is refused unprivileged, so each one that runs names
-    // itself in a warning. That is the signal both assertions read.
+    // Both hooks fail, because `/bin/true` cannot be reached inside this root, so each one
+    // that runs names itself in a warning. That is the signal both assertions read.
     assert!(
         seen.contains("10-pre.hook"),
         "the PreTransaction hook did not run, so the trigger proves nothing:\n{seen}"

@@ -44,6 +44,12 @@ confidence-threshold = 0.9
 multiple-versions = "warn"
 wildcards = "deny"
 
+# Windows-only crates.
+skip-tree = [
+    { crate = "winreg" },
+    { crate = "windows-sys" },
+]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
