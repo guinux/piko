@@ -248,7 +248,8 @@ pub fn resolve_target(universe: &Universe<'_>, dep: &RelationOrSoname) -> Option
 ///
 /// `pacman -S gnome` installs every member of the `gnome` group. The group is not a package,
 /// so it resolves to nothing on its own. Returns the members in the order
-/// [`Universe::group_members`] found them, or an empty vector if `name` is not a group.
+/// [`Universe::group_members`] found them — one per package name, whatever the number of
+/// repositories carrying it — or an empty vector if `name` is not a group.
 ///
 /// Checked only *after* [`resolve_target`] fails. This matches pacman, which prefers a
 /// package to a group of the same name rather than installing both.
@@ -1185,5 +1186,84 @@ mod tests {
             sysupgrade(&universe, false).upgrades.is_empty(),
             "core carries app at the installed version, so extra is never consulted"
         );
+    }
+    /// The names `resolve_targets` put on `request`, in the order it added them.
+    fn resolved<'a>(universe: &Universe<'a>, targets: &[&str]) -> Vec<&'a str> {
+        let owned: Vec<String> = targets.iter().map(|target| (*target).to_owned()).collect();
+        let request = resolve_targets(universe, Request::new(), &owned).unwrap();
+        named(universe, request.targets())
+    }
+
+    #[test]
+    fn a_group_target_expands_to_every_member() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("editor", "1.0.0-1").groups(["tools"]),
+                    PackageSpec::new("linker", "1.0.0-1").groups(["tools"]),
+                    PackageSpec::new("unrelated", "1.0.0-1"),
+                ],
+            )
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let mut members = resolved(&universe, &["tools"]);
+        members.sort_unstable();
+        assert_eq!(members, ["editor", "linker"]);
+    }
+
+    /// pacman tries the name as a package first, so a package and a group sharing a name
+    /// install the package alone rather than both.
+    #[test]
+    fn a_package_wins_over_a_group_of_the_same_name() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("tools", "1.0.0-1"),
+                    PackageSpec::new("member", "1.0.0-1").groups(["tools"]),
+                ],
+            )
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        assert_eq!(resolved(&universe, &["tools"]), ["tools"]);
+    }
+
+    #[test]
+    fn a_target_naming_neither_a_package_nor_a_group_is_reported() {
+        let scenario = Scenario::new().repo("core", [PackageSpec::new("app", "1.0.0-1")]).build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let failure =
+            resolve_targets(&universe, Request::new(), &["absent".to_owned()]).unwrap_err();
+        assert!(matches!(failure, TargetResolutionFailure::NotFound(name) if name == "absent"));
+    }
+
+    /// A member both enabled repositories carry expands to one target, so the at-most-one
+    /// clause on its name has one unit to agree with rather than two to contradict. Offering
+    /// both candidates makes this request unsatisfiable.
+    #[test]
+    fn a_member_carried_by_two_repositories_still_solves() {
+        let scenario = Scenario::new()
+            .repo("core", [PackageSpec::new("shared", "1.0.0-1").groups(["tools"])])
+            .repo("extra", [PackageSpec::new("shared", "2.0.0-1").groups(["tools"])])
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let request = resolve_targets(&universe, Request::new(), &["tools".to_owned()]).unwrap();
+        let planned = solve_with_removals(&universe, &request, &Limits::default())
+            .unwrap()
+            .expect("a group target must not encode an unsatisfiable request");
+
+        let selected: Vec<String> = planned
+            .selected
+            .iter()
+            .filter_map(|id| universe.get(*id))
+            .filter(|candidate| candidate.name().as_ref() == "shared")
+            .map(|candidate| candidate.version().to_string())
+            .collect();
+        assert_eq!(selected, ["1.0.0-1"], "core's build, and only it");
     }
 }

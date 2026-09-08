@@ -59,10 +59,13 @@ pub enum Command {
     /// database is opened for that case. Ends with a one-line summary, unless `--quiet` is
     /// given.
     ///
-    /// `-e/--explicit`, `-o/--orphans`, `-m/--foreign` and `-g/--groups` each replace the plain
-    /// installed listing with a different filter: `pacman -Qe`/`-Qdtt`/`-Qm`/`-Qg`
-    /// respectively. Each is rejected together with `--repos`, `--repo`, and with the other
-    /// three.
+    /// `-e/--explicit`, `-o/--orphans` and `-m/--foreign` each replace the plain installed
+    /// listing with a different filter: `pacman -Qe`/`-Qdtt`/`-Qm` respectively. Each is
+    /// rejected together with `--repos`, `--repo`, and with the others.
+    ///
+    /// `-g/--groups` lists groups rather than packages, and is the one filter that reads
+    /// either side: installed packages by default (`pacman -Qg`), every configured
+    /// repository with `--repos`, or one with `--repo <NAME>` (`pacman -Sg`).
     #[command(visible_alias = "ls")]
     List {
         /// List installed packages. This is the default when neither `--repos` nor `--repo`
@@ -101,17 +104,24 @@ pub enum Command {
             conflicts_with_all = ["repos", "repo", "explicit", "orphans", "groups"]
         )]
         foreign: bool,
-        /// List installed packages belonging to one of the given groups. With no name given,
-        /// lists every group name at least one installed package belongs to instead,
-        /// `pacman -Qg`.
+        /// List the members of the given groups. With no name given, lists every group name
+        /// instead. `--repos`/`--repo <NAME>` read the repositories rather than the installed
+        /// set, `pacman -Sg` rather than `pacman -Qg`.
+        ///
+        /// Group names must follow `-g` directly, since it takes any number of them:
+        /// `list -g alpm --repos`, never `list -g --repos alpm`.
         #[arg(
             short,
             long,
             value_name = "NAME",
             num_args = 0..,
-            conflicts_with_all = ["repos", "repo", "explicit", "orphans", "foreign"]
+            conflicts_with_all = ["explicit", "orphans", "foreign"]
         )]
         groups: Option<Vec<String>>,
+        /// With `--groups` and no group named, list every group *and* its members, rather
+        /// than the group names alone. `pacman -Qg`, and `pacman -Sgg`.
+        #[arg(long, requires = "groups")]
+        with_members: bool,
         /// Print only names, one per line — no color, no checkmark, no summary.
         #[arg(short, long)]
         quiet: bool,
@@ -310,8 +320,11 @@ pub enum Command {
     /// would fail — a first-choice provider that turns out to conflict — the solver backs out
     /// and reports that it did, rather than giving up.
     Plan {
-        /// The package(s) to plan for: a dependency string (`foo`, `foo>=1.0`), or a path to
-        /// a package file. May be empty with `--sysupgrade`.
+        /// The package(s) to plan for: a dependency string (`foo`, `foo>=1.0`), a `%GROUPS%`
+        /// group name, or a path to a package file. May be empty with `--sysupgrade`.
+        ///
+        /// With `--remove`, a target names an installed package, or a group to take every
+        /// installed member of.
         ///
         /// A package URL is refused here, since previewing one would have to download it. Use
         /// `piko install` for that.
@@ -504,6 +517,9 @@ pub enum Command {
     /// As with `install`, with no `--root`, this resolves `RootDir` from the parsed
     /// pacman.conf instead.
     ///
+    /// A target names an installed package, or a group, which takes every installed member
+    /// of it. A package wins over a group of the same name.
+    ///
     /// The set of packages removed is decided by the same planner `piko plan -R` prints, so
     /// that command is an exact preview of this one. Removing a package something else still
     /// depends on is refused. `-c` cascades instead. `-s` also takes away dependencies
@@ -513,7 +529,8 @@ pub enum Command {
         /// Where to remove from. Use `/` for the running system.
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Installed package names.
+        /// Installed package names, or a `%GROUPS%` group name to remove every installed
+        /// member of.
         #[arg(required = true)]
         packages: Vec<String>,
         /// Do not create `.pacsave` files for modified configuration files.

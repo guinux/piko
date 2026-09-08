@@ -497,7 +497,8 @@ impl PackageSpec {
         self
     }
 
-    /// Sets `%GROUPS%`, which is what `IgnoreGroup` matches against.
+    /// Sets `%GROUPS%`: what `IgnoreGroup` matches against, and what a target naming a
+    /// group expands through.
     #[must_use]
     pub fn groups<I: IntoIterator<Item = S>, S: Into<String>>(mut self, items: I) -> Self {
         self.groups = items.into_iter().map(Into::into).collect();

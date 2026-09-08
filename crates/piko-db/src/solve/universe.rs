@@ -35,7 +35,7 @@
 //! entry is indistinguishable from an absent one at exactly the moment that difference
 //! decides whether a package is installed, upgraded, or left alone.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use alpm_types::{FullVersion, Name, PackageRelation, RelationOrSoname};
 
@@ -549,13 +549,17 @@ impl<'a> Universe<'a> {
                 self.conflicts_on.entry(conflict.name.as_ref()).or_default().push(id);
             }
 
-            // Only candidates that are not already installed. `pacman -S <group>` installs
-            // the group's members from a repository. An installed member is already accounted
-            // for by the "must remain" clause, not by being a target.
+            // Installed and repository members share one bucket, and the two accessors filter
+            // it in opposite directions. Installing a group takes its repository members;
+            // removing one takes its installed members. libalpm reads two group caches for
+            // the same reason — a sync database's for `-S`, the local database's for `-R`.
+            for group in solvable.groups() {
+                self.groups.entry(group.as_ref()).or_default().push(id);
+            }
+
+            // A `%REPLACES%` entry only ever points at what is already there, so an installed
+            // candidate has nothing to say here.
             if !solvable.is_installed() {
-                for group in solvable.groups() {
-                    self.groups.entry(group.as_ref()).or_default().push(id);
-                }
                 for replaces in solvable.replaces() {
                     self.replaces.entry(replaces.name.as_ref()).or_default().push(id);
                 }
@@ -726,11 +730,52 @@ impl<'a> Universe<'a> {
         self.replaces.get(name).map_or(&[], Vec::as_slice)
     }
 
-    /// Every repository candidate belonging to the `%GROUPS%` group `name`, in priority then
-    /// scan order. Empty if `name` names no group.
+    /// Every **repository** candidate belonging to the `%GROUPS%` group `name`, at most one
+    /// per package name, in priority then scan order. Empty if `name` names no group.
+    ///
+    /// This is what `pacman -S <group>` expands to: the group's members as a repository
+    /// offers them. An installed member is left out, because the "must remain" clause already
+    /// holds it in place and a target would only ask for it a second time.
+    ///
+    /// The one-per-name rule is `alpm_find_group_pkgs`'s (`sync.c:295`): its
+    /// `alpm_pkg_find(pkgs, pkg->name)` test keeps the first database to carry a member and
+    /// passes over every later one. It decides more than which build is offered. An expanded
+    /// group becomes one explicit target per member, and the at-most-one-per-name clause
+    /// forbids selecting two candidates of a single name, so a member carried by two enabled
+    /// repositories would otherwise encode a request no solver can satisfy.
     #[must_use]
     pub fn group_members(&self, name: &str) -> Vec<SolvableId> {
-        self.groups.get(name).cloned().unwrap_or_default()
+        let mut seen: HashSet<&str> = HashSet::new();
+        self.members_of(name)
+            .filter(|member| !member.is_installed())
+            .filter(|member| seen.insert(member.name().as_ref()))
+            .map(|member| member.id())
+            .collect()
+    }
+
+    /// Every **installed** package belonging to the `%GROUPS%` group `name`, in scan order.
+    /// Empty if no installed package carries it.
+    ///
+    /// The removal counterpart of [`Self::group_members`], and disjoint from it. `pacman -R
+    /// <group>` removes every installed member, reading the *local* database's group cache
+    /// (`alpm_db_get_group(db_local, …)` in `remove.c`) rather than a repository's. A group
+    /// a repository defines but nothing installs is therefore nothing to remove, even though
+    /// it is something to install.
+    ///
+    /// No de-duplication: the local database holds one entry per package name, so a name can
+    /// appear here only once.
+    #[must_use]
+    pub fn installed_group_members(&self, name: &str) -> Vec<SolvableId> {
+        self.members_of(name)
+            .filter(|member| member.is_installed())
+            .map(|member| member.id())
+            .collect()
+    }
+
+    /// Every candidate carrying the `%GROUPS%` group `name`, installed ones first, then
+    /// repositories in priority order.
+    fn members_of(&self, name: &str) -> impl Iterator<Item = Solvable<'a>> + '_ {
+        self.groups.get(name).into_iter().flatten().filter_map(|id| self.get(*id))
     }
 
     /// Every candidate declaring a `%CONFLICTS%` entry against `name`.
@@ -1094,5 +1139,79 @@ mod tests {
         let bar = universe.get(universe.candidates_named("bar")[0]).unwrap();
         assert_eq!(bar.installed_size(), 8192);
         assert_eq!(bar.download_size(), Some(1024));
+    }
+    /// One index, read in opposite directions: installing a group takes the repositories'
+    /// candidates, removing one takes the installed packages. A member that is both keeps a
+    /// repository candidate on the install side, which is what makes `piko install <group>`
+    /// offer to upgrade or reinstall it.
+    #[test]
+    fn a_groups_installed_and_repository_members_are_read_separately() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("member", "1.0.0-1").groups(["tools"]))
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("member", "2.0.0-1").groups(["tools"]),
+                    PackageSpec::new("other", "1.0.0-1").groups(["tools"]),
+                ],
+            )
+            .build();
+        let universe = universe(&scenario);
+
+        let mut offered = names(&universe, &universe.group_members("tools"));
+        offered.sort_unstable();
+        assert_eq!(offered, ["member", "other"]);
+        let offered_member = universe
+            .group_members("tools")
+            .into_iter()
+            .filter_map(|id| universe.get(id))
+            .find(|candidate| candidate.name().as_ref() == "member")
+            .unwrap();
+        assert_eq!(offered_member.version().to_string(), "2.0.0-1", "the repository's build");
+
+        let installed = universe.installed_group_members("tools");
+        assert_eq!(names(&universe, &installed), ["member"]);
+        assert!(universe.get(installed[0]).unwrap().is_installed());
+
+        assert!(universe.group_members("not-a-group").is_empty());
+        assert!(universe.installed_group_members("not-a-group").is_empty());
+    }
+
+    /// `alpm_find_group_pkgs` keeps the first database to carry a member. Two candidates of
+    /// one name can never both be selected, so a group that offered both would expand into a
+    /// request no solver can satisfy — see `a_member_carried_by_two_repositories_still_solves`
+    /// in `encode`.
+    #[test]
+    fn a_group_offers_one_candidate_per_name_in_repository_priority_order() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("shared", "1.0.0-1").groups(["tools"]),
+                    PackageSpec::new("core-only", "1.0.0-1").groups(["tools"]),
+                ],
+            )
+            .repo(
+                "extra",
+                [
+                    PackageSpec::new("shared", "2.0.0-1").groups(["tools"]),
+                    PackageSpec::new("extra-only", "1.0.0-1").groups(["tools"]),
+                ],
+            )
+            .build();
+        let universe = universe(&scenario);
+
+        let members = universe.group_members("tools");
+        let mut listed = names(&universe, &members);
+        listed.sort_unstable();
+        assert_eq!(listed, ["core-only", "extra-only", "shared"]);
+
+        let shared = members
+            .iter()
+            .filter_map(|id| universe.get(*id))
+            .find(|member| member.name().as_ref() == "shared")
+            .unwrap();
+        assert_eq!(shared.origin(), Origin::Repository(0), "the earlier repository wins");
+        assert_eq!(shared.version().to_string(), "1.0.0-1");
     }
 }

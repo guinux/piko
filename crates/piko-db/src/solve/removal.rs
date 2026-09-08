@@ -41,7 +41,8 @@ pub struct RemovalOptions {
 /// Why a removal could not be planned.
 #[derive(Debug)]
 pub enum RemovalFailure {
-    /// A named package is not installed.
+    /// A target names neither an installed package nor a group any installed package
+    /// belongs to.
     NotInstalled(String),
     /// Removing the targets would break the system, and `-c` was not given.
     ///
@@ -53,6 +54,11 @@ pub enum RemovalFailure {
 }
 
 /// Plans removing `targets`, exactly as `piko plan -R` does.
+///
+/// A target names an installed package, or a `%GROUPS%` group, which expands to every
+/// installed member — `pacman -R <group>` "will remove every package in that group". A member
+/// also named on its own costs nothing: the plan is read back from the solution, not from the
+/// request's list.
 ///
 /// # Errors
 ///
@@ -69,9 +75,20 @@ pub fn plan_removal(
     let mut request = Request::new().recursive(options.recursive).allow_removals(options.cascade);
 
     for target in targets {
+        // A package first, a `%GROUPS%` group second. That is `remove_target`'s order in
+        // `src/pacman/remove.c`, and the same preference `resolve_targets` applies on the
+        // install side, so a name that is both means the package in either direction.
         match local.get_str(target).and_then(|_| universe.installed_named(target)) {
             Some(installed) => request = request.remove(installed.id()),
-            None => return Err(RemovalFailure::NotInstalled(target.clone())),
+            None => {
+                let members = universe.installed_group_members(target);
+                if members.is_empty() {
+                    return Err(RemovalFailure::NotInstalled(target.clone()));
+                }
+                for member in members {
+                    request = request.remove(member);
+                }
+            }
         }
     }
 
@@ -115,4 +132,89 @@ pub fn removal_names(universe: &Universe<'_>, plan: &Plan) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a failing assertion in a test should abort it loudly"
+)]
+mod tests {
+    use super::*;
+    use crate::config::DbUsage;
+    use crate::fixture::{BuiltScenario, PackageSpec, Scenario};
+    use crate::solve::UniverseOptions;
+
+    /// The names a plain `-R` of `targets` takes away from `scenario`, sorted.
+    fn removed(scenario: &BuiltScenario, targets: &[&str]) -> Result<Vec<String>, RemovalFailure> {
+        let universe = Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new(),
+        )
+        .unwrap();
+        let owned: Vec<String> = targets.iter().map(|target| (*target).to_owned()).collect();
+        let plan = plan_removal(
+            scenario.local(),
+            &universe,
+            &owned,
+            RemovalOptions::default(),
+            &Limits::default(),
+        )?;
+
+        let mut names = removal_names(&universe, &plan);
+        names.sort();
+        Ok(names)
+    }
+
+    /// "Groups can also be specified to be removed, in which case every package in that group
+    /// will be removed" — `pacman(8)`, on `-R`.
+    #[test]
+    fn a_group_target_removes_every_installed_member() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("editor", "1.0.0-1").groups(["tools"]))
+            .installed(PackageSpec::new("linker", "1.0.0-1").groups(["tools"]))
+            .installed(PackageSpec::new("unrelated", "1.0.0-1"))
+            .build();
+
+        assert_eq!(removed(&scenario, &["tools"]).unwrap(), ["editor", "linker"]);
+    }
+
+    /// `remove_target` looks the name up as a package before it looks it up as a group, so a
+    /// system carrying both takes away the package alone.
+    #[test]
+    fn a_package_wins_over_a_group_of_the_same_name() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("tools", "1.0.0-1"))
+            .installed(PackageSpec::new("member", "1.0.0-1").groups(["tools"]))
+            .build();
+
+        assert_eq!(removed(&scenario, &["tools"]).unwrap(), ["tools"]);
+    }
+
+    /// A removal reads the *local* database's groups. A group only a repository defines is
+    /// something to install and nothing to remove.
+    #[test]
+    fn a_group_no_installed_package_belongs_to_is_not_a_target() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("unrelated", "1.0.0-1"))
+            .repo("core", [PackageSpec::new("member", "1.0.0-1").groups(["tools"])])
+            .build();
+
+        let failure = removed(&scenario, &["tools"]).unwrap_err();
+        assert!(matches!(failure, RemovalFailure::NotInstalled(name) if name == "tools"));
+    }
+
+    /// `_alpm_remove_pkg` skips a duplicate target rather than refusing it. piko needs no
+    /// check of its own: the plan is read back from the solution, so naming a package twice —
+    /// as itself and through its group — describes the same removal.
+    #[test]
+    fn naming_a_group_and_one_of_its_members_removes_each_package_once() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("editor", "1.0.0-1").groups(["tools"]))
+            .installed(PackageSpec::new("linker", "1.0.0-1").groups(["tools"]))
+            .build();
+
+        assert_eq!(removed(&scenario, &["tools", "editor"]).unwrap(), ["editor", "linker"]);
+    }
 }

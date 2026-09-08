@@ -92,7 +92,7 @@ pub fn hold_pkg_allows(
 pub fn report(failure: &RemovalFailure) {
     match failure {
         RemovalFailure::NotInstalled(name) => {
-            eprintln!("piko: error: package {name} is not installed");
+            eprintln!("piko: error: no installed package or group named {name}");
         }
         RemovalFailure::WouldBreakSystem(facts) => {
             eprintln!("piko: error: removing this would leave the system unsatisfied");

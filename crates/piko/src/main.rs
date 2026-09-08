@@ -89,9 +89,45 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
     let config = ConfigCache::default();
 
     let code = match &cli.command {
-        Command::List { installed: _, repos, repo, explicit, orphans, foreign, groups, quiet } => {
+        Command::List {
+            installed: _,
+            repos,
+            repo,
+            explicit,
+            orphans,
+            foreign,
+            groups,
+            with_members,
+            quiet,
+        } => {
             if let Some(names) = groups {
-                cmd::list::groups(&open_local_db(cli, &config)?, names, *quiet, &mut out)
+                // `--repo`/`--repos` select the side a group listing reads, the way they
+                // select the side a package listing reads. Neither means the installed set.
+                match (repo, repos) {
+                    (Some(name), _) => {
+                        let repo = parse_repo_arg(name)?;
+                        let dbpath = resolve_dbpath(cli, &config);
+                        let db = open_repo_by_name(&dbpath, &repo, cli, &config)?;
+                        cmd::list::repo_groups([&db], names, *with_members, *quiet, &mut out)
+                    }
+                    (None, true) => {
+                        let opened = open_all_repos(cli, &config)?;
+                        cmd::list::repo_groups(
+                            opened.iter().map(|(_, db)| db),
+                            names,
+                            *with_members,
+                            *quiet,
+                            &mut out,
+                        )
+                    }
+                    (None, false) => cmd::list::groups(
+                        &open_local_db(cli, &config)?,
+                        names,
+                        *with_members,
+                        *quiet,
+                        &mut out,
+                    ),
+                }
             } else if *explicit {
                 cmd::list::explicit(&open_local_db(cli, &config)?, *quiet, &mut out)
             } else if *orphans {
