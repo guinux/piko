@@ -41,7 +41,7 @@ use crate::output::{emit, report as report_error};
 /// command the user asked for still runs. See [`piko_txn::history`].
 pub fn note(recording: &piko_txn::Recording, message: &str) {
     if let Err(problem) = piko_txn::history::note(recording, message) {
-        eprintln!("piko: warning: {problem}");
+        eprintln!("warning: {problem}");
     }
 }
 
@@ -196,14 +196,20 @@ pub fn install(
         }
     };
 
-    let mut request = match resolve_targets(&universe, Request::new(), &prepared.names) {
-        Ok(request) => request,
-        Err(failure) => {
-            crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-            crate::cmd::plan::report_target_resolution_failure(&failure);
-            return ExitCode::FAILURE;
-        }
-    };
+    let (mut request, ignored_targets) =
+        match resolve_targets(&universe, Request::new(), &prepared.names) {
+            Ok(resolved) => resolved,
+            Err(failure) => {
+                crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
+                crate::cmd::plan::report_target_resolution_failure(&failure);
+                return ExitCode::FAILURE;
+            }
+        };
+    // Through `suspend`, since the spinner is still running: an ordinary `eprintln!` here
+    // lands inside the row indicatif is redrawing.
+    if !ignored_targets.is_empty() {
+        steplist.suspend(|| crate::cmd::plan::print_ignored_targets(&ignored_targets));
+    }
 
     // Each file candidate is targeted by its id, not by a name. Resolving it by name would
     // find whichever candidate the universe prefers, which is the file only by construction —
@@ -211,7 +217,7 @@ pub fn install(
     let file_ids = universe.file_candidates();
     if file_ids.len() != prepared.files.len() {
         crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-        eprintln!("piko: internal error: the universe lost a package file candidate");
+        eprintln!("internal error: the universe lost a package file candidate");
         return ExitCode::FAILURE;
     }
     for id in file_ids {
@@ -229,6 +235,11 @@ pub fn install(
     // committed rather than only printed.
     if let Some(downgrade) = options.sysupgrade {
         request = request.with_sysupgrade(&universe, downgrade);
+        if !request.ignored_upgrades().is_empty() {
+            steplist.suspend(|| {
+                crate::cmd::plan::print_ignored_upgrades(&universe, request.ignored_upgrades());
+            });
+        }
     }
 
     let planned = match solve_with_removals(&universe, &request, &limits) {
@@ -312,7 +323,7 @@ pub fn install(
         Err(error) => {
             report_error(&error);
             eprintln!(
-                "piko: note: set SigLevel = Never in pacman.conf to install without \
+                "note: set SigLevel = Never in pacman.conf to install without \
                  checking signatures"
             );
             return ExitCode::FAILURE;
@@ -533,7 +544,7 @@ fn warn_about_ambiguous_targets(classified: &[TargetKind], catalog: &Catalog<'_>
     for spelled in classified.iter().filter_map(TargetKind::ambiguous_name) {
         if catalog.repos.iter().any(|(_, repository)| repository.get_str(spelled).is_some()) {
             eprintln!(
-                "piko: warning: {spelled} names both a file here and a package in a \
+                "warning: {spelled} names both a file here and a package in a \
                  repository; installing the file (write ./{spelled} to silence this, or \
                  move the file to install the package)"
             );
@@ -555,10 +566,10 @@ fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::Dow
     }
     steplist.suspend(|| {
         for rejected in dir.rejected() {
-            eprintln!("piko: warning: {rejected}");
+            eprintln!("warning: {rejected}");
         }
         if dir.created() {
-            eprintln!("piko: warning: no {} cache exists, creating...", dir.path().display());
+            eprintln!("warning: no {} cache exists, creating...", dir.path().display());
         }
     });
 }
@@ -621,7 +632,7 @@ fn emit_line(out: &mut impl std::io::Write, line: &str) -> Result<(), ExitCode> 
         if error.kind() == std::io::ErrorKind::BrokenPipe {
             return Err(ExitCode::SUCCESS);
         }
-        eprintln!("piko: error: failed to write output: {error}");
+        eprintln!("error: failed to write output: {error}");
         return Err(ExitCode::FAILURE);
     }
     Ok(())
@@ -764,13 +775,13 @@ fn named_only(
     let mut names = Vec::new();
     for name in entries {
         let Some(package) = local.get_str(name) else {
-            eprintln!("piko: error: package {name} is not installed");
+            eprintln!("error: package {name} is not installed");
             return Err(ExitCode::FAILURE);
         };
         match EntryName::new(package.name(), package.version()) {
             Ok(entry) => found.push(entry),
             Err(error) => {
-                eprintln!("piko: error: {name} has no usable entry name: {error}");
+                eprintln!("error: {name} has no usable entry name: {error}");
                 return Err(ExitCode::FAILURE);
             }
         }
@@ -861,18 +872,18 @@ fn planned(
             // A removal-only request restricts candidates to what is installed, so the solver
             // has nothing to install. Reaching here means that invariant broke. Refusing is
             // the only safe answer, because the commit engine would carry out whatever this is.
-            eprintln!("piko: error: the removal plan contains a step that is not a removal");
-            eprintln!("piko: note: this is a bug; run `piko plan -R` to see the plan");
+            eprintln!("error: the removal plan contains a step that is not a removal");
+            eprintln!("note: this is a bug; run `piko plan -R` to see the plan");
             return Err(ExitCode::FAILURE);
         };
         let Some(solvable) = universe.get(*package) else {
-            eprintln!("piko: error: the plan names a package the universe does not know");
+            eprintln!("error: the plan names a package the universe does not know");
             return Err(ExitCode::FAILURE);
         };
         match EntryName::new(solvable.name(), solvable.version()) {
             Ok(entry) => found.push(entry),
             Err(error) => {
-                eprintln!("piko: error: {} has no usable entry name: {error}", solvable.name());
+                eprintln!("error: {} has no usable entry name: {error}", solvable.name());
                 return Err(ExitCode::FAILURE);
             }
         }
@@ -955,7 +966,7 @@ fn run(
     match journal::read(dbpath) {
         Ok(Some(_)) => {
             eprintln!(
-                "piko: error: an unfinished transaction is recorded in this database; \
+                "error: an unfinished transaction is recorded in this database; \
                  run `piko report` to see it"
             );
             return ExitCode::FAILURE;
@@ -1016,7 +1027,7 @@ fn run(
             report_error(&error);
             if !matches!(error, piko_txn::Error::HookAborted { .. }) {
                 eprintln!(
-                    "piko: error: the transaction stopped part-way; \
+                    "error: the transaction stopped part-way; \
                      run `piko report` to see what was applied"
                 );
             }
@@ -1041,11 +1052,11 @@ fn run(
 fn report_side_effects(report: &piko_txn::Report) {
     for run in &report.scriptlets {
         if run.outcome.truncated {
-            eprintln!("piko: warning: {}'s scriptlet output was truncated", run.package);
+            eprintln!("warning: {}'s scriptlet output was truncated", run.package);
         }
         if !run.outcome.succeeded() {
             eprintln!(
-                "piko: warning: {}'s {} scriptlet {}",
+                "warning: {}'s {} scriptlet {}",
                 run.package,
                 run.kind.as_str(),
                 run.outcome.describe()
@@ -1061,31 +1072,28 @@ fn report_side_effects(report: &piko_txn::Report) {
     // Printed after the run, not before it, because the hook files are read once per phase
     // inside the transaction. That is the same reason every other hook diagnostic here is late.
     for problem in &report.hook_problems {
-        eprintln!("piko: warning: {problem}");
+        eprintln!("warning: {problem}");
     }
 
     // Neither record can fail a transaction, so a problem with one arrives here rather than
     // as an error. See `piko_txn::history`.
     for problem in &report.history_problems {
-        eprintln!("piko: warning: {problem}");
+        eprintln!("warning: {problem}");
     }
 
     for run in &report.hooks {
         if let Some(missing) = &run.unsatisfied {
-            eprintln!(
-                "piko: warning: skipping hook {}: nothing installed satisfies {missing}",
-                run.name
-            );
+            eprintln!("warning: skipping hook {}: nothing installed satisfies {missing}", run.name);
             continue;
         }
         let Some(outcome) = &run.outcome else {
             continue;
         };
         if outcome.truncated {
-            eprintln!("piko: warning: hook {}'s output was truncated", run.name);
+            eprintln!("warning: hook {}'s output was truncated", run.name);
         }
         if !outcome.succeeded() {
-            eprintln!("piko: warning: hook {} {}", run.name, outcome.describe());
+            eprintln!("warning: hook {} {}", run.name, outcome.describe());
         }
     }
 }

@@ -4,12 +4,15 @@
 //! [`crate::cmd::plan`] follow. Most conventions are domain-specific and stay local to the
 //! module that draws them.
 
-/// Returns the green check for "this is done" or "this is already the case".
+/// Returns the green check for "this is done", "this is already the case", or "this is the
+/// line naming what follows".
 ///
-/// Used for a finished [`progress`](crate::progress) row, and for an installed package in
-/// `piko search`/`piko list`. Auto-detects terminal support the way every `console` style in
-/// this CLI does: piped output, and every test capturing into a `Vec<u8>`, gets plain text
-/// with no ANSI codes.
+/// Used for a [`progress`](crate::progress) row's plain line, and for an installed package in
+/// `piko search`/`piko list`. A commit's rows print that line as soon as they have output to
+/// frame, so the glyph marks the name of an item as much as the end of it; how the item ended
+/// is reported separately. Auto-detects terminal support the way every `console` style in this
+/// CLI does: piped output, and every test capturing into a `Vec<u8>`, gets plain text with no
+/// ANSI codes.
 pub(crate) fn checkmark() -> console::StyledObject<&'static str> {
     console::Style::new().green().apply_to("✓")
 }

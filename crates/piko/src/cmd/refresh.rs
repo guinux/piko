@@ -45,7 +45,7 @@ pub fn refresh(
             Err(error) => {
                 report(&error);
                 eprintln!(
-                    "piko: note: a repository's SigLevel requires a signature, so refreshing \
+                    "note: a repository's SigLevel requires a signature, so refreshing \
                      cannot continue without a usable keyring"
                 );
                 return ExitCode::FAILURE;
@@ -112,7 +112,7 @@ pub fn refresh(
     if !only.is_empty() {
         for wanted in only {
             if !config.repositories.iter().any(|repo| repo.name.to_string() == *wanted) {
-                eprintln!("piko: error: {wanted} is not a configured repository");
+                eprintln!("error: {wanted} is not a configured repository");
                 failed = true;
             }
         }

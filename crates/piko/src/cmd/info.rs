@@ -35,7 +35,7 @@ pub fn installed(
             emit!(out, "");
         }
         let Some(package) = db.get_str(name) else {
-            eprintln!("piko: error: package {name} is not installed");
+            eprintln!("error: package {name} is not installed");
             ok = false;
             continue;
         };
@@ -62,7 +62,7 @@ pub fn repo(
             emit!(out, "");
         }
         let Some(package) = db.get_str(name) else {
-            eprintln!("piko: error: package {name} is not in {}", db.path().display());
+            eprintln!("error: package {name} is not in {}", db.path().display());
             ok = false;
             continue;
         };
@@ -112,7 +112,7 @@ pub fn installed_then_repos(
             }
             None => {
                 eprintln!(
-                    "piko: error: package {name} is not installed and not in any configured \
+                    "error: package {name} is not installed and not in any configured \
                      repository"
                 );
                 ok = false;

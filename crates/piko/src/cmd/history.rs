@@ -42,7 +42,7 @@ pub fn history(
         (Ok(since), Ok(until)) => (since, until),
         (Err(bad), _) | (_, Err(bad)) => {
             eprintln!(
-                "piko: error: {bad} is not a time this understands; use YYYY-MM-DD or \
+                "error: {bad} is not a time this understands; use YYYY-MM-DD or \
                  YYYY-MM-DDTHH:MM:SS+ZZZZ"
             );
             return ExitCode::FAILURE;

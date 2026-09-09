@@ -10,7 +10,7 @@ use piko_db::config::{CleanMethod, DbUsage, SigLevel};
 ///
 /// Without the chain, "failed to parse .../desc" would omit the reason it failed to parse.
 pub fn report(error: &dyn std::error::Error) {
-    eprintln!("piko: error: {error}");
+    eprintln!("error: {error}");
 
     let mut source = error.source();
     while let Some(cause) = source {
@@ -24,7 +24,7 @@ pub fn report(error: &dyn std::error::Error) {
 /// Printed rather than swallowed so the output is never mistaken for the complete list.
 pub fn report_dropped_diagnostics(dropped: usize) {
     if dropped > 0 {
-        eprintln!("piko: warning: {dropped} further problem(s) not shown");
+        eprintln!("warning: {dropped} further problem(s) not shown");
     }
 }
 
@@ -38,7 +38,7 @@ macro_rules! emit {
             if error.kind() == ::std::io::ErrorKind::BrokenPipe {
                 return ::std::process::ExitCode::SUCCESS;
             }
-            eprintln!("piko: error: failed to write output: {error}");
+            eprintln!("error: failed to write output: {error}");
             return ::std::process::ExitCode::FAILURE;
         }
     };

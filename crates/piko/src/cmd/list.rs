@@ -201,7 +201,7 @@ fn print_group_names(
 fn report_missing_groups(wanted: &[String], seen: &BTreeSet<String>) -> bool {
     let mut ok = true;
     for name in wanted.iter().filter(|name| !seen.contains(*name)) {
-        eprintln!("piko: error: group {name} was not found");
+        eprintln!("error: group {name} was not found");
         ok = false;
     }
     ok

@@ -6,7 +6,7 @@
 
 /// Prints an error and its whole cause chain.
 pub fn report(error: &dyn std::error::Error) {
-    eprintln!("piko-key: error: {error}");
+    eprintln!("error: {error}");
 
     let mut source = error.source();
     while let Some(cause) = source {
@@ -22,7 +22,7 @@ macro_rules! emit {
             if error.kind() == ::std::io::ErrorKind::BrokenPipe {
                 return ::std::process::ExitCode::SUCCESS;
             }
-            eprintln!("piko-key: error: failed to write output: {error}");
+            eprintln!("error: failed to write output: {error}");
             return ::std::process::ExitCode::FAILURE;
         }
     };

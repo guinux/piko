@@ -13,11 +13,15 @@
 //! ignored is treated as if that repository did not carry it at all, and resolution falls
 //! through to the next repository in priority order — the same as libalpm's non-interactive
 //! path through `resolvedep` (`prompt == 0`: warn and `continue`, rather than asking
-//! `ALPM_QUESTION_INSTALL_IGNOREPKG`), since piko has no prompt machinery. Unlike libalpm,
-//! nothing is logged, since `piko-db` never calls a logging macro: a caller cannot currently tell an ignored
-//! match from a genuinely absent one, which is fine for `piko resolve`'s "did I get a
-//! package back" question but would need a real return value if a future caller needs to
-//! explain *why* nothing came back.
+//! `ALPM_QUESTION_INSTALL_IGNOREPKG`). piko never asks that question: an ignored package is
+//! reported and left alone, never installed.
+//!
+//! Nothing is logged here, since `piko-db` never calls a logging macro. The reason travels as a
+//! return value instead: [`IgnoreList::reason`] answers *which* list covered a package and
+//! which pattern matched, and [`SyncRepos::ignored_satisfiers`] answers what an empty
+//! [`SyncRepos::find_satisfiers`] threw away. Without them an ignored match and a genuinely
+//! absent one are indistinguishable, and a caller reporting "not found in any configured
+//! repository" for an ignored package states something false.
 //!
 //! [`SyncRepos::find_literal_satisfier`] also honors a version constraint, if `dep` carries one
 //! (`foo>=1.0`, `foo=1.2.3-1`, ...) — this is `_alpm_depcmp_literal`'s other half in `deps.c`:
@@ -189,14 +193,89 @@ impl<'a> IgnoreList<'a> {
         Self { packages, groups }
     }
 
+    /// Why a package with this name and these `%GROUPS%` is ignored, or `None` if it is not.
+    ///
+    /// The whole of `alpm_pkg_should_ignore` lives here, and every other question about
+    /// ignoring is asked through it. It takes a name and a group list rather than a package
+    /// so that an *installed* package can be judged by the same rule: `check_literal`
+    /// (`sync.c:93`) tests both the repository candidate and the installed one, and the two
+    /// can carry different `%GROUPS%`.
+    ///
+    /// `IgnorePkg` is tested before `IgnoreGroup`, matching libalpm's own order, so a package
+    /// covered by both reports the name match.
+    #[must_use]
+    pub fn reason(&self, name: &str, groups: &[alpm_types::Group]) -> Option<IgnoreReason> {
+        if let Some(pattern) = matching_pattern(self.packages, name) {
+            return Some(IgnoreReason::Package { pattern: pattern.to_owned() });
+        }
+        groups.iter().find_map(|group| {
+            matching_pattern(self.groups, group).map(|pattern| IgnoreReason::Group {
+                group: group.clone(),
+                pattern: pattern.to_owned(),
+            })
+        })
+    }
+
+    /// [`Self::reason`] for a repository package.
+    #[must_use]
+    pub fn reason_for(&self, package: &RepoPackage) -> Option<IgnoreReason> {
+        self.reason(package.name().as_ref(), package.groups())
+    }
+
     /// Whether `package` is covered by either list.
     ///
     /// Crate-visible because [`crate::solve::Universe`] applies the same filter when it
     /// interns repository candidates, and two copies of `alpm_pkg_should_ignore` would be
     /// two chances to disagree.
     pub(crate) fn ignores(&self, package: &RepoPackage) -> bool {
-        matches_any(self.packages, package.name().as_ref())
-            || package.groups().iter().any(|group| matches_any(self.groups, group))
+        self.reason_for(package).is_some()
+    }
+}
+
+/// Which of `pacman.conf`'s two lists covered a package, and the pattern that did it.
+///
+/// libalpm has no equivalent: `alpm_pkg_should_ignore` returns an `int`, and each of its five
+/// call sites supplies the context from what it already knows. piko's callers are further from
+/// the test — [`crate::solve::Universe`] applies it while interning candidates, and the
+/// message is printed much later — so the reason travels with the package instead of being
+/// reconstructed. Naming the pattern matters when the entry is a glob: `IgnorePkg = linux*`
+/// covering `linux-firmware` is otherwise a surprise with no visible cause.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IgnoreReason {
+    /// The package's own name matched an `IgnorePkg` pattern.
+    Package {
+        /// The `IgnorePkg` entry that matched.
+        pattern: String,
+    },
+    /// One of the package's `%GROUPS%` matched an `IgnoreGroup` pattern.
+    Group {
+        /// The group the package belongs to.
+        group: String,
+        /// The `IgnoreGroup` entry that matched it.
+        pattern: String,
+    },
+}
+
+impl IgnoreReason {
+    /// The `pacman.conf` directive this reason came from, for a message that tells the user
+    /// which list to edit.
+    #[must_use]
+    pub const fn directive(&self) -> &'static str {
+        match self {
+            Self::Package { .. } => "IgnorePkg",
+            Self::Group { .. } => "IgnoreGroup",
+        }
+    }
+}
+
+impl std::fmt::Display for IgnoreReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Package { pattern } => write!(f, "IgnorePkg = {pattern}"),
+            Self::Group { group, pattern } => {
+                write!(f, "IgnoreGroup = {pattern}, via group {group}")
+            }
+        }
     }
 }
 
@@ -229,6 +308,20 @@ impl<'a> IgnoreList<'a> {
 /// all of them. A second copy would be a second chance for these rules to drift.
 #[must_use]
 pub fn matches_any(patterns: &[String], text: &str) -> bool {
+    matching_pattern(patterns, text).is_some()
+}
+
+/// The pattern [`matches_any`] selected `text` with, or `None` when nothing selects it.
+///
+/// The whole backwards-with-inversion scan lives here, and [`matches_any`] is a `is_some()`
+/// over it: two copies of `_alpm_fnmatch_patterns` would be two chances to disagree, and the
+/// `!` rule is exactly the part that is easy to get subtly wrong.
+///
+/// The pattern returned is always a selecting one. A scan that stops on an inverted pattern
+/// answers `None`, since that entry de-selects `text` rather than choosing it. The `!` or `\`
+/// sigil is stripped from what comes back, so the caller quotes the glob that was compiled.
+#[must_use]
+pub fn matching_pattern<'p>(patterns: &'p [String], text: &str) -> Option<&'p str> {
     for pattern in patterns.iter().rev() {
         let inverted = pattern.starts_with('!');
         // `_alpm_fnmatch_patterns` strips one leading character for either sigil: `!` because
@@ -240,10 +333,10 @@ pub fn matches_any(patterns: &[String], text: &str) -> bool {
         };
         let hit = glob::Pattern::new(bare).map_or(bare == text, |compiled| compiled.matches(text));
         if hit {
-            return !inverted;
+            return (!inverted).then_some(bare);
         }
     }
-    false
+    None
 }
 
 /// An ordered set of sync repositories — `pacman.conf`'s file order, which **is** repository
@@ -332,6 +425,55 @@ impl<'a> SyncRepos<'a> {
                 })
             })
             .collect()
+    }
+
+    /// Every package that would have satisfied `dep` had [`Self::with_ignores`] not covered
+    /// it, paired with the reason it was covered.
+    ///
+    /// This exists only to explain an empty [`Self::find_satisfiers`]. Nothing in resolution
+    /// calls it, and it never turns an ignored package into a usable one: piko reports an
+    /// ignored package and leaves it alone, where pacman asks
+    /// `ALPM_QUESTION_INSTALL_IGNOREPKG` and may install it anyway.
+    ///
+    /// Unlike [`Self::find_literal_satisfier`], this does not stop at the highest-priority
+    /// repository. A caller explaining "nothing came back" wants every copy that was passed
+    /// over, not the one that would have won. The version constraint still applies: a
+    /// repository copy that is both ignored *and* too old did not fail because it was
+    /// ignored, and reporting it would name the wrong cause.
+    #[must_use]
+    pub fn ignored_satisfiers(&self, dep: &RelationOrSoname) -> Vec<(Resolved<'a>, IgnoreReason)> {
+        self.repos
+            .iter()
+            .filter(|repo| {
+                repo.usage.contains(DbUsage::INSTALL) || repo.usage.contains(DbUsage::UPGRADE)
+            })
+            .flat_map(|repo| {
+                repo.database.iter().filter_map(move |package| {
+                    if !satisfies(package, dep) {
+                        return None;
+                    }
+                    let reason = self.ignores.reason_for(package)?;
+                    Some((Resolved { repo: repo.database.name(), package }, reason))
+                })
+            })
+            .collect()
+    }
+}
+
+/// Whether `package` satisfies `dep` at all, by its own name and version or by `%PROVIDES%`.
+///
+/// `_alpm_depcmp`'s two halves in one call, without any of `resolvedep`'s policy: no `Usage`
+/// gate, no `IgnoreList`, no repository priority, and no exclusion of a literally-named
+/// package from the `%PROVIDES%` step. It answers "could this package have been the answer",
+/// which is the question both [`SyncRepos::ignored_satisfiers`] and
+/// [`crate::solve::Universe::ignored_satisfiers`] ask about a package that was already
+/// filtered out. Two copies of it would be two chances to name the wrong cause.
+pub(crate) fn satisfies(package: &RepoPackage, dep: &RelationOrSoname) -> bool {
+    match dep {
+        RelationOrSoname::Relation(relation) if relation.name == *package.name() => {
+            depcmp::version_satisfies(package.version(), relation)
+        }
+        _ => package.provides().iter().any(|provided| depcmp::provides_satisfies(provided, dep)),
     }
 }
 
@@ -582,7 +724,7 @@ Foobar McFooface <foobar@mcfooface.org>
 
     /// The pattern list, exercised directly rather than through `IgnorePkg`.
     mod fnmatch_patterns {
-        use super::super::matches_any;
+        use super::super::{matches_any, matching_pattern};
 
         fn patterns(list: &[&str]) -> Vec<String> {
             list.iter().map(|entry| (*entry).to_owned()).collect()
@@ -642,7 +784,85 @@ Foobar McFooface <foobar@mcfooface.org>
             let list = patterns(&["foo[bar"]);
             assert!(matches_any(&list, "foo[bar"));
             assert!(!matches_any(&list, "foob"));
+            assert_eq!(matching_pattern(&list, "foo[bar"), Some("foo[bar"));
         }
+
+        /// The pattern that comes back is the one that decided, not merely one that matches.
+        /// With the backwards scan the *last* entry wins, so an earlier one matching too must
+        /// not be the one reported.
+        #[test]
+        fn the_pattern_reported_is_the_one_the_backwards_scan_stopped_on() {
+            let list = patterns(&["linux*", "lin*"]);
+            assert_eq!(matching_pattern(&list, "linux-firmware"), Some("lin*"));
+        }
+
+        /// An inverted entry de-selects, so there is no selecting pattern to name.
+        #[test]
+        fn an_inverted_match_names_no_pattern() {
+            let list = patterns(&["linux*", "!linux-firmware"]);
+            assert_eq!(matching_pattern(&list, "linux-firmware"), None);
+            assert_eq!(matching_pattern(&list, "linux"), Some("linux*"));
+        }
+
+        /// The sigil is stripped from what is reported, so the caller quotes the glob that was
+        /// actually compiled.
+        #[test]
+        fn the_escaping_backslash_is_not_reported() {
+            assert_eq!(matching_pattern(&patterns(&[r"\!odd"]), "!odd"), Some("!odd"));
+        }
+    }
+
+    /// `IgnorePkg` is tested before `IgnoreGroup`, so a package covered by both reports the
+    /// name — the reason that names one package rather than a whole group.
+    #[test]
+    fn a_reason_names_the_list_and_the_pattern_that_matched() {
+        let packages = vec!["linux*".to_owned()];
+        let groups = vec!["base-devel".to_owned()];
+        let ignores = IgnoreList::new(&packages, &groups);
+
+        assert_eq!(
+            ignores.reason("linux-firmware", &[]),
+            Some(IgnoreReason::Package { pattern: "linux*".to_owned() })
+        );
+        assert_eq!(
+            ignores.reason("gcc", &["base-devel".to_owned()]),
+            Some(IgnoreReason::Group {
+                group: "base-devel".to_owned(),
+                pattern: "base-devel".to_owned(),
+            })
+        );
+        assert_eq!(
+            ignores.reason("linux-headers", &["base-devel".to_owned()]),
+            Some(IgnoreReason::Package { pattern: "linux*".to_owned() }),
+            "IgnorePkg is tested first, as in alpm_pkg_should_ignore"
+        );
+        assert_eq!(ignores.reason("bash", &["core".to_owned()]), None);
+    }
+
+    /// An ignored match and an absent one must be tellable apart: `find_satisfiers` answers
+    /// the same empty result for both, so the reason has to come from somewhere else.
+    #[test]
+    fn an_ignored_match_is_reported_rather_than_only_dropped() {
+        let scenario = Scenario::new().repo("core", [PackageSpec::new("gedit", "46.2-1")]).build();
+        let ignore_pkg = vec!["gedit".to_owned()];
+        let repos = sync_repos(&scenario).with_ignores(IgnoreList::new(&ignore_pkg, &[]));
+
+        assert!(repos.find_satisfiers(&relation("gedit")).is_empty());
+        let ignored = repos.ignored_satisfiers(&relation("gedit"));
+        assert_eq!(ignored.len(), 1);
+        assert_eq!(ignored[0].0.package().name().as_ref(), "gedit");
+        assert_eq!(ignored[0].1, IgnoreReason::Package { pattern: "gedit".to_owned() });
+    }
+
+    /// A copy that is both ignored *and* too old did not fail because it was ignored. Naming
+    /// it would send the user to `pacman.conf` over a version constraint.
+    #[test]
+    fn a_version_mismatch_is_not_reported_as_an_ignored_match() {
+        let scenario = Scenario::new().repo("core", [PackageSpec::new("gedit", "46.2-1")]).build();
+        let ignore_pkg = vec!["gedit".to_owned()];
+        let repos = sync_repos(&scenario).with_ignores(IgnoreList::new(&ignore_pkg, &[]));
+
+        assert!(repos.ignored_satisfiers(&relation("gedit>=47")).is_empty());
     }
 
     #[test]

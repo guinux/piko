@@ -312,7 +312,7 @@ pub fn verify(
                 piko_sig::Verdict::Accepted { .. } => ExitCode::SUCCESS,
                 piko_sig::Verdict::Rejected(rejection) => {
                     eprintln!(
-                        "piko-key: error: the signature on {} was rejected: {rejection}",
+                        "error: the signature on {} was rejected: {rejection}",
                         file.display()
                     );
                     ExitCode::FAILURE

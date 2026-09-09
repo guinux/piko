@@ -70,14 +70,14 @@ pub(crate) fn install_cancel_handler() -> (piko_net::Cancel, PromptMode) {
     #[allow(clippy::expect_used, reason = "the only registration reachable in one process run")]
     ctrlc::set_handler(move || {
         if for_handler_kill.load(std::sync::atomic::Ordering::SeqCst) {
-            eprintln!("piko: interrupted");
+            eprintln!("interrupted");
             std::process::exit(130);
         }
         if for_handler.is_requested() {
-            eprintln!("piko: still stopping -- forcing exit");
+            eprintln!("still stopping -- forcing exit");
             std::process::exit(130);
         }
-        eprintln!("piko: stopping the download (press Ctrl+C again to force quit)...");
+        eprintln!("stopping the download (press Ctrl+C again to force quit)...");
         for_handler.request();
     })
     .expect("installing the SIGINT handler cannot fail here");

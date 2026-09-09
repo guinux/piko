@@ -40,7 +40,7 @@ pub fn check_selected(
                 }
             }
             None => {
-                steplist.suspend(|| eprintln!("piko: error: package {name} is not installed"));
+                steplist.suspend(|| eprintln!("error: package {name} is not installed"));
                 missing = true;
             }
         }

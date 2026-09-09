@@ -50,7 +50,7 @@ pub fn files_installed(
 
     for name in names {
         let Some(package) = db.get_str(name) else {
-            eprintln!("piko: error: package {name} is not installed");
+            eprintln!("error: package {name} is not installed");
             ok = false;
             continue;
         };
@@ -72,7 +72,7 @@ pub fn files_installed(
 
         if sorted.len() != paths.len() {
             eprintln!(
-                "piko: warning: {} path(s) are not valid UTF-8 and were omitted",
+                "warning: {} path(s) are not valid UTF-8 and were omitted",
                 paths.len().saturating_sub(sorted.len())
             );
         }
@@ -105,7 +105,7 @@ pub fn files_repo(
         match db.get_str(name) {
             Some(package) => found.push(package),
             None => {
-                eprintln!("piko: error: package {name} is not in {}", db.path().display());
+                eprintln!("error: package {name} is not in {}", db.path().display());
                 ok = false;
             }
         }
@@ -155,7 +155,7 @@ pub fn files_installed_then_repos(
         let source = resolve_installed_or_repo(local, dbs, name);
         if source.is_none() {
             eprintln!(
-                "piko: error: package {name} is not installed and not in any configured \
+                "error: package {name} is not installed and not in any configured \
                  repository"
             );
             ok = false;
@@ -195,7 +195,7 @@ pub fn files_installed_then_repos(
                     sorted.sort_unstable();
                     if sorted.len() != paths.len() {
                         eprintln!(
-                            "piko: warning: {} path(s) are not valid UTF-8 and were omitted",
+                            "warning: {} path(s) are not valid UTF-8 and were omitted",
                             paths.len().saturating_sub(sorted.len())
                         );
                     }

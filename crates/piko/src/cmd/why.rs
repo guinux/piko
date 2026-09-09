@@ -27,7 +27,7 @@ pub fn why(local: &LocalDatabase, target: &str, out: &mut impl std::io::Write) -
     };
 
     let Some(result) = explain_why_installed(&universe, target) else {
-        eprintln!("piko: error: package {target} is not installed");
+        eprintln!("error: package {target} is not installed");
         return ExitCode::FAILURE;
     };
 

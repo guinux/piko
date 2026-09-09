@@ -27,9 +27,10 @@ use piko_txn::CacheDirSource;
 
 use crate::cli::{Cli, Command};
 use crate::context::{
-    ConfigCache, cache_dirs, hold_pkg, hook_dirs, open_all_repos, open_local_db, open_repo_by_name,
-    open_repo_db, open_repos_for_packages, parse_repo_arg, path_patterns, recording,
-    require_pacman_config, resolve_dbpath, resolve_log_file, resolve_root_dir, signing_policy,
+    ConfigCache, cache_dirs, hold_pkg, hook_dirs, ignore_lists, open_all_repos, open_local_db,
+    open_repo_by_name, open_repo_db, open_repos_for_packages, parse_repo_arg, path_patterns,
+    recording, require_pacman_config, resolve_dbpath, resolve_log_file, resolve_root_dir,
+    signing_policy,
 };
 use crate::error::Error;
 use crate::output::report;
@@ -73,7 +74,7 @@ fn exec_helper() -> Option<ExitCode> {
     }
 
     let Err(message) = piko_txn::exec::helper_main(&arguments.collect::<Vec<_>>());
-    eprintln!("piko: error: {message}");
+    eprintln!("error: {message}");
     Some(ExitCode::FAILURE)
 }
 
@@ -254,7 +255,9 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 }
                 repos
             };
-            cmd::sync::check_updates(&local, &repos, *quiet, &mut out)
+            let (ignore_pkg, ignore_group) = ignore_lists(cli, &config);
+            let ignores = IgnoreList::new(&ignore_pkg, &ignore_group);
+            cmd::sync::check_updates(&local, &repos, ignores, *quiet, &mut out)
         }
         Command::Resolve { target } => {
             let parsed = require_pacman_config(cli, &config)?;
@@ -278,7 +281,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
             let format = if *names { cmd::plan::Format::Names } else { cmd::plan::Format::Full };
             if targets.is_empty() && !*sysupgrade {
-                eprintln!("piko: error: no targets given (use --sysupgrade to upgrade everything)");
+                eprintln!("error: no targets given (use --sysupgrade to upgrade everything)");
                 return Ok(ExitCode::FAILURE);
             }
             let mode = if *remove {
@@ -458,7 +461,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
     if let Err(error) = out.flush()
         && error.kind() != io::ErrorKind::BrokenPipe
     {
-        eprintln!("piko: error: failed to write output: {error}");
+        eprintln!("error: failed to write output: {error}");
         return Ok(ExitCode::FAILURE);
     }
 

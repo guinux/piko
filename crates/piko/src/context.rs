@@ -48,7 +48,7 @@ impl ConfigCache {
                 PacmanConfig::open(&cli.config)
                     .inspect(|config| {
                         for diagnostic in config.diagnostics() {
-                            eprintln!("piko: warning: {diagnostic}");
+                            eprintln!("warning: {diagnostic}");
                         }
                     })
                     .map_err(|error| error.to_string())
@@ -211,6 +211,19 @@ pub fn hold_pkg(cli: &Cli, config: &ConfigCache) -> Vec<String> {
     config.get(cli).map(|parsed| parsed.options.hold_pkg.clone()).unwrap_or_default()
 }
 
+/// Resolves `IgnorePkg` and `IgnoreGroup`, as the two lists
+/// [`piko_db::resolve::IgnoreList::new`] pairs.
+///
+/// The same lenient fallback [`hold_pkg`] takes, for the same reason: a config piko cannot
+/// read has already warned through [`resolve_dbpath`], and two empty lists ignore nothing —
+/// which is what an absent `IgnorePkg` directive means anyway.
+pub fn ignore_lists(cli: &Cli, config: &ConfigCache) -> (Vec<String>, Vec<String>) {
+    config
+        .get(cli)
+        .map(|parsed| (parsed.options.ignore_pkg.clone(), parsed.options.ignore_group.clone()))
+        .unwrap_or_default()
+}
+
 /// Resolves the effective installation root: `RootDir` from the parsed pacman.conf, else the
 /// hardcoded default with a warning if that cannot be read.
 ///
@@ -221,7 +234,7 @@ pub fn resolve_root_dir(cli: &Cli, config: &ConfigCache) -> PathBuf {
         Ok(config) => config.options.root_dir.clone(),
         Err(error) => {
             eprintln!(
-                "piko: warning: failed to read {} ({error}); falling back to {}",
+                "warning: failed to read {} ({error}); falling back to {}",
                 cli.config.display(),
                 piko_db::config::DEFAULT_ROOT_DIR
             );
@@ -242,7 +255,7 @@ pub fn resolve_dbpath(cli: &Cli, config: &ConfigCache) -> PathBuf {
         Ok(config) => config.options.db_path.clone(),
         Err(error) => {
             eprintln!(
-                "piko: warning: failed to read {} ({error}); falling back to {}",
+                "warning: failed to read {} ({error}); falling back to {}",
                 cli.config.display(),
                 piko_db::config::DEFAULT_DB_PATH
             );
@@ -266,7 +279,7 @@ pub fn resolve_log_file(cli: &Cli, config: &ConfigCache) -> PathBuf {
         Ok(config) => config.options.log_file.clone(),
         Err(error) => {
             eprintln!(
-                "piko: warning: failed to read {} ({error}); falling back to {}",
+                "warning: failed to read {} ({error}); falling back to {}",
                 cli.config.display(),
                 piko_db::config::DEFAULT_LOG_FILE
             );
@@ -314,7 +327,7 @@ pub fn open_local_db(cli: &Cli, config: &ConfigCache) -> Result<LocalDatabase, p
 
     let db = LocalDatabase::open_with(&root, OpenOptions::new())?;
     for diagnostic in db.diagnostics() {
-        eprintln!("piko: warning: {diagnostic}");
+        eprintln!("warning: {diagnostic}");
     }
     report_dropped_diagnostics(db.diagnostics_dropped());
     Ok(db)
@@ -322,7 +335,7 @@ pub fn open_local_db(cli: &Cli, config: &ConfigCache) -> Result<LocalDatabase, p
 
 fn print_repo_diagnostics(db: &RepoDatabase) {
     for diagnostic in db.diagnostics() {
-        eprintln!("piko: warning: {diagnostic}");
+        eprintln!("warning: {diagnostic}");
     }
     report_dropped_diagnostics(db.diagnostics_dropped());
 }
@@ -413,7 +426,7 @@ pub fn open_repo_by_name(
 /// database would then announce itself as:
 ///
 /// ```text
-/// piko: error: failed to open /var/lib/pacman/sync/core.db
+/// error: failed to open /var/lib/pacman/sync/core.db
 ///   caused by: signature rejected: the signature is invalid
 /// ```
 ///
@@ -488,7 +501,7 @@ pub fn open_all_repos(
         match open_repo_by_name(&dbpath, &repo.name, cli, config) {
             Ok(db) => opened.push((repo.usage, db)),
             Err(error) => {
-                eprintln!("piko: warning: skipping repository {}: {error}", repo.name);
+                eprintln!("warning: skipping repository {}: {error}", repo.name);
             }
         }
     }
@@ -532,7 +545,7 @@ pub fn open_repos_for_packages(
                 opened.push(db);
             }
             Err(error) => {
-                eprintln!("piko: warning: skipping repository {}: {error}", repo.name);
+                eprintln!("warning: skipping repository {}: {error}", repo.name);
             }
         }
     }

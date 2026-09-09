@@ -35,9 +35,10 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use alpm_types::RelationOrSoname;
+use alpm_types::{FullVersion, Name, RelationOrSoname};
 
 use crate::diagnostics::Sink;
+use crate::resolve::IgnoreReason;
 use crate::solve::clause::{ClauseId, ClauseKind, Lit, Problem};
 use crate::solve::{Origin, Solvable, SolvableId, Universe};
 use crate::{Error, Limits, Result};
@@ -50,6 +51,7 @@ pub struct Request {
     needed: bool,
     allow_removals: bool,
     recursive: bool,
+    ignored_upgrades: Vec<IgnoredUpgrade>,
 }
 
 impl Default for Request {
@@ -74,6 +76,7 @@ impl Request {
             needed: false,
             allow_removals: true,
             recursive: false,
+            ignored_upgrades: Vec::new(),
         }
     }
 
@@ -147,7 +150,20 @@ impl Request {
         for (replacement, replaced) in &upgrade.replacements {
             self = self.target(*replacement).remove(*replaced);
         }
+        self.ignored_upgrades = upgrade.ignored;
         self
+    }
+
+    /// The upgrades `IgnorePkg`/`IgnoreGroup` kept out of this request.
+    ///
+    /// Empty unless [`Self::with_sysupgrade`] was applied. Carried on the request rather than
+    /// returned separately so the one call that decides `-Su`'s targets also carries what it
+    /// decided against: a caller that reports these cannot forget to ask, and a second
+    /// [`sysupgrade`] call to recover them could not disagree with the first but would walk
+    /// the installed set twice.
+    #[must_use]
+    pub fn ignored_upgrades(&self) -> &[IgnoredUpgrade] {
+        &self.ignored_upgrades
     }
 
     /// The requested targets.
@@ -266,6 +282,40 @@ pub enum TargetResolutionFailure {
     /// A target parsed but named neither a package nor a `%GROUPS%` group in any configured
     /// repository.
     NotFound(String),
+    /// A target resolved to nothing only because `IgnorePkg`/`IgnoreGroup` covered every
+    /// candidate for it.
+    ///
+    /// Distinct from [`Self::NotFound`] because the two call for opposite actions: one means
+    /// the name is wrong, the other means `pacman.conf` says not to touch it. libalpm draws
+    /// the same line, between `ALPM_ERR_PKG_IGNORED` and `ALPM_ERR_PKG_NOT_FOUND`
+    /// (`deps.c:743`).
+    Ignored {
+        /// The target as the user spelled it.
+        target: String,
+        /// What was passed over for it. Never empty.
+        candidates: Vec<IgnoredTarget>,
+    },
+}
+
+/// A named target, or a member of a named group, that `IgnorePkg`/`IgnoreGroup` covered.
+#[derive(Clone, Debug)]
+pub struct IgnoredTarget {
+    /// The package's name.
+    pub name: Name,
+    /// Its version in the repository that carried it.
+    pub version: FullVersion,
+    /// Which list covered it, and the pattern that matched.
+    pub reason: IgnoreReason,
+}
+
+impl IgnoredTarget {
+    fn from_candidate(candidate: &crate::solve::IgnoredCandidate<'_>) -> Self {
+        Self {
+            name: candidate.package().name().clone(),
+            version: candidate.package().version().clone(),
+            reason: candidate.reason().clone(),
+        }
+    }
 }
 
 /// Resolves `targets` against `universe`, adding each one to `request`.
@@ -279,6 +329,15 @@ pub enum TargetResolutionFailure {
 /// through exactly this rule, so both commands treat `foo`, `foo>=1.0`, and a group name
 /// alike.
 ///
+/// # `IgnorePkg` is reported, never overridden
+///
+/// A target every candidate of which is ignored fails with
+/// [`TargetResolutionFailure::Ignored`] rather than being installed anyway. pacman asks
+/// `ALPM_QUESTION_INSTALL_IGNOREPKG` here and installs on a yes; piko does not ask, and the
+/// answer is always no. A group target is the partial case: its non-ignored members are still
+/// resolved, and the ignored ones come back in the returned list so the caller can say what it
+/// left out.
+///
 /// # Errors
 ///
 /// [`TargetResolutionFailure`], naming the first target that could not be resolved.
@@ -286,7 +345,8 @@ pub fn resolve_targets(
     universe: &Universe<'_>,
     mut request: Request,
     targets: &[String],
-) -> Result<Request, TargetResolutionFailure> {
+) -> Result<(Request, Vec<IgnoredTarget>), TargetResolutionFailure> {
+    let mut ignored: Vec<IgnoredTarget> = Vec::new();
     for target in targets {
         let Ok(dep) = target.parse::<alpm_types::RelationOrSoname>() else {
             return Err(TargetResolutionFailure::InvalidDependencyString(target.clone()));
@@ -297,14 +357,26 @@ pub fn resolve_targets(
         }
 
         let members = resolve_group(universe, target);
-        if members.is_empty() {
+        let ignored_members: Vec<IgnoredTarget> =
+            universe.ignored_in_group(target).map(IgnoredTarget::from_candidate).collect();
+        if !members.is_empty() {
+            for member in members {
+                request = request.target(member);
+            }
+            ignored.extend(ignored_members);
+            continue;
+        }
+
+        // Nothing was resolvable. Say which of the two reasons it was.
+        let mut candidates: Vec<IgnoredTarget> =
+            universe.ignored_satisfiers(&dep).map(IgnoredTarget::from_candidate).collect();
+        candidates.extend(ignored_members);
+        if candidates.is_empty() {
             return Err(TargetResolutionFailure::NotFound(target.clone()));
         }
-        for member in members {
-            request = request.target(member);
-        }
+        return Err(TargetResolutionFailure::Ignored { target: target.clone(), candidates });
     }
-    Ok(request)
+    Ok((request, ignored))
 }
 
 /// Compiles `request` against `universe`.
@@ -960,6 +1032,45 @@ pub struct Sysupgrade {
     pub upgrades: Vec<SolvableId>,
     /// `(replacement, replaced)` pairs from `%REPLACES%`.
     pub replacements: Vec<(SolvableId, SolvableId)>,
+    /// What `IgnorePkg`/`IgnoreGroup` kept out, in the same order.
+    pub ignored: Vec<IgnoredUpgrade>,
+}
+
+/// Which change `IgnorePkg`/`IgnoreGroup` prevented.
+///
+/// One variant per warning libalpm prints: `check_literal`'s two (`sync.c:96`, `sync.c:106`)
+/// and `check_replacers`' one (`sync.c:156`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IgnoredChange {
+    /// A newer repository version was available.
+    Upgrade,
+    /// An older repository version would have been taken, `-Suu` having been asked for.
+    Downgrade,
+    /// Another package's `%REPLACES%` named the installed one.
+    Replacement,
+}
+
+/// A change a full system upgrade would have made, had `IgnorePkg`/`IgnoreGroup` not covered
+/// one of the two packages involved.
+///
+/// The available side is carried by value rather than as a [`SolvableId`]: an ignored
+/// repository candidate is never interned, so no id names it. `installed` still is one — the
+/// installed set is interned unconditionally.
+#[derive(Clone, Debug)]
+pub struct IgnoredUpgrade {
+    /// The installed package that stays as it is.
+    pub installed: SolvableId,
+    /// The name of the repository package that was passed over. Equal to the installed name
+    /// except for [`IgnoredChange::Replacement`].
+    pub name: Name,
+    /// That package's version.
+    pub version: FullVersion,
+    /// Which list covered it, and the pattern that matched. Either side of the pair can be
+    /// the covered one: `check_literal` tests
+    /// `alpm_pkg_should_ignore(spkg) || alpm_pkg_should_ignore(lpkg)`.
+    pub reason: IgnoreReason,
+    /// What was prevented.
+    pub kind: IgnoredChange,
 }
 
 /// Chooses what `-Su` would do, mirroring `alpm_sync_sysupgrade` (`sync.c:200`).
@@ -982,15 +1093,37 @@ pub struct Sysupgrade {
 /// volunteer upgrades.
 ///
 /// `enable_downgrade` is `-Suu`. Without it, a repository version older than the installed
-/// one is left alone (libalpm warns "local (%s) is newer than %s (%s)"). piko's diagnostics
-/// are returned to the caller rather than logged or printed, so this function has nowhere to
-/// warn to; it simply does not select the older version.
+/// one is left alone (libalpm warns "local (%s) is newer than %s (%s)"); this function simply
+/// does not select it.
+///
+/// # `IgnorePkg`/`IgnoreGroup` is tested on both sides, and an ignored copy still settles the
+/// repository
+///
+/// `check_literal` and `check_replacers` both test
+/// `alpm_pkg_should_ignore(spkg) || alpm_pkg_should_ignore(lpkg)`. Only the repository side
+/// can be filtered while the universe is interned, because an installed package is always
+/// interned — `IgnorePkg` means "do not upgrade it", not "pretend it is not there". The
+/// installed side is therefore tested here, through [`Universe::ignores`]. Without it an
+/// `IgnoreGroup` that the installed `desc` carries but the repository `desc` does not is
+/// silently bypassed, and piko upgrades a package pacman leaves alone.
+///
+/// The repository walk also has to *see* an ignored candidate. `_alpm_db_get_pkgfromcache`
+/// finds a package whatever its ignore status, and the caller then `break`s
+/// (`sync.c:239-246`), so the first repository carrying the name settles the outcome even
+/// when that outcome is "nothing, it is ignored". Skipping ignored candidates here instead
+/// would let a lower-priority repository volunteer an upgrade that pacman never offers.
+/// [`Universe::ignored_named`] is what makes them visible again.
+///
+/// What was passed over is returned in [`Sysupgrade::ignored`], decided by this one walk
+/// rather than by a second pass that would have to reproduce the same priority rules.
 #[must_use]
 pub fn sysupgrade(universe: &Universe<'_>, enable_downgrade: bool) -> Sysupgrade {
     let mut result = Sysupgrade::default();
 
     for installed in universe.iter().filter(Solvable::is_installed) {
         let name = installed.name().as_ref();
+        // The `lpkg` half of the test, which no filter upstream of here can apply.
+        let local = universe.ignores().reason(name, installed.groups());
 
         for index in 0.. {
             let Some(usage) = universe.repository_usage(index) else { break };
@@ -998,42 +1131,112 @@ pub fn sysupgrade(universe: &Universe<'_>, enable_downgrade: bool) -> Sysupgrade
                 continue;
             }
 
-            // `%REPLACES%` first.
+            // `%REPLACES%` first. An ignored replacer is reported and skipped rather than
+            // ending the search, matching `check_replacers`' `continue`: a second replacer in
+            // the same repository is still considered, and so is the literal name below.
+            let replaces_installed = |entry: &alpm_types::PackageRelation| {
+                entry.name.as_ref() == name
+                    && crate::depcmp::version_satisfies(installed.version(), entry)
+            };
+            let ignored_replacers = universe
+                .ignored_in(index)
+                .filter(|candidate| candidate.package().replaces().iter().any(replaces_installed));
+            for candidate in ignored_replacers {
+                result.ignored.push(IgnoredUpgrade {
+                    installed: installed.id(),
+                    name: candidate.package().name().clone(),
+                    version: candidate.package().version().clone(),
+                    reason: candidate.reason().clone(),
+                    kind: IgnoredChange::Replacement,
+                });
+            }
             let replacer = universe.replacers_of(name).iter().copied().find(|id| {
                 let Some(candidate) = universe.get(*id) else { return false };
                 if candidate.origin() != Origin::Repository(index) {
                     return false;
                 }
-                candidate.replaces().iter().any(|entry| {
-                    entry.name.as_ref() == name
-                        && crate::depcmp::version_satisfies(installed.version(), entry)
-                })
+                candidate.replaces().iter().any(replaces_installed)
             });
             if let Some(replacer) = replacer {
-                result.replacements.push((replacer, installed.id()));
+                match (&local, universe.get(replacer)) {
+                    (Some(reason), Some(candidate)) => result.ignored.push(IgnoredUpgrade {
+                        installed: installed.id(),
+                        name: candidate.name().clone(),
+                        version: candidate.version().clone(),
+                        reason: reason.clone(),
+                        kind: IgnoredChange::Replacement,
+                    }),
+                    _ => result.replacements.push((replacer, installed.id())),
+                }
                 break;
             }
 
             // Then the literal name. Finding it settles the matter for this package, whether
-            // or not it turns out to be newer.
-            let Some(literal) = universe.candidates_named(name).iter().copied().find(|id| {
+            // or not it turns out to be newer, and whether or not it is ignored.
+            let literal = universe.candidates_named(name).iter().copied().find(|id| {
                 universe.get(*id).is_some_and(|c| c.origin() == Origin::Repository(index))
-            }) else {
-                continue;
-            };
-
-            if let Some(candidate) = universe.get(literal) {
-                let newer = candidate.version() > installed.version();
-                let older = candidate.version() < installed.version();
-                if newer || (older && enable_downgrade) {
-                    result.upgrades.push(literal);
+            });
+            if let Some((id, candidate)) = literal.and_then(|id| Some((id, universe.get(id)?))) {
+                let change =
+                    ignored_change(installed.version(), candidate.version(), enable_downgrade);
+                match (change, local.clone()) {
+                    (Some(kind), Some(reason)) => result.ignored.push(IgnoredUpgrade {
+                        installed: installed.id(),
+                        name: candidate.name().clone(),
+                        version: candidate.version().clone(),
+                        reason,
+                        kind,
+                    }),
+                    (Some(_), None) => result.upgrades.push(id),
+                    (None, _) => {}
                 }
+                break;
             }
-            break;
+
+            // No usable candidate: the repository may still carry an ignored copy, which
+            // settles the search the same way an ordinary one would.
+            let mut ignored_here = universe.ignored_named(name).filter(|c| c.repository() == index);
+            if let Some(candidate) = ignored_here.next() {
+                if let Some(kind) = ignored_change(
+                    installed.version(),
+                    candidate.package().version(),
+                    enable_downgrade,
+                ) {
+                    result.ignored.push(IgnoredUpgrade {
+                        installed: installed.id(),
+                        name: candidate.package().name().clone(),
+                        version: candidate.package().version().clone(),
+                        reason: candidate.reason().clone(),
+                        kind,
+                    });
+                }
+                break;
+            }
         }
     }
 
     result
+}
+
+/// Which change a version pair would have produced, or `None` when it would have produced
+/// none.
+///
+/// The ignore test is nested inside the version comparison, never the other way round: an
+/// ignored package already at the repository version has had nothing prevented, and neither
+/// has one whose repository copy is older while `-Suu` was not asked for. `check_literal`
+/// nests them the same way, which is why it stays silent in both cases.
+fn ignored_change(
+    installed: &FullVersion,
+    available: &FullVersion,
+    enable_downgrade: bool,
+) -> Option<IgnoredChange> {
+    if available > installed {
+        Some(IgnoredChange::Upgrade)
+    } else if available < installed && enable_downgrade {
+        Some(IgnoredChange::Downgrade)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1187,10 +1390,135 @@ mod tests {
             "core carries app at the installed version, so extra is never consulted"
         );
     }
+    /// A universe built with `IgnorePkg = <packages>` / `IgnoreGroup = <groups>`.
+    fn ignoring<'a>(
+        scenario: &'a BuiltScenario,
+        packages: &'a [String],
+        groups: &'a [String],
+    ) -> Universe<'a> {
+        Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new()
+                .usage(DbUsage::ALL)
+                .ignores(crate::resolve::IgnoreList::new(packages, groups)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_ignored_upgrade_is_reported_instead_of_taken() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("gedit", "46.2-1"))
+            .repo("core", [PackageSpec::new("gedit", "47.0-1")])
+            .build();
+        let ignored = vec!["gedit".to_owned()];
+        let universe = ignoring(&scenario, &ignored, &[]);
+
+        let result = sysupgrade(&universe, false);
+        assert!(result.upgrades.is_empty());
+        assert_eq!(result.ignored.len(), 1);
+        assert_eq!(result.ignored[0].kind, IgnoredChange::Upgrade);
+        assert_eq!(result.ignored[0].version.to_string(), "47.0-1");
+    }
+
+    /// The ignore test is nested inside the version comparison. A held-back package that has
+    /// nothing to be held back from has had nothing prevented, and libalpm stays silent.
+    #[test]
+    fn an_ignored_package_already_at_the_repository_version_reports_nothing() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("gedit", "47.0-1"))
+            .repo("core", [PackageSpec::new("gedit", "47.0-1")])
+            .build();
+        let ignored = vec!["gedit".to_owned()];
+
+        assert!(sysupgrade(&ignoring(&scenario, &ignored, &[]), false).ignored.is_empty());
+    }
+
+    /// Without `-Suu` an older repository version was never going to be taken, so nothing was
+    /// prevented. With it, the downgrade is what `IgnorePkg` held back.
+    #[test]
+    fn an_older_ignored_version_is_reported_only_under_downgrade() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("gedit", "47.0-1"))
+            .repo("core", [PackageSpec::new("gedit", "46.2-1")])
+            .build();
+        let ignored = vec!["gedit".to_owned()];
+        let universe = ignoring(&scenario, &ignored, &[]);
+
+        assert!(sysupgrade(&universe, false).ignored.is_empty());
+        let downgraded = sysupgrade(&universe, true);
+        assert_eq!(downgraded.ignored.len(), 1);
+        assert_eq!(downgraded.ignored[0].kind, IgnoredChange::Downgrade);
+    }
+
+    /// `check_replacers` warns and `continue`s rather than replacing.
+    #[test]
+    fn an_ignored_replacer_is_reported_and_not_applied() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("old", "1.0.0-1"))
+            .repo("core", [PackageSpec::new("new", "2.0.0-1").replaces(["old"])])
+            .build();
+        let ignored = vec!["new".to_owned()];
+        let universe = ignoring(&scenario, &ignored, &[]);
+
+        let result = sysupgrade(&universe, false);
+        assert!(result.replacements.is_empty());
+        assert_eq!(result.ignored.len(), 1);
+        assert_eq!(result.ignored[0].kind, IgnoredChange::Replacement);
+        assert_eq!(result.ignored[0].name.as_ref(), "new");
+    }
+
+    /// `check_literal` tests `should_ignore(spkg) || should_ignore(lpkg)`. Only the repository
+    /// side can be filtered while interning, so an `IgnoreGroup` that only the installed
+    /// `desc` carries is the case that a candidate-side filter alone lets through.
+    #[test]
+    fn an_ignore_group_carried_only_by_the_installed_package_still_holds_the_upgrade_back() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("app", "1.0.0-1").groups(["held"]))
+            .repo("core", [PackageSpec::new("app", "2.0.0-1")])
+            .build();
+        let groups = vec!["held".to_owned()];
+        let universe = ignoring(&scenario, &[], &groups);
+
+        let result = sysupgrade(&universe, false);
+        assert!(
+            result.upgrades.is_empty(),
+            "the installed side of the test must hold the upgrade back, as `lpkg` does"
+        );
+        assert_eq!(result.ignored.len(), 1);
+        assert_eq!(result.ignored[0].kind, IgnoredChange::Upgrade);
+    }
+
+    /// `_alpm_db_get_pkgfromcache` finds a package whatever its ignore status, and the caller
+    /// then `break`s: the first repository carrying the name settles the outcome. A candidate
+    /// filtered out of the universe must not let a lower-priority repository volunteer an
+    /// upgrade pacman never offers.
+    #[test]
+    fn an_ignored_copy_in_the_first_repository_settles_the_search() {
+        // Only `core`'s copy carries the ignored group, so `extra`'s newer copy is a perfectly
+        // ordinary candidate — and must still never be reached.
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("app", "1.0.0-1"))
+            .repo("core", [PackageSpec::new("app", "2.0.0-1").groups(["held"])])
+            .repo("extra", [PackageSpec::new("app", "3.0.0-1")])
+            .build();
+        let groups = vec!["held".to_owned()];
+        let universe = ignoring(&scenario, &[], &groups);
+
+        let result = sysupgrade(&universe, false);
+        assert!(
+            result.upgrades.is_empty(),
+            "core carries the name, ignored or not, so extra is never consulted"
+        );
+        assert_eq!(result.ignored.len(), 1);
+        assert_eq!(result.ignored[0].version.to_string(), "2.0.0-1", "core's copy, not extra's");
+    }
+
     /// The names `resolve_targets` put on `request`, in the order it added them.
     fn resolved<'a>(universe: &Universe<'a>, targets: &[&str]) -> Vec<&'a str> {
         let owned: Vec<String> = targets.iter().map(|target| (*target).to_owned()).collect();
-        let request = resolve_targets(universe, Request::new(), &owned).unwrap();
+        let (request, _) = resolve_targets(universe, Request::new(), &owned).unwrap();
         named(universe, request.targets())
     }
 
@@ -1252,7 +1580,8 @@ mod tests {
             .build();
         let universe = universe_of(&scenario, DbUsage::ALL);
 
-        let request = resolve_targets(&universe, Request::new(), &["tools".to_owned()]).unwrap();
+        let (request, _) =
+            resolve_targets(&universe, Request::new(), &["tools".to_owned()]).unwrap();
         let planned = solve_with_removals(&universe, &request, &Limits::default())
             .unwrap()
             .expect("a group target must not encode an unsatisfiable request");

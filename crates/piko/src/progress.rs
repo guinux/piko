@@ -1,5 +1,14 @@
-//! A live, stacked list of transaction steps: a spinner on stderr while an item runs, replaced
-//! by a plain checkmark line the moment it finishes.
+//! A live, stacked list of transaction steps: a spinner on stderr while an item runs, and a
+//! plain checkmark line on stdout naming it.
+//!
+//! That checkmark line is written as soon as the item has something to print underneath, and
+//! otherwise when the item finishes. So a name always comes before the output it frames, in a
+//! captured log as much as on a terminal — stderr and its spinner are not there to fill the
+//! gap. The glyph marks the line that names whatever follows it; how the item ended is
+//! reported separately by `cmd::txn::report_side_effects`, which never read the glyph.
+//!
+//! Lines nest by two spaces per level: a package step or a hook at column zero, a scriptlet
+//! under its step, and each item's own output one level further in again.
 //!
 //! A row is never left as a permanently kept `indicatif` bar. `MultiProgress` redraws its
 //! whole managed stack together on every tick and assumes that stack fits on screen. A
@@ -286,11 +295,31 @@ pub(crate) fn database_download_sink(row: Row) -> impl Fn(piko_net::Event) + Sen
 /// many times (a resolved dependency set, a package, a hook, a download/verify phase) uses
 /// this instead of [`Row::finish`].
 pub(crate) fn settle_row(steplist: &StepList, out: &mut impl std::io::Write, row: Row, text: &str) {
+    settle_row_indented(steplist, out, row, "", text);
+}
+
+/// As [`settle_row`], with `indent` ahead of the check.
+///
+/// [`CommitDriver`] nests its lines, and prints this same line from two places: the moment the
+/// item first has output to frame, or when it finishes having said nothing. Both go through
+/// here, so the two positions cannot drift into two different formats.
+pub(crate) fn settle_row_indented(
+    steplist: &StepList,
+    out: &mut impl std::io::Write,
+    row: Row,
+    indent: &str,
+    text: &str,
+) {
     row.finish_and_clear();
     steplist.suspend(|| {
-        let _ = writeln!(out, "{} {text}", checkmark());
+        let _ = writeln!(out, "{indent}{} {text}", checkmark());
         let _ = out.flush();
     });
+}
+
+/// The plain-line indent for a row nested `depth` levels deep: two spaces per level.
+fn indent_for(depth: usize) -> String {
+    "  ".repeat(depth)
 }
 
 /// A one-line description of a step, for the row this step's progress prints under.
@@ -435,9 +464,15 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
 }
 
 /// Drives one line per package and one line per hook through a `Staged::commit_with_progress`
-/// call: a spinner while that item runs, replaced by a plain checkmark line once it finishes,
-/// with `(n/total)` on the right while running. Also prints whatever [`print_step_result`] has
-/// to say about `out` as each install/remove step finishes.
+/// call: a spinner with `(n/total)` on the right while that item runs, and a plain checkmark
+/// line naming it. Also prints whatever [`print_step_result`] has to say about `out` as each
+/// install/remove step finishes.
+///
+/// The checkmark line is written by [`Self::announce`] the moment the item produces its first
+/// line of output, and by [`Self::close`] otherwise. Announcing cascades outwards first, so a
+/// scriptlet's chatter lands under the scriptlet's name, which lands under its package's. An
+/// item that announced early is only cleared when it finishes: printing its name a second time
+/// would say the same thing twice.
 ///
 /// Each finished item becomes an ordinary printed line, not a permanently kept `indicatif` row.
 /// `MultiProgress` redraws its whole managed stack together on every tick and assumes it fits
@@ -450,14 +485,27 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
 pub(crate) struct CommitDriver<'a, W> {
     steplist: &'a StepList,
     out: &'a mut W,
-    /// The currently running package-or-hook row and the text it was opened with. At most one
-    /// at a time: `commit_with_progress` emits step and hook events strictly one after
-    /// another, never interleaved.
-    current: Option<(Row, String)>,
+    /// The currently running package-or-hook row. At most one at a time:
+    /// `commit_with_progress` emits step and hook events strictly one after another, never
+    /// interleaved.
+    current: Option<OpenRow>,
     /// As `current`, for the nested "Running … script" row. Opens and closes at most twice
     /// within a package row's lifetime (once per scriptlet function), never overlapping
     /// itself.
-    scriptlet: Option<(Row, String)>,
+    scriptlet: Option<OpenRow>,
+}
+
+/// One live [`CommitDriver`] row, with what its plain line says and whether it has said it.
+struct OpenRow {
+    /// The live row on stderr. Cleared by whichever of the two positions prints the plain line.
+    row: Row,
+    /// The text the row was opened with, and what its plain line reads.
+    text: String,
+    /// How deep the row nests: zero for a package step or a hook, one for a scriptlet under a
+    /// step. Its own output takes one level more.
+    depth: usize,
+    /// Whether the plain line has been written already, ahead of the output it frames.
+    announced: bool,
 }
 
 impl<'a, W: std::io::Write> CommitDriver<'a, W> {
@@ -471,11 +519,12 @@ impl<'a, W: std::io::Write> CommitDriver<'a, W> {
             E::HookStarted { index, total, name, description } => {
                 self.current = Some(self.open_counted(description.unwrap_or(name), index, total));
             }
-            E::HookOutputLine { line, .. } => self.print_line(&format!("  {line}")),
+            E::HookOutputLine { line, .. } => self.print_line(line),
             E::HookFinished { .. } => self.close(|driver| &mut driver.current),
             E::ScriptletStarted { kind, .. } => {
                 let text = format!("Running {} script", kind.as_str().replace('_', " "));
-                self.scriptlet = Some((self.steplist.spinner(&text), text));
+                let row = self.steplist.spinner(&text);
+                self.scriptlet = Some(OpenRow { row, text, depth: 1, announced: false });
             }
             E::ScriptletOutputLine { line, .. } => self.print_line(line),
             E::ScriptletFinished { .. } => self.close(|driver| &mut driver.scriptlet),
@@ -493,30 +542,68 @@ impl<'a, W: std::io::Write> CommitDriver<'a, W> {
     }
 
     /// Opens a transient [`Kind::Counted`] row for `text` at 1-based position `index + 1` of
-    /// `total`, keeping `text` alongside it for [`Self::close`] to print once it finishes.
-    fn open_counted(&self, text: &str, index: usize, total: usize) -> (Row, String) {
+    /// `total`, keeping `text` alongside it for the plain line that will name it.
+    fn open_counted(&self, text: &str, index: usize, total: usize) -> OpenRow {
         let row = self.steplist.counted(text, total);
         row.set_position(index.saturating_add(1) as u64);
-        (row, text.to_owned())
+        OpenRow { row, text: text.to_owned(), depth: 0, announced: false }
     }
 
-    /// Clears whichever row `slot` names and reprints its text as a plain, checked-off line.
-    fn close(&mut self, slot: impl FnOnce(&mut Self) -> &mut Option<(Row, String)>) {
-        if let Some((row, text)) = slot(self).take() {
-            settle_row(self.steplist, self.out, row, &text);
+    /// Clears whichever row `slot` names, printing its plain line first if nothing else has.
+    fn close(&mut self, slot: impl FnOnce(&mut Self) -> &mut Option<OpenRow>) {
+        if let Some(open) = slot(self).take() {
+            if open.announced {
+                open.row.finish_and_clear();
+            } else {
+                let indent = indent_for(open.depth);
+                settle_row_indented(self.steplist, self.out, open.row, &indent, &open.text);
+            }
         }
     }
 
-    /// Writes and immediately flushes one line.
+    /// Writes the plain line of every open row that has not written one yet, outermost first,
+    /// so output lands under the thing that produced it.
+    fn announce(&mut self) {
+        Self::announce_row(self.steplist, &mut *self.out, self.current.as_mut());
+        Self::announce_row(self.steplist, &mut *self.out, self.scriptlet.as_mut());
+    }
+
+    /// Writes one row's plain line, if it has not been written already.
+    ///
+    /// This takes `steplist`, `out` and the row separately rather than `&mut self`, because it
+    /// borrows two fields of the driver at once and the borrow checker needs to see them as
+    /// the distinct fields they are.
+    fn announce_row(steplist: &StepList, out: &mut W, slot: Option<&mut OpenRow>) {
+        let Some(open) = slot else { return };
+        if open.announced {
+            return;
+        }
+        open.announced = true;
+        // Retiring the spinner here is what keeps the phrase on screen once rather than
+        // twice: checked off in the scrollback, and still spinning at the foot of the
+        // display. An item with output of its own no longer needs a spinner to show it is
+        // working.
+        let indent = indent_for(open.depth);
+        settle_row_indented(steplist, out, open.row.clone(), &indent, &open.text);
+    }
+
+    /// Names whatever is running, then writes and immediately flushes one line of its output.
+    ///
+    /// The indent comes from the innermost open row, so the one decision about how deep a line
+    /// sits is made here rather than at each event arm.
     ///
     /// `out` is a `BufWriter` (`main.rs`; `piko list` writes over a thousand lines, and wants
     /// it buffered). That is exactly wrong for a line meant to appear the instant it happens.
     /// Without an explicit flush it sits in the buffer until 8 KiB accumulates or the process
     /// exits, so a live transaction would print in bursts instead of one line at a time.
     fn print_line(&mut self, text: &str) {
+        self.announce();
+        let innermost = self.scriptlet.as_ref().or(self.current.as_ref());
+        let indent =
+            innermost.map_or_else(String::new, |open| indent_for(open.depth.saturating_add(1)));
         let out = &mut *self.out;
         self.steplist.suspend(|| {
-            let _ = writeln!(out, "{text}");
+            let _ = writeln!(out, "{indent}{text}");
             let _ = out.flush();
         });
     }
@@ -576,4 +663,115 @@ fn print_step_result(
     // `out` is buffered (see `CommitDriver::print_line`). Without this flush, a `.pacnew`
     // notice would sit unseen until the buffer fills or the transaction ends.
     let _ = out.flush();
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::expect_used,
+    reason = "a test that cannot unwrap or assert is not a test"
+)]
+mod tests {
+    use piko_txn::{
+        exec::{Outcome, Status},
+        progress::Event,
+        scriptlet::Kind as ScriptletKind,
+    };
+
+    use super::*;
+
+    /// A scriptlet or hook that ran and exited zero. None of these tests read it: the driver
+    /// renders the row it opened, not the outcome, which `cmd::txn::report_side_effects` owns.
+    fn succeeded() -> Outcome {
+        Outcome { status: Status::Exited(0), output: Vec::new(), truncated: false }
+    }
+
+    fn started() -> Event<'static> {
+        Event::ScriptletStarted { package: "foo", kind: ScriptletKind::PostInstall }
+    }
+
+    fn output(line: &str) -> Event<'_> {
+        Event::ScriptletOutputLine { package: "foo", kind: ScriptletKind::PostInstall, line }
+    }
+
+    fn finished(outcome: &Outcome) -> Event<'_> {
+        Event::ScriptletFinished { package: "foo", kind: ScriptletKind::PostInstall, outcome }
+    }
+
+    /// `console` writes no ANSI codes into a `Vec<u8>`, so the ✓ arrives as plain text.
+    #[test]
+    fn a_silent_scriptlet_is_named_once_it_finishes() {
+        let steplist = StepList::new();
+        let mut out = Vec::new();
+        let mut driver = CommitDriver::new(&steplist, &mut out);
+        let outcome = succeeded();
+        driver.handle(started());
+        driver.handle(finished(&outcome));
+        driver.finish();
+        assert_eq!(String::from_utf8(out).unwrap(), "  ✓ Running post install script\n");
+    }
+
+    #[test]
+    fn a_scriptlet_that_prints_is_named_before_its_output_and_not_again_after() {
+        let steplist = StepList::new();
+        let mut out = Vec::new();
+        let mut driver = CommitDriver::new(&steplist, &mut out);
+        let outcome = succeeded();
+        driver.handle(started());
+        driver.handle(output("Updating icon cache"));
+        driver.handle(finished(&outcome));
+        driver.finish();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "  ✓ Running post install script\n    Updating icon cache\n"
+        );
+    }
+
+    /// The cascade: the package step is named before the scriptlet nested under it, although
+    /// the scriptlet is what asked for a line. `open_counted` stands in for
+    /// `Event::StepStarted`, whose `Step` needs a whole package to build.
+    #[test]
+    fn a_nested_scriptlet_names_its_step_before_itself() {
+        let steplist = StepList::new();
+        let mut out = Vec::new();
+        let mut driver = CommitDriver::new(&steplist, &mut out);
+        let outcome = succeeded();
+        driver.current = Some(driver.open_counted("Installing foo", 0, 1));
+        driver.handle(started());
+        driver.handle(output("Updating icon cache"));
+        driver.handle(finished(&outcome));
+        driver.finish();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "✓ Installing foo\n  ✓ Running post install script\n    Updating icon cache\n"
+        );
+    }
+
+    #[test]
+    fn a_hook_is_named_by_its_description_before_its_output() {
+        let steplist = StepList::new();
+        let mut out = Vec::new();
+        let mut driver = CommitDriver::new(&steplist, &mut out);
+        let run = piko_txn::hook::Run {
+            name: "10-foo.hook".to_owned(),
+            description: Some("Reloading system manager configuration".to_owned()),
+            outcome: Some(succeeded()),
+            unsatisfied: None,
+            fatal: false,
+        };
+        driver.handle(Event::HookStarted {
+            index: 0,
+            total: 1,
+            name: "10-foo.hook",
+            description: Some("Reloading system manager configuration"),
+        });
+        driver.handle(Event::HookOutputLine { index: 0, total: 1, line: "Running in chroot" });
+        driver.handle(Event::HookFinished { index: 0, total: 1, run: &run });
+        driver.finish();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "✓ Reloading system manager configuration\n  Running in chroot\n"
+        );
+    }
 }

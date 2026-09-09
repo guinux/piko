@@ -67,7 +67,7 @@ fn resolve_gpgdir(cli: &Cli) -> PathBuf {
         Ok(config) => config.options.gpg_dir,
         Err(error) => {
             eprintln!(
-                "piko-key: warning: failed to read {} ({error}); falling back to {}",
+                "warning: failed to read {} ({error}); falling back to {}",
                 cli.config.display(),
                 piko_db::config::DEFAULT_GPG_DIR
             );

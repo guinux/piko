@@ -67,6 +67,22 @@ pub enum Fact {
         /// The installed package it displaces.
         replaced: String,
     },
+    /// A `%DEPENDS%` entry had a satisfier in a repository, and `IgnorePkg`/`IgnoreGroup`
+    /// removed it from the candidate set.
+    ///
+    /// Accompanies a [`Fact::Requires`] rather than replacing it: the requirement is the
+    /// clause in the core, and this says why nothing answers it. Without it the explanation
+    /// reads as "no such package exists", which sends the user looking for a typo instead of
+    /// at `pacman.conf`. libalpm separates the same two outcomes as `ALPM_ERR_PKG_IGNORED`
+    /// versus `ALPM_ERR_PKG_NOT_FOUND` (`deps.c:743`).
+    Ignored {
+        /// The `%DEPENDS%` entry nothing satisfies.
+        relation: String,
+        /// The package that would have satisfied it.
+        candidate: String,
+        /// Which list covered it, and the pattern that matched.
+        reason: String,
+    },
     /// Two candidates are versions of the same package, so at most one can be chosen.
     SameName {
         /// The first candidate.
@@ -89,6 +105,9 @@ impl fmt::Display for Fact {
                 write!(f, "{package} conflicts with {other}")
             }
             Self::Replaces { package, replaced } => write!(f, "{package} replaces {replaced}"),
+            Self::Ignored { relation, candidate, reason } => {
+                write!(f, "{candidate} would satisfy {relation}, but it is ignored ({reason})")
+            }
             Self::SameName { first, second } => {
                 write!(f, "{first} and {second} are versions of the same package")
             }
@@ -125,7 +144,7 @@ impl Derivation {
             .core()
             .iter()
             .filter_map(|id| problem.get(*id))
-            .filter_map(|clause| fact(universe, clause.kind()))
+            .flat_map(|clause| facts_for(universe, clause.kind()))
             .collect();
         Self { facts }
     }
@@ -141,6 +160,37 @@ impl fmt::Display for Derivation {
         }
         Ok(())
     }
+}
+
+/// Resolves one clause into the facts it contributes.
+///
+/// At most one clause-level [`Fact`], plus a [`Fact::Ignored`] for each candidate an
+/// unsatisfiable requirement would have had. The second is attached here, where the relation
+/// is already in hand, rather than being re-derived by a caller comparing the explanation
+/// against the universe.
+fn facts_for(universe: &Universe<'_>, kind: ClauseKind) -> Vec<Fact> {
+    let mut facts: Vec<Fact> = fact(universe, kind).into_iter().collect();
+    let ClauseKind::Requires { dependent, dependency } = kind else { return facts };
+    let Some(relation) = universe
+        .get(dependent)
+        .and_then(|solvable| solvable.depends().ok())
+        .and_then(|depends| depends.get(dependency).cloned())
+    else {
+        return facts;
+    };
+    // Only when nothing interned answers it. A requirement that *is* satisfiable is in the
+    // core for some other reason, and naming an ignored alternative there would be noise.
+    if !universe.satisfiers(&relation).is_empty() {
+        return facts;
+    }
+    for candidate in universe.ignored_satisfiers(&relation) {
+        facts.push(Fact::Ignored {
+            relation: relation.to_string(),
+            candidate: format!("{}-{}", candidate.package().name(), candidate.package().version()),
+            reason: candidate.reason().to_string(),
+        });
+    }
+    facts
 }
 
 /// Resolves one clause into a [`Fact`], or `None` for a clause with nothing to say.

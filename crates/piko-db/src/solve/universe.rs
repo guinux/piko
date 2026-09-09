@@ -44,7 +44,7 @@ use crate::{
     config::DbUsage,
     depcmp,
     repo::{RepoDatabase, RepoName, RepoPackage},
-    resolve::IgnoreList,
+    resolve::{IgnoreList, IgnoreReason},
     solve::FilePackage,
 };
 
@@ -342,6 +342,40 @@ enum Source<'a> {
     },
 }
 
+/// A repository candidate `IgnorePkg`/`IgnoreGroup` kept out of the universe, and why.
+///
+/// The candidate is *not* a [`Solvable`]: it was never interned, so nothing can select it and
+/// no [`SolvableId`] names it. It is kept only so a caller can say what was passed over.
+/// libalpm warns at the moment it skips one; piko has no logger, so the fact travels as data
+/// instead (principle 7).
+#[derive(Clone, Debug)]
+pub struct IgnoredCandidate<'a> {
+    package: &'a RepoPackage,
+    repository: usize,
+    reason: IgnoreReason,
+}
+
+impl<'a> IgnoredCandidate<'a> {
+    /// The repository package that was left out.
+    #[must_use]
+    pub const fn package(&self) -> &'a RepoPackage {
+        self.package
+    }
+
+    /// Which admitted repository carried it, as an index for
+    /// [`Universe::repository_name`]/[`Universe::repository_usage`].
+    #[must_use]
+    pub const fn repository(&self) -> usize {
+        self.repository
+    }
+
+    /// Which list covered it, and the pattern that matched.
+    #[must_use]
+    pub const fn reason(&self) -> &IgnoreReason {
+        &self.reason
+    }
+}
+
 /// How a [`Universe`] is built: which repositories count, and what is ignored.
 ///
 /// `Usage` is a parameter rather than a constant because libalpm applies three different
@@ -389,6 +423,10 @@ impl<'a> UniverseOptions<'a> {
     /// This never filters installed packages. `IgnorePkg` means "do not upgrade it", not
     /// "pretend it is not there". A planner that lost sight of an installed package would
     /// plan to install it again.
+    ///
+    /// A filtered candidate is kept as a *report*, not as a candidate: see
+    /// [`Universe::ignored`]. Nothing can select it, and the caller can still say what was
+    /// passed over.
     #[must_use]
     pub const fn ignores(mut self, ignores: IgnoreList<'a>) -> Self {
         self.ignores = ignores;
@@ -445,6 +483,20 @@ pub struct Universe<'a> {
     /// 1157 installed against 15 200 available, that is 17 million comparisons. Sysupgrade
     /// needs the reverse index instead.
     replaces: HashMap<&'a str, Vec<SolvableId>>,
+    /// The repository candidates `IgnorePkg`/`IgnoreGroup` kept out, in the order they were
+    /// walked.
+    ///
+    /// Deliberately not bounded by [`Limits::max_diagnostics`](crate::Limits::max_diagnostics),
+    /// unlike a diagnostic sink. This is a subset of the candidate set
+    /// `solve_max_solvables` already counted before anything was interned, so it is bounded
+    /// by a bound that has already fired. A second bound here would truncate the sysupgrade
+    /// report rather than protect anything: an `IgnorePkg` entry wide enough to overflow a
+    /// diagnostic budget is exactly the one whose effect the user most needs told.
+    ignored: Box<[IgnoredCandidate<'a>]>,
+    /// The lists that produced `ignored`, kept so [`crate::solve::sysupgrade`] can apply the
+    /// same test to an *installed* package. `check_literal` (`sync.c:93`) tests both sides,
+    /// and only the repository side can be filtered at intern time.
+    ignores: IgnoreList<'a>,
 }
 
 impl<'a> Universe<'a> {
@@ -491,9 +543,11 @@ impl<'a> Universe<'a> {
         for (index, package) in options.files.iter().enumerate() {
             sources.push(Source::File { index, package });
         }
+        let mut ignored: Vec<IgnoredCandidate<'a>> = Vec::new();
         for (index, (_, repository)) in admitted.iter().enumerate() {
             for package in *repository {
-                if options.ignores.ignores(package) {
+                if let Some(reason) = options.ignores.reason_for(package) {
+                    ignored.push(IgnoredCandidate { package, repository: index, reason });
                     continue;
                 }
                 sources.push(Source::Repo { index, package });
@@ -514,6 +568,8 @@ impl<'a> Universe<'a> {
             sources,
             repo_names,
             repo_usage,
+            ignored: ignored.into_boxed_slice(),
+            ignores: options.ignores,
         };
         universe.index();
         Ok(universe)
@@ -626,6 +682,74 @@ impl<'a> Universe<'a> {
     #[must_use]
     pub fn repository_name(&self, index: usize) -> Option<&'a RepoName> {
         self.repo_names.get(index).copied()
+    }
+
+    /// Every repository candidate `IgnorePkg`/`IgnoreGroup` kept out, in the order the
+    /// repositories were walked.
+    ///
+    /// Nothing here is selectable. This is the report side of the filter
+    /// [`UniverseOptions::ignores`] applied, and the only way to tell an ignored package from
+    /// an absent one once the universe is built.
+    #[must_use]
+    pub fn ignored(&self) -> &[IgnoredCandidate<'a>] {
+        &self.ignored
+    }
+
+    /// The ignored candidates literally named `name`, in repository priority order.
+    ///
+    /// A linear scan, deliberately: this list is the size of what `IgnorePkg` matched, not of
+    /// a repository, and it is consulted only on the path that is about to print a message.
+    /// A fifth index would cost every build to serve the rare case.
+    pub fn ignored_named<'s>(
+        &'s self,
+        name: &'s str,
+    ) -> impl Iterator<Item = &'s IgnoredCandidate<'a>> {
+        self.ignored.iter().filter(move |candidate| candidate.package.name().as_ref() == name)
+    }
+
+    /// The ignored candidates that would have satisfied `dep`.
+    ///
+    /// The counterpart of [`Universe::satisfiers`] over what was filtered out, and the only
+    /// way to tell "no package provides this" from "the one that does is ignored" — libalpm's
+    /// own `ALPM_ERR_PKG_IGNORED` versus `ALPM_ERR_PKG_NOT_FOUND` distinction (`deps.c:743`).
+    /// Unlike [`Universe::satisfiers`] it applies no preference order: a caller explaining a
+    /// failure wants every copy that was passed over.
+    pub fn ignored_satisfiers(
+        &self,
+        dep: &RelationOrSoname,
+    ) -> impl Iterator<Item = &IgnoredCandidate<'a>> {
+        self.ignored
+            .iter()
+            .filter(move |candidate| crate::resolve::satisfies(candidate.package, dep))
+    }
+
+    /// The ignored candidates belonging to the `%GROUPS%` group `name`.
+    ///
+    /// [`Universe::group_members`]' counterpart: a target naming a group expands to members
+    /// that were interned, and this names the members that were not.
+    pub fn ignored_in_group<'s>(
+        &'s self,
+        name: &'s str,
+    ) -> impl Iterator<Item = &'s IgnoredCandidate<'a>> {
+        self.ignored
+            .iter()
+            .filter(move |candidate| candidate.package.groups().iter().any(|g| g == name))
+    }
+
+    /// The ignored candidates carried by the repository at `index`.
+    pub fn ignored_in(&self, index: usize) -> impl Iterator<Item = &IgnoredCandidate<'a>> {
+        self.ignored.iter().filter(move |candidate| candidate.repository == index)
+    }
+
+    /// The `IgnorePkg`/`IgnoreGroup` lists this universe was built with.
+    ///
+    /// Needed because only the repository side of `check_literal`'s test
+    /// (`alpm_pkg_should_ignore(spkg) || alpm_pkg_should_ignore(lpkg)`) can be applied while
+    /// interning. An installed package is always interned — `IgnorePkg` means "do not upgrade
+    /// it", not "pretend it is not there" — so the installed half is asked here instead.
+    #[must_use]
+    pub const fn ignores(&self) -> IgnoreList<'a> {
+        self.ignores
     }
 
     /// Every candidate literally named `name`, installed copy first, then repositories in
@@ -1075,6 +1199,65 @@ mod tests {
         assert_eq!(candidates.len(), 1, "only the installed copy should survive");
         assert!(universe.get(candidates[0]).unwrap().is_installed());
         assert!(universe.installed_named("foo").is_some());
+
+        // The candidate is out of the solve, and still nameable: that is what makes an
+        // ignored package distinguishable from an absent one.
+        assert_eq!(universe.ignored().len(), 1);
+        let held = &universe.ignored()[0];
+        assert_eq!(held.package().name().as_ref(), "foo");
+        assert_eq!(held.package().version().to_string(), "2.0.0-1");
+        assert_eq!(held.repository(), 0);
+        assert_eq!(*held.reason(), IgnoreReason::Package { pattern: "foo".to_owned() });
+        assert_eq!(universe.ignored_named("foo").count(), 1);
+    }
+
+    /// The `%PROVIDES%` half: a dependency that nothing satisfies must be able to name the
+    /// ignored package that would have.
+    #[test]
+    fn an_ignored_provider_is_still_reachable_through_ignored_satisfiers() {
+        let scenario = Scenario::new()
+            .repo("core", [PackageSpec::new("libfoo", "1.0.0-1").provides(["foo=1.0.0-1"])])
+            .build();
+        let ignored = vec!["libfoo".to_owned()];
+        let universe = Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new().ignores(IgnoreList::new(&ignored, &[])),
+        )
+        .unwrap();
+
+        let dep: RelationOrSoname = "foo".parse().unwrap();
+        assert!(universe.satisfiers(&dep).is_empty());
+        let held: Vec<_> = universe.ignored_satisfiers(&dep).collect();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].package().name().as_ref(), "libfoo");
+    }
+
+    /// A group target expands to its interned members; the members it lost must still be
+    /// nameable so the caller can say which ones it left out.
+    #[test]
+    fn an_ignored_group_member_is_reported_separately_from_the_members_that_remain() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("gcc", "1.0.0-1").groups(["base-devel"]),
+                    PackageSpec::new("make", "1.0.0-1").groups(["base-devel"]),
+                ],
+            )
+            .build();
+        let ignored = vec!["gcc".to_owned()];
+        let universe = Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new().ignores(IgnoreList::new(&ignored, &[])),
+        )
+        .unwrap();
+
+        assert_eq!(universe.group_members("base-devel").len(), 1, "make remains");
+        let held: Vec<_> = universe.ignored_in_group("base-devel").collect();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].package().name().as_ref(), "gcc");
     }
 
     /// `_alpm_outerconflicts` checks both directions, so the index must find the declarer
