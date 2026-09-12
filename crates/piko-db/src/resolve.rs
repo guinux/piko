@@ -43,10 +43,11 @@
 //! including its `%PROVIDES%` step, covering both a soname (`lib:libfoo.so.1`, `libfoo.so=1-64`,
 //! ...) and a plain named relation (`provides = python` satisfying a dependency on `python3`) —
 //! and returns every match rather than picking one. Real libalpm collects a `providers` list and
-//! asks `ALPM_QUESTION_SELECT_PROVIDER` when there is more than one; piko has no prompt
-//! machinery (same reasoning as `IgnorePkg`, above), so it returns the whole list and leaves the
-//! choice to the caller instead. Two steps, in this exact order, mirroring `resolvedep`
-//! (`deps.c`) field-for-field:
+//! asks `ALPM_QUESTION_SELECT_PROVIDER` when there is more than one. This module asks nothing:
+//! it returns the whole list and leaves the choice to the caller. The planner is where that
+//! choice is actually made — [`crate::solve::ambiguities`] returns the question as data and
+//! [`crate::solve::Request::choose_provider`] answers it, so that a library still prompts
+//! nobody. Two steps, in this exact order, mirroring `resolvedep` (`deps.c`) field-for-field:
 //!
 //! 1. **Literal match first, and only.** If [`SyncRepos::find_literal_satisfier`] finds a match, that
 //!    single package *is* the result — step 2 is not even attempted. This is where "a package
@@ -78,11 +79,11 @@
 //! *consumes* those entries once a repository has already recorded them as text, so there is no
 //! ELF file to scan and nothing for `alpm-soname` to do here.
 //!
-//! What this module itself does **not** do — conflict/replacement handling, and the
+//! What this module itself does **not** do — conflict/replacement handling, the
 //! already-installed-provider short-circuit real libalpm's `resolvedep` applies before
-//! prompting — now lives in [`crate::solve`] instead (`solve::solve_with_removals`/
-//! `solve::sysupgrade`, and `solve::universe`'s installed-providers pass), reached through
-//! `piko plan`/`piko install`/`piko update`.
+//! prompting, and the provider question itself — now lives in [`crate::solve`] instead
+//! (`solve::solve_with_removals`/`solve::sysupgrade`, `solve::universe`'s installed-providers
+//! pass, and `solve::ambiguities`), reached through `piko plan`/`piko install`/`piko update`.
 //! This module remains the single-query API neither concept belongs in.
 //! Other libalpm call sites gate on a
 //! different `Usage` mask entirely
@@ -387,9 +388,10 @@ impl<'a> SyncRepos<'a> {
 
     /// Finds every package satisfying `dep`: [`Self::find_literal_satisfier`] first, and if that
     /// finds nothing usable, every package across every repository whose `%PROVIDES%` satisfies
-    /// `dep` — real libalpm's `ALPM_QUESTION_SELECT_PROVIDER` list, without the prompt. See the
-    /// module doc for the exact two-step control flow this mirrors. Empty when nothing
-    /// satisfies `dep` anywhere.
+    /// `dep` — real libalpm's `ALPM_QUESTION_SELECT_PROVIDER` list, with nothing asked about it
+    /// here. A planner narrows that list from an answer instead
+    /// ([`crate::solve::ambiguities`]). See the module doc for the exact two-step control flow
+    /// this mirrors. Empty when nothing satisfies `dep` anywhere.
     #[must_use]
     pub fn find_satisfiers(&self, dep: &RelationOrSoname) -> Vec<Resolved<'a>> {
         if let RelationOrSoname::Relation(relation) = dep

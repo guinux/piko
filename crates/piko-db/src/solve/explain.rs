@@ -83,6 +83,21 @@ pub enum Fact {
         /// Which list covered it, and the pattern that matched.
         reason: String,
     },
+    /// A caller answered `ALPM_QUESTION_SELECT_PROVIDER`, so one provider satisfies a
+    /// `%DEPENDS%` entry and the others no longer do.
+    ///
+    /// Replaces the [`Fact::Requires`] for that entry rather than accompanying it, because the
+    /// clause itself carries the answer. Without it the explanation reads as "nothing
+    /// satisfies this dependency" while several packages plainly do — the same misreading
+    /// [`Fact::Ignored`] exists to prevent.
+    Chose {
+        /// The package with the dependency.
+        package: String,
+        /// The `%DEPENDS%` entry, verbatim.
+        relation: String,
+        /// The provider the answer named.
+        chosen: String,
+    },
     /// Two candidates are versions of the same package, so at most one can be chosen.
     SameName {
         /// The first candidate.
@@ -107,6 +122,9 @@ impl fmt::Display for Fact {
             Self::Replaces { package, replaced } => write!(f, "{package} replaces {replaced}"),
             Self::Ignored { relation, candidate, reason } => {
                 write!(f, "{candidate} would satisfy {relation}, but it is ignored ({reason})")
+            }
+            Self::Chose { package, relation, chosen } => {
+                write!(f, "{chosen} was chosen to satisfy {relation}, which {package} requires")
             }
             Self::SameName { first, second } => {
                 write!(f, "{first} and {second} are versions of the same package")
@@ -197,33 +215,34 @@ fn facts_for(universe: &Universe<'_>, kind: ClauseKind) -> Vec<Fact> {
 fn fact(universe: &Universe<'_>, kind: ClauseKind) -> Option<Fact> {
     match kind {
         ClauseKind::Requires { dependent, dependency } => Some(Fact::Requires {
-            package: describe(universe, dependent),
-            relation: universe
-                .get(dependent)
-                .and_then(|solvable| solvable.depends().ok())
-                .and_then(|depends| depends.get(dependency).map(ToString::to_string))
-                .unwrap_or_else(|| "?".to_owned()),
+            package: describe_candidate(universe, dependent),
+            relation: relation_text(universe, dependent, dependency),
+        }),
+        ClauseKind::Chosen { dependent, dependency, chosen } => Some(Fact::Chose {
+            package: describe_candidate(universe, dependent),
+            relation: relation_text(universe, dependent, dependency),
+            chosen: describe_candidate(universe, chosen),
         }),
         ClauseKind::Conflicts { declarer, other } => Some(Fact::Conflicts {
-            package: describe(universe, declarer),
-            other: describe(universe, other),
+            package: describe_candidate(universe, declarer),
+            other: describe_candidate(universe, other),
         }),
         ClauseKind::SameName { first, second } => Some(Fact::SameName {
-            first: describe(universe, first),
-            second: describe(universe, second),
+            first: describe_candidate(universe, first),
+            second: describe_candidate(universe, second),
         }),
         ClauseKind::Replaces { replacement, replaced } => Some(Fact::Replaces {
-            package: describe(universe, replacement),
-            replaced: describe(universe, replaced),
+            package: describe_candidate(universe, replacement),
+            replaced: describe_candidate(universe, replaced),
         }),
         ClauseKind::Target { target } => {
-            Some(Fact::Requested { package: describe(universe, target) })
+            Some(Fact::Requested { package: describe_candidate(universe, target) })
         }
         ClauseKind::Installed { installed } => {
-            Some(Fact::MustRemain { package: describe(universe, installed) })
+            Some(Fact::MustRemain { package: describe_candidate(universe, installed) })
         }
         ClauseKind::Excluded { excluded } => {
-            Some(Fact::Excluded { package: describe(universe, excluded) })
+            Some(Fact::Excluded { package: describe_candidate(universe, excluded) })
         }
         // A learned clause is a fact the solver derived, not one a user could act on. The core
         // already replaces each one with the problem clauses that produced it.
@@ -231,11 +250,23 @@ fn fact(universe: &Universe<'_>, kind: ClauseKind) -> Option<Fact> {
     }
 }
 
+/// One of `dependent`'s `%DEPENDS%` entries, verbatim, or `?` if it cannot be read.
+fn relation_text(universe: &Universe<'_>, dependent: SolvableId, dependency: usize) -> String {
+    universe
+        .get(dependent)
+        .and_then(|solvable| solvable.depends().ok())
+        .and_then(|depends| depends.get(dependency).map(ToString::to_string))
+        .unwrap_or_else(|| "?".to_owned())
+}
+
 /// `name version (origin)`, the form every fact refers to a package by.
 ///
 /// The origin matters: "glibc (installed)" and "glibc (core)" are different candidates. An
 /// explanation that could not tell them apart would be unreadable exactly when it matters.
-fn describe(universe: &Universe<'_>, id: SolvableId) -> String {
+/// Public because a frontend that has to name a candidate outside an explanation — a prompt
+/// listing the providers of a dependency, say — must spell it the same way, or the two drift.
+#[must_use]
+pub fn describe_candidate(universe: &Universe<'_>, id: SolvableId) -> String {
     universe.get(id).map_or_else(
         || "<unknown>".to_owned(),
         |solvable| {

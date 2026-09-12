@@ -94,6 +94,22 @@ pub enum ClauseKind {
         /// the exact relation rather than guess at it.
         dependency: usize,
     },
+    /// `dependent` lists a `%DEPENDS%` entry, and the caller answered
+    /// `ALPM_QUESTION_SELECT_PROVIDER` for it, so the clause's one literal is the provider
+    /// they named.
+    ///
+    /// Distinct from [`Self::Requires`] so an explanation can say *why* the other providers
+    /// are gone. Without it, a transaction made impossible by the answer reports that nothing
+    /// satisfies the dependency, which sends the reader looking for a package that is in fact
+    /// right there.
+    Chosen {
+        /// The package whose `%DEPENDS%` produced this clause.
+        dependent: SolvableId,
+        /// Which of `dependent`'s `%DEPENDS%` entries this was.
+        dependency: usize,
+        /// The provider the caller named.
+        chosen: SolvableId,
+    },
     /// Two candidates cannot both be selected because one declares `%CONFLICTS%` on the
     /// other.
     Conflicts {

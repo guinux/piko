@@ -78,6 +78,78 @@ pub fn confirm(out: &mut impl std::io::Write, prompt: &str, default: bool) -> bo
     answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
 }
 
+/// Prints `prompt` and waits for a 1-based choice among `count`, returning a 0-based index.
+///
+/// This is pacman's numbered-question reader, the one `ALPM_QUESTION_SELECT_PROVIDER` is put
+/// through. The list is numbered from 1 as pacman prints it; the answer comes back as an index
+/// into the list the caller rendered. `default` is what an absent answer takes, which callers
+/// set to 0 — libalpm's own `use_index = 0`, the first candidate in repository priority order.
+///
+/// An empty line answers `default`. **A closed or empty stdin answers `default` too**, and
+/// that is the one place this differs from [`confirm`], which declines. The two questions
+/// differ in what an absent answer can mean: a confirmation has a "do nothing" answer and an
+/// unattended run should take it, while this one has none. Something must satisfy the
+/// dependency, every candidate on the list yields a valid plan, and the whole plan is still
+/// printed and confirmed afterwards. Refusing here would turn an unattended run into a failure
+/// over a question whose default is exactly what a system that configured nothing already got.
+///
+/// An unparseable or out-of-range answer says so and asks again, as pacman does. That loop
+/// ends on its own: a closed stdin returns `default` rather than looping, so only someone
+/// typing can keep it going.
+///
+/// `out` is flushed before the prompt is written to it, so the list already printed there is
+/// visible first even when `out` is buffered.
+pub fn select(out: &mut impl std::io::Write, prompt: &str, count: usize, default: usize) -> usize {
+    if count == 0 {
+        return default;
+    }
+    loop {
+        if write!(out, "{prompt}").and_then(|()| out.flush()).is_err() {
+            return default;
+        }
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            return default;
+        }
+        match parse_selection(&line, count) {
+            Selection::Answered(index) => return index,
+            Selection::Empty => return default,
+            Selection::Invalid => {
+                eprintln!("invalid value: it must be a number between 1 and {count}");
+            }
+        }
+    }
+}
+
+/// What one answered line of [`select`] meant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Selection {
+    /// A number in range, as a 0-based index.
+    Answered(usize),
+    /// Nothing was typed, so the caller's default stands.
+    Empty,
+    /// Not a number, or outside `1..=count`.
+    Invalid,
+}
+
+/// Reads one answered line. Split out from [`select`] so the decision is testable without a
+/// terminal; [`select`] itself is only the loop and the I/O around this.
+fn parse_selection(line: &str, count: usize) -> Selection {
+    let answer = line.trim();
+    if answer.is_empty() {
+        return Selection::Empty;
+    }
+    // Parsed as `usize`, so a negative answer is rejected by the parse rather than by the
+    // range test below — and an answer larger than `usize` is rejected too, instead of
+    // wrapping into range.
+    match answer.parse::<usize>() {
+        Ok(number) if (1..=count).contains(&number) => {
+            Selection::Answered(number.saturating_sub(1))
+        }
+        _ => Selection::Invalid,
+    }
+}
+
 /// Renders `method` as the `CleanMethod` keyword(s) that produced it, mirroring
 /// `show_cleanmethod` in `pacman-conf.c`.
 pub fn clean_method_lines(method: CleanMethod) -> Vec<&'static str> {
@@ -264,6 +336,36 @@ mod tests {
     use piko_txn::LocalOffset;
 
     use super::*;
+
+    #[test]
+    fn a_selection_is_read_as_a_zero_based_index() {
+        assert_eq!(parse_selection("1\n", 3), Selection::Answered(0));
+        assert_eq!(parse_selection("3\n", 3), Selection::Answered(2));
+        assert_eq!(parse_selection("  2  \n", 3), Selection::Answered(1));
+    }
+
+    /// An empty line is the caller's default, not an invalid answer: pressing Enter is how
+    /// pacman's own prompt is usually answered.
+    #[test]
+    fn an_empty_line_leaves_the_default_standing() {
+        assert_eq!(parse_selection("\n", 3), Selection::Empty);
+        assert_eq!(parse_selection("   \n", 3), Selection::Empty);
+    }
+
+    /// The list is numbered from 1, so `0` is out of range rather than the first entry.
+    #[test]
+    fn a_number_outside_the_list_is_invalid() {
+        assert_eq!(parse_selection("0\n", 3), Selection::Invalid);
+        assert_eq!(parse_selection("4\n", 3), Selection::Invalid);
+        assert_eq!(parse_selection("-1\n", 3), Selection::Invalid);
+        assert_eq!(parse_selection("99999999999999999999999999\n", 3), Selection::Invalid);
+    }
+
+    #[test]
+    fn a_non_numeric_answer_is_invalid() {
+        assert_eq!(parse_selection("y\n", 3), Selection::Invalid);
+        assert_eq!(parse_selection("1a\n", 3), Selection::Invalid);
+    }
 
     #[test]
     fn human_size_uses_bare_bytes_below_1024() {

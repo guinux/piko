@@ -53,6 +53,7 @@ pub struct Request {
     allow_removals: bool,
     recursive: bool,
     ignored_upgrades: Vec<IgnoredUpgrade>,
+    provider_choices: Vec<ProviderChoice>,
 }
 
 impl Default for Request {
@@ -78,6 +79,7 @@ impl Request {
             allow_removals: true,
             recursive: false,
             ignored_upgrades: Vec::new(),
+            provider_choices: Vec::new(),
         }
     }
 
@@ -173,6 +175,34 @@ impl Request {
         &self.targets
     }
 
+    /// Answers one [`Ambiguity`]: for this one `%DEPENDS%` entry of this one package, only
+    /// `choice.chosen` satisfies it.
+    ///
+    /// This is `ALPM_QUESTION_SELECT_PROVIDER`'s `use_index`, carried as policy rather than
+    /// asked through a callback: a library returns its questions and takes their answers, and
+    /// prompts nobody. [`encode`] then compiles that requirement with the chosen candidate as
+    /// its **only** satisfier.
+    ///
+    /// Narrowing, not reordering. [`Solver::decide`](crate::solve::Solver) skips a clause
+    /// another clause has already satisfied, so a merely reordered list would leave the answer
+    /// unapplied in exactly the case that motivates asking: a provider selected for some
+    /// unrelated requirement already answering this one.
+    ///
+    /// An answer naming a candidate that cannot satisfy the requirement is ignored, leaving
+    /// the full candidate list. The alternative is a clause with no satisfier at all, which
+    /// forbids the dependent outright and reports itself as an unexplained impossibility.
+    #[must_use]
+    pub fn choose_provider(mut self, choice: ProviderChoice) -> Self {
+        self.provider_choices.push(choice);
+        self
+    }
+
+    /// The provider questions this request carries answers for.
+    #[must_use]
+    pub fn provider_choices(&self) -> &[ProviderChoice] {
+        &self.provider_choices
+    }
+
     /// Whether this request only takes packages away.
     ///
     /// A pure removal must never *install* anything. Left unconstrained, the solver happily
@@ -186,6 +216,27 @@ impl Request {
     pub fn is_removal_only(&self) -> bool {
         !self.removals.is_empty() && self.targets.is_empty()
     }
+}
+
+/// One answer to an [`Ambiguity`]: which provider satisfies one package's one dependency.
+///
+/// Identified by `(dependent, dependency)` rather than by the dependency's text. [`encode`]
+/// emits a requirement for every `%DEPENDS%` entry of every candidate in the cone, and the
+/// cone is seeded with the whole installed set — so a text-keyed answer would also rewrite the
+/// same dependency of an installed package this transaction never touches, and pull a new
+/// provider in for it. The pair is what [`Divergence`] and [`ClauseKind::Requires`] already
+/// use.
+///
+/// A [`SolvableId`] is meaningful only for the [`Universe`] it came from, which is built once
+/// per run. An answer that outlives a run has to be keyed by name and relation text instead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProviderChoice {
+    /// The package whose `%DEPENDS%` raised the question.
+    pub dependent: SolvableId,
+    /// Which of its `%DEPENDS%` entries.
+    pub dependency: usize,
+    /// The provider to satisfy it with.
+    pub chosen: SolvableId,
 }
 
 /// A requirement clause, kept so the plan can tell whether the solver took the candidate
@@ -437,7 +488,17 @@ pub fn encode(
     let mut problem = Problem::new(universe.len());
     let mut requirements = Vec::new();
 
+    // Deliberately built *after* the cone, and never fed into it. The cone must keep every
+    // candidate of every name group, or the "something called X must remain" and at-most-one
+    // clauses lose members; the providers an answer sets aside also stay legitimate candidates
+    // for other requirements. A cone that varied with the answers would also stop a caller's
+    // ask-and-solve-again loop from being provably finite.
     let cone = reachable_cone(universe, request, limits)?;
+    let choices: HashMap<(SolvableId, usize), SolvableId> = request
+        .provider_choices
+        .iter()
+        .map(|choice| ((choice.dependent, choice.dependency), choice.chosen))
+        .collect();
 
     // 1. Targets. A unit on the specific candidate. This distinguishes "install this" from
     //    "keep whatever is there".
@@ -503,11 +564,22 @@ pub fn encode(
         let Some(solvable) = universe.get(*id) else { continue };
 
         for (index, dep) in solvable.depends()?.iter().enumerate() {
-            let satisfiers = in_cone(&cone, &universe.satisfiers(dep));
+            let mut satisfiers = in_cone(&cone, &universe.satisfiers(dep));
+            // The caller answered `ALPM_QUESTION_SELECT_PROVIDER` for this entry, so only the
+            // provider they named satisfies it now. An answer naming something that cannot
+            // satisfy it is dropped: the alternative is a clause with no satisfier, which
+            // forbids `id` outright and explains nothing.
+            let answered = choices.get(&(*id, index)).filter(|chosen| satisfiers.contains(chosen));
+            if let Some(chosen) = answered {
+                satisfiers = vec![*chosen];
+            }
+            let kind = answered
+                .map_or(ClauseKind::Requires { dependent: *id, dependency: index }, |chosen| {
+                    ClauseKind::Chosen { dependent: *id, dependency: index, chosen: *chosen }
+                });
             let mut literals = vec![Lit::negative(*id)];
             literals.extend(satisfiers.iter().copied().map(Lit::positive));
-            let clause =
-                problem.add(literals, ClauseKind::Requires { dependent: *id, dependency: index });
+            let clause = problem.add(literals, kind);
             requirements.push(Requirement {
                 clause,
                 dependent: *id,
@@ -722,51 +794,48 @@ impl FidelityReport {
     }
 }
 
-/// Compares a solution against the greedy choice each requirement would have made.
+/// One requirement libalpm's descent would have raised, and what answered it.
+struct Raised<'a> {
+    /// The candidate the descent would have taken: the first satisfier in preference order.
+    preferred: SolvableId,
+    /// Every candidate of the clause, in [`Universe::satisfiers`] preference order.
+    satisfiers: &'a [SolvableId],
+    /// The first of those the solution selected.
+    satisfier: SolvableId,
+}
+
+/// Visits every requirement libalpm's descent would have raised for this solution.
 ///
-/// This is the honest fidelity measure. The solver's backjump counter is not: unit
-/// propagation can reject libalpm's first choice without any decision ever being retracted,
-/// so a run with zero conflicts may still have diverged. Only the requirements themselves
-/// know which candidate was preferred.
+/// [`encode`] emits a requirement for every `%DEPENDS%` entry of every candidate in the cone.
+/// The cone is seeded with the whole installed set, and "every installed package must remain"
+/// keeps all of them selected. So `encoded.requirements` covers the entire installed system,
+/// not the transaction. libalpm reaches the preference order only through `alpm_checkdeps`,
+/// which raises a dependency **only when the package list it has already accumulated does not
+/// satisfy it**. Three things are in that list before the order is ever consulted, and a
+/// requirement any of them answers is one libalpm never walked:
 ///
-/// Two filters keep the measure meaningful. Both close a bug in which it fired on every plan
-/// it was ever shown:
+/// - an installed package the transaction keeps,
+/// - a package the user named, which is in the list before resolution starts,
+/// - a provider pulled in for an *earlier* `%DEPENDS%` entry of the same dependent, since
+///   libalpm resolves one package's dependencies in declaration order.
 ///
-/// 1. **Compared by package name, not by candidate.** A requirement whose preferred satisfier
-///    was the installed copy of `foo`, and whose selected satisfier is `foo` from a
-///    repository, has not diverged. That is what an upgrade *is*, and during `-Su` it
-///    describes most of the transaction. Counting those made a clean 59-package sysupgrade
-///    report 28 divergences.
-/// 2. **Only requirements libalpm would have raised at all.** [`encode`] emits a requirement
-///    for every `%DEPENDS%` entry of every candidate in the cone. The cone is seeded with the
-///    whole installed set, and "every installed package must remain" keeps all of them
-///    selected. So `encoded.requirements` covers the entire installed system, not the
-///    transaction. libalpm reaches the preference order only through `alpm_checkdeps`, which
-///    raises a dependency **only when the package list it has already accumulated does not
-///    satisfy it**. Three things are in that list before the order is ever consulted. A
-///    requirement any of them answers is not a departure from the descent: libalpm never
-///    walked it.
-///
-///    - an installed package the transaction keeps,
-///    - a package the user named, which is in the list before resolution starts,
-///    - a provider pulled in for an *earlier* `%DEPENDS%` entry of the same dependent, since
-///      libalpm resolves one package's dependencies in declaration order.
-///
-/// A genuine divergence is a different package answering a dependency the transaction
-/// reached: `fcron` where libalpm would have taken `cronie`.
-///
-/// The third filter is modeled per dependent, not across the whole descent. libalpm's outer
+/// That third filter is modeled per dependent, not across the whole descent. libalpm's outer
 /// queue order also decides which provider arrives first, and reproducing that would mean
 /// running a second resolver alongside the one whose answer is being audited. The measured
 /// false positives came from the inner loop: `cl-alexandria` declares `cl-asdf` before
 /// `common-lisp`, so `ecl` answers both and `clisp` is never tried.
-#[must_use]
-pub fn fidelity(
+///
+/// Both [`fidelity`] and [`ambiguities`] ask this same question — "would the descent have
+/// reached this requirement at all?" — and they must not answer it two different ways. Each
+/// dropped filter here brought back a measured false positive (`corrosion`,
+/// `tesseract-data-sun`, `cl-alexandria` respectively), so a second copy is a second chance
+/// for one of them to go missing.
+fn visit_raised_requirements(
     universe: &Universe<'_>,
     encoded: &Encoded,
     selected: &[SolvableId],
-    limits: &Limits,
-) -> FidelityReport {
+    mut visit: impl FnMut(&Requirement, &Raised<'_>),
+) {
     let chosen: HashSet<SolvableId> = selected.iter().copied().collect();
     // What the transaction actually changes. An installed candidate that was merely
     // re-selected is the status quo. Its requirements were resolved by whatever installed it,
@@ -776,7 +845,6 @@ pub fn fidelity(
         .copied()
         .filter(|id| universe.get(*id).is_some_and(|solvable| !solvable.is_installed()))
         .collect();
-    let name_of = |id: SolvableId| universe.get(id).map(|solvable| solvable.name());
     // libalpm puts every named target in its package list before resolving anything, so a
     // dependency one of them satisfies is never raised.
     let targets: HashSet<SolvableId> = encoded
@@ -791,9 +859,10 @@ pub fn fidelity(
     // entries. Keyed by dependent, because that inner loop is the part of libalpm's order
     // this models. See the note on the outer queue above.
     let mut pulled: HashMap<SolvableId, HashSet<SolvableId>> = HashMap::new();
+    // Reused across requirements. Most stop at the two cheap checks below and never fill it,
+    // so this loop runs over the whole encoding without allocating per requirement.
+    let mut satisfiers: Vec<SolvableId> = Vec::new();
 
-    let mut diverged = 0_usize;
-    let mut sink = Sink::new(limits);
     for requirement in &encoded.requirements {
         // A requirement only applies if its dependent was actually selected.
         if !chosen.contains(&requirement.dependent) {
@@ -803,25 +872,30 @@ pub fn fidelity(
             continue;
         };
 
-        // The clause is `¬dependent ∨ sat₁ ∨ …` and `dependent` is selected, so at least one
-        // of these is true. Iterated twice rather than collected, because this loop runs over
-        // every requirement in the encoding, and most of them stop at the checks above.
-        let all_satisfiers = || {
+        satisfiers.clear();
+        satisfiers.extend(
             encoded
                 .problem
                 .literals_of(requirement.clause)
                 .iter()
                 .filter(|literal| !literal.is_negative())
-                .map(|literal| literal.solvable())
-        };
-        let satisfiers = || all_satisfiers().filter(|id| chosen.contains(id));
+                .map(|literal| literal.solvable()),
+        );
 
-        let Some(satisfier) = satisfiers().next() else { continue };
+        // The clause is `¬dependent ∨ sat₁ ∨ …` and `dependent` is selected, so at least one
+        // of these is true.
+        let Some(satisfier) = satisfiers.iter().copied().find(|id| chosen.contains(id)) else {
+            continue;
+        };
 
         // Already answered by an installed package the transaction keeps, or by a package the
         // user named. `alpm_checkdeps` reports no missing dependency here, so the descent
         // stops before the preference order.
-        if satisfiers().any(|id| !changing.contains(&id) || targets.contains(&id)) {
+        if satisfiers
+            .iter()
+            .filter(|id| chosen.contains(id))
+            .any(|id| !changing.contains(id) || targets.contains(id))
+        {
             continue;
         }
         // Already answered by what an earlier `%DEPENDS%` entry of this same dependent pulled
@@ -829,33 +903,73 @@ pub fn fidelity(
         // pick for that earlier entry need not be in this plan at all.
         if pulled
             .get(&requirement.dependent)
-            .is_some_and(|acc| all_satisfiers().any(|id| acc.contains(&id)))
+            .is_some_and(|acc| satisfiers.iter().any(|id| acc.contains(id)))
         {
             continue;
         }
         // Raised, so the descent takes its preferred candidate and carries it into the rest of
-        // this dependent's dependencies. Recorded before the checks below, which decide only
-        // whether the pick *differed*, not whether it happened.
+        // this dependent's dependencies. Recorded before the visit, which decides only what to
+        // make of the requirement, never whether it happened.
         pulled.entry(requirement.dependent).or_default().insert(preferred);
 
-        if chosen.contains(&preferred) {
-            continue;
+        visit(requirement, &Raised { preferred, satisfiers: &satisfiers, satisfier });
+    }
+}
+
+/// Compares a solution against the greedy choice each requirement would have made.
+///
+/// This is the honest fidelity measure. The solver's backjump counter is not: unit
+/// propagation can reject libalpm's first choice without any decision ever being retracted,
+/// so a run with zero conflicts may still have diverged. Only the requirements themselves
+/// know which candidate was preferred.
+///
+/// Two filters keep the measure meaningful. Both close a bug in which it fired on every plan
+/// it was ever shown. The second — "only requirements libalpm would have raised at all" — is
+/// [`visit_raised_requirements`], which [`ambiguities`] walks too. The first is here:
+///
+/// **Compared by package name, not by candidate.** A requirement whose preferred satisfier
+/// was the installed copy of `foo`, and whose selected satisfier is `foo` from a repository,
+/// has not diverged. That is what an upgrade *is*, and during `-Su` it describes most of the
+/// transaction. Counting those made a clean 59-package sysupgrade report 28 divergences.
+///
+/// A genuine divergence is a different package answering a dependency the transaction
+/// reached: `fcron` where libalpm would have taken `cronie`.
+#[must_use]
+pub fn fidelity(
+    universe: &Universe<'_>,
+    encoded: &Encoded,
+    selected: &[SolvableId],
+    limits: &Limits,
+) -> FidelityReport {
+    let chosen: HashSet<SolvableId> = selected.iter().copied().collect();
+    let name_of = |id: SolvableId| universe.get(id).map(|solvable| solvable.name());
+
+    let mut diverged = 0_usize;
+    let mut sink = Sink::new(limits);
+    visit_raised_requirements(universe, encoded, selected, |requirement, raised| {
+        if chosen.contains(&raised.preferred) {
+            return;
         }
-        let Some(wanted) = name_of(preferred) else { continue };
+        let Some(wanted) = name_of(raised.preferred) else { return };
         // Satisfied by a different version of the same package? Then this is an upgrade of
         // the preferred candidate, not a departure from it.
-        if satisfiers().any(|id| name_of(id) == Some(wanted)) {
-            continue;
+        if raised
+            .satisfiers
+            .iter()
+            .filter(|id| chosen.contains(id))
+            .any(|id| name_of(*id) == Some(wanted))
+        {
+            return;
         }
 
         diverged = diverged.saturating_add(1);
         sink.push(|| Divergence {
             dependent: requirement.dependent,
             dependency: requirement.dependency,
-            preferred,
-            selected: satisfier,
+            preferred: raised.preferred,
+            selected: raised.satisfier,
         });
-    }
+    });
 
     let (collected, dropped) = sink.finish();
     let fidelity = if diverged == 0 {
@@ -864,6 +978,130 @@ pub fn fidelity(
         Fidelity::Diverged { requirements: diverged }
     };
     FidelityReport { fidelity, diverged: collected, dropped }
+}
+
+/// A dependency several packages could answer, and that libalpm would have asked about.
+///
+/// This is `ALPM_QUESTION_SELECT_PROVIDER` (`deps.c:719`) expressed as data. A caller renders
+/// it, asks whoever can answer, and feeds the answer back through
+/// [`Request::choose_provider`]. Nothing here prompts: a library returns its questions the
+/// same way it returns its diagnostics.
+#[derive(Clone, Debug)]
+pub struct Ambiguity {
+    /// The package whose `%DEPENDS%` declared the dependency.
+    pub dependent: SolvableId,
+    /// Which of `dependent`'s `%DEPENDS%` entries this was.
+    ///
+    /// Together with `dependent`, this names the requirement an answer applies to. Index
+    /// `dependent`'s `%DEPENDS%` with it to quote the relation, the same resolution
+    /// [`Encoded::explain`] performs.
+    pub dependency: usize,
+    /// The providers, in `resolvedep` preference order. Always at least two.
+    ///
+    /// The first is libalpm's own default: the `use_index = 0` a frontend that answers
+    /// nothing gets.
+    pub providers: Box<[SolvableId]>,
+}
+
+/// The provider questions a solution reached, and what the bound withheld.
+#[derive(Clone, Debug)]
+pub struct AmbiguityReport {
+    found: Box<[Ambiguity]>,
+    dropped: usize,
+}
+
+impl AmbiguityReport {
+    /// The questions, up to [`Limits::max_diagnostics`].
+    #[must_use]
+    pub fn found(&self) -> &[Ambiguity] {
+        &self.found
+    }
+
+    /// How many further questions the bound withheld.
+    ///
+    /// Each of those keeps libalpm's own default answer, so the cost of the bound is "pacman
+    /// with nobody at the keyboard", not a failure. Reported rather than swallowed, so a
+    /// caller cannot mistake a truncated list for the complete one.
+    #[must_use]
+    pub const fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    /// Whether the solution raised no question at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.found.is_empty()
+    }
+}
+
+/// The `ALPM_QUESTION_SELECT_PROVIDER` questions this solution reached.
+///
+/// `resolvedep` (`deps.c:636`) asks in exactly one situation, and the three tests here are its
+/// three escapes from asking:
+///
+/// 1. **A literal match ends the search.** The literal pass `return`s before `%PROVIDES%` is
+///    consulted at all (`deps.c:644-675`), so a dependency some package is literally named
+///    after is never a question, however many others provide it.
+/// 2. **An installed provider returns early** (`deps.c:709`), before the providers list is
+///    even finished. Tested against every candidate of the clause rather than only the
+///    selected ones: a provider this transaction removes is still in the local database
+///    `resolvedep` consults.
+/// 3. **One provider is taken without asking** — `count > 1` gates the question
+///    (`deps.c:719`).
+///
+/// Which requirements the descent would have reached at all is
+/// [`visit_raised_requirements`], shared with [`fidelity`].
+///
+/// There is no "already answered" test. An answered requirement is encoded with its chosen
+/// candidate as its only satisfier, so it fails the third test on its own. That is what lets a
+/// caller loop — ask, answer, solve again — without tracking which questions it has already
+/// put.
+#[must_use]
+pub fn ambiguities(
+    universe: &Universe<'_>,
+    encoded: &Encoded,
+    selected: &[SolvableId],
+    limits: &Limits,
+) -> AmbiguityReport {
+    let mut sink = Sink::new(limits);
+    visit_raised_requirements(universe, encoded, selected, |requirement, raised| {
+        if raised.satisfiers.len() < 2 {
+            return;
+        }
+        // `deps.c:709`. An installed provider is returned without the list ever being
+        // completed.
+        if raised
+            .satisfiers
+            .iter()
+            .any(|id| universe.get(*id).is_some_and(|solvable| solvable.is_installed()))
+        {
+            return;
+        }
+        // The literal pass. A candidate named after the dependency answered it already.
+        let named = universe
+            .get(requirement.dependent)
+            .and_then(|solvable| solvable.depends().ok())
+            .and_then(|depends| {
+                depends.get(requirement.dependency).and_then(crate::depcmp::dep_name).cloned()
+            });
+        if let Some(name) = named
+            && raised
+                .satisfiers
+                .iter()
+                .any(|id| universe.get(*id).is_some_and(|solvable| *solvable.name() == name))
+        {
+            return;
+        }
+
+        sink.push(|| Ambiguity {
+            dependent: requirement.dependent,
+            dependency: requirement.dependency,
+            providers: raised.satisfiers.to_vec().into_boxed_slice(),
+        });
+    });
+
+    let (found, dropped) = sink.finish();
+    AmbiguityReport { found, dropped }
 }
 
 /// A solved request, together with the installed packages that had to go.
@@ -1637,5 +1875,312 @@ mod tests {
             .map(|candidate| candidate.version().to_string())
             .collect();
         assert_eq!(selected, ["1.0.0-1"], "core's build, and only it");
+    }
+
+    // --- `ALPM_QUESTION_SELECT_PROVIDER` -------------------------------------------------
+
+    /// Solves `target` against `scenario`, returning what it would install and the questions
+    /// it raised, both as names so no id outlives the universe they belong to.
+    fn ask(scenario: &BuiltScenario, target: &str) -> (Vec<String>, Vec<(String, Vec<String>)>) {
+        let limits = Limits::default();
+        let universe = universe_of(scenario, DbUsage::ALL);
+        let id = resolve_target(&universe, &target.parse().unwrap()).expect("target resolves");
+        let request = Request::new().target(id);
+        let planned = solve_with_removals(&universe, &request, &limits).unwrap().unwrap();
+
+        let installing = planned
+            .selected
+            .iter()
+            .filter_map(|id| universe.get(*id))
+            .filter(|solvable| !solvable.is_installed())
+            .map(|solvable| solvable.name().to_string())
+            .collect();
+        let report = ambiguities(&universe, &planned.encoded, &planned.selected, &limits);
+        assert_eq!(report.dropped(), 0);
+        let questions = report
+            .found()
+            .iter()
+            .map(|ambiguity| {
+                let relation = universe
+                    .get(ambiguity.dependent)
+                    .and_then(|solvable| solvable.depends().ok())
+                    .and_then(|depends| depends.get(ambiguity.dependency).map(ToString::to_string))
+                    .unwrap();
+                let providers = named(&universe, &ambiguity.providers)
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect();
+                (relation, providers)
+            })
+            .collect();
+        (installing, questions)
+    }
+
+    /// Two providers, nothing installed answering it: `count > 1` at `deps.c:719`.
+    #[test]
+    fn two_providers_raise_one_question() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("app", "1.0.0-1").depends(["virtual"]),
+                    PackageSpec::new("impl-a", "1.0.0-1").provides(["virtual"]),
+                    PackageSpec::new("impl-b", "1.0.0-1").provides(["virtual"]),
+                ],
+            )
+            .build();
+
+        let (installing, questions) = ask(&scenario, "app");
+        assert!(
+            installing.contains(&"impl-a".to_owned()),
+            "the default is the head: {installing:?}"
+        );
+        assert_eq!(questions.len(), 1, "{questions:?}");
+        assert_eq!(questions[0].0, "virtual");
+        assert_eq!(questions[0].1, ["impl-a", "impl-b"], "in preference order");
+    }
+
+    /// The literal pass `return`s before `%PROVIDES%` is read at all (`deps.c:644-675`), so a
+    /// dependency some package is literally named after is never a question — however many
+    /// other packages provide it.
+    #[test]
+    fn a_literal_match_is_never_a_question() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("app", "1.0.0-1").depends(["virtual"]),
+                    PackageSpec::new("virtual", "1.0.0-1"),
+                    PackageSpec::new("impl-a", "1.0.0-1").provides(["virtual"]),
+                    PackageSpec::new("impl-b", "1.0.0-1").provides(["virtual"]),
+                ],
+            )
+            .build();
+
+        let (installing, questions) = ask(&scenario, "app");
+        assert!(installing.contains(&"virtual".to_owned()), "{installing:?}");
+        assert!(questions.is_empty(), "the literal match ended the search: {questions:?}");
+    }
+
+    /// `deps.c:709` returns an already-installed provider without ever finishing the list.
+    #[test]
+    fn an_installed_provider_is_never_a_question() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("impl-b", "1.0.0-1").provides(["virtual"]))
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("app", "1.0.0-1").depends(["virtual"]),
+                    PackageSpec::new("impl-a", "1.0.0-1").provides(["virtual"]),
+                ],
+            )
+            .build();
+
+        let (_installing, questions) = ask(&scenario, "app");
+        assert!(questions.is_empty(), "{questions:?}");
+    }
+
+    /// `count == 1` is taken without asking.
+    #[test]
+    fn a_single_provider_is_never_a_question() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("app", "1.0.0-1").depends(["virtual"]),
+                    PackageSpec::new("impl-a", "1.0.0-1").provides(["virtual"]),
+                ],
+            )
+            .build();
+
+        let (_installing, questions) = ask(&scenario, "app");
+        assert!(questions.is_empty(), "{questions:?}");
+    }
+
+    /// The scope filter, shared with [`fidelity`]: `encode` emits a requirement for every
+    /// `%DEPENDS%` entry of every candidate in the cone, so without it an unrelated installed
+    /// package's ambiguous dependency would be asked about on every plan.
+    #[test]
+    fn an_untouched_installed_package_raises_no_question() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("impl-b", "1.0.0-1").provides(["virtual"]))
+            .installed(PackageSpec::new("host", "1.0.0-1").depends(["virtual"]))
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("unrelated", "1.0.0-1"),
+                    PackageSpec::new("impl-a", "1.0.0-1").provides(["virtual"]),
+                    PackageSpec::new("impl-c", "1.0.0-1").provides(["virtual"]),
+                ],
+            )
+            .build();
+
+        let (_installing, questions) = ask(&scenario, "unrelated");
+        assert!(
+            questions.is_empty(),
+            "installing `unrelated` decides nothing about `host`: {questions:?}"
+        );
+    }
+
+    /// Answering selects the named provider instead of the head of the list.
+    #[test]
+    fn an_answer_selects_the_provider_it_names() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("app", "1.0.0-1").depends(["virtual"]),
+                    PackageSpec::new("impl-a", "1.0.0-1").provides(["virtual"]),
+                    PackageSpec::new("impl-b", "1.0.0-1").provides(["virtual"]),
+                ],
+            )
+            .build();
+
+        let limits = Limits::default();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let app = resolve_target(&universe, &"app".parse().unwrap()).unwrap();
+        let impl_b = resolve_target(&universe, &"impl-b".parse().unwrap()).unwrap();
+        let request = Request::new().target(app).choose_provider(ProviderChoice {
+            dependent: app,
+            dependency: 0,
+            chosen: impl_b,
+        });
+        let planned = solve_with_removals(&universe, &request, &limits).unwrap().unwrap();
+
+        let installing = named(&universe, &planned.selected);
+        assert!(installing.contains(&"impl-b"), "{installing:?}");
+        assert!(!installing.contains(&"impl-a"), "the answer excludes the head: {installing:?}");
+
+        // An answered requirement has one satisfier, so it fails `count > 1` and is never
+        // asked again. That is what lets a caller loop without tracking what it has asked.
+        let report = ambiguities(&universe, &planned.encoded, &planned.selected, &limits);
+        assert!(report.is_empty(), "{:?}", report.found().len());
+        // The answer is what the descent would now have taken, so it is not a divergence.
+        assert_eq!(
+            planned.fidelity.fidelity(),
+            Fidelity::Greedy,
+            "{:?}",
+            planned.fidelity.diverged()
+        );
+    }
+
+    /// The reason the answer narrows the clause instead of reordering it.
+    ///
+    /// `Solver::decide` skips a clause another clause has already satisfied, so its literal
+    /// order is never consulted there. Here `impl-b` is selected for `helper`'s `asdf`, which
+    /// also satisfies `app`'s `virtual` — the shape measured on real data as
+    /// `cl-hu-dwim-stefil requires common-lisp`, answered by the `ecl` that `cl-alexandria`
+    /// pulled in. A reordered candidate list would leave the answer unapplied in exactly this
+    /// case.
+    #[test]
+    fn an_answer_binds_even_when_another_requirement_already_answered_it() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("app", "1.0.0-1").depends(["helper", "virtual"]),
+                    PackageSpec::new("helper", "1.0.0-1").depends(["asdf"]),
+                    PackageSpec::new("impl-a", "1.0.0-1").provides(["virtual"]),
+                    PackageSpec::new("impl-b", "1.0.0-1").provides(["virtual", "asdf"]),
+                ],
+            )
+            .build();
+
+        let limits = Limits::default();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let app = resolve_target(&universe, &"app".parse().unwrap()).unwrap();
+        let impl_a = resolve_target(&universe, &"impl-a".parse().unwrap()).unwrap();
+
+        // Unanswered, `impl-b` answers both requirements and `impl-a` is never needed.
+        let plain =
+            solve_with_removals(&universe, &Request::new().target(app), &limits).unwrap().unwrap();
+        let installing = named(&universe, &plain.selected);
+        assert!(installing.contains(&"impl-b"), "{installing:?}");
+        assert!(!installing.contains(&"impl-a"), "{installing:?}");
+
+        // Answered, `impl-a` satisfies `virtual` and `impl-b` still satisfies `asdf`.
+        let request = Request::new().target(app).choose_provider(ProviderChoice {
+            dependent: app,
+            // `virtual` is the second `%DEPENDS%` entry.
+            dependency: 1,
+            chosen: impl_a,
+        });
+        let answered = solve_with_removals(&universe, &request, &limits).unwrap().unwrap();
+        let installing = named(&universe, &answered.selected);
+        assert!(installing.contains(&"impl-a"), "the answer must bind: {installing:?}");
+        assert!(installing.contains(&"impl-b"), "and `asdf` still needs it: {installing:?}");
+    }
+
+    /// The answer is keyed by `(dependent, dependency)`, not by the dependency's text. The
+    /// cone is seeded with the whole installed set, so a text-keyed answer would rewrite
+    /// `host`'s identical requirement too and pull a second provider in for a package this
+    /// transaction never touches.
+    #[test]
+    fn an_answer_does_not_reach_an_untouched_installed_package() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("impl-b", "1.0.0-1").provides(["virtual"]))
+            .installed(PackageSpec::new("host", "1.0.0-1").depends(["virtual"]))
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("app", "1.0.0-1").depends(["virtual"]),
+                    PackageSpec::new("impl-a", "1.0.0-1").provides(["virtual"]),
+                    PackageSpec::new("impl-c", "1.0.0-1").provides(["virtual"]),
+                ],
+            )
+            .build();
+
+        let limits = Limits::default();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let app = resolve_target(&universe, &"app".parse().unwrap()).unwrap();
+        let impl_c = resolve_target(&universe, &"impl-c".parse().unwrap()).unwrap();
+        let request = Request::new().target(app).choose_provider(ProviderChoice {
+            dependent: app,
+            dependency: 0,
+            chosen: impl_c,
+        });
+        let planned = solve_with_removals(&universe, &request, &limits).unwrap().unwrap();
+
+        let installing: Vec<&str> = planned
+            .selected
+            .iter()
+            .filter_map(|id| universe.get(*id))
+            .filter(|solvable| !solvable.is_installed())
+            .map(|solvable| solvable.name().as_ref())
+            .collect();
+        assert_eq!(installing, ["app", "impl-c"], "`host` keeps `impl-b`: {installing:?}");
+    }
+
+    /// A stale answer — one naming a candidate that cannot satisfy the requirement — leaves
+    /// the full candidate list. Narrowing to nothing would forbid the dependent outright and
+    /// report an impossibility with no stated cause.
+    #[test]
+    fn a_stale_answer_is_ignored() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("app", "1.0.0-1").depends(["virtual"]),
+                    PackageSpec::new("impl-a", "1.0.0-1").provides(["virtual"]),
+                    PackageSpec::new("impl-b", "1.0.0-1").provides(["virtual"]),
+                    PackageSpec::new("stranger", "1.0.0-1"),
+                ],
+            )
+            .build();
+
+        let limits = Limits::default();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let app = resolve_target(&universe, &"app".parse().unwrap()).unwrap();
+        let stranger = resolve_target(&universe, &"stranger".parse().unwrap()).unwrap();
+        let request = Request::new().target(app).choose_provider(ProviderChoice {
+            dependent: app,
+            dependency: 0,
+            chosen: stranger,
+        });
+        let planned = solve_with_removals(&universe, &request, &limits).unwrap().unwrap();
+
+        let installing = named(&universe, &planned.selected);
+        assert!(installing.contains(&"impl-a"), "the list stands: {installing:?}");
+        assert!(!installing.contains(&"stranger"), "{installing:?}");
     }
 }

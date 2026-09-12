@@ -13,6 +13,7 @@ pub mod info;
 pub mod list;
 pub mod local;
 pub mod plan;
+pub mod provider;
 pub mod refresh;
 pub mod removal;
 pub mod repo;

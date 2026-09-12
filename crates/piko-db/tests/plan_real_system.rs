@@ -469,3 +469,91 @@ fn plan_names(universe: &Universe<'_>, plan: &piko_db::solve::Plan) -> BTreeSet<
         .map(|solvable| solvable.name().to_string())
         .collect()
 }
+
+/// Answering every provider question with libalpm's own default must change nothing.
+///
+/// This is the acceptance gate for the whole `ALPM_QUESTION_SELECT_PROVIDER` path. `use_index
+/// = 0` is what a frontend that answers nothing gets, and it is the answer the non-interactive
+/// path takes. A restricted clause that changed a plan when answered that way would mean the
+/// restriction is stronger than the unrestricted encoding — and every result this project has
+/// measured against `pacman -Sp` would have to be measured again.
+///
+/// Also reports how many questions real targets raise, which is the figure the divergence
+/// register quotes.
+#[test]
+#[ignore = "requires a real ALPM sync database"]
+fn answering_every_question_with_the_default_leaves_the_plan_unchanged() {
+    let repos = open_repos();
+    if repos.is_empty() {
+        return;
+    }
+    let Ok(local) = LocalDatabase::open("/var/lib/pacman/local") else {
+        eprintln!("skipping: no local database");
+        return;
+    };
+
+    let limits = piko_db::Limits::default();
+    let universe =
+        Universe::build(&local, repos.iter().map(|db| (DbUsage::ALL, db)), UniverseOptions::new())
+            .unwrap();
+
+    let mut asked = 0_usize;
+    let mut examined = 0_usize;
+    for target in ["plasma-meta", "gimp", "firefox", "base-devel", "texlive-most"] {
+        let Ok(dep) = target.parse::<RelationOrSoname>() else { continue };
+        let Some(id) = piko_db::solve::resolve_target(&universe, &dep) else { continue };
+        examined += 1;
+
+        let request = Request::new().target(id);
+        let Ok(Ok(planned)) = piko_db::solve::solve_with_removals(&universe, &request, &limits)
+        else {
+            continue;
+        };
+        let questions =
+            piko_db::solve::ambiguities(&universe, &planned.encoded, &planned.selected, &limits);
+        if questions.is_empty() {
+            continue;
+        }
+        asked += questions.found().len();
+
+        // Answer each one with its own first candidate: libalpm's `use_index = 0`.
+        let mut answered = request;
+        for ambiguity in questions.found() {
+            let chosen = ambiguity.providers[0];
+            answered = answered.choose_provider(piko_db::solve::ProviderChoice {
+                dependent: ambiguity.dependent,
+                dependency: ambiguity.dependency,
+                chosen,
+            });
+            let name = universe.get(chosen).unwrap().name().to_string();
+            eprintln!("{target}: {} providers, default {name}", ambiguity.providers.len());
+        }
+
+        let again = piko_db::solve::solve_with_removals(&universe, &answered, &limits)
+            .unwrap()
+            .unwrap_or_else(|_| panic!("{target} must still be plannable once answered"));
+
+        let names = |selected: &[piko_db::solve::SolvableId]| -> BTreeSet<String> {
+            selected
+                .iter()
+                .filter_map(|id| universe.get(*id))
+                .map(|solvable| format!("{}-{}", solvable.name(), solvable.version()))
+                .collect()
+        };
+        assert_eq!(
+            names(&planned.selected),
+            names(&again.selected),
+            "{target}: the default answer must reproduce the unanswered plan"
+        );
+
+        // And an answered requirement is never asked again, which is what makes a caller's
+        // ask-and-solve-again loop finite.
+        let left = piko_db::solve::ambiguities(&universe, &again.encoded, &again.selected, &limits);
+        assert!(
+            left.found().len() < questions.found().len(),
+            "{target}: answering must retire at least one question"
+        );
+    }
+
+    eprintln!("examined {examined} target(s), {asked} provider question(s) in total");
+}

@@ -501,6 +501,15 @@ pub fn plan(
         }
     };
 
+    // A preview never asks. Blocking on stdin would make `--names` unusable in a pipe, and
+    // `pacman.c` forces `noconfirm` for its own `--print` runs. Stating the assumption keeps
+    // the plan honest: it is one of several valid plans, and `piko install` is where the
+    // choice is actually made. On stderr, so `--names` stays diffable against `pacman -Sp`.
+    crate::cmd::provider::report_defaults(
+        &universe,
+        &piko_db::solve::ambiguities(&universe, &planned.encoded, &planned.selected, &limits),
+    );
+
     let built = Plan::assemble(&universe, &planned, request.targets(), &limits, cache);
     render(&universe, &built, format, out)
 }

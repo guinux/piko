@@ -245,17 +245,65 @@ pub fn install(
         }
     }
 
-    let planned = match solve_with_removals(&universe, &request, &limits) {
-        Ok(Ok(planned)) => planned,
-        Ok(Err(encoded)) => {
-            crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-            crate::cmd::plan::report_unsatisfiable(&universe, encoded, &limits);
-            return ExitCode::FAILURE;
+    // Ask, answer, solve again. An answered requirement is encoded with one satisfier, so it
+    // is never raised a second time, and the set of requirements the cone can raise does not
+    // depend on the answers — the loop therefore adds at least one answer per round and runs
+    // out of questions. Two rounds is the common case: a chosen provider brings its own
+    // dependencies, which may be ambiguous in turn.
+    let mut answered: std::collections::HashMap<String, SolvableId> =
+        std::collections::HashMap::new();
+    let planned = loop {
+        let planned = match solve_with_removals(&universe, &request, &limits) {
+            Ok(Ok(planned)) => planned,
+            Ok(Err(encoded)) => {
+                crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
+                crate::cmd::plan::report_unsatisfiable(&universe, encoded, &limits);
+                return ExitCode::FAILURE;
+            }
+            Err(error) => {
+                crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
+                report_error(&error);
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let questions =
+            piko_db::solve::ambiguities(&universe, &planned.encoded, &planned.selected, &limits);
+        if questions.is_empty() {
+            break planned;
         }
-        Err(error) => {
-            crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-            report_error(&error);
-            return ExitCode::FAILURE;
+        // `--noconfirm` takes libalpm's own `use_index = 0` for every question: the first
+        // candidate in repository priority order. Reported rather than silent, so an
+        // unattended run still says a choice was made on its behalf. Unlike `HoldPkg` and
+        // `IgnorePkg`, there is no standing instruction in `pacman.conf` for that default to
+        // contradict, so it needs no refusal.
+        if options.noconfirm {
+            steplist.suspend(|| crate::cmd::provider::report_defaults(&universe, &questions));
+            break planned;
+        }
+
+        // Through `suspend`: the "Resolving dependencies" spinner is still redrawing its row,
+        // and would overwrite the question. `during_prompt` brackets it the way the
+        // "Proceed with installation?" prompt below is bracketed.
+        let choices = steplist.suspend(|| {
+            let mut ask =
+                || crate::cmd::provider::answer(&universe, &questions, &mut answered, out);
+            match &pre_cancel {
+                Some(handoff) => handoff.mode.during_prompt(ask),
+                None => ask(),
+            }
+        });
+        if questions.dropped() > 0 {
+            steplist.suspend(|| {
+                eprintln!(
+                    "warning: {} further provider question(s) not asked; the first candidate \
+                     was taken",
+                    questions.dropped()
+                );
+            });
+        }
+        for choice in choices {
+            request = request.choose_provider(choice);
         }
     };
 
