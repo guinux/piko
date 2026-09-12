@@ -14,9 +14,6 @@ alpm-types.workspace = true
 clap.workspace = true
 console.workspace = true
 ctrlc.workspace = true
-# `HoldPkg` entries are shell globs, matched with pacman's own bare `fnmatch` rather than
-# libalpm's `_alpm_fnmatch_patterns` — see `cmd::removal::is_held` for why the two differ.
-glob.workspace = true
 indicatif.workspace = true
 piko-db.workspace = true
 piko-db-write.workspace = true

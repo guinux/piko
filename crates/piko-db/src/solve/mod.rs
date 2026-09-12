@@ -15,6 +15,7 @@ mod clause;
 mod encode;
 mod explain;
 mod file;
+mod glob;
 mod plan;
 mod removal;
 mod solver;
@@ -25,14 +26,18 @@ pub use cache::{NoCache, PackageCache};
 pub use clause::{Clause, ClauseId, ClauseKind, Lit, Problem};
 pub use encode::{
     Divergence, Encoded, Fidelity, FidelityReport, IgnoredChange, IgnoredTarget, IgnoredUpgrade,
-    Planned, Request, Requirement, Sysupgrade, TargetResolutionFailure, encode, fidelity,
-    recurse_unneeded, resolve_group, resolve_target, resolve_targets, solve_with_removals,
-    sysupgrade,
+    Planned, Request, Requirement, Resolution, Sysupgrade, TargetResolutionFailure, encode,
+    fidelity, recurse_unneeded, resolve_group, resolve_target, resolve_targets,
+    solve_with_removals, sysupgrade,
 };
 pub use explain::{Derivation, Fact};
 pub use file::FilePackage;
+pub use glob::{
+    Expansion, ExpansionFailure, InstallableTargets, Side, expand_installable_targets,
+    expand_installed_names, expand_installed_targets,
+};
 pub use plan::{Change, Plan, PlanDiagnostic, Step};
-pub use removal::{RemovalFailure, RemovalOptions, plan_removal, removal_names};
+pub use removal::{Removal, RemovalFailure, RemovalOptions, plan_removal, removal_names};
 pub use solver::{Outcome, Solution, Solver, Unsatisfiable, core_kinds};
 pub use universe::{IgnoredCandidate, Origin, Solvable, SolvableId, Universe, UniverseOptions};
 pub use why::{Dependents, WhyResult, dependents, explain_why_installed, orphans};

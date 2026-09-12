@@ -1941,3 +1941,147 @@ fn a_removal_is_recorded_with_the_version_that_went() {
     assert!(sandbox.log().contains("removed foo (1.0.0-1)"), "{}", sandbox.log());
     assert!(sandbox.history().contains("removed foo 1.0.0-1"), "{}", sandbox.history());
 }
+
+// --- Glob targets ---------------------------------------------------------------------------
+//
+// A pattern is a rewrite of the target list, so what these check is that the rewrite happened,
+// that its cause was printed, and that nothing else about the transaction changed.
+
+/// The whole claim, end to end: `app-*` installs exactly the packages whose names it matches,
+/// and says which they were.
+#[test]
+fn a_glob_install_target_expands_to_every_matching_repository_package() {
+    let sandbox = Sandbox::new();
+    for name in ["app-a", "app-b", "other"] {
+        write_package_with(&sandbox.path("cache"), name, "1.0.0-1", None, &[]);
+    }
+    sandbox.write_repo(&[
+        ("app-a", "1.0.0-1", &[][..]),
+        ("app-b", "1.0.0-1", &[][..]),
+        ("other", "1.0.0-1", &[][..]),
+    ]);
+
+    let output = sandbox.run_install(&["app-*"], &[]);
+    let seen = text(&output);
+
+    assert!(output.status.success(), "{seen}");
+    assert!(
+        seen.contains("note: app-* matched 2 packages"),
+        "the expansion was not reported:\n{seen}"
+    );
+    assert!(sandbox.path("db/local/app-a-1.0.0-1").is_dir(), "{seen}");
+    assert!(sandbox.path("db/local/app-b-1.0.0-1").is_dir(), "{seen}");
+    assert!(
+        !sandbox.path("db/local/other-1.0.0-1").exists(),
+        "a package the pattern does not match was installed:\n{seen}"
+    );
+}
+
+/// A pattern that selects nothing is a refused transaction, not an empty successful one.
+#[test]
+fn a_glob_install_target_that_matches_nothing_installs_nothing() {
+    let sandbox = Sandbox::new();
+    sandbox.write_repo(&[("app-a", "1.0.0-1", &[][..])]);
+
+    let output = sandbox.run_install(&["zzz-*"], &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "an unmatched pattern succeeded:\n{seen}");
+    assert!(seen.contains("no package or group matching zzz-*"), "{seen}");
+    assert!(!sandbox.path("db/local/app-a-1.0.0-1").exists(), "{seen}");
+}
+
+/// A pattern carrying a version requirement has two honest readings, so it is refused rather
+/// than guessed at.
+#[test]
+fn a_versioned_glob_target_is_refused() {
+    let sandbox = Sandbox::new();
+    sandbox.write_repo(&[("app-a", "1.0.0-1", &[][..])]);
+
+    let output = sandbox.run_install(&["app-*>=1.0"], &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "{seen}");
+    assert!(seen.contains("glob pattern with a version requirement"), "{seen}");
+}
+
+/// `classify`'s path rule fires before the pattern rule, and a `Name` cannot hold a `/`. So a
+/// path-shaped target stays a file target even when it carries a metacharacter.
+#[test]
+fn a_glob_is_never_taken_for_a_file_target() {
+    let sandbox = Sandbox::new();
+    sandbox.write_repo(&[("app-a", "1.0.0-1", &[][..])]);
+
+    let output = sandbox.run_install(&["./app-*.pkg.tar.zst"], &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "{seen}");
+    assert!(
+        !seen.contains("matched") && !seen.contains("no package or group matching"),
+        "a path was read as a pattern:\n{seen}"
+    );
+}
+
+#[test]
+fn a_glob_remove_target_removes_every_matching_installed_package() {
+    let sandbox = Sandbox::new();
+    for name in ["app-a", "app-b", "other"] {
+        write_package_with(&sandbox.path("cache"), name, "1.0.0-1", None, &[]);
+    }
+    sandbox.write_repo(&[
+        ("app-a", "1.0.0-1", &[][..]),
+        ("app-b", "1.0.0-1", &[][..]),
+        ("other", "1.0.0-1", &[][..]),
+    ]);
+    assert!(sandbox.run_install(&["app-a", "app-b", "other"], &[]).status.success());
+
+    let output = sandbox.run_remove(&["app-*"], &["--noconfirm"], None);
+    let seen = text(&output);
+
+    assert!(output.status.success(), "{seen}");
+    assert!(seen.contains("note: app-* matched 2 packages"), "{seen}");
+    assert!(!sandbox.path("db/local/app-a-1.0.0-1").exists(), "{seen}");
+    assert!(!sandbox.path("db/local/app-b-1.0.0-1").exists(), "{seen}");
+    assert!(sandbox.path("db/local/other-1.0.0-1").is_dir(), "{seen}");
+}
+
+/// `HoldPkg` is the guard a glob removal needs, and it already exists: it runs over the
+/// *solved* removal set rather than the names typed, and `--noconfirm` answers no to it. This
+/// is why no second guard was added for an unattended pattern.
+#[test]
+fn a_glob_remove_target_is_still_subject_to_hold_pkg() {
+    let sandbox = Sandbox::new();
+    for name in ["app-a", "app-b"] {
+        write_package_with(&sandbox.path("cache"), name, "1.0.0-1", None, &[]);
+    }
+    sandbox.write_repo(&[("app-a", "1.0.0-1", &[][..]), ("app-b", "1.0.0-1", &[][..])]);
+    assert!(sandbox.run_install(&["app-a", "app-b"], &[]).status.success());
+    sandbox.set_hold_pkg("app-a");
+
+    let output = sandbox.run_remove(&["app-*"], &["--noconfirm"], None);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "a held package was removed by a pattern:\n{seen}");
+    assert!(seen.contains("app-a is designated as a HoldPkg"), "{seen}");
+    assert!(sandbox.path("db/local/app-a-1.0.0-1").is_dir(), "{seen}");
+    assert!(sandbox.path("db/local/app-b-1.0.0-1").is_dir(), "{seen}");
+}
+
+/// The `--nodeps` path expands too, and against package names only: it resolves a target with
+/// `LocalDatabase::get_str` alone and has never taken a group name.
+#[test]
+fn a_glob_remove_target_works_on_the_nodeps_path() {
+    let sandbox = Sandbox::new();
+    for name in ["app-a", "app-b"] {
+        write_package_with(&sandbox.path("cache"), name, "1.0.0-1", None, &[]);
+    }
+    sandbox.write_repo(&[("app-a", "1.0.0-1", &[][..]), ("app-b", "1.0.0-1", &[][..])]);
+    assert!(sandbox.run_install(&["app-a", "app-b"], &[]).status.success());
+
+    let output = sandbox.run_remove(&["app-*"], &["--noconfirm", "--nodeps"], None);
+    let seen = text(&output);
+
+    assert!(output.status.success(), "{seen}");
+    assert!(!sandbox.path("db/local/app-a-1.0.0-1").exists(), "{seen}");
+    assert!(!sandbox.path("db/local/app-b-1.0.0-1").exists(), "{seen}");
+}

@@ -920,6 +920,61 @@ impl<'a> Universe<'a> {
             .iter()
             .find_map(|id| self.get(*id).filter(Solvable::is_installed))
     }
+
+    /// Every package name an install target could resolve to.
+    ///
+    /// A name with no candidate beyond the installed copy is left out, because
+    /// [`crate::solve::resolve_target`] skips that copy and would find nothing for it. So this
+    /// is exactly the domain a `piko install` target is answered from.
+    ///
+    /// Unordered: these are a `HashMap`'s keys. A caller that shows them sorts them.
+    pub fn installable_names(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.by_name.iter().filter_map(|(name, ids)| {
+            ids.iter()
+                .any(|id| self.get(*id).is_some_and(|solvable| !solvable.is_installed()))
+                .then_some(*name)
+        })
+    }
+
+    /// Every `%GROUPS%` group name an install target could expand to.
+    ///
+    /// A group whose every member is already installed is left out, for the reason
+    /// [`Self::group_members`] gives: it expands to nothing.
+    ///
+    /// Unordered, as [`Self::installable_names`] is.
+    pub fn installable_group_names(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.groups.iter().filter_map(|(name, ids)| {
+            ids.iter()
+                .any(|id| self.get(*id).is_some_and(|solvable| !solvable.is_installed()))
+                .then_some(*name)
+        })
+    }
+
+    /// Every installed package's name — the domain a removal target is answered from.
+    ///
+    /// Unordered, as [`Self::installable_names`] is.
+    pub fn installed_names(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.by_name.iter().filter_map(|(name, ids)| {
+            ids.iter()
+                .any(|id| self.get(*id).is_some_and(|solvable| solvable.is_installed()))
+                .then_some(*name)
+        })
+    }
+
+    /// Every `%GROUPS%` group name an installed package carries.
+    ///
+    /// [`Self::installable_group_names`]' removal counterpart, filtered the way
+    /// [`Self::installed_group_members`] is: a group only a repository defines is nothing to
+    /// remove.
+    ///
+    /// Unordered, as [`Self::installable_names`] is.
+    pub fn installed_group_names(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.groups.iter().filter_map(|(name, ids)| {
+            ids.iter()
+                .any(|id| self.get(*id).is_some_and(|solvable| solvable.is_installed()))
+                .then_some(*name)
+        })
+    }
 }
 
 /// Whether a repository whose `Usage` is `usage` is admitted under `required`.

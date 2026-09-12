@@ -4,9 +4,8 @@
 //! [`MatchKind`](crate::search::MatchKind), so a user sees one ordering regardless of which
 //! database answered.
 
-use alpm_types::RelationOrSoname;
-
-use crate::{local::package::LocalPackage, search::MatchKind};
+use crate::local::package::LocalPackage;
+use crate::search::{MatchKind, Searchable, Term, best_match, every_term_is_the_name, prepare};
 
 /// One installed package that matched a search query, together with why it matched.
 ///
@@ -18,22 +17,19 @@ pub type LocalSearchHit<'a> = (&'a LocalPackage, MatchKind);
 ///
 /// Comparisons are case-insensitive. Blank (or all-whitespace) terms are dropped; if nothing
 /// is left after that — an empty `terms`, or every term blank — nothing matches, rather than
-/// treating "no term" as an automatic pass. Each package appears at most once, scored by the
-/// single highest [`MatchKind`] any one of its (all-matching) terms achieved. Results are
-/// sorted most-relevant-first, then by name to break ties deterministically.
+/// treating "no term" as an automatic pass. A term carrying `*`, `?` or `[` is a glob pattern,
+/// matched against the whole name, `%PROVIDES%` name or `%GROUPS%` entry; see
+/// [`MatchKind::Glob`]. Each package appears at most once, scored by the single highest
+/// [`MatchKind`] any one of its (all-matching) terms achieved. Results are sorted
+/// most-relevant-first, then by name to break ties deterministically.
 ///
-/// A package whose `desc` cannot be read is treated as matching nothing beyond an exact name
-/// — see [`best_match`].
+/// A package whose `desc` cannot be read is treated as matching nothing beyond an exact name or
+/// a pattern its name satisfies — see [`combined_match`].
 pub(crate) fn search<'a, 'q>(
     packages: &'a [LocalPackage],
     terms: impl IntoIterator<Item = &'q str>,
 ) -> Vec<LocalSearchHit<'a>> {
-    let terms: Vec<String> = terms
-        .into_iter()
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(str::to_lowercase)
-        .collect();
+    let terms = prepare(terms);
     if terms.is_empty() {
         return Vec::new();
     }
@@ -51,22 +47,30 @@ pub(crate) fn search<'a, 'q>(
 
 /// The best [`MatchKind`] achieved across `terms`, if `package` matches every one of them.
 ///
-/// `terms` must already be trimmed, lowercased, and non-empty. Returns `None` as soon as any
-/// term fails to match at all — the AND requirement — without evaluating the remaining terms.
+/// `terms` must be non-empty. Returns `None` as soon as any term fails to match at all — the
+/// AND requirement — without evaluating the remaining terms.
 ///
 /// The package's own lowercased text is built **here**, once, rather than inside
 /// [`best_match`] per term. Matching is case-insensitive, so lowercasing the name, every
 /// `%PROVIDES%` entry, the description and every group once per (package, term) pair would
 /// cost `terms.len()` times more allocation than the search needs.
-fn combined_match(package: &LocalPackage, terms: &[String]) -> Option<MatchKind> {
+///
+/// An exact name match needs no `desc` at all. Anything beyond that — `%PROVIDES%`, `%DESC%`,
+/// `%GROUPS%` — needs [`LocalPackage::desc`], which is lazy and can fail (a corrupt, missing or
+/// oversized `desc` file); `searchable` is `None` when it did. piko normally surfaces every such
+/// failure rather than treating it as absence. This is a deliberate, narrow exception, scoped to
+/// this best-effort bulk search only: a package whose `desc` cannot be read simply matches
+/// nothing beyond its name. Calling [`LocalPackage::desc`] directly on that package still fails
+/// loudly, as always; nothing about its own caching behavior changes.
+fn combined_match(package: &LocalPackage, terms: &[Term]) -> Option<MatchKind> {
     let name = package.name().as_ref().to_lowercase();
 
     // An exact name match outranks everything and needs no `desc` at all, so a search whose
-    // every term hits it never reads one. `desc` is lazy and fallible; see `Searchable`.
-    let searchable = if terms.iter().all(|term| *term == name) {
+    // every term hits it never reads one.
+    let searchable = if every_term_is_the_name(terms, &name) {
         None
     } else {
-        package.desc().ok().map(|desc| Searchable::from_desc(&desc))
+        package.desc().ok().map(|desc| searchable_from(&desc))
     };
 
     let mut best: Option<MatchKind> = None;
@@ -78,67 +82,12 @@ fn combined_match(package: &LocalPackage, terms: &[String]) -> Option<MatchKind>
 }
 
 /// A package's searchable `desc` text, lowercased once.
-struct Searchable {
-    provides: Vec<String>,
-    description: String,
-    groups: Vec<String>,
-}
-
-impl Searchable {
-    fn from_desc(desc: &crate::local::desc_compat::DescView<'_>) -> Self {
-        Self {
-            // Only `Relation` entries carry a package name to match against; a `%PROVIDES%`
-            // soname is not one, and was never matched here.
-            provides: desc
-                .provides()
-                .iter()
-                .filter_map(|provide| match provide {
-                    RelationOrSoname::Relation(relation) => {
-                        Some(relation.name.as_ref().to_lowercase())
-                    }
-                    _ => None,
-                })
-                .collect(),
-            description: desc.description().as_ref().to_lowercase(),
-            groups: desc.groups().iter().map(|group| group.to_lowercase()).collect(),
-        }
+fn searchable_from(desc: &crate::local::desc_compat::DescView<'_>) -> Searchable {
+    Searchable {
+        provides: Searchable::provide_names(desc.provides()),
+        description: desc.description().as_ref().to_lowercase(),
+        groups: desc.groups().iter().map(|group| group.to_lowercase()).collect(),
     }
-}
-
-/// The single highest-ranked way a package matches `query`, if any.
-///
-/// `name`, `query` and everything in `searchable` must already be trimmed and lowercased.
-///
-/// An exact name match is checked first and needs no `desc` at all. Anything beyond that —
-/// `%PROVIDES%`, `%DESC%`, `%GROUPS%` — needs [`LocalPackage::desc`], which is lazy and can
-/// fail (a corrupt, missing or oversized `desc` file); `searchable` is `None` when it did.
-/// piko normally surfaces every such failure rather than treating it as absence. This
-/// function is a deliberate, narrow exception, scoped to this best-effort bulk search only: a
-/// package whose `desc` cannot be read simply matches nothing beyond an exact name. Calling
-/// [`LocalPackage::desc`] directly on that package still fails loudly, as always; nothing
-/// about its own caching behavior changes.
-fn best_match(name: &str, searchable: Option<&Searchable>, query: &str) -> Option<MatchKind> {
-    if name == query {
-        // Nothing else could outrank this, so there is no reason to also inspect `desc`.
-        return Some(MatchKind::ExactName);
-    }
-
-    let searchable = searchable?;
-
-    [
-        searchable
-            .provides
-            .iter()
-            .any(|provide| provide == query)
-            .then_some(MatchKind::ExactProvides),
-        name.starts_with(query).then_some(MatchKind::NameStartsWith),
-        name.contains(query).then_some(MatchKind::NameContains),
-        searchable.description.contains(query).then_some(MatchKind::DescriptionContains),
-        searchable.groups.iter().any(|group| group == query).then_some(MatchKind::ExactGroup),
-    ]
-    .into_iter()
-    .flatten()
-    .max()
 }
 
 #[cfg(test)]
@@ -271,6 +220,39 @@ pgp
 
         let hits = db.search(["foo"]);
         assert_eq!(hits.first().map(|(_, kind)| *kind), Some(MatchKind::ExactGroup));
+    }
+
+    #[test]
+    fn a_glob_term_matches_the_whole_name() {
+        let text = desc_text("libfoobar", "unrelated", "");
+        let fixture = open_with_packages(&[("libfoobar", &text)]);
+        let db = LocalDatabase::open(fixture.path()).unwrap();
+
+        assert_eq!(db.search(["lib*"]).first().map(|(_, kind)| *kind), Some(MatchKind::Glob));
+        assert!(db.search(["lib*x"]).is_empty(), "a pattern is anchored to the whole name");
+    }
+
+    #[test]
+    fn a_glob_term_never_matches_the_description() {
+        let text = desc_text("bar", "a package about foo things", "");
+        let fixture = open_with_packages(&[("bar", &text)]);
+        let db = LocalDatabase::open(fixture.path()).unwrap();
+
+        assert!(db.search(["*foo*"]).is_empty());
+    }
+
+    /// The name is tested before `desc` is consulted, so an unreadable one costs a pattern
+    /// nothing it could have answered from the name alone.
+    #[test]
+    fn a_corrupt_desc_package_is_still_found_by_a_pattern_on_its_name() {
+        let fixture = DbFixture::new();
+        fixture.package("bad-1.0.0-1").desc("not a valid desc at all").build();
+        let db = LocalDatabase::open(fixture.path()).unwrap();
+
+        let hits = db.search(["ba*"]);
+        let names: Vec<&str> = hits.iter().map(|(pkg, _)| pkg.name().as_ref()).collect();
+        assert_eq!(names, ["bad"]);
+        assert_eq!(hits.first().map(|(_, kind)| *kind), Some(MatchKind::Glob));
     }
 
     #[test]

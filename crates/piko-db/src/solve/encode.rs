@@ -40,6 +40,7 @@ use alpm_types::{FullVersion, Name, RelationOrSoname};
 use crate::diagnostics::Sink;
 use crate::resolve::IgnoreReason;
 use crate::solve::clause::{ClauseId, ClauseKind, Lit, Problem};
+use crate::solve::glob::{Expansion, ExpansionFailure, expand_installable_targets};
 use crate::solve::{Origin, Solvable, SolvableId, Universe};
 use crate::{Error, Limits, Result};
 
@@ -282,6 +283,11 @@ pub enum TargetResolutionFailure {
     /// A target parsed but named neither a package nor a `%GROUPS%` group in any configured
     /// repository.
     NotFound(String),
+    /// A glob target could not be expanded into names.
+    ///
+    /// Wraps the expansion's own refusal, so the two commands that expand — install and
+    /// removal — quote one set of messages rather than two.
+    Pattern(ExpansionFailure),
     /// A target resolved to nothing only because `IgnorePkg`/`IgnoreGroup` covered every
     /// candidate for it.
     ///
@@ -309,13 +315,25 @@ pub struct IgnoredTarget {
 }
 
 impl IgnoredTarget {
-    fn from_candidate(candidate: &crate::solve::IgnoredCandidate<'_>) -> Self {
+    pub(super) fn from_candidate(candidate: &crate::solve::IgnoredCandidate<'_>) -> Self {
         Self {
             name: candidate.package().name().clone(),
             version: candidate.package().version().clone(),
             reason: candidate.reason().clone(),
         }
     }
+}
+
+/// What [`resolve_targets`] produced.
+#[derive(Debug)]
+pub struct Resolution {
+    /// The request, with one target added per resolved name.
+    pub request: Request,
+    /// Ignored candidates that were passed over, whether by a named group or by a pattern.
+    pub ignored: Vec<IgnoredTarget>,
+    /// One entry per glob target, in the order the targets were given. Empty when the caller
+    /// named no pattern.
+    pub expansions: Vec<Expansion>,
 }
 
 /// Resolves `targets` against `universe`, adding each one to `request`.
@@ -329,6 +347,14 @@ impl IgnoredTarget {
 /// through exactly this rule, so both commands treat `foo`, `foo>=1.0`, and a group name
 /// alike.
 ///
+/// # A glob target is rewritten before any of that
+///
+/// A target carrying `*`, `?` or `[` is a pattern, expanded into the names it selects by
+/// [`expand_installable_targets`] ahead of the loop below. So the loop sees only names the user
+/// could have typed, and a pattern plans exactly what naming its expansion would have planned.
+/// Doing it here rather than in a frontend is what keeps `piko install`, `piko plan` and
+/// `piko update` from reading one differently: all three arrive through this function.
+///
 /// # `IgnorePkg` is reported, never overridden
 ///
 /// A target every candidate of which is ignored fails with
@@ -336,7 +362,9 @@ impl IgnoredTarget {
 /// `ALPM_QUESTION_INSTALL_IGNOREPKG` here and installs on a yes; piko does not ask, and the
 /// answer is always no. A group target is the partial case: its non-ignored members are still
 /// resolved, and the ignored ones come back in the returned list so the caller can say what it
-/// left out.
+/// left out. A pattern behaves as a group does, for the same reason: it names a set, and
+/// dropping one member leaves the target meaningful. A pattern whose every candidate is ignored
+/// is the literal case again, and fails.
 ///
 /// # Errors
 ///
@@ -345,9 +373,21 @@ pub fn resolve_targets(
     universe: &Universe<'_>,
     mut request: Request,
     targets: &[String],
-) -> Result<(Request, Vec<IgnoredTarget>), TargetResolutionFailure> {
-    let mut ignored: Vec<IgnoredTarget> = Vec::new();
-    for target in targets {
+    limits: &Limits,
+) -> Result<Resolution, TargetResolutionFailure> {
+    let expanded = expand_installable_targets(universe, targets, limits).map_err(|failure| {
+        match failure {
+            // The pattern is right and `pacman.conf` says not to touch what it names. That is
+            // the same answer a fully-ignored literal gets, so it is reported the same way.
+            ExpansionFailure::AllIgnored { pattern, candidates } => {
+                TargetResolutionFailure::Ignored { target: pattern, candidates }
+            }
+            other => TargetResolutionFailure::Pattern(other),
+        }
+    })?;
+
+    let mut ignored: Vec<IgnoredTarget> = expanded.ignored;
+    for target in &expanded.names {
         let Ok(dep) = target.parse::<alpm_types::RelationOrSoname>() else {
             return Err(TargetResolutionFailure::InvalidDependencyString(target.clone()));
         };
@@ -376,7 +416,7 @@ pub fn resolve_targets(
         }
         return Err(TargetResolutionFailure::Ignored { target: target.clone(), candidates });
     }
-    Ok((request, ignored))
+    Ok(Resolution { request, ignored, expansions: expanded.expansions })
 }
 
 /// Compiles `request` against `universe`.
@@ -1518,8 +1558,9 @@ mod tests {
     /// The names `resolve_targets` put on `request`, in the order it added them.
     fn resolved<'a>(universe: &Universe<'a>, targets: &[&str]) -> Vec<&'a str> {
         let owned: Vec<String> = targets.iter().map(|target| (*target).to_owned()).collect();
-        let (request, _) = resolve_targets(universe, Request::new(), &owned).unwrap();
-        named(universe, request.targets())
+        let resolution =
+            resolve_targets(universe, Request::new(), &owned, &Limits::default()).unwrap();
+        named(universe, resolution.request.targets())
     }
 
     #[test]
@@ -1565,7 +1606,8 @@ mod tests {
         let universe = universe_of(&scenario, DbUsage::ALL);
 
         let failure =
-            resolve_targets(&universe, Request::new(), &["absent".to_owned()]).unwrap_err();
+            resolve_targets(&universe, Request::new(), &["absent".to_owned()], &Limits::default())
+                .unwrap_err();
         assert!(matches!(failure, TargetResolutionFailure::NotFound(name) if name == "absent"));
     }
 
@@ -1580,9 +1622,10 @@ mod tests {
             .build();
         let universe = universe_of(&scenario, DbUsage::ALL);
 
-        let (request, _) =
-            resolve_targets(&universe, Request::new(), &["tools".to_owned()]).unwrap();
-        let planned = solve_with_removals(&universe, &request, &Limits::default())
+        let resolution =
+            resolve_targets(&universe, Request::new(), &["tools".to_owned()], &Limits::default())
+                .unwrap();
+        let planned = solve_with_removals(&universe, &resolution.request, &Limits::default())
             .unwrap()
             .expect("a group target must not encode an unsatisfiable request");
 

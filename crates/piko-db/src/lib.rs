@@ -62,6 +62,7 @@ pub mod eager;
 pub mod entry_name;
 pub mod error;
 pub mod fs_util;
+pub mod glob;
 pub mod lazy;
 pub mod limits;
 pub mod search;
@@ -77,6 +78,7 @@ mod diagnostics;
 #[cfg(any(test, feature = "fixture"))]
 pub mod fixture;
 
+pub use crate::glob::{Glob, is_pattern};
 pub use desc_compat::{UnknownSection, UnknownSectionPolicy};
 pub use eager::DescFieldError;
 pub use entry_name::{EntryName, EntryNameError};

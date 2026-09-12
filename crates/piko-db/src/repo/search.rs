@@ -3,10 +3,8 @@
 //! See [`crate::search`] for [`MatchKind`] itself and the equivalent local-database
 //! implementation this mirrors.
 
-use alpm_types::RelationOrSoname;
-
 use super::package::RepoPackage;
-use crate::search::MatchKind;
+use crate::search::{MatchKind, Searchable, Term, best_match, every_term_is_the_name, prepare};
 
 /// One package that matched a search query, together with why it matched.
 ///
@@ -18,22 +16,19 @@ pub type SearchHit<'a> = (&'a RepoPackage, MatchKind);
 ///
 /// Comparisons are case-insensitive. Blank (or all-whitespace) terms are dropped. If nothing
 /// is left after that — an empty `terms`, or every term blank — nothing matches. "No term" is
-/// never treated as an automatic pass. Each package appears at most once, scored by the single
-/// highest [`MatchKind`] any one of its (all-matching) terms achieved. The AND requirement
-/// above already guarantees every term matched *something*, so this score is purely a ranking
-/// signal: a package that matches one term exactly stays ranked at [`MatchKind::ExactName`]
-/// even if a second term only matched its description. Results are sorted most-relevant-first,
-/// then by name to break ties deterministically.
+/// never treated as an automatic pass. A term carrying `*`, `?` or `[` is a glob pattern,
+/// matched against the whole name, `%PROVIDES%` name or `%GROUPS%` entry; see
+/// [`MatchKind::Glob`]. Each package appears at most once, scored by the single highest
+/// [`MatchKind`] any one of its (all-matching) terms achieved. The AND requirement above
+/// already guarantees every term matched *something*, so this score is purely a ranking signal:
+/// a package that matches one term exactly stays ranked at [`MatchKind::ExactName`] even if a
+/// second term only matched its description. Results are sorted most-relevant-first, then by
+/// name to break ties deterministically.
 pub(crate) fn search<'a, 'q>(
     packages: &'a [RepoPackage],
     terms: impl IntoIterator<Item = &'q str>,
 ) -> Vec<SearchHit<'a>> {
-    let terms: Vec<String> = terms
-        .into_iter()
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(str::to_lowercase)
-        .collect();
+    let terms = prepare(terms);
     if terms.is_empty() {
         return Vec::new();
     }
@@ -51,21 +46,20 @@ pub(crate) fn search<'a, 'q>(
 
 /// The best [`MatchKind`] achieved across `terms`, if `package` matches every one of them.
 ///
-/// `terms` must already be trimmed, lowercased, and non-empty. Returns `None` as soon as any
-/// term fails to match at all — the AND requirement — without evaluating the remaining terms.
+/// `terms` must be non-empty. Returns `None` as soon as any term fails to match at all — the
+/// AND requirement — without evaluating the remaining terms.
 ///
 /// The package's own lowercased text is built **here**, once, rather than inside
 /// [`best_match`] per term. Matching is case-insensitive, so lowercasing the name, every
 /// `%PROVIDES%` entry, the description, and every group once per (package, term) pair would
 /// allocate `terms.len()` times more than the search needs. On the real `extra` repository
 /// (about 15 000 packages), a three-term search allocates a third as much this way.
-fn combined_match(package: &RepoPackage, terms: &[String]) -> Option<MatchKind> {
+fn combined_match(package: &RepoPackage, terms: &[Term]) -> Option<MatchKind> {
     let name = package.name().as_ref().to_lowercase();
 
     // An exact name match outranks everything and needs nothing from `desc`. A search whose
     // every term hits the name never builds a `Searchable`.
-    let searchable =
-        (!terms.iter().all(|term| *term == name)).then(|| Searchable::from_package(package));
+    let searchable = (!every_term_is_the_name(terms, &name)).then(|| searchable_from(package));
 
     let mut best: Option<MatchKind> = None;
     for term in terms {
@@ -76,70 +70,23 @@ fn combined_match(package: &RepoPackage, terms: &[String]) -> Option<MatchKind> 
 }
 
 /// A package's searchable `desc` text, lowercased once.
-struct Searchable {
-    provides: Vec<String>,
-    description: String,
-    groups: Vec<String>,
-}
-
-impl Searchable {
-    fn from_package(package: &RepoPackage) -> Self {
-        Self {
-            // Only `Relation` entries carry a package name to match against. A `%PROVIDES%`
-            // soname is not one and is never matched here.
-            provides: package
-                .provides()
-                .iter()
-                .filter_map(|provide| match provide {
-                    RelationOrSoname::Relation(relation) => {
-                        Some(relation.name.as_ref().to_lowercase())
-                    }
-                    _ => None,
-                })
-                .collect(),
-            // `%PROVIDES%` and `%GROUPS%` are free. `%DESC%` is one of the deferred fields, so
-            // searching descriptions is what forces the full parse. A package whose deferred
-            // `desc` will not parse stays searchable by name, provides, and groups rather than
-            // dropping out of results entirely. The failure is not swallowed: `RepoPackage::desc`
-            // still returns it, cached, on every access. A load failure must always surface on
-            // access and never look like an empty result — this is that rule at work. `search`
-            // itself has no channel to report the failure through; that is the caller's job.
-            description: package
-                .desc()
-                .map(|desc| desc.description().as_ref().to_lowercase())
-                .unwrap_or_default(),
-            groups: package.groups().iter().map(|group| group.to_lowercase()).collect(),
-        }
-    }
-}
-
-/// The single highest-ranked way a package matches `query`, if any.
 ///
-/// `name`, `query`, and everything in `searchable` must already be trimmed and lowercased.
-/// `searchable` is `None` only when the caller already knows `name == query` for every term.
-/// That case outranks anything `desc` could contribute.
-fn best_match(name: &str, searchable: Option<&Searchable>, query: &str) -> Option<MatchKind> {
-    if name == query {
-        // Nothing else could outrank this, so `desc` needs no inspection.
-        return Some(MatchKind::ExactName);
+/// `%PROVIDES%` and `%GROUPS%` are free. `%DESC%` is one of the deferred fields, so searching
+/// descriptions is what forces the full parse. A package whose deferred `desc` will not parse
+/// stays searchable by name, provides, and groups rather than dropping out of results entirely.
+/// The failure is not swallowed: [`RepoPackage::desc`] still returns it, cached, on every
+/// access. A load failure must always surface on access and never look like an empty result —
+/// this is that rule at work. [`search`] itself has no channel to report the failure through;
+/// that is the caller's job.
+fn searchable_from(package: &RepoPackage) -> Searchable {
+    Searchable {
+        provides: Searchable::provide_names(package.provides()),
+        description: package
+            .desc()
+            .map(|desc| desc.description().as_ref().to_lowercase())
+            .unwrap_or_default(),
+        groups: package.groups().iter().map(|group| group.to_lowercase()).collect(),
     }
-
-    let searchable = searchable?;
-
-    [
-        searchable
-            .provides
-            .iter()
-            .any(|provide| provide == query)
-            .then_some(MatchKind::ExactProvides),
-        name.starts_with(query).then_some(MatchKind::NameStartsWith),
-        name.contains(query).then_some(MatchKind::NameContains),
-        searchable.description.contains(query).then_some(MatchKind::DescriptionContains),
-        searchable.groups.iter().any(|group| group == query).then_some(MatchKind::ExactGroup),
-    ]
-    .into_iter()
-    .flatten()
-    .max()
 }
 
 #[cfg(test)]
@@ -170,13 +117,14 @@ mod tests {
 
     /// Scores one package against one query, the way [`combined_match`] would.
     ///
-    /// This does the lowercasing `combined_match` hoists, so these tests keep exercising the
-    /// tier logic itself rather than the caching around it. `query` is lowercased here because
-    /// `search` guarantees that of every term it passes down.
+    /// This does the preparation `combined_match` hoists — lowercasing, and compiling a glob
+    /// term — so these tests keep exercising the tier logic itself rather than the caching
+    /// around it.
     fn best_match_of(package: &RepoPackage, query: &str) -> Option<MatchKind> {
         let name = package.name().as_ref().to_lowercase();
-        let searchable = Searchable::from_package(package);
-        best_match(&name, Some(&searchable), &query.to_lowercase())
+        let searchable = searchable_from(package);
+        let terms = prepare([query]);
+        best_match(&name, Some(&searchable), terms.first()?)
     }
 
     /// A minimal, valid v2 `desc` — no `%MD5SUM%` — with `name`/`description` substituted in,
@@ -278,6 +226,82 @@ Foobar McFooface <foobar@mcfooface.org>
         let pkg = package("bar", &text);
 
         assert_eq!(best_match_of(&pkg, "foo"), Some(MatchKind::ExactGroup));
+    }
+
+    #[test]
+    fn a_glob_term_matches_the_whole_name() {
+        let text = desc_text("libfoobar", "unrelated", "");
+        let pkg = package("libfoobar", &text);
+
+        assert_eq!(best_match_of(&pkg, "lib*"), Some(MatchKind::Glob));
+        assert_eq!(best_match_of(&pkg, "*foo*"), Some(MatchKind::Glob));
+        assert_eq!(best_match_of(&pkg, "libfoo?ar"), Some(MatchKind::Glob));
+    }
+
+    /// A pattern is anchored, unlike the substring tiers beside it.
+    #[test]
+    fn a_glob_term_is_anchored() {
+        let text = desc_text("python3-extra", "unrelated", "");
+        let pkg = package("python3-extra", &text);
+
+        assert_eq!(best_match_of(&pkg, "pyth*n"), None);
+        assert_eq!(best_match_of(&pkg, "pyth*n*"), Some(MatchKind::Glob));
+    }
+
+    #[test]
+    fn a_glob_term_matches_a_provides_name_and_a_group() {
+        let provides = desc_text("bar", "unrelated", "%PROVIDES%\nlibfoo\n\n");
+        assert_eq!(best_match_of(&package("bar", &provides), "libf*"), Some(MatchKind::Glob));
+
+        let groups = desc_text("bar", "unrelated", "%GROUPS%\ntools\n\n");
+        assert_eq!(best_match_of(&package("bar", &groups), "too*"), Some(MatchKind::Glob));
+    }
+
+    /// A pattern anchored to the whole string cannot match a sentence, and matching it
+    /// unanchored would make `*` select every package there is. So `%DESC%` has no glob tier.
+    #[test]
+    fn a_glob_term_never_matches_the_description() {
+        let text = desc_text("bar", "a package about foo things", "");
+        let pkg = package("bar", &text);
+
+        assert_eq!(best_match_of(&pkg, "*foo*"), None);
+    }
+
+    #[test]
+    fn a_glob_term_is_lowercased_before_it_is_compiled() {
+        let text = desc_text("python-foo", "unrelated", "");
+        let packages = [package("python-foo", &text)];
+
+        let hits = search(&packages, ["PYTHON-*"]);
+        assert_eq!(hits.first().map(|(_, kind)| *kind), Some(MatchKind::Glob));
+    }
+
+    /// The tier sits below the two exact ones and above the two unanchored name ones. That is
+    /// only visible in a search mixing a pattern with a plain term, since a pattern alone can
+    /// score nothing else. Here `foo` scores `ExactName` for the plain term and `Glob` for the
+    /// pattern, keeping the higher; `foobar` scores `NameStartsWith` and `Glob`, keeping `Glob`.
+    #[test]
+    fn a_glob_hit_ranks_below_an_exact_name_and_above_a_name_prefix() {
+        let packages = [
+            package("foobar", &desc_text("foobar", "unrelated", "")),
+            package("foo", &desc_text("foo", "unrelated", "")),
+        ];
+
+        let hits = search(&packages, ["foo", "fo*"]);
+        let scored: Vec<(&str, MatchKind)> =
+            hits.iter().map(|(pkg, kind)| (pkg.name().as_ref(), *kind)).collect();
+
+        assert_eq!(scored, [("foo", MatchKind::ExactName), ("foobar", MatchKind::Glob)]);
+    }
+
+    /// A pattern that happens to match a name exactly still scores `Glob`. The exact tiers are
+    /// about a term that *is* the string, and a pattern never is one.
+    #[test]
+    fn a_glob_matching_a_whole_name_is_still_a_glob_hit() {
+        let packages = [package("foo", &desc_text("foo", "unrelated", ""))];
+
+        let hits = search(&packages, ["fo*"]);
+        assert_eq!(hits.first().map(|(_, kind)| *kind), Some(MatchKind::Glob));
     }
 
     #[test]

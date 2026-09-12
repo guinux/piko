@@ -5,6 +5,9 @@
 //! searches themselves differ, because the two package types do, and live in
 //! [`crate::local::search`] and [`crate::repo::search`]. [`hide_installed`] combines the two.
 
+use alpm_types::RelationOrSoname;
+
+use crate::glob::{Glob, is_pattern};
 use crate::local::{LocalDatabase, LocalPackage};
 use crate::repo::{RepoDatabase, RepoPackage, SearchHit};
 
@@ -28,10 +31,147 @@ pub enum MatchKind {
     NameContains,
     /// The package name starts with the query.
     NameStartsWith,
+    /// The query is a glob pattern, and it matches the whole of the package name, of one of
+    /// its `%PROVIDES%` names, or of one of its `%GROUPS%` entries.
+    ///
+    /// Ranked above the two unanchored name tiers and below the two exact ones, which is where
+    /// its specificity sits: a glob is anchored to the whole string, unlike a prefix or a
+    /// substring, but it still names a set rather than one string. The position only shows in a
+    /// search mixing a pattern with a plain term, since a pattern can score nothing else.
+    ///
+    /// `%DESC%` is deliberately not matched. A pattern anchored to the whole string cannot
+    /// match a sentence, and matching it unanchored would make `*` select every package there
+    /// is.
+    Glob,
     /// The query exactly matches the name of one of the package's `%PROVIDES%`.
     ExactProvides,
     /// The query exactly matches the package name.
     ExactName,
+}
+
+/// One search term, prepared once for a whole search.
+#[derive(Debug)]
+pub(crate) enum Term {
+    /// Matched case-insensitively by equality, prefix or substring — what every term without a
+    /// glob metacharacter does.
+    Text(String),
+    /// Matched as a whole-string glob against the name, each `%PROVIDES%` name and each
+    /// `%GROUPS%` entry.
+    Glob(Glob),
+}
+
+impl Term {
+    /// Whether this term is the plain text `name`.
+    fn is_text(&self, name: &str) -> bool {
+        matches!(self, Self::Text(query) if query == name)
+    }
+}
+
+/// Trims `terms`, drops the blank ones, lowercases each, and compiles the ones carrying a glob
+/// metacharacter.
+///
+/// The compile happens here, once per search. Compiling inside the per-package loop would build
+/// the same `glob::Pattern` once per (package, term) pair — about 15 000 times per term on a
+/// real `extra`. This is the same reason each side's `combined_match` hoists the package's own
+/// lowercasing out of [`best_match`].
+///
+/// A pattern is lowercased before it is compiled, exactly as a text term is, so `PYTHON-*`
+/// matches `python-foo`. [`Glob`] itself is case-sensitive: the target side depends on that, and
+/// normalising is this search's business rather than the matcher's.
+pub(crate) fn prepare<'q>(terms: impl IntoIterator<Item = &'q str>) -> Vec<Term> {
+    terms
+        .into_iter()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_lowercase)
+        .map(|term| if is_pattern(&term) { Term::Glob(Glob::new(&term)) } else { Term::Text(term) })
+        .collect()
+}
+
+/// Whether every term in `terms` is the plain text `name`.
+///
+/// When it is, the package's `desc` answers nothing the name has not already answered at
+/// [`MatchKind::ExactName`], so neither side builds a [`Searchable`] for it.
+pub(crate) fn every_term_is_the_name(terms: &[Term], name: &str) -> bool {
+    terms.iter().all(|term| term.is_text(name))
+}
+
+/// A package's searchable `desc` text, lowercased once.
+///
+/// One type for both databases. The two sides read their fields from different places, so each
+/// keeps its own constructor, but a second copy of the struct would be a second place for the
+/// tiers below to drift apart.
+pub(crate) struct Searchable {
+    /// Every `%PROVIDES%` entry that names a package. A soname is not one, and is never
+    /// matched.
+    pub provides: Vec<String>,
+    pub description: String,
+    pub groups: Vec<String>,
+}
+
+impl Searchable {
+    /// Lowercases the `%PROVIDES%` entries that name a package, dropping the sonames.
+    pub(crate) fn provide_names<'p>(
+        provides: impl IntoIterator<Item = &'p RelationOrSoname>,
+    ) -> Vec<String> {
+        provides
+            .into_iter()
+            .filter_map(|provide| match provide {
+                RelationOrSoname::Relation(relation) => Some(relation.name.as_ref().to_lowercase()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The single highest-ranked way a package matches `term`, if any.
+///
+/// `name` and everything in `searchable` must already be trimmed and lowercased, as
+/// [`prepare`] has already done for the term. `searchable` is `None` when the caller either
+/// knows it is not needed, or could not read the package's `desc`.
+pub(crate) fn best_match(
+    name: &str,
+    searchable: Option<&Searchable>,
+    term: &Term,
+) -> Option<MatchKind> {
+    match term {
+        Term::Text(query) => {
+            if name == query {
+                // Nothing else could outrank this, so there is no reason to inspect `desc`.
+                return Some(MatchKind::ExactName);
+            }
+            let searchable = searchable?;
+            [
+                searchable
+                    .provides
+                    .iter()
+                    .any(|provide| provide == query)
+                    .then_some(MatchKind::ExactProvides),
+                name.starts_with(query).then_some(MatchKind::NameStartsWith),
+                name.contains(query).then_some(MatchKind::NameContains),
+                searchable.description.contains(query).then_some(MatchKind::DescriptionContains),
+                searchable
+                    .groups
+                    .iter()
+                    .any(|group| group == query)
+                    .then_some(MatchKind::ExactGroup),
+            ]
+            .into_iter()
+            .flatten()
+            .max()
+        }
+        Term::Glob(glob) => {
+            // Tested before `searchable`, so a package whose `desc` cannot be read is still
+            // found by a pattern its name matches.
+            if glob.matches(name) {
+                return Some(MatchKind::Glob);
+            }
+            let searchable = searchable?;
+            (searchable.provides.iter().any(|provide| glob.matches(provide))
+                || searchable.groups.iter().any(|group| glob.matches(group)))
+            .then_some(MatchKind::Glob)
+        }
+    }
 }
 
 /// Drops a repository search hit whenever `installed` already has a package of that name.

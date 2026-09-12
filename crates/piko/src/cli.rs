@@ -232,6 +232,10 @@ pub enum Command {
     #[command(visible_alias = "se")]
     Search {
         /// The search term(s); a package must match all of them.
+        ///
+        /// A term carrying `*`, `?` or `[` is a glob pattern, matched against the whole
+        /// package name, `%PROVIDES%` name or `%GROUPS%` entry. Descriptions are searched by
+        /// plain terms only. Quote a pattern, or the shell expands it first.
         #[arg(required = true)]
         terms: Vec<String>,
         /// Search only installed packages.
@@ -326,6 +330,10 @@ pub enum Command {
         /// With `--remove`, a target names an installed package, or a group to take every
         /// installed member of.
         ///
+        /// A name carrying `*`, `?` or `[` is a glob pattern, expanded exactly as
+        /// `piko install` and `piko remove` expand one. Quote it, or the shell expands it
+        /// first.
+        ///
         /// A package URL is refused here, since previewing one would have to download it. Use
         /// `piko install` for that.
         targets: Vec<String>,
@@ -411,6 +419,11 @@ pub enum Command {
         /// contains `/` (a path), or when it ends in `.pkg.tar[.gz|.bz2|.xz|.zst]` and names a
         /// file that exists here. Anything else is a name. Write `./foo.pkg.tar.zst` to say
         /// "the file" where both readings are possible.
+        ///
+        /// A name carrying `*`, `?` or `[` is a glob pattern, matched against whole package
+        /// and group names. Quote it, or the shell expands it first. The file readings above
+        /// still win, so `./foo*` is a path rather than a pattern. A pattern may not carry a
+        /// version requirement.
         #[arg(required = true)]
         packages: Vec<String>,
         /// Record the named packages as dependencies rather than explicitly installed.
@@ -480,7 +493,8 @@ pub enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
         /// Extra targets to install alongside the upgrade, as `pacman -Su foo` allows. With
-        /// none, every installed package is checked.
+        /// none, every installed package is checked. A target carrying `*`, `?` or `[` is a
+        /// glob pattern, expanded exactly as `piko install` expands one.
         targets: Vec<String>,
         /// Accept a repository version older than the installed one (`pacman -Suu`).
         #[arg(long)]
@@ -531,6 +545,10 @@ pub enum Command {
         root: Option<PathBuf>,
         /// Installed package names, or a `%GROUPS%` group name to remove every installed
         /// member of.
+        ///
+        /// A name carrying `*`, `?` or `[` is a glob pattern, matched against whole installed
+        /// package and group names. Quote it, or the shell expands it first. `--nodeps`
+        /// expands a pattern against package names only, since it has never taken a group.
         #[arg(required = true)]
         packages: Vec<String>,
         /// Do not create `.pacsave` files for modified configuration files.

@@ -196,19 +196,22 @@ pub fn install(
         }
     };
 
-    let (mut request, ignored_targets) =
-        match resolve_targets(&universe, Request::new(), &prepared.names) {
-            Ok(resolved) => resolved,
-            Err(failure) => {
-                crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-                crate::cmd::plan::report_target_resolution_failure(&failure);
-                return ExitCode::FAILURE;
-            }
-        };
+    let resolution = match resolve_targets(&universe, Request::new(), &prepared.names, &limits) {
+        Ok(resolved) => resolved,
+        Err(failure) => {
+            crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
+            crate::cmd::plan::report_target_resolution_failure(&failure);
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut request = resolution.request;
     // Through `suspend`, since the spinner is still running: an ordinary `eprintln!` here
     // lands inside the row indicatif is redrawing.
-    if !ignored_targets.is_empty() {
-        steplist.suspend(|| crate::cmd::plan::print_ignored_targets(&ignored_targets));
+    if !resolution.expansions.is_empty() {
+        steplist.suspend(|| crate::cmd::plan::print_expansions(&resolution.expansions));
+    }
+    if !resolution.ignored.is_empty() {
+        steplist.suspend(|| crate::cmd::plan::print_ignored_targets(&resolution.ignored));
     }
 
     // Each file candidate is targeted by its id, not by a name. Resolving it by name would
@@ -771,9 +774,23 @@ fn named_only(
     options: &RemoveOptions,
     out: &mut impl std::io::Write,
 ) -> Result<Vec<EntryName>, ExitCode> {
+    // A pattern is rewritten into installed names before anything is looked up. Groups are
+    // deliberately left out here: this path resolves a target with `LocalDatabase::get_str`
+    // alone and has never accepted a group name, so a pattern must not become the one spelling
+    // that does.
+    let (entries, expansions) =
+        match piko_db::solve::expand_installed_names(local, entries, &piko_db::Limits::default()) {
+            Ok(expanded) => expanded,
+            Err(failure) => {
+                crate::cmd::plan::report_expansion_failure(&failure);
+                return Err(ExitCode::FAILURE);
+            }
+        };
+    crate::cmd::plan::print_expansions(&expansions);
+
     let mut found = Vec::new();
     let mut names = Vec::new();
-    for name in entries {
+    for name in &entries {
         let Some(package) = local.get_str(name) else {
             eprintln!("error: package {name} is not installed");
             return Err(ExitCode::FAILURE);
@@ -835,21 +852,32 @@ fn planned(
         }
     };
 
-    let plan = match piko_db::solve::plan_removal(
+    let removal = match piko_db::solve::plan_removal(
         local,
         &universe,
         entries,
         piko_db::solve::RemovalOptions { recursive: options.recursive, cascade: options.cascade },
         &limits,
     ) {
-        Ok(plan) => plan,
+        Ok(removal) => removal,
         Err(failure) => {
             crate::progress::settle_row(steplist, out, resolving, "Resolving dependencies");
-            crate::cmd::removal::report(&failure);
+            crate::cmd::plan::report_expansion_failure(&failure);
             return Err(ExitCode::FAILURE);
         }
     };
     crate::progress::settle_row(steplist, out, resolving, "Resolving dependencies");
+
+    // Before the outcome either way: a refusal names packages the user may never have typed,
+    // and the pattern that pulled them in is what explains the list.
+    crate::cmd::plan::print_expansions(&removal.expansions);
+    let plan = match removal.outcome {
+        Ok(plan) => plan,
+        Err(failure) => {
+            crate::cmd::removal::report(&failure);
+            return Err(ExitCode::FAILURE);
+        }
+    };
 
     crate::cmd::plan::print_diagnostics(&universe, &plan);
 

@@ -298,10 +298,9 @@ impl std::fmt::Display for IgnoreReason {
 /// `/usr/share/libalpm/hooks/gtk-update-icon-cache.hook` and `60-depmod.hook` are both built
 /// out of on a real Arch system.
 ///
-/// A malformed glob pattern (e.g. an unbalanced `[`) falls back to an exact-string match rather
-/// than matching everything or being treated as a parse error — real `fnmatch` has no notion of
-/// "invalid pattern" to propagate in the first place, and `IgnorePkg`/`IgnoreGroup` entries are
-/// almost always plain names.
+/// Only the scan is here. Whether one pattern covers one string is [`crate::glob::matches`],
+/// which every pattern rule in the crate shares — including its fallback to an exact-string
+/// match for a malformed glob.
 ///
 /// Public because `--overwrite`, `NoExtract`, `NoUpgrade` and a hook's `Target` are the same
 /// `fnmatch` against a path rather than a package name, and libalpm uses the one function for
@@ -331,8 +330,7 @@ pub fn matching_pattern<'p>(patterns: &'p [String], text: &str) -> Option<&'p st
         } else {
             pattern.as_str()
         };
-        let hit = glob::Pattern::new(bare).map_or(bare == text, |compiled| compiled.matches(text));
-        if hit {
+        if crate::glob::matches(bare, text) {
             return (!inverted).then_some(bare);
         }
     }

@@ -8,10 +8,10 @@ use piko_db::{
     repo::RepoDatabase,
     resolve::IgnoreList,
     solve::{
-        Change, Encoded, Fidelity, IgnoredChange, IgnoredTarget, IgnoredUpgrade, PackageCache,
-        Plan, PlanDiagnostic, RemovalOptions, Request, SolvableId, Step, TargetResolutionFailure,
-        Universe, UniverseOptions, plan_removal, removal_names, resolve_targets,
-        solve_with_removals,
+        Change, Encoded, Expansion, ExpansionFailure, Fidelity, IgnoredChange, IgnoredTarget,
+        IgnoredUpgrade, PackageCache, Plan, PlanDiagnostic, RemovalOptions, Request, Side,
+        SolvableId, Step, TargetResolutionFailure, Universe, UniverseOptions, plan_removal,
+        removal_names, resolve_targets, solve_with_removals,
     },
 };
 
@@ -64,11 +64,18 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
                  repository"
             );
         }
+        TargetResolutionFailure::Pattern(failure) => report_expansion_failure(failure),
         // Not the same failure as `NotFound`, and saying so is the whole point: the name is
         // right, `pacman.conf` says not to touch it. pacman asks whether to install it anyway;
         // piko does not, so the message has to name the directive that has to change instead.
         TargetResolutionFailure::Ignored { target, candidates } => {
-            eprintln!("error: every package satisfying {target} is ignored");
+            // A pattern names a set, a literal names one thing. "satisfying" reads as the
+            // dependency relation, which is the wrong relation for a glob.
+            if piko_db::is_pattern(target) {
+                eprintln!("error: every package matching {target} is ignored");
+            } else {
+                eprintln!("error: every package satisfying {target} is ignored");
+            }
             for candidate in candidates {
                 eprintln!("  {}-{} ({})", candidate.name, candidate.version, candidate.reason);
             }
@@ -90,6 +97,83 @@ pub(crate) fn print_ignored_targets(ignored: &[IgnoredTarget]) {
         eprintln!("warning: ignoring package {}-{}", target.name, target.version);
         if let Some(detail) = ignore_detail(target.name.as_ref(), &target.reason) {
             eprintln!("  {detail}");
+        }
+    }
+}
+
+/// How many names an expansion lists before it stops and counts the rest.
+const EXPANSION_PREVIEW: usize = 20;
+
+/// Says what each glob target selected, before the plan that acts on it.
+///
+/// A step list whose package set has no visible cause is a bad message. The pattern is the
+/// cause, and the pattern is the one thing the list below cannot show. Printed on stderr, like
+/// every other diagnostic here, so a piped step list stays machine-readable.
+pub(crate) fn print_expansions(expansions: &[Expansion]) {
+    for expansion in expansions {
+        eprintln!("note: {} matched {}", expansion.pattern, counts(expansion));
+        if !expansion.groups.is_empty() {
+            eprintln!("  groups: {}", listed(&expansion.groups));
+            eprintln!("  packages: {}", listed(&expansion.names));
+        } else {
+            eprintln!("  {}", listed(&expansion.names));
+        }
+    }
+}
+
+/// `"4 packages"`, or `"2 groups and 47 packages"` when a group was matched too.
+fn counts(expansion: &Expansion) -> String {
+    let packages = plural(expansion.names.len(), "package");
+    if expansion.groups.is_empty() {
+        packages
+    } else {
+        format!("{} and {packages}", plural(expansion.groups.len(), "group"))
+    }
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") }
+}
+
+/// `items`, comma-separated, cut off at [`EXPANSION_PREVIEW`] entries.
+fn listed(items: &[String]) -> String {
+    let shown = items.iter().take(EXPANSION_PREVIEW).cloned().collect::<Vec<_>>().join(", ");
+    match items.len().checked_sub(EXPANSION_PREVIEW) {
+        Some(rest) if rest > 0 => format!("{shown}, and {rest} more"),
+        _ => shown,
+    }
+}
+
+/// Says why a glob target could not be expanded.
+///
+/// Shared by the install and removal sides, so one pattern gets one wording whichever command
+/// refused it.
+pub(crate) fn report_expansion_failure(failure: &ExpansionFailure) {
+    match failure {
+        ExpansionFailure::NoMatch { pattern, side: Side::Installable } => {
+            eprintln!(
+                "error: no package or group matching {pattern} was found in any configured \
+                 repository"
+            );
+        }
+        ExpansionFailure::NoMatch { pattern, side: Side::Installed } => {
+            eprintln!("error: no installed package or group matches {pattern}");
+        }
+        ExpansionFailure::TooBroad { pattern, limit } => {
+            eprintln!("error: {pattern} matches more than {limit} packages");
+            eprintln!("note: name the packages, or narrow the pattern");
+        }
+        ExpansionFailure::Versioned(target) => {
+            eprintln!("error: {target} is a glob pattern with a version requirement");
+            eprintln!(
+                "note: a pattern expands to names only; name the package to constrain its \
+                 version"
+            );
+        }
+        // Raised by the expansion, converted to `TargetResolutionFailure::Ignored` before it
+        // reaches a frontend, so that a pattern and a literal report an ignored target alike.
+        ExpansionFailure::AllIgnored { pattern, .. } => {
+            eprintln!("error: every package matching {pattern} is ignored");
         }
     }
 }
@@ -340,7 +424,17 @@ pub fn plan(
     // `HoldPkg` has no libalpm equivalent, so it stays a CLI concern. See `cmd::removal`.
     if let Mode::Remove { recursive, cascade, hold_pkg } = mode {
         let options = RemovalOptions { recursive, cascade };
-        return match plan_removal(local, &universe, targets, options, &limits) {
+        let removal = match plan_removal(local, &universe, targets, options, &limits) {
+            Ok(removal) => removal,
+            Err(failure) => {
+                report_expansion_failure(&failure);
+                return ExitCode::FAILURE;
+            }
+        };
+        // Before the outcome either way: a refusal names packages the user may never have
+        // typed, and the pattern that pulled them in is what explains the list.
+        print_expansions(&removal.expansions);
+        return match removal.outcome {
             Ok(built) => {
                 // `HoldPkg` guards the preview as well as the removal. pacman's check sits
                 // above its `config->print` early exit, so `pacman -Rc <held> --print` refuses
@@ -367,14 +461,16 @@ pub fn plan(
     }
 
     let request = Request::new().needed(matches!(mode, Mode::Install { needed: true, .. }));
-    let (mut request, ignored_targets) = match resolve_targets(&universe, request, &names) {
+    let resolution = match resolve_targets(&universe, request, &names, &limits) {
         Ok(resolved) => resolved,
         Err(failure) => {
             report_target_resolution_failure(&failure);
             return ExitCode::FAILURE;
         }
     };
-    print_ignored_targets(&ignored_targets);
+    let mut request = resolution.request;
+    print_expansions(&resolution.expansions);
+    print_ignored_targets(&resolution.ignored);
     // Targeted by id, for the reason `cmd::txn::install` gives: a name would find whichever
     // candidate the universe prefers rather than the file that was named.
     let file_ids = universe.file_candidates();

@@ -25,7 +25,7 @@ use piko_db::{
     fixture::DbFixture,
     repo::{RepoDatabase, RepoName},
     resolve::{SyncRepo, SyncRepos},
-    solve::{Universe, UniverseOptions},
+    solve::{Request, Universe, UniverseOptions},
 };
 
 const SYNC_DIR: &str = "/var/lib/pacman/sync";
@@ -376,4 +376,96 @@ fn a_removal_plan_is_the_same_with_and_without_repositories() {
         disagreements.len(),
         disagreements.join("\n  ")
     );
+}
+
+/// A glob target plans exactly what naming its expansion plans, in both directions.
+///
+/// This is the claim the whole design rests on: a pattern is a rewrite of the target list and
+/// nothing more. A three-package fixture cannot catch an ordering or de-duplication mistake in
+/// that rewrite, and the live `core`/`extra` pair can.
+///
+/// Also prints the real expansion sizes, so `Limits::glob_max_expansion`'s default stays tied to
+/// a measurement rather than to a remembered number.
+#[test]
+#[ignore = "requires a real ALPM local database and sync databases"]
+fn a_pattern_plans_exactly_what_naming_its_expansion_plans() {
+    let repos = open_repos();
+    if repos.is_empty() {
+        eprintln!("skipping: no repository could be opened");
+        return;
+    }
+    let Ok(local) = LocalDatabase::open("/var/lib/pacman/local") else {
+        eprintln!("skipping: no real local database");
+        return;
+    };
+
+    let limits = piko_db::Limits::default();
+    let universe =
+        Universe::build(&local, repos.iter().map(|db| (DbUsage::ALL, db)), UniverseOptions::new())
+            .unwrap();
+
+    for pattern in ["linux-*", "vim-*", "python-p*"] {
+        let targets = vec![pattern.to_owned()];
+        let expanded =
+            match piko_db::solve::expand_installable_targets(&universe, &targets, &limits) {
+                Ok(expanded) => expanded,
+                Err(failure) => {
+                    eprintln!("skipping {pattern}: {failure:?}");
+                    continue;
+                }
+            };
+        eprintln!("{pattern} expands to {} packages", expanded.names.len());
+        assert!(expanded.names.len() > 1, "{pattern} is too narrow to be worth comparing");
+
+        let from_pattern =
+            piko_db::solve::resolve_targets(&universe, Request::new(), &targets, &limits).unwrap();
+        let from_names =
+            piko_db::solve::resolve_targets(&universe, Request::new(), &expanded.names, &limits)
+                .unwrap();
+
+        assert_eq!(
+            from_pattern.request.targets(),
+            from_names.request.targets(),
+            "{pattern} and its expansion resolved to different targets"
+        );
+
+        // A pattern this wide may well name a set no solver can satisfy — 455 real
+        // `python-p*` builds do not all coexist. That is still a comparison worth making: the
+        // two spellings must be unsatisfiable together or plannable together.
+        let plan_of = |request: &Request| {
+            piko_db::solve::solve_with_removals(&universe, request, &limits).unwrap().ok().map(
+                |planned| {
+                    let plan = piko_db::solve::Plan::assemble(
+                        &universe,
+                        &planned,
+                        request.targets(),
+                        &limits,
+                        &piko_db::solve::NoCache,
+                    );
+                    plan_names(&universe, &plan)
+                },
+            )
+        };
+
+        // Compared as sets, in both directions. A one-way containment check reports a real
+        // divergence as a match whenever one side is legitimately the smaller.
+        assert_eq!(
+            plan_of(&from_pattern.request),
+            plan_of(&from_names.request),
+            "{pattern} planned differently from naming what it expands to"
+        );
+    }
+}
+
+/// The package names a plan touches, as a set.
+fn plan_names(universe: &Universe<'_>, plan: &piko_db::solve::Plan) -> BTreeSet<String> {
+    plan.steps()
+        .iter()
+        .filter_map(|step| match step {
+            piko_db::solve::Step::Install { candidate, .. }
+            | piko_db::solve::Step::Change { to: candidate, .. }
+            | piko_db::solve::Step::Remove { package: candidate } => universe.get(*candidate),
+        })
+        .map(|solvable| solvable.name().to_string())
+        .collect()
 }

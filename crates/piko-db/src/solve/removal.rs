@@ -26,6 +26,7 @@
 //! the user typed). The guard itself, its prompt, and its `pacman.conf` parsing are a
 //! frontend's concern.
 
+use crate::solve::glob::{Expansion, ExpansionFailure, expand_installed_targets};
 use crate::solve::{Plan, Request, Step, Universe, solve_with_removals};
 use crate::{Error, Limits, LocalDatabase};
 
@@ -53,7 +54,27 @@ pub enum RemovalFailure {
     Planner(Box<Error>),
 }
 
+/// A removal plan, with what the glob targets selected to reach it.
+///
+/// The expansions are here rather than inside [`Removal::outcome`] because a caller needs them
+/// on both branches. A refusal names packages the user may never have typed, and the pattern
+/// that pulled them in is the one thing the refusal itself cannot show.
+#[derive(Debug)]
+pub struct Removal {
+    /// One entry per glob target, in the order the targets were given. Empty when the caller
+    /// named no pattern.
+    pub expansions: Vec<Expansion>,
+    /// The plan, or why there is none.
+    pub outcome: Result<Plan, RemovalFailure>,
+}
+
 /// Plans removing `targets`, exactly as `piko plan -R` does.
+///
+/// A target carrying `*`, `?` or `[` is a glob pattern, expanded against installed package
+/// names and the `%GROUPS%` groups installed packages carry. The expansion is a rewrite of the
+/// target list and nothing more, so a pattern plans exactly what naming what it selects would
+/// have planned. The returned expansions say what each pattern chose, for a caller that wants
+/// to show the cause of a plan it is about to print.
 ///
 /// A target names an installed package, or a `%GROUPS%` group, which expands to every
 /// installed member — `pacman -R <group>` "will remove every package in that group". A member
@@ -62,19 +83,25 @@ pub enum RemovalFailure {
 ///
 /// # Errors
 ///
-/// [`RemovalFailure`], describing why no plan could be built.
+/// [`ExpansionFailure`], when a glob target could not be expanded. Every other refusal is a
+/// [`RemovalFailure`] on [`Removal::outcome`], reported beside the expansions that led to it.
 pub fn plan_removal(
     local: &LocalDatabase,
     universe: &Universe<'_>,
     targets: &[String],
     options: RemovalOptions,
     limits: &Limits,
-) -> Result<Plan, RemovalFailure> {
+) -> Result<Removal, ExpansionFailure> {
+    // A glob target is rewritten into the installed names it selects before anything is
+    // planned, so the loop below sees only names the user could have typed. This is the one
+    // failure that leaves no plan to report against, which is why it is the outer error.
+    let (targets, expansions) = expand_installed_targets(universe, targets, limits)?;
+
     // `-R` refuses when something still depends on the target. `-Rc` cascades instead, using
     // exactly the relax-and-retry loop conflict resolution already uses.
     let mut request = Request::new().recursive(options.recursive).allow_removals(options.cascade);
 
-    for target in targets {
+    for target in &targets {
         // A package first, a `%GROUPS%` group second. That is `remove_target`'s order in
         // `src/pacman/remove.c`, and the same preference `resolve_targets` applies on the
         // install side, so a name that is both means the package in either direction.
@@ -83,7 +110,10 @@ pub fn plan_removal(
             None => {
                 let members = universe.installed_group_members(target);
                 if members.is_empty() {
-                    return Err(RemovalFailure::NotInstalled(target.clone()));
+                    return Ok(Removal {
+                        expansions,
+                        outcome: Err(RemovalFailure::NotInstalled(target.clone())),
+                    });
                 }
                 for member in members {
                     request = request.remove(member);
@@ -92,7 +122,7 @@ pub fn plan_removal(
         }
     }
 
-    match solve_with_removals(universe, &request, limits) {
+    let outcome = match solve_with_removals(universe, &request, limits) {
         Ok(Ok(planned)) => {
             // `NoCache`, not any caller-supplied cache directories: a removal plan selects no
             // repository candidate at all (verified by
@@ -110,7 +140,8 @@ pub fn plan_removal(
             Err(RemovalFailure::WouldBreakSystem(encoded.explain(universe, limits)))
         }
         Err(error) => Err(RemovalFailure::Planner(Box::new(error))),
-    }
+    };
+    Ok(Removal { expansions, outcome })
 }
 
 /// The package names `plan_removal`'s removal steps refer to, in plan order.
@@ -160,7 +191,9 @@ mod tests {
             &owned,
             RemovalOptions::default(),
             &Limits::default(),
-        )?;
+        )
+        .unwrap()
+        .outcome?;
 
         let mut names = removal_names(&universe, &plan);
         names.sort();

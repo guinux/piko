@@ -30,3 +30,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Group listings: `piko list -g` lists the groups installed packages belong to. `--repos`, or
   `--repo <NAME>`, lists the repositories' groups instead, and `--with-members` lists each
   group with its members. pacman's `-Qg`, `-Sg` and `-Sgg`.
+- Glob targets: a `piko install`, `piko remove` or `piko plan` target carrying `*`, `?` or `[`
+  is a pattern, expanded against package names and `%GROUPS%` group names. Each pattern's
+  expansion is printed before the plan it produced. pacman has no equivalent — its `-S` and
+  `-R` targets are literal.
+- Glob search terms: a `piko search` term carrying `*`, `?` or `[` is matched against the whole
+  package name, `%PROVIDES%` name or `%GROUPS%` entry. pacman matches a `-Ss` term with an
+  unanchored POSIX extended regular expression instead.

@@ -23,13 +23,12 @@ use piko_db::solve::RemovalFailure;
 /// not held. This repo has already shipped one bug from assuming those two rules were
 /// interchangeable.
 ///
-/// A malformed glob falls back to an exact-string comparison, as `matches_any` does and for
-/// the same reason: real `fnmatch` has no "invalid pattern" to report, and `HoldPkg` entries
-/// are almost always plain names.
+/// Only the scan differs. Whether one pattern covers one name is `piko_db::glob::matches`,
+/// which `matches_any` calls too — so the two rules differ in the way they are meant to, and
+/// in no other way. That shared rule carries the fallback to an exact-string comparison for a
+/// malformed glob.
 fn is_held(name: &str, hold_pkg: &[String]) -> bool {
-    hold_pkg.iter().any(|pattern| {
-        glob::Pattern::new(pattern).map_or(pattern == name, |compiled| compiled.matches(name))
-    })
+    hold_pkg.iter().any(|pattern| piko_db::glob::matches(pattern, name))
 }
 
 /// pacman's `HoldPkg` guard: whether a removal of `names` may go ahead.

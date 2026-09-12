@@ -233,6 +233,28 @@ pub struct Limits {
     /// Enforced while clauses are emitted, not afterwards. An encoding crafted to explode is
     /// stopped, not merely reported once complete.
     pub solve_max_clauses: usize,
+    /// Maximum number of package names one glob target may expand to.
+    ///
+    /// A pattern rewrites one command-line target into the names it selects. Without a bound,
+    /// `piko install '*'` would hand the encoder every package a repository carries.
+    ///
+    /// Checked while the names accumulate, not once the scan has finished, so an oversized
+    /// pattern costs one comparison per candidate rather than a full expansion and a solve.
+    /// The refusal therefore carries no total: counting the matches is the work the bound
+    /// declines to do. Neither [`Limits::solve_max_solvables`] nor [`Limits::solve_max_clauses`]
+    /// stands in for this. The first bounds the universe rather than the request, and the
+    /// second fires only once the targets are already in hand and their reachable cone
+    /// computed.
+    ///
+    /// Measured on the machine this was developed against: 1243 installed packages, 15 252
+    /// across `core` and `extra`, and a largest `%GROUPS%` group of 283 members (`pro-audio`,
+    /// then `kde-applications` at 194 and `tesseract-data` at 128). So the default clears the
+    /// widest legitimate single expansion — a whole group — with room to spare, while refusing
+    /// `python-*` (2099 in the repositories) and `*` on any real system.
+    ///
+    /// A count, so like [`Limits::solve_max_solvables`] it is reported through its own error
+    /// rather than through [`Limit`], which enumerates only the size bounds.
+    pub glob_max_expansion: usize,
 }
 
 impl Default for Limits {
@@ -254,6 +276,7 @@ impl Default for Limits {
             solve_max_solvables: 1 << 21,
             solve_max_conflicts: 1 << 20,
             solve_max_clauses: 1 << 24,
+            glob_max_expansion: 512,
         }
     }
 }
@@ -312,6 +335,14 @@ mod tests {
         );
         assert!(limits.repo_max_packages > 14_885, "extra.db has 14 885 packages");
         assert!(limits.pacman_conf_bytes > 3 * KIB, "largest observed pacman.conf is 2.8 KB");
+        assert!(
+            limits.glob_max_expansion > 283,
+            "the largest observed %GROUPS% group (pro-audio) has 283 members"
+        );
+        assert!(
+            limits.glob_max_expansion < 1243,
+            "a real system has 1243 installed packages; `piko remove '*'` must not expand"
+        );
         assert_eq!(
             limits.repo_inflated_bytes,
             u64::from(u32::MAX),
