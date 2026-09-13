@@ -233,8 +233,9 @@ pub struct DownloadOnlyOutcome {
     pub verified: bool,
 }
 
-/// Downloads every missing package named in `steps` into the cache, installing nothing. This
-/// is pacman's `-Sw`.
+/// Downloads every missing package named in `steps` into the cache, installing nothing.
+///
+/// This is pacman's `-Sw`.
 ///
 /// Each [`PackageSource::locate`] call already downloads a miss and verifies nothing changed
 /// about a hit. So this is the same lookup a transaction's `verify` step would make, without

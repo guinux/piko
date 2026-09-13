@@ -91,8 +91,9 @@ pub struct FileCheckReport {
 }
 
 impl FileCheckReport {
-    /// How many distinct files have at least one [`FileProblem::is_error`] problem. This is
-    /// `pacman -Qkk`'s "altered files" count: it counts a file once, no matter how many of
+    /// How many distinct files have at least one [`FileProblem::is_error`] problem.
+    ///
+    /// This is `pacman -Qkk`'s "altered files" count: it counts a file once, no matter how many of
     /// its checks failed.
     #[must_use]
     pub fn altered_files(&self) -> usize {

@@ -121,8 +121,9 @@ impl DbFixture {
         Self { dir: TempDir::new().expect("failed to create a temporary directory") }
     }
 
-    /// Writes `contents` to `ALPM_DB_VERSION` verbatim. This lets a test express an invalid
-    /// version.
+    /// Writes `contents` to `ALPM_DB_VERSION` verbatim.
+    ///
+    /// This lets a test express an invalid version.
     ///
     /// # Panics
     ///
@@ -505,8 +506,9 @@ impl PackageSpec {
         self
     }
 
-    /// Sets `%REASON%`. Only meaningful for an installed package; a repository `desc` has no
-    /// such field.
+    /// Sets `%REASON%`.
+    ///
+    /// Only meaningful for an installed package; a repository `desc` has no such field.
     #[must_use]
     pub const fn reason(mut self, reason: alpm_types::PackageInstallReason) -> Self {
         self.reason = reason;

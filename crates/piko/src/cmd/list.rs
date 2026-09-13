@@ -99,7 +99,9 @@ pub fn repo(db: &RepoDatabase, quiet: bool, out: &mut impl std::io::Write) -> Ex
 }
 
 /// `piko list -r`/`--repos`: every repository configured in `config`, one per line, in file
-/// (priority) order. No database is opened.
+/// (priority) order.
+///
+/// No database is opened.
 pub fn repo_names(config: &PacmanConfig, quiet: bool, out: &mut impl std::io::Write) -> ExitCode {
     for repo in &config.repositories {
         emit!(out, "{}", repo.name);
@@ -139,9 +141,10 @@ pub fn explicit(db: &LocalDatabase, quiet: bool, out: &mut impl std::io::Write) 
     if ok { code } else { ExitCode::FAILURE }
 }
 
-/// `piko list -o`/`--orphans`: every installed package pulled in only as a dependency that
-/// nothing installed still requires via `%DEPENDS%`. Matches `pacman -Qdttq`. `%OPTDEPENDS%`
-/// never counts; see [`piko_db::solve::orphans`].
+/// `piko list -o`/`--orphans`: every installed package pulled in only as a dependency that nothing
+/// installed still requires via `%DEPENDS%`.
+///
+/// Matches `pacman -Qdttq`. `%OPTDEPENDS%` never counts; see [`piko_db::solve::orphans`].
 ///
 /// Builds a [`Universe`] over the installed set alone, the same as `piko why` — no repository
 /// is opened, since the question is only about what is already installed.
@@ -163,8 +166,10 @@ pub fn orphans(local: &LocalDatabase, quiet: bool, out: &mut impl std::io::Write
     print_rows(&rows, true, quiet, "orphaned", out)
 }
 
-/// `piko list -m`/`--foreign`: every installed package whose name is not found in any of
-/// `repos`, `pacman -Qm`. See [`piko_db::LocalDatabase::foreign`] for the exact rule.
+/// `piko list -m`/`--foreign`: every installed package whose name is not found in any of `repos`,
+/// `pacman -Qm`.
+///
+/// See [`piko_db::LocalDatabase::foreign`] for the exact rule.
 pub fn foreign<'a>(
     local: &'a LocalDatabase,
     repos: impl IntoIterator<Item = &'a RepoDatabase>,

@@ -89,16 +89,17 @@ impl<'lock> LocalDbWriter<'lock> {
     /// database.
     ///
     /// Creating `ALPM_DB_VERSION` is the writer's job precisely because
-    /// [`crate::schema_version`] refuses to. Fabricating a version marker for a database whose
-    /// layout is unknown papers over corruption. Writing one for a database this code just
-    /// created states a fact instead. libalpm does the same, in `checkdbdir` (`be_local.c:370`)
-    /// plus `_alpm_db_version` handling.
+    /// [`piko_db::local::schema_version::check`] refuses to. Fabricating a version marker for a
+    /// database whose layout is unknown papers over corruption. Writing one for a database this
+    /// code just created states a fact instead. libalpm does the same, in `checkdbdir`
+    /// (`be_local.c:370`) plus `_alpm_db_version` handling.
     ///
     /// # Errors
     ///
     /// - [`Error::WrongLock`] if `lock` does not belong to `dbpath`.
     /// - [`Error::Io`] if the directory or the version file cannot be created.
-    /// - [`Error::SchemaVersion`] if a version file exists and is not [`ALPM_DB_VERSION`].
+    /// - [`Error::Read`] wrapping [`piko_db::Error::SchemaVersion`] if a version file exists
+    ///   and is not [`ALPM_DB_VERSION`].
     pub fn new(dbpath: &Path, lock: &'lock DbLock, limits: Limits) -> Result<Self> {
         let expected = lock.path().parent();
         if expected != Some(dbpath) {
@@ -230,14 +231,14 @@ impl<'lock> LocalDbWriter<'lock> {
 
     /// Reads a `desc` or `files` file back out of an entry.
     ///
-    /// Reading goes through [`crate::fs_util`] like every other read in the crate, so the
-    /// symlink, file-type and size protections apply to the writer's read-modify-write path
-    /// too.
+    /// Reading goes through [`piko_db::fs_util`] like every other read in the crate, so the
+    /// symlink, file-type and size protections apply to the writer's read-modify-write path too.
     ///
     /// # Errors
     ///
-    /// [`Error::Io`], [`Error::LimitExceeded`] or [`Error::NotARegularFile`] if the file
-    /// cannot be read, or [`Error::Record`] if it is not a well-formed section list.
+    /// [`Error::Io`] if the file cannot be read, or [`Error::Read`] wrapping
+    /// [`piko_db::Error::LimitExceeded`] or [`piko_db::Error::NotARegularFile`] if it is too large
+    /// or is not a regular file. [`Error::Record`] if it is not a well-formed section list.
     pub fn read_record(&self, entry: &EntryName, kind: RecordKind) -> Result<Record> {
         let name = file_name(kind);
         let path = self.entry_path(entry).join(name);
@@ -253,9 +254,9 @@ impl<'lock> LocalDbWriter<'lock> {
     ///
     /// # Errors
     ///
-    /// [`Error::NotARegularFile`] if the entry is a symlink rather than a real directory.
-    /// Following it would delete something outside the database. Returns [`Error::Io`] if the
-    /// removal fails.
+    /// [`Error::Io`] carrying [`std::io::ErrorKind::NotADirectory`] if the entry is a symlink
+    /// rather than a real directory. Following it would delete something outside the database. Also
+    /// [`Error::Io`] if the removal itself fails.
     pub fn remove_entry(&self, entry: &EntryName) -> Result<()> {
         self.remove_entry_unsynced(entry)?;
         sync_directory(&self.root)
@@ -311,11 +312,11 @@ impl<'lock> LocalDbWriter<'lock> {
 ///
 /// # Why this exists next to [`LocalDbWriter::write_record`]
 ///
-/// [`atomic_write`] is correct per *file*, and pays for that correctness per file too: an
-/// `fsync` of the data and an `fsync` of the directory, each one a filesystem transaction
-/// commit. An entry is three or four files, so a 42-package upgrade issues 252 `fsync`s for
-/// 126 files. Measured on this machine's btrfs, that is **260 ms** — comparable to the whole
-/// read side of `piko update`, and invisible in any command that only plans.
+/// [`LocalDbWriter::write_record`] is correct per *file*, and pays for that correctness per file
+/// too: an `fsync` of the data and an `fsync` of the directory, each one a filesystem transaction
+/// commit. An entry is three or four files, so a 42-package upgrade issues 252 `fsync`s for 126
+/// files. Measured on this machine's btrfs, that is **260 ms** — comparable to the whole read side
+/// of `piko update`, and invisible in any command that only plans.
 ///
 /// The directory `fsync`s are the easy half. A rename becomes durable when the directory is
 /// synced, so syncing it once after the last rename makes *every* rename durable, not just
@@ -330,10 +331,10 @@ impl<'lock> LocalDbWriter<'lock> {
 ///
 /// # What this does not change
 ///
-/// The crash-safety property is the same one [`atomic_write`] documents, and slightly
-/// stronger: no `rename` happens until **every** staged file's data is durable, so an
-/// interruption can no longer leave an entry with a new `desc` beside an old `files`. It is
-/// still per-entry, not per-transaction — see this module's header.
+/// The crash-safety property is the same one [`LocalDbWriter::write_record`] documents, and
+/// slightly stronger: no `rename` happens until **every** staged file's data is durable, so an
+/// interruption can no longer leave an entry with a new `desc` beside an old `files`. It is still
+/// per-entry, not per-transaction — see this module's header.
 ///
 /// Dropping without [`Self::commit`] removes every temporary, so a failed step leaves the
 /// entry exactly as it was.
@@ -395,10 +396,10 @@ impl EntryWrite {
 
     /// Makes every staged file durable, then publishes them all.
     ///
-    /// The order is the one [`atomic_write`] documents, widened to the whole entry: fsync
-    /// every temporary, then rename every temporary, then fsync the directory once. A crash
-    /// at any point leaves each destination either wholly absent, wholly the old file, or
-    /// wholly the new one.
+    /// The order is the one [`LocalDbWriter::write_record`] documents, widened to the whole entry:
+    /// fsync every temporary, then rename every temporary, then fsync the directory once. A crash
+    /// at any point leaves each destination either wholly absent, wholly the old file, or wholly
+    /// the new one.
     ///
     /// # Errors
     ///

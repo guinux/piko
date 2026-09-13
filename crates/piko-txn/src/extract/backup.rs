@@ -1,8 +1,8 @@
 //! Resolves a backup file after its `.pacnew` has been written.
 //!
-//! [`super::apply`] writes the packaged version to `<path>.pacnew` and stops there. This
-//! module decides what happens next: whether the user's file is replaced, kept, or left beside
-//! the new one for them to merge.
+//! [`fn@super::apply`] writes the packaged version to `<path>.pacnew` and stops there. This module
+//! decides what happens next: whether the user's file is replaced, kept, or left beside the new one
+//! for them to merge.
 //!
 //! The rule itself is [`super::decision::resolve_backup`], which is pure. This module only
 //! supplies its three hashes and carries out its answer.

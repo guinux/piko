@@ -84,11 +84,11 @@ pub enum PlanDiagnostic {
 
     /// A step's `%DEPENDS%` failed to convert, so it contributes no ordering edges.
     ///
-    /// Not reachable through a normal plan. The solver selects every step, and it converts
-    /// each candidate's `%DEPENDS%` while building its reachable cone. It fails the whole
-    /// solve if one does not parse. This is reported rather than ignored because
-    /// [`topological_order`] cannot return an error. A step ordered as if it had no
-    /// dependencies would be exactly the silent downgrade `Lazy` exists to prevent.
+    /// Not reachable through a normal plan. The solver selects every step, and it converts each
+    /// candidate's `%DEPENDS%` while building its reachable cone. It fails the whole solve if one
+    /// does not parse. This is reported rather than ignored because `topological_order` cannot
+    /// return an error. A step ordered as if it had no dependencies would be exactly the silent
+    /// downgrade `Lazy` exists to prevent.
     DependsUnreadable {
         /// The package whose dependencies piko could not read.
         package: SolvableId,

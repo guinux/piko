@@ -28,9 +28,11 @@ const MAX_AGENT_SOCKET_LEN: usize = 98;
 /// tools' keys never collide inside a keyring shared between them.
 pub(crate) const MASTER_KEY_USERID: &str = "piko Local Keyring Master Key <piko@localhost>";
 
-/// A key's ownertrust: how much its own certifications of *other* keys should count towards
-/// their validity. Mirrors [`gpgme::Validity`]'s six levels; kept as piko's own type so no
-/// `gpgme` type crosses this crate's public API.
+/// A key's ownertrust: how much its own certifications of *other* keys should count towards their
+/// validity.
+///
+/// Mirrors [`gpgme::Validity`]'s six levels; kept as piko's own type so no `gpgme` type crosses
+/// this crate's public API.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OwnerTrust {
     /// No ownertrust has been assigned.
@@ -199,13 +201,14 @@ impl KeyringAdmin {
         Error::Gpgme { path: self.home.clone(), action, message }
     }
 
-    /// Creates `home` (mode `0700`) if it does not exist yet, and generates piko's local
-    /// master signing key inside it if none exists yet. Idempotent: calling this again against
-    /// an already-initialized keyring changes nothing and reports
-    /// `InitOutcome { master_key_created: false }`.
+    /// Creates `home` (mode `0700`) if it does not exist yet, and generates piko's local master
+    /// signing key inside it if none exists yet.
     ///
-    /// This call sets the mode only on a directory it created itself. An existing keyring keeps
-    /// its current mode. See [`create_keyring_dir`].
+    /// Idempotent: calling this again against an already-initialized keyring changes nothing and
+    /// reports `InitOutcome { master_key_created: false }`.
+    ///
+    /// This call sets the mode only on a directory it created itself. An existing keyring keeps its
+    /// current mode.
     ///
     /// The master key is RSA-4096, certify-capable, unprotected (no passphrase — this keyring
     /// is meant to be usable by an unattended `piko install`, exactly like pacman's own
@@ -330,10 +333,11 @@ impl KeyringAdmin {
         Ok(result.into())
     }
 
-    /// Locally (non-exportably) certifies `fingerprint`'s primary user ID with piko's master
-    /// key. A no-op if it is already certified — returns `false` rather than signing again, so
-    /// a caller counting how many keys it *newly* signed (as [`Self::populate`] does) does not
-    /// have to re-derive "already signed" itself.
+    /// Locally (non-exportably) certifies `fingerprint`'s primary user ID with piko's master key.
+    ///
+    /// A no-op if it is already certified — returns `false` rather than signing again, so a caller
+    /// counting how many keys it *newly* signed (as [`Self::populate`] does) does not have to
+    /// re-derive "already signed" itself.
     ///
     /// Certifying only the primary user ID, not every one a key carries, is
     /// [`gpgme_op_keysign`]'s own default with no user IDs named — measured to hold even when
@@ -387,9 +391,10 @@ impl KeyringAdmin {
         Ok(true)
     }
 
-    /// Sets ownertrust on `fingerprint`. A no-op if the key already carries `level`. It then
-    /// returns `false` rather than setting it again, as [`Self::lsign`] and [`Self::disable`]
-    /// do.
+    /// Sets ownertrust on `fingerprint`.
+    ///
+    /// A no-op if the key already carries `level`. It then returns `false` rather than setting it
+    /// again, as [`Self::lsign`] and [`Self::disable`] do.
     ///
     /// Each call that is not a no-op drives a whole `gpgme_op_interact` session, and
     /// `populate` calls this once per `-trusted` line on every run. So an already-populated
@@ -398,9 +403,9 @@ impl KeyringAdmin {
     ///
     /// # Errors
     ///
-    /// [`Error::KeyNotFound`] if `fingerprint` is not in the keyring. [`Error::Gpgme`] if
-    /// `level` is [`OwnerTrust::Unknown`] or [`OwnerTrust::Undefined`] — neither is settable
-    /// through GnuPG's trust menu, see [`OwnerTrust::interactive_digit`].
+    /// [`Error::KeyNotFound`] if `fingerprint` is not in the keyring. [`Error::Gpgme`] if `level`
+    /// is [`OwnerTrust::Unknown`] or [`OwnerTrust::Undefined`] — neither is settable through
+    /// GnuPG's trust menu.
     pub fn set_owner_trust(&self, fingerprint: &str, level: OwnerTrust) -> Result<bool> {
         let digit = level.interactive_digit()?;
         let mut context = self.context()?;
@@ -426,9 +431,11 @@ impl KeyringAdmin {
         Ok(true)
     }
 
-    /// Disables `fingerprint`: GnuPG will not use it to satisfy a signature check, without
-    /// removing it. A no-op if already disabled — returns `false` rather than disabling again,
-    /// for the same counting reason [`Self::lsign`] does.
+    /// Disables `fingerprint`: GnuPG will not use it to satisfy a signature check, without removing
+    /// it.
+    ///
+    /// A no-op if already disabled — returns `false` rather than disabling again, for the same
+    /// counting reason [`Self::lsign`] does.
     ///
     /// # Errors
     ///
@@ -457,9 +464,10 @@ impl KeyringAdmin {
         Ok(true)
     }
 
-    /// Deletes the public key `fingerprint`. `allow_secret` must be `true` to also delete a
-    /// matching secret key — piko's own master key included — so it is never removed by
-    /// accident.
+    /// Deletes the public key `fingerprint`.
+    ///
+    /// `allow_secret` must be `true` to also delete a matching secret key — piko's own master key
+    /// included — so it is never removed by accident.
     ///
     /// piko decides this refusal, rather than GnuPG. GPGME rejects the same case on its own,
     /// but reports only `GPG_ERR_CONFLICT`. That message names neither the key nor the next
@@ -502,8 +510,9 @@ impl KeyringAdmin {
         self.find_keys(&[])
     }
 
-    /// Every public key that matches one of `patterns`. An empty `patterns` matches every key,
-    /// so this is also what [`Self::list_keys`] calls.
+    /// Every public key that matches one of `patterns`.
+    ///
+    /// An empty `patterns` matches every key, so this is also what [`Self::list_keys`] calls.
     ///
     /// GnuPG does the matching, through `gpgme_op_keylist_ext`. A pattern is a fingerprint, a
     /// short or long key ID, an email address, or a user ID substring. `gpg --list-keys` accepts
@@ -533,12 +542,14 @@ impl KeyringAdmin {
         keys.map(|key| self.describe(&self.readable(key)?)).collect()
     }
 
-    /// Resolves one key by `keyid`, then describes it. `keyid` is a fingerprint, a short or
-    /// long key ID, an email address, or any other pattern GnuPG accepts.
+    /// Resolves one key by `keyid`, then describes it.
     ///
-    /// Use this lookup to show a user which key an operation will change. It calls the same
-    /// [`Self::get_key`] every mutating operation here calls. A caller that filters
-    /// [`Self::list_keys`] instead runs a second resolver, and the two can name different keys.
+    /// `keyid` is a fingerprint, a short or long key ID, an email address, or any other pattern
+    /// GnuPG accepts.
+    ///
+    /// Use this lookup to show a user which key an operation will change. It calls the same key
+    /// resolver every mutating operation here calls. A caller that filters [`Self::list_keys`]
+    /// instead runs a second resolver, and the two can name different keys.
     ///
     /// # Errors
     ///
@@ -584,9 +595,11 @@ impl KeyringAdmin {
     }
 
     /// Forces GnuPG to recompute key validity from the current trust database (`gpg
-    /// --check-trustdb`'s effect). GPGME exposes no dedicated operation for this — GnuPG's own
-    /// trust model already recomputes validity whenever keys are queried, so a full listing
-    /// achieves the same thing natively, without shelling out to `gpg --check-trustdb`.
+    /// --check-trustdb`'s effect).
+    ///
+    /// GPGME exposes no dedicated operation for this — GnuPG's own trust model already recomputes
+    /// validity whenever keys are queried, so a full listing achieves the same thing natively,
+    /// without shelling out to `gpg --check-trustdb`.
     ///
     /// # Errors
     ///

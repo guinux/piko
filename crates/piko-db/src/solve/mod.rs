@@ -7,8 +7,8 @@
 //! hundred of those scans would dominate a run that opens those archives in 671 ms.
 //! [`Universe`] pays that cost once, as an index, and answers from it.
 //!
-//! The two must still agree on what "satisfies" means. Neither implements it directly; both
-//! call [`crate::depcmp`].
+//! The two must still agree on what "satisfies" means. Neither implements it directly; both call
+//! `depcmp`.
 
 mod cache;
 mod clause;

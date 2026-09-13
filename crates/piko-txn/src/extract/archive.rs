@@ -6,7 +6,7 @@
 //! 1. **Magic-byte sniffing, not extension detection.** A package is usually named
 //!    `.pkg.tar.zst`. But the name is not a guarantee, and `alpm-compress`'s own
 //!    `TryFrom<&Path>` trusts it anyway.
-//! 2. **Bounded decompression.** `alpm-compress` caps nothing anywhere. A [`BoundedReader`]
+//! 2. **Bounded decompression.** `alpm-compress` caps nothing anywhere. A bounded reader
 //!    wraps the decoder and trips a shared flag on overrun. This flag is what tells a bound
 //!    violation apart from a corrupt archive, after `tar` fails.
 //! 3. **`tar::Archive` driven directly**, because `TarballReader` is concretely

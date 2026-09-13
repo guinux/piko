@@ -923,9 +923,9 @@ fn visit_raised_requirements(
 /// so a run with zero conflicts may still have diverged. Only the requirements themselves
 /// know which candidate was preferred.
 ///
-/// Two filters keep the measure meaningful. Both close a bug in which it fired on every plan
-/// it was ever shown. The second — "only requirements libalpm would have raised at all" — is
-/// [`visit_raised_requirements`], which [`ambiguities`] walks too. The first is here:
+/// Two filters keep the measure meaningful. Both close a bug in which it fired on every plan it was
+/// ever shown. The second — "only requirements libalpm would have raised at all" — is
+/// `visit_raised_requirements`, which [`ambiguities`] walks too. The first is here:
 ///
 /// **Compared by package name, not by candidate.** A requirement whose preferred satisfier
 /// was the installed copy of `foo`, and whose selected satisfier is `foo` from a repository,
@@ -1049,8 +1049,8 @@ impl AmbiguityReport {
 /// 3. **One provider is taken without asking** — `count > 1` gates the question
 ///    (`deps.c:719`).
 ///
-/// Which requirements the descent would have reached at all is
-/// [`visit_raised_requirements`], shared with [`fidelity`].
+/// Which requirements the descent would have reached at all is `visit_raised_requirements`, shared
+/// with [`fidelity`].
 ///
 /// There is no "already answered" test. An answered requirement is encoded with its chosen
 /// candidate as its only satisfier, so it fails the third test on its own. That is what lets a

@@ -87,7 +87,7 @@ pub struct Outcome {
     /// This is returned rather than printed, per the workspace's diagnostics rule. The caller
     /// decides whether a scriptlet's chatter belongs on the terminal.
     pub output: Vec<String>,
-    /// Whether output was dropped for exceeding [`MAX_OUTPUT_BYTES`].
+    /// Whether output was dropped for exceeding the per-scriptlet output cap.
     pub truncated: bool,
 }
 

@@ -348,6 +348,7 @@ pub struct SyncRepos<'a> {
 
 impl<'a> SyncRepos<'a> {
     /// Builds a priority-ordered set from `repos`, given in `pacman.conf`'s file order.
+    ///
     /// Ignores nothing until [`Self::with_ignores`] is applied.
     #[must_use]
     pub fn new(repos: impl IntoIterator<Item = SyncRepo<'a>>) -> Self {
@@ -363,10 +364,10 @@ impl<'a> SyncRepos<'a> {
     }
 
     /// Finds `dep`'s highest-priority literal match: the first repository, in file order, whose
-    /// `Usage` includes `Install` or `Upgrade` and that carries a package named exactly
-    /// `dep.name`, satisfying `dep.version_requirement` (if any), and not ignored per
-    /// [`Self::with_ignores`]. See the module doc for the libalpm step this mirrors and what it
-    /// excludes.
+    /// `Usage` includes `Install` or `Upgrade` and that carries a package named exactly `dep.name`,
+    /// satisfying `dep.version_requirement` (if any), and not ignored per [`Self::with_ignores`].
+    ///
+    /// See the module doc for the libalpm step this mirrors and what it excludes.
     #[must_use]
     pub fn find_literal_satisfier(&self, dep: &PackageRelation) -> Option<Resolved<'a>> {
         self.repos
@@ -389,9 +390,11 @@ impl<'a> SyncRepos<'a> {
     /// Finds every package satisfying `dep`: [`Self::find_literal_satisfier`] first, and if that
     /// finds nothing usable, every package across every repository whose `%PROVIDES%` satisfies
     /// `dep` — real libalpm's `ALPM_QUESTION_SELECT_PROVIDER` list, with nothing asked about it
-    /// here. A planner narrows that list from an answer instead
-    /// ([`crate::solve::ambiguities`]). See the module doc for the exact two-step control flow
-    /// this mirrors. Empty when nothing satisfies `dep` anywhere.
+    /// here.
+    ///
+    /// A planner narrows that list from an answer instead ([`crate::solve::ambiguities`]). See the
+    /// module doc for the exact two-step control flow this mirrors. Empty when nothing satisfies
+    /// `dep` anywhere.
     #[must_use]
     pub fn find_satisfiers(&self, dep: &RelationOrSoname) -> Vec<Resolved<'a>> {
         if let RelationOrSoname::Relation(relation) = dep

@@ -185,10 +185,12 @@ pub fn usage_lines(usage: DbUsage) -> Vec<&'static str> {
     lines
 }
 
-/// Renders `level` as the `SigLevel` keyword(s) that produced it, mirroring `show_siglevel`
-/// in `pacman-conf.c`. Returns nothing for `SigLevel::USE_DEFAULT`, matching
-/// `pacman-conf`'s own "do not print an unresolved LocalFileSigLevel/RemoteFileSigLevel"
-/// behavior. That sentinel means "inherit dynamically"; nothing was actually configured.
+/// Renders `level` as the `SigLevel` keyword(s) that produced it, mirroring `show_siglevel` in
+/// `pacman-conf.c`.
+///
+/// Returns nothing for `SigLevel::USE_DEFAULT`, matching `pacman-conf`'s own "do not print an
+/// unresolved LocalFileSigLevel/RemoteFileSigLevel" behavior. That sentinel means "inherit
+/// dynamically"; nothing was actually configured.
 pub fn sig_level_lines(level: SigLevel, package_only: bool) -> Vec<&'static str> {
     if level == SigLevel::USE_DEFAULT {
         return Vec::new();

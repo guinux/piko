@@ -27,8 +27,9 @@ fn styled_validation(has_signature: bool) -> console::StyledObject<String> {
     style.apply_to(validation_label(has_signature))
 }
 
-/// `offset` is the UTC offset `Build Date` is rendered in, captured in `main`. See
-/// [`crate::output::human_date`].
+/// `offset` is the UTC offset `Build Date` is rendered in, captured in `main`.
+///
+/// See [`crate::output::human_date`].
 pub fn repo_info(
     db: &RepoDatabase,
     package: &RepoPackage,

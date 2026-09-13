@@ -75,8 +75,9 @@ fn yes_no(value: bool) -> &'static str {
     if value { "Yes" } else { "No" }
 }
 
-/// `offset` is the UTC offset the two date fields are rendered in, captured in `main`. See
-/// [`crate::output::human_date`].
+/// `offset` is the UTC offset the two date fields are rendered in, captured in `main`.
+///
+/// See [`crate::output::human_date`].
 pub fn info(
     local: &LocalDatabase,
     package: &LocalPackage,

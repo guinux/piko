@@ -101,10 +101,10 @@ pub struct Report {
     pub hooks: Vec<hook::Run>,
     /// Every hook file that could not be read or parsed, in the order they were met.
     ///
-    /// Collected per phase rather than once up front — see [`run_hooks`]. A file broken for the
-    /// whole transaction is reported twice, once for each phase that read the directory.
-    /// libalpm does the same: `_alpm_hook_run` re-runs `_alpm_hook_validate` on every call, so
-    /// pacman prints such a warning twice too.
+    /// Collected per phase rather than once up front. A file broken for the whole transaction is
+    /// reported twice, once for each phase that read the directory. libalpm does the same:
+    /// `_alpm_hook_run` re-runs `_alpm_hook_validate` on every call, so pacman prints such a
+    /// warning twice too.
     pub hook_problems: Vec<hook::Problem>,
     /// Everything that went wrong recording the transaction.
     ///
@@ -284,10 +284,9 @@ struct Superseded {
 /// hook is told changed. Those two answers have to come from one matcher, or they will
 /// eventually disagree about a `!` inversion.
 ///
-/// This holds patterns rather than the predicates [`Filters`] takes, because this is the
-/// *configured* policy, and it has to be handed on to [`hook::Summary`] as data. `Filters`
-/// stays a predicate so a test can supply an exact answer instead of a pattern that has to be
-/// right twice.
+/// This holds patterns rather than the predicates [`crate::Filters`] takes, because this is the
+/// *configured* policy, and it has to be handed on to [`hook::Summary`] as data. `Filters` stays a
+/// predicate so a test can supply an exact answer instead of a pattern that has to be right twice.
 #[derive(Clone, Debug, Default)]
 pub struct Patterns {
     /// `NoExtract`: never written, and therefore never owned.
@@ -547,9 +546,9 @@ impl Transaction<Planned> {
     /// As [`Transaction::verify`], reporting progress through `progress` as it runs.
     ///
     /// `progress` is the same narrow, deliberate exception to "diagnostics are returned, not
-    /// logged" as [`Staged::commit_with_progress`] — see [`crate::progress`]'s documentation.
-    /// It takes `FnMut` rather than `Fn` for the same reason `commit_with_progress` does: a
-    /// caller driving a terminal UI needs a mutable borrow of whatever it draws with.
+    /// logged" as [`Transaction::commit_with_progress`] — see [`crate::progress`]'s documentation.
+    /// It takes `FnMut` rather than `Fn` for the same reason `commit_with_progress` does: a caller
+    /// driving a terminal UI needs a mutable borrow of whatever it draws with.
     ///
     /// # Errors
     ///
@@ -903,7 +902,7 @@ impl Transaction<Staged<'_>> {
         self.commit_with_progress(&mut |_| {})
     }
 
-    /// As [`Staged::commit`], reporting progress through `progress` as it happens.
+    /// As [`Transaction::commit`], reporting progress through `progress` as it happens.
     ///
     /// `progress` is a narrow, deliberate exception to "diagnostics are returned, not logged"
     /// — see [`crate::progress`]'s documentation before treating this as license to add
@@ -913,7 +912,7 @@ impl Transaction<Staged<'_>> {
     ///
     /// # Errors
     ///
-    /// As [`Staged::commit`].
+    /// As [`Transaction::commit`].
     pub fn commit_with_progress(mut self, progress: &mut dyn FnMut(Event<'_>)) -> Result<Report> {
         // Taken out of the state, so the ending is written from exactly one place however
         // `apply` returns. Scattering it over each `?` is how one exit path eventually stops

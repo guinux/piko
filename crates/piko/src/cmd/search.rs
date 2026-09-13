@@ -147,9 +147,11 @@ pub fn installed(
     print_rows(&local_rows(db, terms), None, quiet, out)
 }
 
-/// `piko search --repos`: repository packages only, across every database in `dbs`, in
-/// priority order. Mirrors `pacman -Ss` searching every configured sync database. No
-/// installed status is shown: this mode never opens the local database at all.
+/// `piko search --repos`: repository packages only, across every database in `dbs`, in priority
+/// order.
+///
+/// Mirrors `pacman -Ss` searching every configured sync database. No installed status is shown:
+/// this mode never opens the local database at all.
 pub fn repos_only(
     dbs: &[RepoDatabase],
     terms: &[String],

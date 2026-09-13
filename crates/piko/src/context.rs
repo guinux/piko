@@ -322,6 +322,11 @@ fn command_line() -> String {
 ///
 /// Diagnostics are warnings: the database opened, and the packages it did find are usable.
 /// The caller decides what to do about the rest.
+///
+/// # Errors
+///
+/// Whatever [`LocalDatabase::open_with`] refuses on: an unreadable or missing `<dbpath>/local`,
+/// a schema version this build does not understand, or a limit tripped while scanning.
 pub fn open_local_db(cli: &Cli, config: &ConfigCache) -> Result<LocalDatabase, piko_db::Error> {
     let root = resolve_dbpath(cli, config).join(LOCAL_DB_DIR);
 
@@ -341,6 +346,11 @@ fn print_repo_diagnostics(db: &RepoDatabase) {
 }
 
 /// Opens a repository database archive, printing scan diagnostics.
+///
+/// # Errors
+///
+/// Whatever [`RepoDatabase::open_with`] refuses on: an unreadable archive, one that is not a
+/// regular file, a member that does not parse, or a limit tripped while walking it.
 pub fn open_repo_db(path: &Path) -> Result<RepoDatabase, piko_db::Error> {
     let db = RepoDatabase::open_with(path, RepoOpenOptions::new())?;
     print_repo_diagnostics(&db);
@@ -352,17 +362,27 @@ pub fn open_repo_db(path: &Path) -> Result<RepoDatabase, piko_db::Error> {
 /// Returns the failure rather than printing it, so the caller propagates it with `?` like
 /// every other failure in the dispatch: [`crate::output::report`] renders it at the top, and
 /// the message is unchanged from when this printed it itself.
+///
+/// # Errors
+///
+/// [`Error::InvalidRepoName`] if `repo` is not a name `RepoName` accepts.
 pub fn parse_repo_arg(repo: &str) -> Result<RepoName, Error> {
     RepoName::parse(repo).map_err(|_| Error::InvalidRepoName { name: repo.to_owned() })
 }
 
-/// Opens `<dbpath>/sync/<repo>.db` (preferring `.db` over `.files`), printing scan
-/// diagnostics. This is the config-driven counterpart to [`open_repo_db`], used to resolve a
-/// repository configured in pacman.conf rather than an explicit archive path.
+/// Opens `<dbpath>/sync/<repo>.db` (preferring `.db` over `.files`), printing scan diagnostics.
+///
+/// This is the config-driven counterpart to [`open_repo_db`], used to resolve a repository
+/// configured in pacman.conf rather than an explicit archive path.
 ///
 /// The archive's signature is checked against the repository's effective `SigLevel` before the
 /// database is handed back, so no caller can use an unverified one — see
 /// [`verify_repo_archive`].
+///
+/// # Errors
+///
+/// Whatever opening the archive refuses on, as [`open_repo_db`], or a signature the
+/// repository's effective `SigLevel` does not accept.
 pub fn open_repo_by_name(
     dbpath: &Path,
     repo: &RepoName,
@@ -476,11 +496,13 @@ fn verify_repo_archive(
     }
 }
 
-/// Opens every repository configured in `pacman.conf`, in file (priority) order, skipping any
-/// that fails to open with a warning. Used where every configured repository's own results
-/// are wanted regardless of what any other repository holds. A lookup that stops at the first
-/// match instead wants [`open_repos_for_packages`], which does not pay to open a repository
-/// once the search it exists for is already satisfied.
+/// Opens every repository configured in `pacman.conf`, in file (priority) order, skipping any that
+/// fails to open with a warning.
+///
+/// Used where every configured repository's own results are wanted regardless of what any other
+/// repository holds. A lookup that stops at the first match instead wants
+/// [`open_repos_for_packages`], which does not pay to open a repository once the search it exists
+/// for is already satisfied.
 ///
 /// Carries each repository's `Usage` alongside it. It is needed by
 /// [`resolve`](piko_db::resolve), [`Universe::build`](piko_db::solve::Universe::build), and
@@ -489,6 +511,13 @@ fn verify_repo_archive(
 /// their half of the pair. Bundling `Usage` here rather than returning the bare
 /// `RepoDatabase`s lets one function serve every subcommand that needs "every configured
 /// repository, opened and verified", instead of each maintaining its own loop.
+///
+/// A repository that fails to open is warned about and skipped, so this fails only when there
+/// is no configuration to read at all.
+///
+/// # Errors
+///
+/// [`ConfigUnavailable`] if `pacman.conf` could not be read.
 pub fn open_all_repos(
     cli: &Cli,
     config: &ConfigCache,
@@ -524,6 +553,12 @@ pub fn open_all_repos(
 /// Returns every repository actually opened, not just the ones that matched: the caller still
 /// looks each name up itself (`repo-files`' batching needs to know which repository each
 /// match came from), this only limits how many repositories get opened in the first place.
+///
+/// A repository that fails to open is warned about and skipped, as in [`open_all_repos`].
+///
+/// # Errors
+///
+/// [`ConfigUnavailable`] if `pacman.conf` could not be read.
 pub fn open_repos_for_packages(
     cli: &Cli,
     config: &ConfigCache,
@@ -557,6 +592,10 @@ pub fn open_repos_for_packages(
 /// Unlike [`resolve_dbpath`], a subcommand that is *about* the configuration (`conf`,
 /// `resolve`, a `check-updates` with no explicit archives) cannot fall back to a default —
 /// there is nothing to fall back to — so this turns the cached failure into an error.
+///
+/// # Errors
+///
+/// [`ConfigUnavailable`] naming the path tried and why it failed.
 pub fn require_pacman_config<'a>(
     cli: &Cli,
     config: &'a ConfigCache,

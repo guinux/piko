@@ -27,6 +27,32 @@
 //!
 //! [`DbLock`] handles concurrency. It is byte-compatible with pacman's `db.lck`, not with any
 //! better locking scheme. `docs/locking.md` explains why that constraint is not negotiable.
+//!
+//! # Example
+//!
+//! Flipping one installed package from a dependency to an explicit install — `pacman -D
+//! --asexplicit`. The lock is taken first and released last, and the rewrite touches only
+//! `%REASON%`.
+//!
+//! ```rust,no_run
+//! use std::path::Path;
+//!
+//! use piko_db::{EntryName, Limits};
+//! use piko_db_write::{DbLock, LocalDbWriter};
+//! use alpm_types::PackageInstallReason;
+//!
+//! let dbpath = Path::new("/var/lib/pacman");
+//!
+//! // Fails immediately if pacman or another piko already holds it. There is no wait.
+//! let lock = DbLock::acquire(dbpath)?;
+//! let writer = LocalDbWriter::new(dbpath, &lock, Limits::default())?;
+//!
+//! let entry = EntryName::parse("tree-2.2.1-1")?;
+//! writer.set_install_reason(&entry, PackageInstallReason::Explicit)?;
+//!
+//! lock.release()?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 pub mod atomic;
 pub mod error;

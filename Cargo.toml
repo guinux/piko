@@ -23,6 +23,18 @@ unsafe_code = "forbid"
 missing_docs = "deny"
 missing_debug_implementations = "deny"
 
+[workspace.lints.rustdoc]
+# A doc link is API documentation. A dead one points at an item that no longer exists, and a
+# private one renders as nothing for the reader of the public docs. Both are wrong answers,
+# not cosmetic slips. Denying them keeps `cargo doc --workspace --no-deps` a commit gate.
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+invalid_html_tags = "deny"
+invalid_rust_codeblocks = "deny"
+bare_urls = "deny"
+redundant_explicit_links = "deny"
+
 [workspace.lints.clippy]
 # Sizes and counts read off disk are attacker-influenced; silent wrapping is a bug.
 arithmetic_side_effects = "deny"

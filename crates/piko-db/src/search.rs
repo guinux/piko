@@ -1,9 +1,9 @@
 //! How a package matched a search query.
 //!
-//! [`MatchKind`] is shared between the local and repository searches, so both rank hits the
-//! same way. The ordering a user sees does not depend on which database answered. The
-//! searches themselves differ, because the two package types do, and live in
-//! [`crate::local::search`] and [`crate::repo::search`]. [`hide_installed`] combines the two.
+//! [`MatchKind`] is shared between the local and repository searches, so both rank hits the same
+//! way. The ordering a user sees does not depend on which database answered. The searches
+//! themselves differ, because the two package types do, and live in [`crate::local::search`] and
+//! `repo::search`. [`hide_installed`] combines the two.
 
 use alpm_types::RelationOrSoname;
 

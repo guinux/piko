@@ -37,9 +37,11 @@ impl SigLevel {
     /// Sentinel meaning "not set here; inherit from the enclosing scope".
     pub const USE_DEFAULT: Self = Self(1 << 31);
 
-    /// `config_new`'s default global `SigLevel`, assuming signature support (the common
-    /// case — piko has no `alpm_capabilities` check to gate on). `PACKAGE | DATABASE`,
-    /// required, and `TrustedOnly` since neither `_MARGINAL_OK` nor `_UNKNOWN_OK` is set.
+    /// `config_new`'s default global `SigLevel`, assuming signature support (the common case — piko
+    /// has no `alpm_capabilities` check to gate on).
+    ///
+    /// `PACKAGE | DATABASE`, required, and `TrustedOnly` since neither `_MARGINAL_OK` nor
+    /// `_UNKNOWN_OK` is set.
     #[must_use]
     pub const fn default_global() -> Self {
         Self(Self::PACKAGE.0 | Self::DATABASE.0)

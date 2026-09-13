@@ -1,19 +1,19 @@
 //! Writes a file atomically, in a form that can be inspected before it lands.
 //!
-//! [`crate::local`] already writes database entries atomically, but only from a `&[u8]` held
-//! in memory. That fits a `desc`. It does not fit a downloaded repository database:
-//! `extra.files` is about 50 MB on this machine. A downloaded file must also be **verified
-//! before it replaces the live one**. This requires the file to exist on disk, under a name
-//! the verifier can check, while the destination stays untouched.
+//! [`crate::LocalDbWriter`] already writes database entries atomically, but only from a `&[u8]`
+//! held in memory. That fits a `desc`. It does not fit a downloaded repository database:
+//! `extra.files` is about 50 MB on this machine. A downloaded file must also be **verified before
+//! it replaces the live one**. This requires the file to exist on disk, under a name the verifier
+//! can check, while the destination stays untouched.
 //!
 //! [`AtomicFile`] provides this. It streams into a temporary beside the destination, exposes
 //! that path through [`AtomicFile::path`] for inspection, and renames it over the target only
 //! when [`AtomicFile::commit`] runs. Dropping it without committing removes the temporary, so
 //! a failed or rejected download leaves nothing behind.
 //!
-//! The durability sequence matches [`crate::local`]'s, for the same reason: fsync the data
-//! before the rename. Otherwise a crash can make the rename durable while the contents are
-//! not, leaving an empty file where a good one used to be.
+//! The durability sequence matches [`crate::LocalDbWriter`]'s, for the same reason: fsync the data
+//! before the rename. Otherwise a crash can make the rename durable while the contents are not,
+//! leaving an empty file where a good one used to be.
 
 use std::{
     fs::File,

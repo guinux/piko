@@ -127,8 +127,9 @@ pub struct Catalog<'a> {
     pub configs: &'a [RepositoryConfig],
 }
 
-/// Installs packages by name, resolving dependencies through the configured repositories. With
-/// `options.sysupgrade` set, this also runs `piko update`'s full-system upgrade.
+/// Installs packages by name, resolving dependencies through the configured repositories.
+///
+/// With `options.sysupgrade` set, this also runs `piko update`'s full-system upgrade.
 ///
 /// Targets are resolved exactly as `piko plan` resolves them: a literal name or dependency
 /// string first, a `%GROUPS%` member expansion second. The whole transitive closure of

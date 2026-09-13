@@ -31,6 +31,13 @@
 //!   [`Limits::max_diagnostics`], and the caller decides how to present them.
 //! - **`unsafe` is forbidden workspace-wide.**
 //!
+//! # Feature flags
+//!
+//! - **`fixture`** *(off by default)* — exposes the `fixture` module, a builder for throwaway
+//!   database trees in a `tempfile::TempDir`. Integration tests and downstream crates turn it
+//!   on; nothing in a normal build needs it, and it pulls in `tempfile`. The module is absent
+//!   from a default build, so this names it rather than linking it.
+//!
 //! # Example
 //!
 //! ```rust,no_run
@@ -50,6 +57,10 @@
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+
+// docs.rs sets this cfg (see `[package.metadata.docs.rs]`), and it is nightly-only. On any
+// stable build the attribute expands to nothing, so this costs the MSRV nothing.
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 // The two database formats. Each is self-contained.
 pub mod local;

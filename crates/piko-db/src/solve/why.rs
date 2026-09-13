@@ -112,11 +112,13 @@ pub fn explain_why_installed(universe: &Universe<'_>, target: &str) -> Option<Wh
     Some(WhyResult::Chain(chain))
 }
 
-/// Every installed package with `PackageInstallReason::Depend` that no installed package
-/// requires via `%DEPENDS%` — the batch form of [`WhyResult::Orphan`] with an empty `direct`,
-/// matching `pacman -Qdttq`. See the module docs for why only hard dependencies count. A
-/// package that is only ever someone's `%OPTDEPENDS%` still counts as an orphan here, the
-/// same as [`explain_why_installed`] would report.
+/// Every installed package with `PackageInstallReason::Depend` that no installed package requires
+/// via `%DEPENDS%` — the batch form of [`WhyResult::Orphan`] with an empty `direct`, matching
+/// `pacman -Qdttq`.
+///
+/// See the module docs for why only hard dependencies count. A package that is only ever someone's
+/// `%OPTDEPENDS%` still counts as an orphan here, the same as [`explain_why_installed`] would
+/// report.
 ///
 /// Sorted by name, the same order [`crate::LocalDatabase`] iterates in.
 #[must_use]
@@ -136,10 +138,10 @@ pub fn orphans(universe: &Universe<'_>) -> Vec<SolvableId> {
     found.into_iter().map(|solvable| solvable.id()).collect()
 }
 
-/// Every installed package that directly requires a target package, split by how:
-/// `required_by` via `%DEPENDS%` (`pacman -Qi`'s "Required By"), `optional_for` via
-/// `%OPTDEPENDS%` ("Optional For"). Both are empty, not an error, for a target that is not
-/// installed.
+/// Every installed package that directly requires a target package, split by how: `required_by` via
+/// `%DEPENDS%` (`pacman -Qi`'s "Required By"), `optional_for` via `%OPTDEPENDS%` ("Optional For").
+///
+/// Both are empty, not an error, for a target that is not installed.
 #[derive(Clone, Debug, Default)]
 pub struct Dependents {
     /// Installed packages whose `%DEPENDS%` requires the target.

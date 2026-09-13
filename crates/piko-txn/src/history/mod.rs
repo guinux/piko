@@ -511,9 +511,9 @@ impl From<Entry> for Record {
 
 /// Appends one frontend line to the log `recording` names, if it names one.
 ///
-/// pacman's frontend writes its own lines the same way, under the `PACMAN` caller: the command
-/// it was invoked with, `synchronizing package lists`, `starting full system upgrade`. Those
-/// happen outside any transaction, so they cannot come from a [`Recorder`], which exists only
+/// pacman's frontend writes its own lines the same way, under the `PACMAN` caller: the command it
+/// was invoked with, `synchronizing package lists`, `starting full system upgrade`. Those happen
+/// outside any transaction, so they cannot come from a transaction recorder, which exists only
 /// between staging and committing.
 ///
 /// # Errors

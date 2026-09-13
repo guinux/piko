@@ -8,10 +8,9 @@
 //! the checksum fields. Measured against this machine's real databases, that conversion costs
 //! **18x a raw `%KEYWORD%` section split**, and dominates opening either database.
 //!
-//! All-or-nothing is also why `%URL%` and `%PACKAGER%` are taken out of the text before
-//! either parser sees it ([`crate::desc_compat::take_fields`]): a value their typed
-//! conversion refuses would otherwise cost the `desc` every other section, down to the
-//! `%FILENAME%` an install downloads.
+//! All-or-nothing is also why `%URL%` and `%PACKAGER%` are taken out of the text before either
+//! parser sees it (`desc_compat::take_fields`): a value their typed conversion refuses would
+//! otherwise cost the `desc` every other section, down to the `%FILENAME%` an install downloads.
 //!
 //! Only a handful of sections are needed by everything. [`crate::solve::Universe`] reads the
 //! relation sections and `%GROUPS%` for every candidate in the universe, so deferring *those*
@@ -21,19 +20,17 @@
 //!
 //! # This is not a hand-rolled parser for a format `alpm-*` already implements
 //!
-//! Every *value* goes through `alpm-types`' own parser. This
-//! module skips only the upstream crates' typed conversion of sections it does not need. The
-//! `%KEYWORD%` section split that replaces it already exists in
-//! [`crate::desc_compat::filter_unknown_sections`].
+//! Every *value* goes through `alpm-types`' own parser. This module skips only the upstream crates'
+//! typed conversion of sections it does not need. The `%KEYWORD%` section split that replaces it
+//! already exists in `desc_compat::filter_unknown_sections`.
 //!
 //! # Why one module rather than one per database
 //!
-//! The two `desc` formats differ only in which sections they carry. Both share an identical
-//! section grammar and an identical set of relation sections. The repository format adds
-//! `%CSIZE%`/`%ISIZE%`; the local format adds `%REASON%` and a dozen others. The scan that
-//! finds them is the same scan. [`scan`] does it once and hands every other section's lines
-//! to the caller, so neither side walks the text twice, and the two cannot drift on what a
-//! relation section is.
+//! The two `desc` formats differ only in which sections they carry. Both share an identical section
+//! grammar and an identical set of relation sections. The repository format adds
+//! `%CSIZE%`/`%ISIZE%`; the local format adds `%REASON%` and a dozen others. The scan that finds
+//! them is the same scan. `scan` does it once and hands every other section's lines to the caller,
+//! so neither side walks the text twice, and the two cannot drift on what a relation section is.
 
 use std::str::FromStr;
 

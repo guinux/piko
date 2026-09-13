@@ -65,10 +65,10 @@ const DEFAULT_HOOK_DIR: &str = "/etc/pacman.d/hooks/";
 /// `config_max_recursion`. This is a cycle guard, not a policy limit.
 const MAX_INCLUDE_DEPTH: u8 = 10;
 
-/// `pacman.conf`'s `CleanMethod` directive: how `pacman -Sc` decides what to remove from the
-/// cache. Named after `PM_CLEAN_*` in `conf.h`. piko does not implement cache cleaning itself
-/// (a stated non-goal). This type exists purely so the directive parses and round-trips
-/// faithfully.
+/// `pacman.conf`'s `CleanMethod` directive: how `pacman -Sc` decides what to remove from the cache.
+///
+/// Named after `PM_CLEAN_*` in `conf.h`. piko does not implement cache cleaning itself (a stated
+/// non-goal). This type exists purely so the directive parses and round-trips faithfully.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CleanMethod(u32);
 
@@ -244,8 +244,10 @@ impl PacmanConfig {
         parser.finish()
     }
 
-    /// Non-fatal problems found while parsing: directive names `conf.c` would warn about
-    /// and continue past. Never `Include` failures. Those are fatal; see the module docs.
+    /// Non-fatal problems found while parsing: directive names `conf.c` would warn about and
+    /// continue past.
+    ///
+    /// Never `Include` failures. Those are fatal; see the module docs.
     #[must_use]
     pub fn diagnostics(&self) -> &[ConfigDiagnostic] {
         &self.diagnostics

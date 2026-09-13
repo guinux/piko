@@ -415,10 +415,9 @@ pub fn open(location: &Location) -> Result<std::fs::File> {
 
 /// Serves the package files named on the command line, and delegates everything else.
 ///
-/// A `pacman -U` target is not in any cache directory and has no repository to download from.
-/// It is addressed the same way every other package is — by
-/// [`PackageFileName`](alpm_types::PackageFileName), built from its own `.PKGINFO` — and this
-/// source is what turns that name back into the path the user typed.
+/// A `pacman -U` target is not in any cache directory and has no repository to download from. It is
+/// addressed the same way every other package is — by [`alpm_types::PackageFileName`], built from
+/// its own `.PKGINFO` — and this source is what turns that name back into the path the user typed.
 ///
 /// # Why a wrapper rather than a step in `Transaction`
 ///

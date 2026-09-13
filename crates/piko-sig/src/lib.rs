@@ -27,6 +27,29 @@
 //! riskiest code in this project. See [`keyring`] for the two measurements that settled the
 //! choice.
 //!
+//! # Example
+//!
+//! Checking one package file against the keyring, under the `SigLevel` its repository resolved
+//! to. `check` looks for `<path>.sig` beside the file — [`signature_path`] spells that rule.
+//!
+//! ```rust,no_run
+//! use std::path::Path;
+//!
+//! use piko_sig::{Keyring, Policy, Verdict};
+//! use piko_db::config::SigLevel;
+//!
+//! let keyring = Keyring::open("/etc/pacman.d/gnupg")?;
+//! let package = Path::new("/var/cache/pacman/pkg/tree-2.2.1-1-x86_64.pkg.tar.zst");
+//!
+//! // `Err` means no answer could be obtained. A refusal is a `Verdict`, not an error.
+//! match keyring.check(package, Policy::for_package(SigLevel::default()))? {
+//!     Verdict::Accepted { verified: true } => println!("signature checked and trusted"),
+//!     Verdict::Accepted { verified: false } => println!("policy asked for no check"),
+//!     Verdict::Rejected(reason) => println!("refused: {reason:?}"),
+//! }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! # Scope
 //!
 //! Verification only. Fetching a missing key from a keyserver or WKD (libalpm's

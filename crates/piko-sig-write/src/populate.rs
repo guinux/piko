@@ -75,8 +75,9 @@ pub struct PopulateSummary {
 
 impl KeyringAdmin {
     /// Imports `<keyrings_dir>/<name>.gpg`, then locally signs and trusts every fingerprint
-    /// `<name>-trusted` lists, then disables every fingerprint `<name>-revoked` lists. Either
-    /// side file being absent is not an error — plenty of real keyrings ship no revocations.
+    /// `<name>-trusted` lists, then disables every fingerprint `<name>-revoked` lists.
+    ///
+    /// Either side file being absent is not an error — plenty of real keyrings ship no revocations.
     ///
     /// Both loops treat a failure the same way. A fingerprint the keyring does not hold becomes
     /// a [`SkippedLine`]. A side file may outlive a key a later keyring update pruned from

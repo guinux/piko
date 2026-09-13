@@ -15,7 +15,7 @@ use crate::error::{Error, IoAction, Result};
 /// The lock file's name, inside the database path.
 ///
 /// This sits beside `local/`, not inside it: the path is `<dbpath>/db.lck`, fixed at
-/// `alpm.c:41,67`. It is not a directory, so [`crate::LocalDatabase`]'s scan skips it without
+/// `alpm.c:41,67`. It is not a directory, so [`piko_db::LocalDatabase`]'s scan skips it without
 /// needing a special case.
 pub const LOCK_FILE: &str = "db.lck";
 

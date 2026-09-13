@@ -4,7 +4,7 @@
 //!
 //! 1. [`crate::extract::archive::walk`] reads the members.
 //! 2. [`crate::extract::decision::decide`] decides what to do with each member.
-//! 3. [`crate::extract::apply`] applies the decision, through [`crate::rootfs`].
+//! 3. [`fn@crate::extract::apply`] applies the decision, through [`crate::rootfs`].
 //! 4. [`crate::extract::backup`] resolves the `.pacnew` of any backup file.
 //!
 //! The result is an [`Extraction`]: a record of what actually landed. The local database

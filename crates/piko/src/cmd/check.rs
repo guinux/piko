@@ -10,11 +10,12 @@ use crate::{
     progress::StepList,
 };
 
-/// Checks each named package, printing every problem found and a final summary line. A name
-/// that is not currently installed is reported to stderr, the same continue-past-a-miss
+/// Checks each named package, printing every problem found and a final summary line.
+///
+/// A name that is not currently installed is reported to stderr, the same continue-past-a-miss
 /// convention `piko files`/`piko info` use for more than one name — but it was never actually
-/// checked, so it is not counted in the summary's "packages checked" or "with problems" totals.
-/// It still fails the command.
+/// checked, so it is not counted in the summary's "packages checked" or "with problems" totals. It
+/// still fails the command.
 pub fn check_selected(
     db: &LocalDatabase,
     names: &[String],

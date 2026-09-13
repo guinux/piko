@@ -1,9 +1,9 @@
 //! The audited filesystem core.
 //!
-//! Every byte this crate reads off disk passes through [`read_capped`]. The hardening lives
-//! in one place, so it can be reviewed on its own. The `MetadataFile` convenience
-//! constructors from `alpm-common` (`from_file`) are deliberately never used: they call
-//! `read_to_string` on a path with no bound and no file-type check.
+//! Every byte this crate reads off disk passes through `read_capped`. The hardening lives in one
+//! place, so it can be reviewed on its own. The `MetadataFile` convenience constructors from
+//! `alpm-common` (`from_file`) are deliberately never used: they call `read_to_string` on a path
+//! with no bound and no file-type check.
 //!
 //! Three properties are enforced here:
 //!
@@ -119,7 +119,7 @@ pub(crate) fn read_capped(path: &Path, limit: Limit, max: u64) -> Result<Vec<u8>
 ///
 /// # Errors
 ///
-/// As [`read_capped`], plus [`Error::NotUtf8`] if the contents are not valid UTF-8.
+/// As `read_capped`, plus [`Error::NotUtf8`] if the contents are not valid UTF-8.
 pub fn read_capped_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
     let bytes = read_capped(path, limit, max)?;
     decode(path, bytes)
@@ -127,12 +127,11 @@ pub fn read_capped_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
 
 /// Reads `path` in full and decodes it as UTF-8, **following a final symlink**.
 ///
-/// Exposes the [`open_following_symlinks`] door for alpm `.hook` files. `alpm-hooks(5)`
-/// documents disabling a hook by shadowing it with a symlink to `/dev/null`. Refusing to
-/// follow that symlink would break the feature instead of protecting anything: a hook
-/// directory is host configuration named by `pacman.conf`, not a package-controlled entry
-/// directory, and the file is one of an enumerated set whose whole population is trusted the
-/// same way.
+/// Exposes the `open_following_symlinks` door for alpm `.hook` files. `alpm-hooks(5)` documents
+/// disabling a hook by shadowing it with a symlink to `/dev/null`. Refusing to follow that symlink
+/// would break the feature instead of protecting anything: a hook directory is host configuration
+/// named by `pacman.conf`, not a package-controlled entry directory, and the file is one of an
+/// enumerated set whose whole population is trusted the same way.
 ///
 /// The rest of the door is unchanged: `O_NONBLOCK`, an `fstat` that refuses anything but a
 /// regular file, and a bounded read. A FIFO planted in a hook directory still cannot hang the
@@ -142,7 +141,7 @@ pub fn read_capped_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
 ///
 /// # Errors
 ///
-/// As [`read_capped`], except that a final symlink is resolved rather than refused.
+/// As `read_capped`, except that a final symlink is resolved rather than refused.
 pub fn read_capped_utf8_following(path: &Path, limit: Limit, max: u64) -> Result<String> {
     let file = open_following_symlinks(path)?;
     let metadata = ensure_regular_file(&file, path)?;

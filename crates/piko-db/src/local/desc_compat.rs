@@ -5,8 +5,8 @@
 //! to 173 v1 entries on the machine this was developed against. Without [`DescView`], every
 //! caller would have to match on the variant itself.
 //!
-//! The repository equivalent is [`crate::repo::desc_compat`]. What the two have in common —
-//! the unknown-section filter and its policy — lives in [`crate::desc_compat`].
+//! The repository equivalent is `repo::desc_compat`. What the two have in common — the
+//! unknown-section filter and its policy — lives in [`crate::desc_compat`].
 
 use alpm_db::desc::DbDescFile;
 use alpm_types::{

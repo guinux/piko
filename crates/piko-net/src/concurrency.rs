@@ -42,6 +42,7 @@ impl Concurrency {
     }
 
     /// The same concurrency with a different per-host cap, for a caller that measured its own.
+    ///
     /// Clamps to at least one, since zero would spread nothing anywhere.
     #[must_use]
     pub const fn with_per_host(self, per_host: usize) -> Self {

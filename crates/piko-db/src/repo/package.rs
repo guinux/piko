@@ -227,12 +227,12 @@ fn collect_file_list(
 ///   [`Self::replaces`], [`Self::groups`], [`Self::compressed_size`],
 ///   [`Self::installed_size`]. Infallible and free after open. [`crate::solve::Universe`]
 ///   reads these fields for *every* candidate, so deferring them would buy nothing. See
-///   [`super::eager`].
+///   `repo::eager`.
 /// - **Deferred** — everything else, through [`Self::desc`], which parses the retained text
 ///   on first access and caches the outcome exactly as [`crate::LocalPackage::desc`] does.
 ///
-/// The file list is a third tier — see [`FilesSource`] — because it may require decompressing
-/// a *second*, much larger archive that has not been touched yet.
+/// The file list is a third tier — see `FilesSource` — because it may require decompressing a
+/// *second*, much larger archive that has not been touched yet.
 pub struct RepoPackage {
     entry: EntryName,
     eager: EagerFields,
@@ -240,8 +240,8 @@ pub struct RepoPackage {
     raw: Box<str>,
     /// `%DEPENDS%`, converted on first access from the range [`EagerFields`] recorded.
     ///
-    /// A third tier between the eager fields and the full `desc`. It is the only section
-    /// that needed one — see [`crate::eager::Depends`] for why it is worth deferring.
+    /// A third tier between the eager fields and the full `desc`. It is the only section that
+    /// needed one — see `eager::Depends` for why it is worth deferring.
     depends: Lazy<Box<[RelationOrSoname]>>,
     desc: Lazy<LoadedDesc>,
     files: Arc<FilesSource>,
@@ -270,7 +270,7 @@ impl RepoPackage {
     /// The shared file-list source every package in the same database holds an `Arc` to.
     ///
     /// Used by [`super::database::RepoDatabase::file_lists`] to reach the batch lookup on
-    /// [`FilesSource`] without going through any one package's own [`Self::file_list`].
+    /// `FilesSource` without going through any one package's own [`Self::file_list`].
     pub(crate) const fn files_source(&self) -> &Arc<FilesSource> {
         &self.files
     }
@@ -299,9 +299,9 @@ impl RepoPackage {
 
     /// `%DEPENDS%`, the run-time dependencies, converted on first access.
     ///
-    /// The one relation section that is **not** free: see [`crate::eager::Depends`]. The
-    /// conversion reads a byte range recorded at open, not the whole entry. Its outcome is
-    /// cached — including a failure — exactly as [`Self::desc`]'s is.
+    /// The one relation section that is **not** free: see `eager::Depends`. The conversion reads a
+    /// byte range recorded at open, not the whole entry. Its outcome is cached — including a
+    /// failure — exactly as [`Self::desc`]'s is.
     ///
     /// # Errors
     ///
@@ -426,10 +426,10 @@ impl RepoPackage {
 
     /// Whether the shared file-list arena has already been loaded.
     ///
-    /// Since the arena is shared across every package in the database (see
-    /// [`FilesSource`]), this reflects the database's state, not just this one package's.
-    /// It exists for the same reason [`crate::LocalPackage::is_desc_loaded`] does: proving,
-    /// from outside the crate, that opening a database does not load what it should not.
+    /// Since the arena is shared across every package in the database (see `FilesSource`), this
+    /// reflects the database's state, not just this one package's. It exists for the same reason
+    /// [`crate::LocalPackage::is_desc_loaded`] does: proving, from outside the crate, that opening
+    /// a database does not load what it should not.
     #[must_use]
     pub fn is_files_loaded(&self) -> bool {
         self.files.lazy.is_loaded()

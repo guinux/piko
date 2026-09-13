@@ -235,11 +235,11 @@ pub fn check_duplicates(targets: &[FileTarget]) -> Result<()> {
 ///
 /// # Where the file lands
 ///
-/// [`select_download_dir`] runs here, which is the second place it runs — the other being
-/// `DownloadingSource::new`. It has to: this download happens before a plan exists, so there
-/// is no transaction source yet to borrow one from. It runs *after* the URL is parsed and
-/// after the cache is asked, so a malformed URL is reported as a malformed URL rather than as
-/// a cache problem, and a URL already in the cache needs no writable directory at all.
+/// [`crate::select_download_dir`] runs here, which is the second place it runs — the other being
+/// `DownloadingSource::new`. It has to: this download happens before a plan exists, so there is no
+/// transaction source yet to borrow one from. It runs *after* the URL is parsed and after the cache
+/// is asked, so a malformed URL is reported as a malformed URL rather than as a cache problem, and
+/// a URL already in the cache needs no writable directory at all.
 ///
 /// Nothing is verified here. The file joins the transaction as an ordinary file target and is
 /// checked in [`crate::Transaction::verify`], under `policy`.

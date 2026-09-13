@@ -24,18 +24,16 @@
 //! # What it costs
 //!
 //! Two of the rules ask the whole local database who owns a path. That forces every installed
-//! package's `files` to be read. libalpm has the same data resident for other reasons; piko
-//! does not. The load is deferred to the first query that actually needs one ([`Owners`]) and
-//! then shared. A transaction whose packages ship no backup files and hit no conflicts never
-//! pays it.
+//! package's `files` to be read. libalpm has the same data resident for other reasons; piko does
+//! not. The load is deferred to the first query that actually needs one (`Owners`) and then shared.
+//! A transaction whose packages ship no backup files and hit no conflicts never pays it.
 //!
-//! Deferring the load is not the whole cost, and the rest is easy to miss. Most of
-//! [`Owners`]'s accessors ask "who owns this path", which genuinely has to consider every
-//! installed package — but they run rarely: once per reported conflict, or only for a backup
-//! file. [`Owners::files_of`] is the opposite. It asks "what does *this named package* own".
-//! [`examine`] calls it once per path **per other target in the transaction**, so a linear
-//! scan of the installed set sits inside two nested loops. The check becomes quadratic in the
-//! size of the plan.
+//! Deferring the load is not the whole cost, and the rest is easy to miss. Most of `Owners`'s
+//! accessors ask "who owns this path", which genuinely has to consider every installed package —
+//! but they run rarely: once per reported conflict, or only for a backup file. `Owners::files_of`
+//! is the opposite. It asks "what does *this named package* own". `examine` calls it once per path
+//! **per other target in the transaction**, so a linear scan of the installed set sits inside two
+//! nested loops. The check becomes quadratic in the size of the plan.
 //!
 //! Measured against this machine's database, 85 677 paths held constant while the target count
 //! varied: 1 target 5.1 s, 16 targets 7.0 s, 64 targets 13.7 s, 200 targets **32.0 s**. With
@@ -43,11 +41,10 @@
 //! nearly stops mattering, and the remaining ~5 s is the `lstat` of every path — the work the
 //! check exists to do. Both versions report the same 72 516 conflicts.
 //!
-//! Indexing `files_of` left one scan of the target list per path: [`examine`]'s "is this path
-//! changing hands between two targets" question. That question is now answered from
-//! [`Handover`], built once per [`check`]. Measured on the case that exercises it hardest,
-//! targets rotated so that *every* path is new to its target and owned by another target's
-//! installed version:
+//! Indexing `files_of` left one scan of the target list per path: `examine`'s "is this path
+//! changing hands between two targets" question. That question is now answered from `Handover`,
+//! built once per [`check`]. Measured on the case that exercises it hardest, targets rotated so
+//! that *every* path is new to its target and owned by another target's installed version:
 //!
 //! | targets | paths | per-path scan | indexed |
 //! | --- | --- | --- | --- |

@@ -1,14 +1,12 @@
 //! Checking installed packages against repository databases: available updates, and packages
 //! known to no repository at all.
 //!
-//! [`check_updates`] mirrors what `pacman -Qu` reports. For each installed package, it asks:
-//! is a newer version available in a repository? Version comparison reuses
-//! [`alpm_types::FullVersion`]'s `Ord`, which implements the same epoch/`pkgver`/`pkgrel`
-//! algorithm as libalpm's `alpm_pkg_vercmp` (`version.c`). There is nothing to reimplement
-//! here.
+//! `check_updates` mirrors what `pacman -Qu` reports. For each installed package, it asks: is a
+//! newer version available in a repository? Version comparison reuses [`alpm_types::FullVersion`]'s
+//! `Ord`, which implements the same epoch/`pkgver`/`pkgrel` algorithm as libalpm's
+//! `alpm_pkg_vercmp` (`version.c`). There is nothing to reimplement here.
 //!
-//! [`foreign`] mirrors `pacman -Qm`: the inverse presence check, with no version comparison at
-//! all.
+//! `foreign` mirrors `pacman -Qm`: the inverse presence check, with no version comparison at all.
 
 use crate::{
     local::{database::LocalDatabase, package::LocalPackage},

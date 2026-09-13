@@ -5,12 +5,12 @@
 //! _default with files_ variant also holds a sibling `<name>-<version>/files` entry. See
 //! [alpm-repo-db].
 //!
-//! Unlike the local database, a repository archive has no random access: gzip-over-tar must
-//! be walked front to back. [`RepoDatabase::open_repo`] therefore prefers the smaller
-//! `<repo>.db` archive and defers file lists to `<repo>.files`. It loads that archive in full
-//! only when [`RepoPackage::file_list`] is actually called — the requirement this module
-//! exists to satisfy. See [`files_arena`] for why that deferred load is keyed by name and
-//! version rather than by position.
+//! Unlike the local database, a repository archive has no random access: gzip-over-tar must be
+//! walked front to back. [`RepoDatabase::open_repo`] therefore prefers the smaller `<repo>.db`
+//! archive and defers file lists to `<repo>.files`. It loads that archive in full only when
+//! [`RepoPackage::file_list`] is actually called — the requirement this module exists to satisfy.
+//! See `files_arena` for why that deferred load is keyed by name and version rather than by
+//! position.
 //!
 //! [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
 

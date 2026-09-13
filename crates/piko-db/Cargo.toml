@@ -8,6 +8,12 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# docs.rs builds with `fixture` on, so the module the feature gates is documented rather than
+# missing, and with `--cfg docsrs` so each gated item carries its feature badge.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 # Exposes the test-fixture builder to downstream crates and integration tests.
 fixture = ["dep:tempfile"]

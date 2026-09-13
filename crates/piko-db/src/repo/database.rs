@@ -46,9 +46,10 @@ pub enum Variant {
     DefaultWithFiles,
 }
 
-/// Something suspicious found while reading a repository archive, which did not stop the
-/// open. Mirrors [`crate::Diagnostic`] for the same reason: it is returned, never logged, so
-/// the caller decides how — and whether — to present it.
+/// Something suspicious found while reading a repository archive, which did not stop the open.
+///
+/// Mirrors [`crate::Diagnostic`] for the same reason: it is returned, never logged, so the caller
+/// decides how — and whether — to present it.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RepoDiagnostic {
@@ -98,9 +99,9 @@ pub enum RepoDiagnostic {
     },
     /// A `files` member could not be parsed.
     ///
-    /// The package itself is **not** dropped — its `desc` may still be valid. Its file list
-    /// becomes permanently unavailable instead, surfaced as
-    /// [`Error::FilesMissingForPackage`](crate::Error::FilesMissingForPackage) when asked for.
+    /// The package itself is **not** dropped — its `desc` may still be valid. Its file list becomes
+    /// permanently unavailable instead, surfaced as [`Error::FilesMissingForPackage`] when asked
+    /// for.
     InvalidFiles {
         /// The entry directory name whose `files` member failed to parse.
         entry: String,
@@ -530,13 +531,13 @@ impl RepoDatabase {
     ///
     /// A package must match **all** of `terms` (AND, not OR) to be included at all. Searching
     /// `["firefox", "browser"]` only returns packages that independently satisfy both. See
-    /// [`search::MatchKind`] for the six ways a single term can match, and their relative
-    /// ranking, highest first: an exact name match, an exact match against one of its
-    /// `%PROVIDES%`, a name prefix, a name substring, a description substring, or an exact
-    /// group match. Comparisons are case-insensitive. Blank terms are dropped; if nothing is
-    /// left after that, nothing matches. Each package appears at most once, scored by the
-    /// single highest [`search::MatchKind`] any one of its terms achieved. Results are sorted
-    /// most-relevant-first, then by name to break ties deterministically.
+    /// [`crate::MatchKind`] for the six ways a single term can match, and their relative ranking,
+    /// highest first: an exact name match, an exact match against one of its `%PROVIDES%`, a name
+    /// prefix, a name substring, a description substring, or an exact group match. Comparisons are
+    /// case-insensitive. Blank terms are dropped; if nothing is left after that, nothing matches.
+    /// Each package appears at most once, scored by the single highest [`crate::MatchKind`] any one
+    /// of its terms achieved. Results are sorted most-relevant-first, then by name to break ties
+    /// deterministically.
     #[must_use]
     pub fn search<'q>(&self, terms: impl IntoIterator<Item = &'q str>) -> Vec<SearchHit<'_>> {
         search::search(&self.packages, terms)

@@ -1,9 +1,9 @@
 //! Whether a set of signature results satisfies a `SigLevel`.
 //!
-//! A pure function over values, separate from anything that talks to GnuPG, for the same
-//! reason [`piko_txn::extract::decision`] is separate from extraction. This is the rule that
-//! decides whether piko will install code onto a system, so it has to be readable and
-//! enumerable in tests without a keyring.
+//! A pure function over values, separate from anything that talks to GnuPG, for the same reason
+//! `piko-txn`'s extraction decision is separate from extraction itself. This is the rule that
+//! decides whether piko will install code onto a system, so it has to be readable and enumerable in
+//! tests without a keyring.
 //!
 //! Transcribed from `_alpm_check_pgp_helper` (`signing.c:803`). libalpm spreads the same rule
 //! across that function (which decides) and `_alpm_process_siglist` (which explains), with the

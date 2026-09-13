@@ -99,10 +99,10 @@ pub enum Origin {
 
 /// One candidate, resolved from a [`SolvableId`].
 ///
-/// Holds its [`Source`] by value rather than by reference. [`Source`] is two words and
-/// [`Copy`], so every accessor borrows the underlying package for `'a` rather than for as long
-/// as the [`Universe`] is borrowed. Without that, indexing the universe by `&'a str` keys
-/// taken from its own candidates would not typecheck.
+/// Holds its `Source` by value rather than by reference. `Source` is two words and [`Copy`], so
+/// every accessor borrows the underlying package for `'a` rather than for as long as the
+/// [`Universe`] is borrowed. Without that, indexing the universe by `&'a str` keys taken from its
+/// own candidates would not typecheck.
 #[derive(Clone, Copy, Debug)]
 pub struct Solvable<'a> {
     id: SolvableId,
@@ -154,11 +154,11 @@ impl<'a> Solvable<'a> {
 
     /// `%DEPENDS%`.
     ///
-    /// The only accessor on this type that can fail, and deliberately so. A repository
-    /// candidate's `%DEPENDS%` converts on first access rather than at open — see
-    /// [`crate::eager::Depends`] — because only the solvables inside `encode`'s reachable
-    /// cone ever need it: 16% of the universe on this machine. An installed package's
-    /// `%DEPENDS%` is already in the eager tier, so this arm never fails.
+    /// The only accessor on this type that can fail, and deliberately so. A repository candidate's
+    /// `%DEPENDS%` converts on first access rather than at open — see `eager::Depends` — because
+    /// only the solvables inside `encode`'s reachable cone ever need it: 16% of the universe on
+    /// this machine. An installed package's `%DEPENDS%` is already in the eager tier, so this arm
+    /// never fails.
     ///
     /// # Errors
     ///
@@ -854,8 +854,10 @@ impl<'a> Universe<'a> {
         self.replaces.get(name).map_or(&[], Vec::as_slice)
     }
 
-    /// Every **repository** candidate belonging to the `%GROUPS%` group `name`, at most one
-    /// per package name, in priority then scan order. Empty if `name` names no group.
+    /// Every **repository** candidate belonging to the `%GROUPS%` group `name`, at most one per
+    /// package name, in priority then scan order.
+    ///
+    /// Empty if `name` names no group.
     ///
     /// This is what `pacman -S <group>` expands to: the group's members as a repository
     /// offers them. An installed member is left out, because the "must remain" clause already
@@ -878,6 +880,7 @@ impl<'a> Universe<'a> {
     }
 
     /// Every **installed** package belonging to the `%GROUPS%` group `name`, in scan order.
+    ///
     /// Empty if no installed package carries it.
     ///
     /// The removal counterpart of [`Self::group_members`], and disjoint from it. `pacman -R
@@ -904,10 +907,10 @@ impl<'a> Universe<'a> {
 
     /// Every candidate declaring a `%CONFLICTS%` entry against `name`.
     ///
-    /// The reverse direction of `_alpm_outerconflicts` (`conflict.c`). An installed package
-    /// may name an incoming one, rather than the other way round, and libalpm checks both.
-    /// Whether the conflict actually applies still needs [`crate::depcmp`], because a conflict
-    /// matches through `%PROVIDES%` as well as literally.
+    /// The reverse direction of `_alpm_outerconflicts` (`conflict.c`). An installed package may
+    /// name an incoming one, rather than the other way round, and libalpm checks both. Whether the
+    /// conflict actually applies still needs `depcmp`, because a conflict matches through
+    /// `%PROVIDES%` as well as literally.
     #[must_use]
     pub fn conflicting_with(&self, name: &str) -> &[SolvableId] {
         self.conflicts_on.get(name).map_or(&[], Vec::as_slice)

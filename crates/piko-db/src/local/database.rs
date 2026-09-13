@@ -422,11 +422,10 @@ impl LocalDatabase {
     /// Checks every installed package against `repos`, returning those with a newer version
     /// available — mirrors `pacman -Qu`.
     ///
-    /// See [`crate::updates::check_updates`] for the exact rules: repository priority is
-    /// `repos`' own order (piko does not parse `pacman.conf`), a package absent from every
-    /// repository is skipped, and version comparison reuses
-    /// [`alpm_types::FullVersion`]'s `Ord` — the same algorithm as libalpm's
-    /// `alpm_pkg_vercmp` (`version.c`).
+    /// See `updates::check_updates` for the exact rules: repository priority is `repos`' own order
+    /// (piko does not parse `pacman.conf`), a package absent from every repository is skipped, and
+    /// version comparison reuses [`alpm_types::FullVersion`]'s `Ord` — the same algorithm as
+    /// libalpm's `alpm_pkg_vercmp` (`version.c`).
     #[must_use]
     pub fn check_updates<'a>(
         &'a self,
@@ -438,8 +437,8 @@ impl LocalDatabase {
     /// Every installed package whose name is not found in any of `repos` — mirrors
     /// `pacman -Qm`.
     ///
-    /// See [`crate::updates::foreign`] for the exact rule: no `Usage` gate, and a name present
-    /// in more than one repository counts the same as a name present in exactly one.
+    /// See `updates::foreign` for the exact rule: no `Usage` gate, and a name present in more than
+    /// one repository counts the same as a name present in exactly one.
     #[must_use]
     pub fn foreign<'a>(
         &'a self,

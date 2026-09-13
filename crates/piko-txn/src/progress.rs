@@ -7,7 +7,7 @@ use piko_db::EntryName;
 
 use crate::{exec, hook, install::Extraction, scriptlet, transaction::Step};
 
-/// One thing happening while [`crate::transaction::Staged::commit_with_progress`] applies a
+/// One thing happening while [`crate::transaction::Transaction::commit_with_progress`] applies a
 /// plan.
 ///
 /// This is `#[non_exhaustive]`. Unlike `piko_net::progress::Event`, it carries a borrowed
@@ -128,8 +128,9 @@ pub enum Event<'a> {
     },
 }
 
-/// What one finished step did. It carries only what [`Event::StepFinished`]'s `step` does not
-/// already say.
+/// What one finished step did.
+///
+/// It carries only what [`Event::StepFinished`]'s `step` does not already say.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum StepOutcome<'a> {

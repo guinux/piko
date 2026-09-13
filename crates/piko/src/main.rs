@@ -1,11 +1,11 @@
 //! The `piko` command line interface.
 //!
-//! This file only dispatches commands. Argument definitions live in [`cli`]. Database
-//! opening lives in [`context`]. Failures live in [`error`]. Value rendering lives in
-//! [`output`]. Each subcommand family has its own module under [`cmd`].
+//! This file only dispatches commands. Argument definitions live in `cli`. Database opening lives
+//! in `context`. Failures live in `error`. Value rendering lives in `output`. Each subcommand
+//! family has its own module under `cmd`.
 //!
-//! Each arm uses `?` instead of a hand-written `match`. [`error::Error`] covers all three
-//! of the CLI's failure sources — see that module.
+//! Each arm uses `?` instead of a hand-written `match`. `error::Error` covers all three of the
+//! CLI's failure sources — see that module.
 
 mod cli;
 mod cmd;

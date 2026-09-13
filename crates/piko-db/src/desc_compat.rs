@@ -7,13 +7,13 @@
 //! default — see [`UnknownSectionPolicy`].
 //!
 //! This module holds only the part both databases share. The local `desc` view lives in
-//! [`crate::local::desc_compat`], and the repository one in [`crate::repo::desc_compat`].
-//! [`filter_unknown_sections`] is deliberately reused by both rather than duplicated: the two
-//! formats have different keyword sets, but the identical section grammar.
+//! [`crate::local::desc_compat`], and the repository one in `repo::desc_compat`.
+//! `filter_unknown_sections` is deliberately reused by both rather than duplicated: the two formats
+//! have different keyword sets, but the identical section grammar.
 //!
-//! [`take_fields`] is here for the same reason: `%URL%` and `%PACKAGER%` are the two sections
-//! both formats hand to a parser that can refuse a value libalpm prints verbatim, and both
-//! parsers convert every section or none.
+//! `take_fields` is here for the same reason: `%URL%` and `%PACKAGER%` are the two sections both
+//! formats hand to a parser that can refuse a value libalpm prints verbatim, and both parsers
+//! convert every section or none.
 
 use std::{borrow::Cow, str::FromStr as _};
 

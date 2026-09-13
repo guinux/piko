@@ -6,8 +6,8 @@
 //!
 //! # The ordering is the security property
 //!
-//! `pacman -Sy` verifies a database when it downloads it, and this mirrors that. The sequence
-//! in [`refresh`] is not incidental:
+//! `pacman -Sy` verifies a database when it downloads it, and this mirrors that. The sequence in
+//! [`fn@refresh`] is not incidental:
 //!
 //! 1. Stream the download into a temporary beside the destination
 //!    ([`piko_db_write::AtomicFile`]), leaving the live database untouched.
@@ -40,6 +40,48 @@
 //! when the signal lands still waits that request out. [`refresh::Limits::timeout`] bounds it,
 //! and `Refresher`'s connect timeout is deliberately much shorter than its overall one, so a
 //! cancellation is prompt rather than instant.
+//!
+//! # Example
+//!
+//! Refreshing one repository, the way `pacman -Sy` does. The keyring is opened once and lent
+//! to every refresh; a [`Policy`](piko_sig::Policy) of `SigLevel = Never` would pass `None`
+//! instead and verify nothing.
+//!
+//! ```rust,no_run
+//! use std::path::Path;
+//!
+//! use piko_net::{Cancel, Refresher};
+//! use piko_net::refresh::Outcome;
+//! use piko_sig::{Keyring, Policy};
+//! use piko_db::config::SigLevel;
+//!
+//! let keyring = Keyring::open("/etc/pacman.d/gnupg")?;
+//!
+//! // A database is judged by the `DATABASE*` half of the repository's resolved `SigLevel`.
+//! let policy = Policy::for_database(SigLevel::default());
+//!
+//! // Installed on the CLI's `SIGINT` handler. Checked once per 64 KiB.
+//! let cancel = Cancel::new();
+//!
+//! let refresher = Refresher::default();
+//! let outcome = refresher.refresh(
+//!     Path::new("/var/lib/pacman/sync"),
+//!     "core",
+//!     &["https://mirror.example/core/os/x86_64".to_owned()],
+//!     Some(&keyring),
+//!     policy,
+//!     false, // `force`: pacman's second `-y`, which skips the conditional request.
+//!     &cancel,
+//! )?;
+//!
+//! match outcome {
+//!     // `core.db` was downloaded, verified against `core.db.sig`, then renamed into place.
+//!     Outcome::Updated => println!("core updated"),
+//!     // A `304`. The live database was never touched.
+//!     Outcome::UpToDate => println!("core already current"),
+//! }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 //!
 //! # What is deliberately not here
 //!

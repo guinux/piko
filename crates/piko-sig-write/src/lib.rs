@@ -21,6 +21,36 @@
 //! `piko-sig` already links, so administering a keyring adds no new binary dependency and no
 //! subprocess/argv attack surface.
 //!
+//! # Example
+//!
+//! Bootstrapping a keyring the way `pacman-key --init` plus `--populate` does: create the
+//! layout and the master key, import a vendor's keys, then locally sign one so GnuPG treats it
+//! as trusted.
+//!
+//! ```rust,no_run
+//! use std::path::Path;
+//!
+//! use piko_sig_write::KeyringAdmin;
+//!
+//! // Idempotent: an already-initialized keyring is left alone.
+//! let (admin, outcome) = KeyringAdmin::init("/etc/pacman.d/gnupg")?;
+//! if outcome.master_key_created {
+//!     println!("generated a new master signing key");
+//! }
+//!
+//! let summary = admin.import(Path::new("/usr/share/pacman/keyrings/archlinux.gpg"))?;
+//! println!("{} of {} keys imported", summary.imported, summary.considered);
+//!
+//! // Certifying with the master key is what turns a merely present key into a trusted one.
+//! // Any of the fingerprints `list_keys` returns would do here.
+//! for key in admin.list_keys()? {
+//!     if admin.lsign(&key.fingerprint)? {
+//!         println!("{} locally signed", key.fingerprint);
+//!     }
+//! }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! # What is not here
 //!
 //! No keyserver or WKD lookups (`gpg --recv-keys`/`--refresh-keys`), and no interactive trust

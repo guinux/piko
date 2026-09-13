@@ -1,8 +1,7 @@
 //! Searching the local database.
 //!
-//! The repository equivalent is [`crate::repo::search`]. Both rank hits with the shared
-//! [`MatchKind`](crate::search::MatchKind), so a user sees one ordering regardless of which
-//! database answered.
+//! The repository equivalent is `repo::search`. Both rank hits with the shared [`MatchKind`], so a
+//! user sees one ordering regardless of which database answered.
 
 use crate::local::package::LocalPackage;
 use crate::search::{MatchKind, Searchable, Term, best_match, every_term_is_the_name, prepare};
