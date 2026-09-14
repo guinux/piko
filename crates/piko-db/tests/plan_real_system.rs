@@ -273,6 +273,98 @@ fn a_real_plan_orders_every_dependency_before_its_dependent() {
     assert_eq!(violations, 0, "a dependency was planned after its dependent");
 }
 
+/// The removal mirror of `a_real_plan_orders_every_dependency_before_its_dependent`.
+///
+/// A dependent is removed before the packages it depends on, so its `pre_remove` scriptlet
+/// still finds their files. This is `_alpm_sortbydeps(handle, rem_orig, NULL, 1)`
+/// (`trans.c:157`).
+///
+/// The removal set is built with `-Rs` over a sample of installed packages, so the plans are
+/// deep enough for the order to mean something. A package that nothing can remove cleanly is
+/// skipped: the test measures the order of a plan, not which plans exist.
+#[test]
+#[ignore = "requires a real ALPM local database"]
+fn a_real_removal_plan_orders_every_dependent_before_its_dependencies() {
+    /// How many installed packages to attempt a `-Rs` of. Most are depended upon by something
+    /// else, so most attempts refuse, and each attempt costs one solve.
+    const ATTEMPTS: usize = 150;
+
+    /// How many removal plans of two or more packages make the order mean something. The walk
+    /// stops at this many, so a machine whose first packages all cascade runs quickly.
+    const WANTED: usize = 15;
+
+    let Ok(local) = LocalDatabase::open("/var/lib/pacman/local") else {
+        eprintln!("skipping: no real local database");
+        return;
+    };
+
+    let limits = piko_db::Limits::default();
+    let universe = Universe::build(&local, std::iter::empty(), UniverseOptions::new()).unwrap();
+
+    let mut violations = 0_usize;
+    let mut planned_count = 0_usize;
+    let mut deepest = 0_usize;
+
+    for package in local.iter().take(ATTEMPTS) {
+        if planned_count >= WANTED {
+            break;
+        }
+        let Some(installed) = universe.installed_named(package.name().as_ref()) else { continue };
+        let request = piko_db::solve::Request::new().recursive(true).remove(installed.id());
+        let Ok(Ok(solved)) = piko_db::solve::solve_with_removals(&universe, &request, &limits)
+        else {
+            continue;
+        };
+        let plan = piko_db::solve::Plan::assemble(
+            &universe,
+            &solved,
+            request.targets(),
+            &limits,
+            &piko_db::solve::NoCache,
+        );
+
+        // Position of each removed package in execution order.
+        let mut position = std::collections::HashMap::new();
+        for (index, step) in plan.steps().iter().enumerate() {
+            if let piko_db::solve::Step::Remove { package } = step {
+                position.insert(*package, index);
+            }
+        }
+        if position.len() < 2 {
+            continue;
+        }
+        planned_count += 1;
+        deepest = deepest.max(position.len());
+
+        for (id, index) in &position {
+            let solvable = universe.get(*id).unwrap();
+            let Ok(depends) = solvable.depends() else { continue };
+            for want in depends {
+                for satisfier in universe.satisfiers(want) {
+                    let Some(other) = position.get(&satisfier) else { continue };
+                    // The dependent must come first, so its own index must be the smaller one.
+                    if other < index && plan.diagnostics().is_empty() {
+                        eprintln!(
+                            "  {} (at {index}) depends on {} (at {other})",
+                            solvable.name(),
+                            universe.get(satisfier).unwrap().name()
+                        );
+                        violations += 1;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "{planned_count} removal plans of 2 or more packages, deepest {deepest}, \
+         {violations} violations"
+    );
+    assert!(planned_count >= WANTED, "expected {WANTED} usable plans, got {planned_count}");
+    assert_eq!(violations, 0, "a dependency was removed before its dependent");
+}
+
 /// A removal plan must not depend on which repositories are configured.
 ///
 /// This is not a curiosity. `piko remove` is a removal-only operation. If the answer is

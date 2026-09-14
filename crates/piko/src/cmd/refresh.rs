@@ -45,7 +45,7 @@ pub fn refresh(
             Err(error) => {
                 report(&error);
                 eprintln!(
-                    "note: a repository's SigLevel requires a signature, so refreshing \
+                    "Note: a repository's SigLevel requires a signature, so refreshing \
                      cannot continue without a usable keyring"
                 );
                 return ExitCode::FAILURE;
@@ -109,10 +109,12 @@ pub fn refresh(
         }
     }
 
+    // Through `suspend`, as every other line this function prints. The finished rows still
+    // belong to the `MultiProgress`. A bare `eprintln!` writes into the region it draws.
     if !only.is_empty() {
         for wanted in only {
             if !config.repositories.iter().any(|repo| repo.name.to_string() == *wanted) {
-                eprintln!("error: {wanted} is not a configured repository");
+                steps.suspend(|| eprintln!("Error: {wanted} is not a configured repository"));
                 failed = true;
             }
         }

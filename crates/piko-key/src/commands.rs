@@ -11,7 +11,7 @@ pub fn init(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
     match KeyringAdmin::init(gpgdir) {
         Ok((_, outcome)) => {
             if outcome.master_key_created {
-                emit!(out, "generated a new master signing key in {}", gpgdir.display());
+                emit!(out, "Generated a new master signing key in {}", gpgdir.display());
             } else {
                 emit!(out, "{} is already initialized", gpgdir.display());
             }
@@ -52,7 +52,7 @@ pub fn populate(
     };
 
     if names.is_empty() {
-        emit!(out, "no keyrings found under {}", keyring_dir.display());
+        emit!(out, "No keyrings found under {}", keyring_dir.display());
         return ExitCode::SUCCESS;
     }
 
@@ -139,13 +139,13 @@ pub fn lsign_key(
         {
             Decision::Proceed(fingerprint) => fingerprint,
             Decision::Declined => {
-                emit!(out, "skipped {keyid}");
+                emit!(out, "Skipped {keyid}");
                 continue;
             }
             Decision::Failed => return ExitCode::FAILURE,
         };
         match admin.lsign(&fingerprint) {
-            Ok(true) => emit!(out, "locally signed {fingerprint}"),
+            Ok(true) => emit!(out, "Locally signed {fingerprint}"),
             Ok(false) => emit!(out, "{fingerprint} is already locally signed"),
             Err(error) => {
                 report(&error);
@@ -191,11 +191,11 @@ pub fn list_keys(gpgdir: &Path, keyids: &[String], out: &mut impl std::io::Write
             expired_suffix(key)
         );
         for user_id in &key.user_ids {
-            emit!(out, "  uid  {user_id}");
+            emit!(out, "  Uid  {user_id}");
         }
     }
     if keys.is_empty() {
-        emit!(out, "no matching keys");
+        emit!(out, "No matching keys");
         if !keyids.is_empty() {
             return ExitCode::FAILURE;
         }
@@ -240,7 +240,7 @@ pub fn delete(
         let fingerprint = match confirm_trust_action(&admin, keyid, "delete", noconfirm, out) {
             Decision::Proceed(fingerprint) => fingerprint,
             Decision::Declined => {
-                emit!(out, "skipped {keyid}");
+                emit!(out, "Skipped {keyid}");
                 continue;
             }
             Decision::Failed => return ExitCode::FAILURE,
@@ -249,7 +249,7 @@ pub fn delete(
             report(&error);
             return ExitCode::FAILURE;
         }
-        emit!(out, "deleted {fingerprint}");
+        emit!(out, "Deleted {fingerprint}");
     }
     ExitCode::SUCCESS
 }
@@ -312,7 +312,7 @@ pub fn verify(
                 piko_sig::Verdict::Accepted { .. } => ExitCode::SUCCESS,
                 piko_sig::Verdict::Rejected(rejection) => {
                     eprintln!(
-                        "error: the signature on {} was rejected: {rejection}",
+                        "Error: the signature on {} was rejected: {rejection}",
                         file.display()
                     );
                     ExitCode::FAILURE
@@ -337,7 +337,7 @@ pub fn updatedb(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
     };
     match admin.update_trustdb() {
         Ok(()) => {
-            emit!(out, "trust database recomputed");
+            emit!(out, "Trust database recomputed");
             ExitCode::SUCCESS
         }
         Err(error) => {

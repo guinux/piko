@@ -240,6 +240,23 @@ pub enum Error {
         output: Vec<String>,
     },
 
+    /// The transaction stopped because [`crate::Transaction::cancel`]'s flag was raised.
+    ///
+    /// `completed` is zero for a stop during verification. Nothing is applied there, and no
+    /// journal exists yet.
+    ///
+    /// During the commit, the flag is read before a step starts, never inside one. So no step
+    /// is half applied. The steps counted here completed, and the journal names them. The
+    /// remaining steps were not attempted. The system is then left part-way through the
+    /// transaction. That is the same state a failed step leaves it in.
+    #[error("the transaction was cancelled after {completed} of {total} steps")]
+    Cancelled {
+        /// How many steps ran to the end.
+        completed: usize,
+        /// How many steps the transaction planned.
+        total: usize,
+    },
+
     /// A package's signature does not satisfy the configured `SigLevel`.
     ///
     /// The package is intact as far as piko knows; what failed is the *policy*. This is

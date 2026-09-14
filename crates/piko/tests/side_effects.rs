@@ -1034,7 +1034,7 @@ fn update_downgrade_moves_a_package_backwards_and_nothing_else_does() {
     let seen = text(&output);
     assert!(output.status.success(), "{seen}");
     assert!(
-        seen.contains("nothing to do"),
+        seen.contains("Nothing to do"),
         "a plain update downgraded, or failed instead of reporting nothing to do:\n{seen}"
     );
 
@@ -1063,7 +1063,7 @@ fn update_with_nothing_pending_reports_it() {
     let output = sandbox.run_update(&[], &["--norefresh"]);
     let seen = text(&output);
     assert!(output.status.success(), "{seen}");
-    assert!(seen.contains("nothing to do"), "{seen}");
+    assert!(seen.contains("Nothing to do"), "{seen}");
 }
 
 /// `update` must apply a `%REPLACES%` pair: install the replacement and remove what it
@@ -1142,7 +1142,7 @@ fn update_refreshes_repositories_by_default() {
     let output = sandbox.run_update(&[], &[]);
     let seen = text(&output);
     assert!(output.status.success(), "{seen}");
-    assert!(seen.contains("nothing to do"), "{seen}");
+    assert!(seen.contains("Nothing to do"), "{seen}");
     assert!(
         sandbox.path("db/sync/test.db").exists(),
         "update did not refresh the database:\n{seen}"
@@ -1163,7 +1163,7 @@ fn update_norefresh_skips_the_database_refresh() {
     let output = sandbox.run_update(&[], &["--norefresh"]);
     let seen = text(&output);
     assert!(output.status.success(), "{seen}");
-    assert!(seen.contains("nothing to do"), "{seen}");
+    assert!(seen.contains("Nothing to do"), "{seen}");
     assert!(
         !sandbox.path("db/sync/test.db").exists(),
         "--norefresh refreshed the database anyway:\n{seen}"
@@ -1245,17 +1245,14 @@ fn serve_many(bodies: std::collections::HashMap<String, Vec<u8>>) -> (String, Ar
     (format!("http://127.0.0.1:{port}"), served)
 }
 
-/// `-w` with `ParallelDownloads > 1` still reports every package as downloaded, not as a
-/// cache hit.
+/// `-w` with `ParallelDownloads > 1` fetches every package exactly once and verifies each one.
 ///
-/// The guard for a real trap. Package downloads happen in a `prefetch` phase ahead of the
-/// per-package loop, so a `was_cached` check asked inside that loop would answer "yes" for
-/// everything, reporting a run that fetched the whole transaction as one that fetched nothing.
-/// That is `-w`'s verification regression in reverse. `download_only` collects the answer
-/// before `prefetch` runs; this test says so out loud. Three packages, so more than one worker
-/// has something to do.
+/// Three packages, so more than one worker has something to do. The run has two halves: one
+/// `prefetch` phase, then a per-package loop that locates and checks each file. Both halves
+/// must cover all three packages. The request count pins the fetch. The "Verifying signatures"
+/// row pins the check.
 #[test]
-fn download_only_reports_parallel_downloads_as_downloads_not_cache_hits() {
+fn download_only_fetches_and_verifies_every_package_in_parallel() {
     let names = ["foo", "bar", "baz"];
     let bodies: std::collections::HashMap<String, Vec<u8>> = names
         .iter()
@@ -1277,18 +1274,12 @@ fn download_only_reports_parallel_downloads_as_downloads_not_cache_hits() {
 
     for name in names {
         assert!(
-            seen.contains(&format!("downloaded {name}-1.0.0-1-x86_64.pkg.tar")),
-            "{name} was not reported as downloaded:\n{seen}"
-        );
-        assert!(
             sandbox.path(&format!("cache/{name}-1.0.0-1-x86_64.pkg.tar")).exists(),
             "{name} did not land in the cache:\n{seen}"
         );
     }
-    assert!(
-        !seen.contains("already in cache:"),
-        "a freshly downloaded package was reported as a cache hit:\n{seen}"
-    );
+    assert!(seen.contains("Downloading packages"), "no download phase was shown:\n{seen}");
+    assert!(seen.contains("Verifying signatures"), "no verification phase was shown:\n{seen}");
     assert_eq!(served.load(Ordering::SeqCst), names.len(), "not every package was fetched");
 }
 
@@ -1327,13 +1318,10 @@ fn download_only_downloads_without_installing() {
     let output = sandbox.run_install(&["foo"], &["--downloadonly"]);
     let seen = text(&output);
     assert!(output.status.success(), "{seen}");
-    assert!(seen.contains("downloaded"), "no download was reported:\n{seen}");
-    // The prefetch phase must not turn a fresh download into a cache hit. See
-    // `download_only_reports_parallel_downloads_as_downloads_not_cache_hits`.
-    assert!(
-        !seen.contains("already in cache:"),
-        "reported as cached rather than downloaded:\n{seen}"
-    );
+    // `-w` reports the phases it ran, not a per-package summary. The cache holds the result,
+    // and the assertions below read it there.
+    assert!(seen.contains("Downloading packages"), "no download phase was shown:\n{seen}");
+    assert!(seen.contains("Verifying signatures"), "no verification phase was shown:\n{seen}");
 
     assert_eq!(
         std::fs::read(sandbox.path("cache/foo-1.0.0-1-x86_64.pkg.tar")).unwrap(),
@@ -1380,8 +1368,8 @@ fn download_only_refuses_an_unsigned_package() {
         "the refusal did not name the missing signature as the reason:\n{seen}"
     );
     assert!(
-        !seen.contains("already in cache:"),
-        "the package was reported as supplied before being refused:\n{seen}"
+        !sandbox.path("root/usr/bin/foo").exists(),
+        "the refused package was installed anyway:\n{seen}"
     );
 }
 
@@ -1850,7 +1838,7 @@ fn history_keeps_the_newest_and_all_overrides_it() {
 fn an_empty_history_names_the_files_it_read() {
     let sandbox = Sandbox::new();
     let seen = text(&run_history(&sandbox, &[]));
-    assert!(seen.contains("no transactions recorded"), "{seen}");
+    assert!(seen.contains("No transactions recorded"), "{seen}");
     assert!(seen.contains("pacman.log"), "{seen}");
     assert!(seen.contains("piko-history"), "{seen}");
 }
@@ -1966,7 +1954,7 @@ fn a_glob_install_target_expands_to_every_matching_repository_package() {
 
     assert!(output.status.success(), "{seen}");
     assert!(
-        seen.contains("note: app-* matched 2 packages"),
+        seen.contains("Note: app-* matched 2 packages"),
         "the expansion was not reported:\n{seen}"
     );
     assert!(sandbox.path("db/local/app-a-1.0.0-1").is_dir(), "{seen}");
@@ -2039,7 +2027,7 @@ fn a_glob_remove_target_removes_every_matching_installed_package() {
     let seen = text(&output);
 
     assert!(output.status.success(), "{seen}");
-    assert!(seen.contains("note: app-* matched 2 packages"), "{seen}");
+    assert!(seen.contains("Note: app-* matched 2 packages"), "{seen}");
     assert!(!sandbox.path("db/local/app-a-1.0.0-1").exists(), "{seen}");
     assert!(!sandbox.path("db/local/app-b-1.0.0-1").exists(), "{seen}");
     assert!(sandbox.path("db/local/other-1.0.0-1").is_dir(), "{seen}");

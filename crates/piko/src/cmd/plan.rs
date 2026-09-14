@@ -56,11 +56,11 @@ pub enum Mode<'a> {
 pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure) {
     match failure {
         TargetResolutionFailure::InvalidDependencyString(target) => {
-            eprintln!("error: {target} is not a valid dependency string");
+            eprintln!("Error: {target} is not a valid dependency string");
         }
         TargetResolutionFailure::NotFound(target) => {
             eprintln!(
-                "error: no package satisfying {target} was found in any configured \
+                "Error: no package satisfying {target} was found in any configured \
                  repository"
             );
         }
@@ -72,15 +72,15 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
             // A pattern names a set, a literal names one thing. "satisfying" reads as the
             // dependency relation, which is the wrong relation for a glob.
             if piko_db::is_pattern(target) {
-                eprintln!("error: every package matching {target} is ignored");
+                eprintln!("Error: every package matching {target} is ignored");
             } else {
-                eprintln!("error: every package satisfying {target} is ignored");
+                eprintln!("Error: every package satisfying {target} is ignored");
             }
             for candidate in candidates {
                 eprintln!("  {}-{} ({})", candidate.name, candidate.version, candidate.reason);
             }
             eprintln!(
-                "note: piko never installs an ignored package; edit IgnorePkg or \
+                "Note: piko never installs an ignored package; edit IgnorePkg or \
                  IgnoreGroup in pacman.conf to allow it"
             );
         }
@@ -94,7 +94,7 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
 /// `cmd::removal::hold_pkg_allows` gives: a warning under a plan is a warning nobody reads.
 pub(crate) fn print_ignored_targets(ignored: &[IgnoredTarget]) {
     for target in ignored {
-        eprintln!("warning: ignoring package {}-{}", target.name, target.version);
+        eprintln!("Warning: ignoring package {}-{}", target.name, target.version);
         if let Some(detail) = ignore_detail(target.name.as_ref(), &target.reason) {
             eprintln!("  {detail}");
         }
@@ -111,10 +111,10 @@ const EXPANSION_PREVIEW: usize = 20;
 /// every other diagnostic here, so a piped step list stays machine-readable.
 pub(crate) fn print_expansions(expansions: &[Expansion]) {
     for expansion in expansions {
-        eprintln!("note: {} matched {}", expansion.pattern, counts(expansion));
+        eprintln!("Note: {} matched {}", expansion.pattern, counts(expansion));
         if !expansion.groups.is_empty() {
-            eprintln!("  groups: {}", listed(&expansion.groups));
-            eprintln!("  packages: {}", listed(&expansion.names));
+            eprintln!("  Groups: {}", listed(&expansion.groups));
+            eprintln!("  Packages: {}", listed(&expansion.names));
         } else {
             eprintln!("  {}", listed(&expansion.names));
         }
@@ -152,28 +152,28 @@ pub(crate) fn report_expansion_failure(failure: &ExpansionFailure) {
     match failure {
         ExpansionFailure::NoMatch { pattern, side: Side::Installable } => {
             eprintln!(
-                "error: no package or group matching {pattern} was found in any configured \
+                "Error: no package or group matching {pattern} was found in any configured \
                  repository"
             );
         }
         ExpansionFailure::NoMatch { pattern, side: Side::Installed } => {
-            eprintln!("error: no installed package or group matches {pattern}");
+            eprintln!("Error: no installed package or group matches {pattern}");
         }
         ExpansionFailure::TooBroad { pattern, limit } => {
-            eprintln!("error: {pattern} matches more than {limit} packages");
-            eprintln!("note: name the packages, or narrow the pattern");
+            eprintln!("Error: {pattern} matches more than {limit} packages");
+            eprintln!("Note: name the packages, or narrow the pattern");
         }
         ExpansionFailure::Versioned(target) => {
-            eprintln!("error: {target} is a glob pattern with a version requirement");
+            eprintln!("Error: {target} is a glob pattern with a version requirement");
             eprintln!(
-                "note: a pattern expands to names only; name the package to constrain its \
+                "Note: a pattern expands to names only; name the package to constrain its \
                  version"
             );
         }
         // Raised by the expansion, converted to `TargetResolutionFailure::Ignored` before it
         // reaches a frontend, so that a pattern and a literal report an ignored target alike.
         ExpansionFailure::AllIgnored { pattern, .. } => {
-            eprintln!("error: every package matching {pattern} is ignored");
+            eprintln!("Error: every package matching {pattern} is ignored");
         }
     }
 }
@@ -213,13 +213,13 @@ pub(crate) fn print_ignored_change(
     let (new_name, new_version) = available;
     match kind {
         IgnoredChange::Upgrade => eprintln!(
-            "warning: {old_name}: ignoring package upgrade ({old_version} => {new_version})"
+            "Warning: {old_name}: ignoring package upgrade ({old_version} => {new_version})"
         ),
         IgnoredChange::Downgrade => eprintln!(
-            "warning: {old_name}: ignoring package downgrade ({old_version} => {new_version})"
+            "Warning: {old_name}: ignoring package downgrade ({old_version} => {new_version})"
         ),
         IgnoredChange::Replacement => eprintln!(
-            "warning: ignoring package replacement ({old_name}-{old_version} => \
+            "Warning: ignoring package replacement ({old_name}-{old_version} => \
              {new_name}-{new_version})"
         ),
     }
@@ -248,7 +248,7 @@ fn ignore_detail(name: &str, reason: &piko_db::resolve::IgnoreReason) -> Option<
 /// more (fast — the problem is already compiled) solve. Shared with `cmd::txn::install`, which
 /// fails the same way `piko plan` does when the targets it was given have no valid plan.
 pub(crate) fn report_unsatisfiable(universe: &Universe<'_>, encoded: Encoded, limits: &Limits) {
-    eprintln!("error: the requested transaction has no solution");
+    eprintln!("Error: the requested transaction has no solution");
     for fact in encoded.explain(universe, limits) {
         eprintln!("  {fact}");
     }
@@ -265,17 +265,17 @@ pub(crate) fn print_diagnostics(universe: &Universe<'_>, built: &Plan) {
                     .get(*package)
                     .map_or_else(|| "<unknown>".to_owned(), |solvable| solvable.name().to_string());
                 eprintln!(
-                    "warning: {name} is on a dependency cycle; it may be installed \
+                    "Warning: {name} is on a dependency cycle; it may be installed \
                      before something it depends on"
                 );
             }
             // `PlanDiagnostic` is `#[non_exhaustive]`. A kind added later must still be
             // shown, not silently dropped.
-            other => eprintln!("warning: {other:?}"),
+            other => eprintln!("Warning: {other:?}"),
         }
     }
     if built.diagnostics_dropped() > 0 {
-        eprintln!("warning: {} further problem(s) not shown", built.diagnostics_dropped());
+        eprintln!("Warning: {} further problem(s) not shown", built.diagnostics_dropped());
     }
     print_divergences(universe, built);
 }
@@ -292,7 +292,7 @@ fn print_divergences(universe: &Universe<'_>, built: &Plan) {
     let name_of =
         |id| universe.get(id).map_or_else(|| "<unknown>".to_owned(), |s| s.name().to_string());
     eprintln!(
-        "note: {requirements} dependency requirement(s) were satisfied by a candidate \
+        "Note: {requirements} dependency requirement(s) were satisfied by a candidate \
          pacman would not have tried first; the plan is valid and may differ from `pacman -Sp`"
     );
     for divergence in built.divergences() {
@@ -347,7 +347,7 @@ fn read_file_targets(
             }
             piko_txn::TargetKind::Url(url) => {
                 eprintln!(
-                    "error: cannot plan {url}: previewing a package URL would have to \
+                    "Error: cannot plan {url}: previewing a package URL would have to \
                      download it; use `piko install` instead"
                 );
                 return Err(ExitCode::FAILURE);
@@ -475,7 +475,7 @@ pub fn plan(
     // candidate the universe prefers rather than the file that was named.
     let file_ids = universe.file_candidates();
     if file_ids.len() != files.len() {
-        eprintln!("internal error: the universe lost a package file candidate");
+        eprintln!("Internal error: the universe lost a package file candidate");
         return ExitCode::FAILURE;
     }
     for id in file_ids {

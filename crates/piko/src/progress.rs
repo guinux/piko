@@ -21,7 +21,11 @@
 //! say over. `print_step_result` (stdout) still exists for what a row cannot show: a
 //! `.pacnew`/`.pacsave` notice, or a warning.
 
-use std::{collections::BTreeSet, str::FromStr, sync::Mutex};
+use std::{
+    collections::BTreeSet,
+    str::FromStr,
+    sync::{Mutex, PoisonError},
+};
 
 use alpm_types::PackageFileName;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -108,17 +112,8 @@ impl Row {
         self.bar.finish();
     }
 
-    /// As [`Row::finish`], but replaces the message first.
-    ///
-    /// Used for a row whose text evolved while running (the file currently downloading, the
-    /// package currently being installed) and should settle back on its phase's plain name
-    /// once there is no longer a "current" one.
-    pub(crate) fn finish_as(self, text: impl Into<String>) {
-        self.set_message(text);
-        self.finish();
-    }
-
-    /// As [`Row::finish_as`], but drops whatever bytes/count template the row started with.
+    /// As [`Row::finish`], but replaces the message first. It also drops whatever bytes or
+    /// count template the row started with.
     ///
     /// Used for an outcome (e.g. "up to date") that measured nothing.
     pub(crate) fn finish_plain(self, text: impl Into<String>) {
@@ -140,14 +135,58 @@ impl Row {
     }
 }
 
+/// The draw handle of the most recently built [`StepList`].
+///
+/// `ctrlc` runs its handler on a thread of its own. That thread has no path to the `StepList`
+/// the command built. This static is that path. See [`suspend_active`].
+///
+/// The newest list wins. Nothing ever unregisters. A `MultiProgress` whose rows are all
+/// finished draws nothing. So a stale handle costs one lock and a redraw of an empty stack.
+/// `Mutex::new` is `const`, so this needs no `OnceLock` around it.
+static ACTIVE: Mutex<Option<MultiProgress>> = Mutex::new(None);
+
+/// Runs `body` with the live rows of the current [`StepList`] hidden.
+///
+/// The counterpart of [`StepList::suspend`] for a caller holding no list: the `SIGINT` handler,
+/// concretely. It runs `body` unchanged when no list exists yet.
+///
+/// This waits for indicatif's draw lock. Two holders are brief: a row update, and one line
+/// through [`CommitDriver::print_line`]. One is not. A caller that suspends around a blocking
+/// read holds the lock for as long as that read takes. `cmd::txn`'s provider question does
+/// exactly that. So the handler's instant-kill path prints without this function.
+pub(crate) fn suspend_active<R>(body: impl FnOnce() -> R) -> R {
+    let active = ACTIVE.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    match active {
+        Some(mp) => mp.suspend(body),
+        None => body(),
+    }
+}
+
+/// Clears the current [`StepList`]'s rows permanently.
+///
+/// For a caller that is about to end the process. Unlike [`suspend_active`], the rows never
+/// come back. This also releases the draw lock before it returns.
+pub(crate) fn clear_active() {
+    let active = ACTIVE.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if let Some(mp) = active {
+        let _ = mp.clear();
+    }
+}
+
 /// The stack of live rows for one transaction, each added as its phase starts.
 pub(crate) struct StepList {
     mp: MultiProgress,
 }
 
 impl StepList {
+    /// Builds a list. It becomes the one [`suspend_active`] writes around.
+    ///
+    /// This registers the list here rather than at each call site. A command cannot forget it
+    /// that way. A `MultiProgress` clone shares the state of the one it came from.
     pub(crate) fn new() -> Self {
-        Self { mp: MultiProgress::new() }
+        let mp = MultiProgress::new();
+        *ACTIVE.lock().unwrap_or_else(PoisonError::into_inner) = Some(mp.clone());
+        Self { mp }
     }
 
     fn add(&self, kind: Kind, text: &str, len: u64) -> Row {
@@ -266,6 +305,20 @@ pub(crate) fn download_rig(steplist: &StepList, total_bytes: u64) -> DownloadRig
     let row = steplist.download("Downloading packages", total_bytes);
     let sink = download_sink(row.clone(), head.clone());
     DownloadRig { head: Some(head), row: Some(row), sink: Box::new(sink) }
+}
+
+/// Clears the download rows of a run that stops before anything is fetched.
+///
+/// This clears the rows rather than settling them. A checked-off "Downloading packages" line
+/// would claim work that never happened. The clear also stops the steady tick, so the caller's
+/// refusal reaches the terminal whole. A live row redraws over a bare `eprintln!` mid-line.
+///
+/// Two call sites hand these rows to [`VerifyDriver`] once the run reaches it. Both report
+/// refusals before that point. One function keeps their answer to "clear or settle" the same.
+pub(crate) fn clear_download_rows(row: Option<Row>, head: Option<Row>) {
+    for row in [row, head].into_iter().flatten() {
+        row.finish_and_clear();
+    }
 }
 
 /// Drives a per-repository download [`Row`] for `piko refresh`.
@@ -635,7 +688,7 @@ fn print_step_result(
     match (step, outcome) {
         (piko_txn::Step::Install { .. }, StepOutcome::Installed { extraction, pacsaves, .. }) => {
             for path in &extraction.unreadable {
-                let _ = writeln!(out, "  warning: could not hash {}", path.display());
+                let _ = writeln!(out, "  Warning: could not hash {}", path.display());
             }
             // A `.pacnew` the user is never told about is a configuration change that never
             // happens, silently.
@@ -644,16 +697,16 @@ fn print_step_result(
                     piko_txn::extract::BackupOutcome::KeptBoth { pacnew },
                 ) = step_outcome
                 {
-                    let _ = writeln!(out, "  installed as {} -- merge it", pacnew.display());
+                    let _ = writeln!(out, "  Installed as {} -- merge it", pacnew.display());
                 }
             }
             for pacsave in *pacsaves {
-                let _ = writeln!(out, "  saved {} as .pacsave", pacsave.display());
+                let _ = writeln!(out, "  Saved {} as .pacsave", pacsave.display());
             }
         }
         (piko_txn::Step::Remove { .. }, StepOutcome::Removed { pacsaves }) => {
             for pacsave in *pacsaves {
-                let _ = writeln!(out, "  saved {} as .pacsave", pacsave.display());
+                let _ = writeln!(out, "  Saved {} as .pacsave", pacsave.display());
             }
         }
         // `Step`/`StepOutcome` are reported together by construction (`Event::StepFinished`),
@@ -697,6 +750,33 @@ mod tests {
 
     fn finished(outcome: &Outcome) -> Event<'_> {
         Event::ScriptletFinished { package: "foo", kind: ScriptletKind::PostInstall, outcome }
+    }
+
+    /// The `SIGINT` handler runs `body` whether or not a command has built a list yet.
+    ///
+    /// `ACTIVE` is process-wide. These tests share a process with every other test in this
+    /// module. So this pins what the handler needs and nothing more. The closure runs, and its
+    /// value comes back. Which list is registered does not change that.
+    #[test]
+    fn suspending_around_the_active_list_runs_the_body_either_way() {
+        assert_eq!(suspend_active(|| 1 + 1), 2);
+
+        let _steplist = StepList::new();
+        assert_eq!(suspend_active(|| 1 + 1), 2);
+    }
+
+    /// `clear_active` is safe with no list registered, and with one holding a live row.
+    ///
+    /// The handler calls it on a path that exits the process straight after. A panic there
+    /// would replace an exit code of 130 with one of 101.
+    #[test]
+    fn clearing_the_active_list_is_safe_with_and_without_a_row() {
+        clear_active();
+
+        let steplist = StepList::new();
+        let row = steplist.spinner("Downloading packages");
+        clear_active();
+        row.finish_and_clear();
     }
 
     /// `console` writes no ANSI codes into a `Vec<u8>`, so the ✓ arrives as plain text.

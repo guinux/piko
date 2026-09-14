@@ -10,11 +10,11 @@ use piko_db::config::{CleanMethod, DbUsage, SigLevel};
 ///
 /// Without the chain, "failed to parse .../desc" would omit the reason it failed to parse.
 pub fn report(error: &dyn std::error::Error) {
-    eprintln!("error: {error}");
+    eprintln!("Error: {error}");
 
     let mut source = error.source();
     while let Some(cause) = source {
-        eprintln!("  caused by: {cause}");
+        eprintln!("  Caused by: {cause}");
         source = cause.source();
     }
 }
@@ -24,7 +24,7 @@ pub fn report(error: &dyn std::error::Error) {
 /// Printed rather than swallowed so the output is never mistaken for the complete list.
 pub fn report_dropped_diagnostics(dropped: usize) {
     if dropped > 0 {
-        eprintln!("warning: {dropped} further problem(s) not shown");
+        eprintln!("Warning: {dropped} further problem(s) not shown");
     }
 }
 
@@ -38,7 +38,7 @@ macro_rules! emit {
             if error.kind() == ::std::io::ErrorKind::BrokenPipe {
                 return ::std::process::ExitCode::SUCCESS;
             }
-            eprintln!("error: failed to write output: {error}");
+            eprintln!("Error: failed to write output: {error}");
             return ::std::process::ExitCode::FAILURE;
         }
     };
@@ -115,7 +115,7 @@ pub fn select(out: &mut impl std::io::Write, prompt: &str, count: usize, default
             Selection::Answered(index) => return index,
             Selection::Empty => return default,
             Selection::Invalid => {
-                eprintln!("invalid value: it must be a number between 1 and {count}");
+                eprintln!("Invalid value: it must be a number between 1 and {count}");
             }
         }
     }

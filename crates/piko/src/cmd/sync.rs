@@ -111,12 +111,12 @@ pub fn resolve_and_print(
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     if opened.is_empty() {
-        eprintln!("error: no configured repository could be opened; see warnings above");
+        eprintln!("Error: no configured repository could be opened; see warnings above");
         return ExitCode::FAILURE;
     }
 
     let Ok(dep) = target.parse::<alpm_types::RelationOrSoname>() else {
-        eprintln!("error: {target} is not a valid dependency string");
+        eprintln!("Error: {target} is not a valid dependency string");
         return ExitCode::FAILURE;
     };
 
@@ -132,11 +132,11 @@ pub fn resolve_and_print(
         let ignored = repos.ignored_satisfiers(&dep);
         if ignored.is_empty() {
             eprintln!(
-                "error: no package satisfying {target} was found in any configured \
+                "Error: no package satisfying {target} was found in any configured \
                  repository"
             );
         } else {
-            eprintln!("error: every package satisfying {target} is ignored");
+            eprintln!("Error: every package satisfying {target} is ignored");
             for (resolved, reason) in &ignored {
                 eprintln!(
                     "  {}-{} in {} ({reason})",

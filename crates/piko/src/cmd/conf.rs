@@ -141,7 +141,7 @@ fn conf_directive(
 ) -> ExitCode {
     let Some(known) = KNOWN_DIRECTIVES.iter().find(|name| name.eq_ignore_ascii_case(directive))
     else {
-        eprintln!("error: unknown directive '{directive}'");
+        eprintln!("Error: unknown directive '{directive}'");
         return ExitCode::FAILURE;
     };
 

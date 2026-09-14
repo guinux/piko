@@ -123,7 +123,7 @@ pub fn report_defaults(universe: &Universe<'_>, report: &AmbiguityReport) {
     let name_of =
         |id| universe.get(id).map_or_else(|| "<unknown>".to_owned(), |s| s.name().to_string());
     eprintln!(
-        "note: {} dependency requirement(s) have several providers; the first was taken \
+        "Note: {} dependency requirement(s) have several providers; the first was taken \
          (an interactive `piko install` asks which one to use)",
         report.found().len()
     );

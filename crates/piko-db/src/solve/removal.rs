@@ -200,6 +200,53 @@ mod tests {
         Ok(names)
     }
 
+    /// The names a `-Rs` of `targets` takes away from `scenario`, in plan order.
+    fn removed_in_plan_order(scenario: &BuiltScenario, targets: &[&str]) -> Vec<String> {
+        let universe = Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new(),
+        )
+        .unwrap();
+        let owned: Vec<String> = targets.iter().map(|target| (*target).to_owned()).collect();
+        let plan = plan_removal(
+            scenario.local(),
+            &universe,
+            &owned,
+            RemovalOptions { recursive: true, ..RemovalOptions::default() },
+            &Limits::default(),
+        )
+        .unwrap()
+        .outcome
+        .unwrap();
+
+        removal_names(&universe, &plan)
+    }
+
+    /// A dependent is taken away before the packages it depends on. Its `pre_remove` scriptlet
+    /// then still finds their files. This is `_alpm_sortbydeps(handle, rem_orig, NULL, 1)`
+    /// (`trans.c:157`).
+    ///
+    /// The chain is named so that the correct order and the order of the package names differ.
+    /// A plan sorted by name reads `app`, `base`, `mid`.
+    #[test]
+    fn a_dependent_is_removed_before_its_dependencies() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("app", "1.0.0-1").depends(["mid"]))
+            .installed(
+                PackageSpec::new("mid", "1.0.0-1")
+                    .depends(["base"])
+                    .reason(alpm_types::PackageInstallReason::Depend),
+            )
+            .installed(
+                PackageSpec::new("base", "1.0.0-1")
+                    .reason(alpm_types::PackageInstallReason::Depend),
+            )
+            .build();
+
+        assert_eq!(removed_in_plan_order(&scenario, &["app"]), ["app", "mid", "base"]);
+    }
+
     /// "Groups can also be specified to be removed, in which case every package in that group
     /// will be removed" — `pacman(8)`, on `-R`.
     #[test]

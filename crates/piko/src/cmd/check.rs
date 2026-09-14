@@ -41,7 +41,7 @@ pub fn check_selected(
                 }
             }
             None => {
-                steplist.suspend(|| eprintln!("error: package {name} is not installed"));
+                steplist.suspend(|| eprintln!("Error: package {name} is not installed"));
                 missing = true;
             }
         }

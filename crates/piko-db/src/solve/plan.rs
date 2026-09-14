@@ -210,12 +210,20 @@ impl Plan {
 
         let ordered = topological_order(universe, &incoming, &mut sink);
 
-        let mut steps: Vec<Step> =
-            Vec::with_capacity(ordered.len().saturating_add(planned.removed.len()));
+        // The same traversal over the removal set, then reversed. Post-order emits a
+        // dependency before its dependent, so the reverse removes the dependent first. A
+        // `pre_remove` scriptlet therefore still finds the files of every package it depends
+        // on. `_alpm_sortbydeps(handle, rem_orig, NULL, 1)` (`trans.c:157`) is the same call:
+        // the install side passes `trans->remove` as the ignore list, the removal side
+        // passes nothing.
+        let mut outgoing = topological_order(universe, &planned.removed, &mut sink);
+        outgoing.reverse();
+
+        let mut steps: Vec<Step> = Vec::with_capacity(ordered.len().saturating_add(outgoing.len()));
 
         // Removals first, matching `_alpm_sync_commit`. Replaced and conflicting packages are
         // taken out in bulk before anything installs.
-        for id in &planned.removed {
+        for id in &outgoing {
             if let Some(gone) = universe.get(*id) {
                 installed_delta = installed_delta
                     .saturating_sub(i64::try_from(gone.installed_size()).unwrap_or(i64::MAX));
@@ -294,19 +302,22 @@ fn pending_download(candidate: &Solvable<'_>, cache: &dyn PackageCache) -> u64 {
     if cached { 0 } else { size }
 }
 
-/// Orders `incoming` so that every package follows the packages it depends on.
+/// Orders `members` so that every package follows the packages it depends on.
 ///
 /// This is `_alpm_sortbydeps` (`deps.c:213`) as an explicit-stack DFS. It uses no recursion,
 /// so a pathological dependency depth cannot overflow the stack. This matters because the
 /// depth is attacker-influenced.
 ///
+/// Both halves of a plan use this. The install set takes the order as returned. The removal
+/// set reverses it, which is libalpm's `reverse` argument.
+///
 /// libalpm also pulls *installed* packages into the graph lazily, so a cycle running through
 /// an already-installed package stays visible. piko does not: those vertices are traversal
 /// scaffolding libalpm never emits, and they only affect which cycles get warned about. The
-/// order of the packages actually being installed is identical.
+/// order of the packages actually in the plan is identical.
 fn topological_order(
     universe: &Universe<'_>,
-    incoming: &[SolvableId],
+    members: &[SolvableId],
     sink: &mut Sink<PlanDiagnostic>,
 ) -> Vec<SolvableId> {
     /// Where the traversal has got to with a vertex.
@@ -317,12 +328,12 @@ fn topological_order(
         Done,
     }
 
-    // Positions within `incoming`, so the graph is dense and the traversal deterministic.
-    let position = |id: SolvableId| incoming.iter().position(|candidate| *candidate == id);
+    // Positions within `members`, so the graph is dense and the traversal deterministic.
+    let position = |id: SolvableId| members.iter().position(|candidate| *candidate == id);
 
     // Edge list: vertex -> the vertices it depends on, in the order its `%DEPENDS%` names
     // them. A tie breaks the same way every run.
-    let edges: Vec<Vec<usize>> = incoming
+    let edges: Vec<Vec<usize>> = members
         .iter()
         .map(|id| {
             let mut targets = Vec::new();
@@ -344,10 +355,10 @@ fn topological_order(
         })
         .collect();
 
-    let mut state = vec![State::Unvisited; incoming.len()];
-    let mut ordered = Vec::with_capacity(incoming.len());
+    let mut state = vec![State::Unvisited; members.len()];
+    let mut ordered = Vec::with_capacity(members.len());
 
-    for root in 0..incoming.len() {
+    for root in 0..members.len() {
         if state.get(root).copied().unwrap_or(State::Done) != State::Unvisited {
             continue;
         }
@@ -371,7 +382,7 @@ fn topological_order(
                         State::InProgress => {
                             // A back edge: this dependency is an ancestor, so the two are on
                             // a cycle and no order satisfies both.
-                            if let Some(id) = incoming.get(next).copied() {
+                            if let Some(id) = members.get(next).copied() {
                                 sink.push(|| PlanDiagnostic::DependencyCycle { package: id });
                             }
                         }
@@ -384,7 +395,7 @@ fn topological_order(
                     if let Some(slot) = state.get_mut(vertex) {
                         *slot = State::Done;
                     }
-                    if let Some(id) = incoming.get(vertex).copied() {
+                    if let Some(id) = members.get(vertex).copied() {
                         ordered.push(id);
                     }
                 }

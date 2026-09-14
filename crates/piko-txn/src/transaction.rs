@@ -389,6 +389,7 @@ pub struct Transaction<S> {
     scriptlets: bool,
     hook_dirs: Vec<PathBuf>,
     recording: Recording,
+    cancel: Option<piko_net::Cancel>,
     state: S,
 }
 
@@ -413,6 +414,8 @@ impl Transaction<Planned> {
             hook_dirs: Vec::new(),
             // Records nothing by default, like `scriptlets`. A library caller opts in.
             recording: Recording::default(),
+            // No flag by default, so the commit runs to the end. A library caller opts in.
+            cancel: None,
             state: Planned { steps },
         }
     }
@@ -513,6 +516,42 @@ impl Transaction<Planned> {
         self
     }
 
+    /// Lets `cancel` stop the commit between two steps.
+    ///
+    /// The default is no flag, which runs every step.
+    ///
+    /// [`Transaction::verify_with_progress`] reads the flag at each phase boundary and once
+    /// per package. It applies nothing, so it stops with [`Error::Cancelled`] and leaves no
+    /// journal.
+    ///
+    /// [`Transaction::commit_with_progress`] reads it once per step, before that step starts.
+    /// The step already running therefore finishes. The commit then stops with the same error
+    /// and leaves the journal in place. The journal names what was applied.
+    ///
+    /// This is the same flag a download reads, so one Ctrl+C covers every phase. Each read
+    /// sits on a boundary. A flag raised inside one long extraction waits for that
+    /// extraction.
+    #[must_use]
+    pub fn cancel(mut self, cancel: piko_net::Cancel) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Returns [`Error::Cancelled`] when [`Transaction::cancel`]'s flag is raised.
+    ///
+    /// [`Transaction::verify_with_progress`] calls this at each phase boundary, and once per
+    /// package inside its loops. Verification reads whole package files, so one phase can run
+    /// for a long time on a large transaction. A flag read only at the end of a phase leaves
+    /// the user waiting. Nothing on screen says the stop was taken.
+    ///
+    /// Nothing is applied during verification, so `completed` is always zero here.
+    fn stop_if_cancelled(&self, total: usize) -> Result<()> {
+        if self.cancel.as_ref().is_some_and(piko_net::Cancel::is_requested) {
+            return Err(Error::Cancelled { completed: 0, total });
+        }
+        Ok(())
+    }
+
     /// Verifies one package's detached signature, returning whether it was actually checked.
     ///
     /// Delegates to [`check_signature`], which is a free function so that a caller with no
@@ -590,7 +629,9 @@ impl Transaction<Planned> {
         let total_installs =
             self.state.steps.iter().filter(|step| matches!(step, Step::Install { .. })).count();
         let mut signature_checked = 0_usize;
+        let total_steps = self.state.steps.len();
         for step in &self.state.steps {
+            self.stop_if_cancelled(total_steps)?;
             match step {
                 Step::Install { package, .. } => {
                     let path = source.locate(package)?.path().to_path_buf();
@@ -633,6 +674,7 @@ impl Transaction<Planned> {
         let mut targets = Vec::with_capacity(located.len());
         let mut packages = Vec::with_capacity(located.len());
         for (path, validated) in located {
+            self.stop_if_cancelled(total_steps)?;
             let conflict::LoadedPackage { target, info, raw } =
                 conflict::load_package(&path, &self.limits)?;
             let entry = self::entry_name(&path, &info)?;
@@ -672,6 +714,9 @@ impl Transaction<Planned> {
             });
         }
 
+        // The last read before the conflict check. That check walks the filesystem once for
+        // the whole plan, so it cannot be interrupted part-way.
+        self.stop_if_cancelled(total_steps)?;
         let root = RootDir::open(&self.root_path)?;
         progress(VerifyEvent::ConflictCheckStarted);
         let check = conflict::check(
@@ -699,6 +744,7 @@ impl Transaction<Planned> {
             scriptlets: self.scriptlets,
             hook_dirs: self.hook_dirs,
             recording: self.recording,
+            cancel: self.cancel,
             state: Verified {
                 steps: self.state.steps,
                 packages,
@@ -860,6 +906,7 @@ impl Transaction<Verified> {
             scriptlets: self.scriptlets,
             hook_dirs: self.hook_dirs,
             recording: self.recording,
+            cancel: self.cancel,
             state: Staged {
                 steps: self.state.steps,
                 packages: self.state.packages,
@@ -939,6 +986,9 @@ impl Transaction<Staged<'_>> {
         let problems = recorder.map_or_else(Vec::new, |recorder| {
             let outcome = match &result {
                 Ok(_) => HistoryOutcome::Completed,
+                // A cancellation is not a failure. The steps it counts did run, and the user
+                // asked for the stop. `piko history` renders the two differently.
+                Err(Error::Cancelled { .. }) => HistoryOutcome::Cancelled,
                 Err(error) => HistoryOutcome::Failed { reason: error.to_string() },
             };
             recorder.finish(outcome, crate::history::now())
@@ -991,7 +1041,17 @@ impl Transaction<Staged<'_>> {
         }
 
         let total = state.steps.len();
+        let mut completed = 0_usize;
         for (index, step) in state.steps.iter().enumerate() {
+            // Read before the step starts, so a raised flag never splits one. The step
+            // before it wrote its own journal line and fsynced. The journal left behind
+            // therefore names exactly what was applied. The remaining steps stay unattempted.
+            //
+            // `PostTransaction` hooks are skipped by the early return. `alpm-hooks(5)`
+            // requires that: they do not run when a transaction does not complete.
+            if self.cancel.as_ref().is_some_and(piko_net::Cancel::is_requested) {
+                return Err(Error::Cancelled { completed, total });
+            }
             // Peeked, not consumed. `next_package` still advances only inside the
             // `Step::Install` arm below.
             let replaces = match step {
@@ -1029,6 +1089,7 @@ impl Transaction<Staged<'_>> {
                         progress,
                     )?;
                     state.journal.completed(index)?;
+                    completed = completed.saturating_add(1);
                     progress(Event::StepFinished {
                         step,
                         outcome: StepOutcome::Installed {
@@ -1067,6 +1128,7 @@ impl Transaction<Staged<'_>> {
                         progress,
                     )?;
                     state.journal.completed(index)?;
+                    completed = completed.saturating_add(1);
                     progress(Event::StepFinished {
                         step,
                         outcome: StepOutcome::Removed { pacsaves: &pacsaves },
@@ -1339,6 +1401,158 @@ mod tests {
 
         // And the journal is gone, so nothing looks interrupted.
         assert!(crate::journal::read(db.path()).unwrap().is_none());
+    }
+
+    /// A cancellation is read between two steps, so the step already running finishes.
+    ///
+    /// This pins all three halves of [`Transaction::cancel`]'s contract. The step that was
+    /// running is applied and recorded. The next one is not attempted. The journal stays
+    /// behind, naming what was done.
+    #[test]
+    fn a_cancelled_commit_finishes_its_step_and_leaves_the_journal() {
+        let foo = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(foo, &[("usr/bin/foo", b"binary")]);
+        let bar = "bar-1.0.0-1-x86_64.pkg.tar";
+        let bar_cache = cache_with_raw_pkginfo(
+            bar,
+            "pkgname = bar\npkgbase = bar\npkgver = 1.0.0-1\n\
+             pkgdesc = An example package\nurl = https://example.org/\n\
+             builddate = 1733737242\n\
+             packager = Foobar McFooface <foobar@mcfooface.org>\n\
+             size = 123\narch = x86_64\nlicense = MIT\n",
+            &[("usr/bin/bar", b"bar")],
+        );
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source =
+            CacheDirSource::new([cache.path().to_path_buf(), bar_cache.path().to_path_buf()])
+                .unwrap();
+        let lock = DbLock::acquire(db.path()).unwrap();
+
+        // `bar` is installed first, so the cancelled transaction below has a second step that
+        // is not an install. A step left unattempted must stay unattempted whatever it is.
+        Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Install {
+                package: bar.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+        )
+        .ownership(Ownership::Inherit)
+        .verify(&source)
+        .unwrap()
+        .stage(&lock)
+        .unwrap()
+        .commit()
+        .unwrap();
+
+        let cancel = piko_net::Cancel::new();
+        let steps = vec![
+            Step::Install { package: foo.parse().unwrap(), reason: PackageInstallReason::Explicit },
+            Step::Remove { entry: EntryName::parse("bar-1.0.0-1").unwrap(), no_save: false },
+        ];
+        // Raised from inside the commit, once the first step is over. This is the moment a
+        // Ctrl+C lands in: a step has just been recorded, and the next has not started.
+        let raise = cancel.clone();
+        let error = Transaction::new(root.path(), db.path(), steps)
+            .ownership(Ownership::Inherit)
+            .cancel(cancel)
+            .verify(&source)
+            .unwrap()
+            .stage(&lock)
+            .unwrap()
+            .commit_with_progress(&mut |event| {
+                if matches!(event, Event::StepFinished { .. }) {
+                    raise.request();
+                }
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, Error::Cancelled { completed: 1, total: 2 }), "{error:?}");
+
+        // The first step is applied and recorded.
+        assert_eq!(std::fs::read(root.path().join("usr/bin/foo")).unwrap(), b"binary");
+        let local = LocalDatabase::open(db.path().join("local")).unwrap();
+        assert!(local.get_str("foo").is_some(), "the finished step was not recorded");
+        // The second is untouched.
+        assert!(local.get_str("bar").is_some(), "an unattempted step ran anyway");
+        assert!(root.path().join("usr/bin/bar").exists());
+
+        // And the journal stays, naming exactly the one step that ran.
+        let record = crate::journal::read(db.path()).unwrap().expect("the journal was removed");
+        assert_eq!(record.completed, [0]);
+        assert_eq!(record.outstanding().len(), 1);
+    }
+
+    /// Verification reads the flag too, so a press there does not wait for the whole phase.
+    ///
+    /// Signature checking hashes every package file. A flag read only after that loop would
+    /// leave a long wait between the press and the stop.
+    #[test]
+    fn a_cancelled_verification_stops_before_it_stages_anything() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+
+        let cancel = piko_net::Cancel::new();
+        cancel.request();
+        let error = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Install {
+                package: name.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+        )
+        .ownership(Ownership::Inherit)
+        .cancel(cancel)
+        .verify(&source)
+        .unwrap_err();
+
+        assert!(matches!(error, Error::Cancelled { completed: 0, total: 1 }), "{error:?}");
+        // Verification stages nothing, so there is no journal to leave behind.
+        assert!(crate::journal::read(db.path()).unwrap().is_none());
+        assert!(!root.path().join("usr/bin/foo").exists());
+    }
+
+    /// A flag raised after verification stops the commit before its first step.
+    ///
+    /// This is the one window verification's own reads cannot cover. The press lands after
+    /// verification's last read and before the first step. The journal exists by then, so it
+    /// stays behind.
+    #[test]
+    fn a_commit_cancelled_before_its_first_step_applies_nothing() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let lock = DbLock::acquire(db.path()).unwrap();
+
+        let cancel = piko_net::Cancel::new();
+        let verified = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Install {
+                package: name.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+        )
+        .ownership(Ownership::Inherit)
+        .cancel(cancel.clone())
+        .verify(&source)
+        .unwrap();
+        cancel.request();
+
+        let error = verified.stage(&lock).unwrap().commit().unwrap_err();
+
+        assert!(matches!(error, Error::Cancelled { completed: 0, total: 1 }), "{error:?}");
+        assert!(!root.path().join("usr/bin/foo").exists());
+        let record = crate::journal::read(db.path()).unwrap().expect("the journal was removed");
+        assert!(record.completed.is_empty());
     }
 
     #[test]

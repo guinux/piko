@@ -6,11 +6,11 @@
 
 /// Prints an error and its whole cause chain.
 pub fn report(error: &dyn std::error::Error) {
-    eprintln!("error: {error}");
+    eprintln!("Error: {error}");
 
     let mut source = error.source();
     while let Some(cause) = source {
-        eprintln!("  caused by: {cause}");
+        eprintln!("  Caused by: {cause}");
         source = cause.source();
     }
 }
@@ -22,7 +22,7 @@ macro_rules! emit {
             if error.kind() == ::std::io::ErrorKind::BrokenPipe {
                 return ::std::process::ExitCode::SUCCESS;
             }
-            eprintln!("error: failed to write output: {error}");
+            eprintln!("Error: failed to write output: {error}");
             return ::std::process::ExitCode::FAILURE;
         }
     };

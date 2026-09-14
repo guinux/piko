@@ -42,7 +42,7 @@ pub fn history(
         (Ok(since), Ok(until)) => (since, until),
         (Err(bad), _) | (_, Err(bad)) => {
             eprintln!(
-                "error: {bad} is not a time this understands; use YYYY-MM-DD or \
+                "Error: {bad} is not a time this understands; use YYYY-MM-DD or \
                  YYYY-MM-DDTHH:MM:SS+ZZZZ"
             );
             return ExitCode::FAILURE;
@@ -60,7 +60,7 @@ pub fn history(
     };
 
     if records.is_empty() {
-        emit!(out, "no transactions recorded");
+        emit!(out, "No transactions recorded");
         // An empty history and an unreadable one are different answers. Naming the files it
         // read is what lets a user tell "nothing has happened" from "piko looked in the wrong
         // place".
@@ -248,11 +248,13 @@ fn versions(action: &Action, kind: ChangeKind) -> String {
     }
 }
 
-/// The leading mark: a green check for a completed transaction, a red cross otherwise.
+/// The leading mark: a green check for a completed transaction, a red cross for a failed one,
+/// and a yellow mark for the two stops in between.
 fn outcome_mark(outcome: &Outcome) -> console::StyledObject<String> {
     match outcome {
         Outcome::Completed => console::Style::new().green().apply_to(checkmark().to_string()),
         Outcome::Failed { .. } => console::Style::new().red().apply_to("✗".to_owned()),
+        Outcome::Cancelled => console::Style::new().yellow().apply_to("-".to_owned()),
         Outcome::Interrupted => console::Style::new().yellow().apply_to("!".to_owned()),
     }
 }

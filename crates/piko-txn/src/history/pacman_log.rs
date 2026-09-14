@@ -260,13 +260,9 @@ pub fn sessions(lines: &[Line]) -> Vec<Session> {
 
         let Some(session) = open.as_mut() else { continue };
 
-        if line.message == "transaction completed" || line.message == "transaction failed" {
+        if let Some(outcome) = self::ending(&line.message) {
             session.finished = line.timestamp;
-            session.outcome = if line.message.ends_with("completed") {
-                Outcome::Completed
-            } else {
-                Outcome::Failed { reason: "the log records a failed transaction".to_owned() }
-            };
+            session.outcome = outcome;
             sessions.extend(open.take());
             continue;
         }
@@ -302,6 +298,21 @@ fn started_id(message: &str) -> Option<Option<String>> {
         return Some(None);
     };
     Some(rest.strip_suffix(')').map(ToOwned::to_owned))
+}
+
+/// The outcome a transaction-ending message states, or `None` for any other line.
+///
+/// libalpm writes two of these three. `transaction cancelled` is piko's own, written when the
+/// user stops a commit between two steps. A reader of a shared log sees which happened.
+fn ending(message: &str) -> Option<Outcome> {
+    match message {
+        "transaction completed" => Some(Outcome::Completed),
+        "transaction cancelled" => Some(Outcome::Cancelled),
+        "transaction failed" => {
+            Some(Outcome::Failed { reason: "the log records a failed transaction".to_owned() })
+        }
+        _ => None,
+    }
 }
 
 /// The hook file a `running '…'...` message names.

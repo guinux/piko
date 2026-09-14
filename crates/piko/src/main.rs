@@ -74,7 +74,7 @@ fn exec_helper() -> Option<ExitCode> {
     }
 
     let Err(message) = piko_txn::exec::helper_main(&arguments.collect::<Vec<_>>());
-    eprintln!("error: {message}");
+    eprintln!("Error: {message}");
     Some(ExitCode::FAILURE)
 }
 
@@ -281,7 +281,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
             let format = if *names { cmd::plan::Format::Names } else { cmd::plan::Format::Full };
             if targets.is_empty() && !*sysupgrade {
-                eprintln!("error: no targets given (use --sysupgrade to upgrade everything)");
+                eprintln!("Error: no targets given (use --sysupgrade to upgrade everything)");
                 return Ok(ExitCode::FAILURE);
             }
             let mode = if *remove {
@@ -461,7 +461,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
     if let Err(error) = out.flush()
         && error.kind() != io::ErrorKind::BrokenPipe
     {
-        eprintln!("error: failed to write output: {error}");
+        eprintln!("Error: failed to write output: {error}");
         return Ok(ExitCode::FAILURE);
     }
 

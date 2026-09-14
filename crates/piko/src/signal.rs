@@ -1,5 +1,16 @@
 //! A `SIGINT` handler that lets a download in progress stop cleanly.
 //!
+//! The first press raises a flag, [`piko_net::Cancel`]. Three places read it. A download reads
+//! it per queued file, per request, and per 64 KiB chunk. `cmd::txn::run` reads it once,
+//! between verification and the commit. The commit reads it before each step, through
+//! `piko_txn::Transaction::cancel`.
+//!
+//! So one press stops the run at the next of those points. Before the commit, nothing is
+//! applied. Inside it, the step already running finishes and the journal names what was done.
+//! A second press is still the way out of a step that will not end, and it leaves both the
+//! journal and `db.lck` behind. The handler's message names no phase, because the handler
+//! covers all of them.
+//!
 //! This is not installed unconditionally at process start. `ctrlc::set_handler` cannot be
 //! un-registered, and accepts only one registration per process, so an early install would
 //! both replace Ctrl+C's instant-kill behavior everywhere in the process for the rest of the
@@ -57,11 +68,18 @@ pub(crate) struct Handoff {
 
 /// Installs a `SIGINT` handler.
 ///
-/// In graceful mode, the first press requests cancellation of whatever download is in
-/// flight; a second press force-exits. [`PromptMode::during_prompt`] switches it to killing
-/// the process on the very first press instead, for a window with nothing to cancel
-/// gracefully. Each press prints which happened. `ctrlc`'s handler runs on its own thread
-/// rather than in raw signal-handler context, so printing from it is safe.
+/// In graceful mode, the first press requests a stop and a second press force-exits. The
+/// module documentation lists what reads the flag, and where the run stops.
+/// [`PromptMode::during_prompt`] switches this
+/// to killing the process on the very first press instead, for a window with nothing to
+/// cancel gracefully. Each press prints which happened. `ctrlc`'s handler runs on its own
+/// thread rather than in raw signal-handler context, so printing from it is safe.
+///
+/// Two of the three messages go through [`crate::progress::suspend_active`] and
+/// [`crate::progress::clear_active`]. A live row redraws every 100 ms. It would overdraw a
+/// bare `eprintln!` mid-line. The cost is that the handler waits for indicatif's draw lock. A
+/// blocked `stdout` under `CommitDriver::print_line` therefore delays Ctrl+C for as long as the
+/// reader of that pipe takes.
 pub(crate) fn install_cancel_handler() -> (piko_net::Cancel, PromptMode) {
     let cancel = piko_net::Cancel::new();
     let for_handler = cancel.clone();
@@ -70,14 +88,26 @@ pub(crate) fn install_cancel_handler() -> (piko_net::Cancel, PromptMode) {
     #[allow(clippy::expect_used, reason = "the only registration reachable in one process run")]
     ctrlc::set_handler(move || {
         if for_handler_kill.load(std::sync::atomic::Ordering::SeqCst) {
-            eprintln!("interrupted");
+            // The one message that prints on its own. Instant-kill mode marks a prompt.
+            // `cmd::txn`'s provider question holds the draw lock across that prompt. A request
+            // for the lock here would wait for the answer Ctrl+C just refused to give. The
+            // prompt's own `suspend` hides the rows already, so nothing can overdraw this.
+            eprintln!("Interrupted");
             std::process::exit(130);
         }
         if for_handler.is_requested() {
-            eprintln!("still stopping -- forcing exit");
+            // This clears the rows rather than suspending them. The process ends on the next
+            // line, so the rows have no reason to come back.
+            crate::progress::clear_active();
+            eprintln!("Still stopping -- forcing exit");
             std::process::exit(130);
         }
-        eprintln!("stopping the download (press Ctrl+C again to force quit)...");
+        crate::progress::suspend_active(|| {
+            // Named for what the flag does, not for a phase. One handler covers downloading,
+            // verification and the commit, and all three stop on it. A phase named here would
+            // be the wrong one for every press that lands in one of the other two.
+            eprintln!("Stopping (press Ctrl+C again to force quit)...");
+        });
         for_handler.request();
     })
     .expect("installing the SIGINT handler cannot fail here");

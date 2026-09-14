@@ -224,6 +224,13 @@ pub enum Outcome {
         /// What went wrong, as the error described it.
         reason: String,
     },
+    /// The user cancelled the transaction between two steps.
+    ///
+    /// This is not [`Outcome::Interrupted`]. That one is what a reader reports for a record
+    /// with no ending at all. A cancelled transaction has an ending. The steps before the
+    /// cancellation ran, and the transaction then stopped on request. See
+    /// [`crate::Error::Cancelled`].
+    Cancelled,
     /// The record was found unfinished: the process did not live to write an ending.
     ///
     /// Never written by a transaction. This is what a reader reports for a block that has no
@@ -238,6 +245,7 @@ impl Outcome {
         match self {
             Self::Completed => "completed",
             Self::Failed { .. } => "failed",
+            Self::Cancelled => "cancelled",
             Self::Interrupted => "interrupted",
         }
     }
@@ -673,8 +681,12 @@ impl Recorder {
 
     /// Writes the ending to both records, and returns whatever went wrong along the way.
     pub(crate) fn finish(mut self, outcome: Outcome, finished: i64) -> Vec<Problem> {
+        // A cancellation gets its own line. `pacman.log` is shared, so a reader of it should
+        // not have to guess whether a stop was requested. `pacman_log::ending` maps all three
+        // words back.
         self.log(match outcome {
             Outcome::Completed => "transaction completed",
+            Outcome::Cancelled => "transaction cancelled",
             Outcome::Failed { .. } | Outcome::Interrupted => "transaction failed",
         });
         self.entry.outcome = outcome;

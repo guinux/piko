@@ -71,13 +71,12 @@ pub fn hold_pkg_allows(
     }
 
     for name in held {
-        eprintln!("warning: {name} is designated as a HoldPkg");
+        eprintln!("Warning: {name} is designated as a HoldPkg");
     }
     if noconfirm {
         // Deliberately does not name a flag. `piko remove` arrives here from `--noconfirm`;
         // `piko plan -R` arrives here always (see the call site for why `--print` forces it).
-        eprintln!("error: HoldPkg was found in the target list, and this run cannot ask");
-        eprintln!("note: this question defaults to no, so it has to be answered in person");
+        eprintln!("Error: HoldPkg was found in the target list, and this run cannot ask confirmation");
         return false;
     }
     crate::output::confirm(
@@ -91,14 +90,14 @@ pub fn hold_pkg_allows(
 pub fn report(failure: &RemovalFailure) {
     match failure {
         RemovalFailure::NotInstalled(name) => {
-            eprintln!("error: no installed package or group named {name}");
+            eprintln!("Error: no installed package or group named {name}");
         }
         RemovalFailure::WouldBreakSystem(facts) => {
-            eprintln!("error: removing this would leave the system unsatisfied");
+            eprintln!("Error: removing this would leave the system unsatisfied");
             for fact in facts {
                 eprintln!("  {fact}");
             }
-            eprintln!("note: pass -c to remove the dependents too");
+            eprintln!("Note: pass -c to remove the dependents too");
         }
         RemovalFailure::Planner(error) => crate::output::report(error.as_ref()),
     }

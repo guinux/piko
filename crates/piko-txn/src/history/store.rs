@@ -268,6 +268,7 @@ fn apply_end(entry: &mut Entry, value: &str) {
     entry.finished = fields.next().and_then(time_fmt::parse);
     entry.outcome = match outcome {
         "completed" => Outcome::Completed,
+        "cancelled" => Outcome::Cancelled,
         "failed" => {
             Outcome::Failed { reason: fields.next().unwrap_or("the transaction failed").to_owned() }
         }
@@ -328,6 +329,16 @@ mod tests {
             ..sample()
         };
         let text = render(&entry, LocalOffset::UTC);
+        assert_eq!(parse(&text, false), vec![entry]);
+    }
+
+    /// A cancellation must not read back as an interruption. The two mean different things:
+    /// the user asked for one, and the other is what a record with no ending looks like.
+    #[test]
+    fn a_cancelled_entry_round_trips() {
+        let entry = Entry { outcome: Outcome::Cancelled, ..sample() };
+        let text = render(&entry, LocalOffset::UTC);
+        assert!(text.contains("end cancelled "), "{text}");
         assert_eq!(parse(&text, false), vec![entry]);
     }
 

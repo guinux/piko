@@ -41,7 +41,7 @@ use crate::output::{emit, report as report_error};
 /// command the user asked for still runs. See [`piko_txn::history`].
 pub fn note(recording: &piko_txn::Recording, message: &str) {
     if let Err(problem) = piko_txn::history::note(recording, message) {
-        eprintln!("warning: {problem}");
+        eprintln!("Warning: {problem}");
     }
 }
 
@@ -221,7 +221,7 @@ pub fn install(
     let file_ids = universe.file_candidates();
     if file_ids.len() != prepared.files.len() {
         crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-        eprintln!("internal error: the universe lost a package file candidate");
+        eprintln!("Internal error: the universe lost a package file candidate");
         return ExitCode::FAILURE;
     }
     for id in file_ids {
@@ -297,7 +297,7 @@ pub fn install(
         if questions.dropped() > 0 {
             steplist.suspend(|| {
                 eprintln!(
-                    "warning: {} further provider question(s) not asked; the first candidate \
+                    "Warning: {} further provider question(s) not asked; the first candidate \
                      was taken",
                     questions.dropped()
                 );
@@ -313,7 +313,7 @@ pub fn install(
     crate::cmd::plan::print_diagnostics(&universe, &built);
 
     if built.steps().is_empty() {
-        emit!(out, "nothing to do");
+        emit!(out, "Nothing to do");
         return ExitCode::SUCCESS;
     }
 
@@ -353,6 +353,9 @@ pub fn install(
         Some(handoff) => handoff.cancel,
         None => crate::signal::install_cancel_handler().0,
     };
+    // A second handle on the same flag. `DownloadingSource` takes the one above, and reads
+    // it while a download runs. `run` reads this one once, after every download is over.
+    let cancel_flag = cancel.clone();
 
     let steps = match piko_txn::install_steps(&universe, &built, &explicit_targets, options.as_deps)
     {
@@ -375,7 +378,7 @@ pub fn install(
         Err(error) => {
             report_error(&error);
             eprintln!(
-                "note: set SigLevel = Never in pacman.conf to install without \
+                "Note: set SigLevel = Never in pacman.conf to install without \
                  checking signatures"
             );
             return ExitCode::FAILURE;
@@ -395,6 +398,7 @@ pub fn install(
     ) {
         Ok(source) => source,
         Err(error) => {
+            crate::progress::clear_download_rows(rig.row, rig.head);
             report_error(&error);
             return ExitCode::FAILURE;
         }
@@ -403,19 +407,18 @@ pub fn install(
     // The named files go in front of the cache: the plan chose them, so the source must serve
     // them. A `FileSource` with nothing in it is a pass-through, so this costs nothing when no
     // file was named.
-    let named = prepared.paths_by_name();
-    let source = FileSource::new(named.clone(), Box::new(source));
+    let source = FileSource::new(prepared.paths_by_name(), Box::new(source));
 
     if options.download_only {
-        let code =
-            download_only(&source, &cache, &named, &steps, &verification, &policy_overrides, out);
-        if let Some(head) = rig.head {
-            head.finish_and_clear();
-        }
-        if let Some(row) = rig.row {
-            row.finish_as("Downloading packages");
-        }
-        return code;
+        return download_only(
+            &source,
+            &cache,
+            &steps,
+            &verification,
+            &policy_overrides,
+            Progress { steplist: &steplist, download: rig.row, download_head: rig.head },
+            out,
+        );
     }
 
     let settings = Settings {
@@ -426,6 +429,7 @@ pub fn install(
         hook_dirs: options.side_effects.hook_dirs.clone(),
         patterns: options.patterns,
         recording: options.side_effects.recording.clone(),
+        cancel: Some(cancel_flag),
     };
     run(
         root,
@@ -571,7 +575,7 @@ fn fetch_package_url(
     let cancel =
         pre_cancel.as_ref().map_or_else(piko_net::Cancel::new, |handoff| handoff.cancel.clone());
 
-    if writeln!(out, "fetching {url}").is_err() {
+    if writeln!(out, "Fetching {url}").is_err() {
         // Nothing has been fetched yet, so a broken pipe here just ends the run quietly.
         return Err(ExitCode::SUCCESS);
     }
@@ -596,7 +600,7 @@ fn warn_about_ambiguous_targets(classified: &[TargetKind], catalog: &Catalog<'_>
     for spelled in classified.iter().filter_map(TargetKind::ambiguous_name) {
         if catalog.repos.iter().any(|(_, repository)| repository.get_str(spelled).is_some()) {
             eprintln!(
-                "warning: {spelled} names both a file here and a package in a \
+                "Warning: {spelled} names both a file here and a package in a \
                  repository; installing the file (write ./{spelled} to silence this, or \
                  move the file to install the package)"
             );
@@ -618,10 +622,10 @@ fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::Dow
     }
     steplist.suspend(|| {
         for rejected in dir.rejected() {
-            eprintln!("warning: {rejected}");
+            eprintln!("Warning: {rejected}");
         }
         if dir.created() {
-            eprintln!("warning: no {} cache exists, creating...", dir.path().display());
+            eprintln!("Warning: no {} cache exists, creating...", dir.path().display());
         }
     });
 }
@@ -629,42 +633,45 @@ fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::Dow
 /// Downloads every missing package named in `steps` into the cache, installing nothing.
 ///
 /// A thin CLI wrapper around [`piko_txn::download_only`]. See there for what it does and why.
-/// This only turns each [`piko_txn::DownloadOnlyOutcome`] into a printed line, and any
-/// [`piko_txn::Error`] it stops on into a reported one.
+/// This drives the live step list. It reports any [`piko_txn::Error`] the call stops on.
 ///
-/// A write failure is ignored, rather than turned into an early return, matching
-/// `crate::progress::print_step_result`'s policy for the same situation. This runs while
-/// packages are still being downloaded, and there is nothing to gain from stopping early just
-/// because the terminal on the other end of `out` went away. A dead `out` is instead caught by
-/// the next `emit!` call after this returns, the same way a live commit handles it.
-/// `-w`, and the three things it can report about one package.
+/// It prints nothing per package. `-w` shows the two rows an install shows for the same work:
+/// "Downloading packages" and "Verifying signatures". The cache holds the result.
 ///
-/// A package named on the command line as a file is neither downloaded nor found in a cache
-/// directory. Calling it either would be wrong, so `named` supplies the third verb. It is the
-/// set of names [`PreparedTargets::paths_by_name`] built, which is exactly the set
-/// [`FileSource`] serves.
+/// The rows come from [`crate::progress::VerifyDriver`], not from a second display. That driver
+/// also renders an install's `verify_with_progress`. Each outcome is one package located and
+/// signature-checked. [`piko_txn::progress::VerifyEvent::SignatureChecked`] reports exactly
+/// that, so both paths render this phase the same way.
+///
+/// This counts `total` itself, because an outcome carries no index. It is the plan's install
+/// count, the same total `Transaction::verify_with_progress` computes.
 fn download_only(
     source: &dyn PackageSource,
     cache: &CacheDirSource,
-    named: &HashMap<String, PathBuf>,
     steps: &[Step],
     verification: &Verification,
     policy_overrides: &HashMap<String, Policy>,
+    progress: Progress<'_>,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
+    let total = steps.iter().filter(|step| matches!(step, Step::Install { .. })).count();
+    let mut driver = crate::progress::VerifyDriver::new(
+        progress.steplist,
+        &mut *out,
+        progress.download,
+        progress.download_head,
+    );
+    let mut checked = 0_usize;
     let result =
-        piko_txn::download_only(source, cache, steps, verification, policy_overrides, |outcome| {
-            let name = outcome.package.to_string();
-            let verb = if named.contains_key(&name) {
-                "already here:"
-            } else if outcome.was_cached {
-                "already in cache:"
-            } else {
-                "downloaded"
-            };
-            let checked = if outcome.verified { ", signature verified" } else { "" };
-            let _ = writeln!(out, "{verb} {name} ({} bytes{checked})", outcome.size);
+        piko_txn::download_only(source, cache, steps, verification, policy_overrides, |_outcome| {
+            checked = checked.saturating_add(1);
+            driver.handle(piko_txn::progress::VerifyEvent::SignatureChecked {
+                index: checked,
+                total,
+            });
         });
+    // Closes whatever row is still open, on success and on failure alike.
+    driver.finish();
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -684,7 +691,7 @@ fn emit_line(out: &mut impl std::io::Write, line: &str) -> Result<(), ExitCode> 
         if error.kind() == std::io::ErrorKind::BrokenPipe {
             return Err(ExitCode::SUCCESS);
         }
-        eprintln!("error: failed to write output: {error}");
+        eprintln!("Error: failed to write output: {error}");
         return Err(ExitCode::FAILURE);
     }
     Ok(())
@@ -841,13 +848,13 @@ fn named_only(
     let mut names = Vec::new();
     for name in &entries {
         let Some(package) = local.get_str(name) else {
-            eprintln!("error: package {name} is not installed");
+            eprintln!("Error: package {name} is not installed");
             return Err(ExitCode::FAILURE);
         };
         match EntryName::new(package.name(), package.version()) {
             Ok(entry) => found.push(entry),
             Err(error) => {
-                eprintln!("error: {name} has no usable entry name: {error}");
+                eprintln!("Error: {name} has no usable entry name: {error}");
                 return Err(ExitCode::FAILURE);
             }
         }
@@ -862,7 +869,7 @@ fn named_only(
         return Err(ExitCode::FAILURE);
     }
 
-    emit_line(out, &format!("removing {} package(s):", found.len()))?;
+    emit_line(out, &format!("Removing {} package(s):", found.len()))?;
     for entry in &found {
         emit_line(out, &format!("  {}", entry.as_str()))?;
     }
@@ -949,18 +956,18 @@ fn planned(
             // A removal-only request restricts candidates to what is installed, so the solver
             // has nothing to install. Reaching here means that invariant broke. Refusing is
             // the only safe answer, because the commit engine would carry out whatever this is.
-            eprintln!("error: the removal plan contains a step that is not a removal");
-            eprintln!("note: this is a bug; run `piko plan -R` to see the plan");
+            eprintln!("Error: the removal plan contains a step that is not a removal");
+            eprintln!("Note: this is a bug; run `piko plan -R` to see the plan");
             return Err(ExitCode::FAILURE);
         };
         let Some(solvable) = universe.get(*package) else {
-            eprintln!("error: the plan names a package the universe does not know");
+            eprintln!("Error: the plan names a package the universe does not know");
             return Err(ExitCode::FAILURE);
         };
         match EntryName::new(solvable.name(), solvable.version()) {
             Ok(entry) => found.push(entry),
             Err(error) => {
-                eprintln!("error: {} has no usable entry name: {error}", solvable.name());
+                eprintln!("Error: {} has no usable entry name: {error}", solvable.name());
                 return Err(ExitCode::FAILURE);
             }
         }
@@ -1006,6 +1013,11 @@ struct Settings {
     patterns: piko_txn::Patterns,
     /// Where the transaction records what it does.
     recording: piko_txn::Recording,
+    /// The `SIGINT` flag, read once between verification and the commit.
+    ///
+    /// [`run`] holds that check, and explains it. This is `None` for a transaction with no
+    /// handler installed, which is every removal.
+    cancel: Option<piko_net::Cancel>,
 }
 
 /// The live step list `run` drives, bundled so its own parameter count stays under clippy's
@@ -1022,18 +1034,32 @@ struct Progress<'a> {
     download_head: Option<crate::progress::Row>,
 }
 
+impl Progress<'_> {
+    /// Clears both download rows. A run that stops before anything is fetched calls this.
+    /// See [`crate::progress::clear_download_rows`].
+    fn clear_downloads(&mut self) {
+        crate::progress::clear_download_rows(self.download.take(), self.download_head.take());
+    }
+}
+
 /// Drives one transaction from planning to report.
 fn run(
     root: &Path,
     dbpath: &Path,
     steps: Vec<Step>,
     source: &dyn PackageSource,
-    progress: Progress<'_>,
+    mut progress: Progress<'_>,
     settings: Settings,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
+    // `install` opens its download rows before it knows whether this function downloads
+    // anything. Those rows tick until `VerifyDriver` takes them over. So every refusal below
+    // clears them first, for two reasons. A live row redraws over a bare `eprintln!` mid-line.
+    // And a row left ticking on a stopped run still claims a download that never starts.
+    // `remove` passes no rows, so the call costs it nothing.
     if steps.is_empty() {
-        emit!(out, "nothing to do");
+        progress.clear_downloads();
+        emit!(out, "Nothing to do");
         return ExitCode::SUCCESS;
     }
 
@@ -1042,14 +1068,16 @@ fn run(
     // transaction on top would make it harder to work out later.
     match journal::read(dbpath) {
         Ok(Some(_)) => {
+            progress.clear_downloads();
             eprintln!(
-                "error: an unfinished transaction is recorded in this database; \
+                "Error: an unfinished transaction is recorded in this database; \
                  run `piko report` to see it"
             );
             return ExitCode::FAILURE;
         }
         Ok(None) => {}
         Err(error) => {
+            progress.clear_downloads();
             report_error(&error);
             return ExitCode::FAILURE;
         }
@@ -1058,11 +1086,13 @@ fn run(
     let lock = match piko_db_write::DbLock::acquire(dbpath) {
         Ok(lock) => lock,
         Err(error) => {
+            progress.clear_downloads();
             report_error(&error);
             return ExitCode::FAILURE;
         }
     };
 
+    let total_steps = steps.len();
     let planned = Transaction::new(root, dbpath, steps)
         .overwrite(settings.overwrite)
         .verification(settings.verification)
@@ -1071,6 +1101,12 @@ fn run(
         .hook_dirs(settings.hook_dirs)
         .patterns(settings.patterns)
         .recording(settings.recording);
+    // The commit reads the same flag the check below reads. It stops between two steps.
+    // `Cancel` is a cheap handle, so both readers hold one.
+    let planned = match settings.cancel.clone() {
+        Some(cancel) => planned.cancel(cancel),
+        None => planned,
+    };
 
     let mut verify_driver = crate::progress::VerifyDriver::new(
         progress.steplist,
@@ -1080,7 +1116,26 @@ fn run(
     );
     let verified = planned.verify_with_progress(source, &mut |event| verify_driver.handle(event));
     verify_driver.finish();
-    let staged = match verified.and_then(|verified| verified.stage(&lock)) {
+    let verified = match verified {
+        Ok(verified) => verified,
+        Err(error) => {
+            report_error(&error);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // This covers the window between verification's last read and the commit's first. It is
+    // also the last point where a stop leaves nothing behind. `stage` opens the journal, and
+    // a stop past it leaves that journal for `piko report`.
+    //
+    // This builds the error rather than printing prose of its own. One Ctrl+C then says the
+    // same thing wherever it lands.
+    if settings.cancel.as_ref().is_some_and(piko_net::Cancel::is_requested) {
+        report_error(&piko_txn::Error::Cancelled { completed: 0, total: total_steps });
+        return ExitCode::FAILURE;
+    }
+
+    let staged = match verified.stage(&lock) {
         Ok(staged) => staged,
         Err(error) => {
             report_error(&error);
@@ -1102,11 +1157,18 @@ fn run(
             // A hook that aborted the run explains itself through the error, which already
             // carries what it printed. See `Error::HookAborted`.
             report_error(&error);
-            if !matches!(error, piko_txn::Error::HookAborted { .. }) {
-                eprintln!(
-                    "error: the transaction stopped part-way; \
+            match error {
+                piko_txn::Error::HookAborted { .. } => {}
+                // The user requested this stop, so it is not reported as a breakage. The
+                // journal is left in place. The lock is released just below.
+                piko_txn::Error::Cancelled { .. } => eprintln!(
+                    "Note: the steps that ran are recorded; \
+                     run `piko report` to see them, then re-run to finish"
+                ),
+                _ => eprintln!(
+                    "Error: the transaction stopped part-way; \
                      run `piko report` to see what was applied"
-                );
+                ),
             }
             let _ = lock.release();
             ExitCode::FAILURE
@@ -1129,11 +1191,11 @@ fn run(
 fn report_side_effects(report: &piko_txn::Report) {
     for run in &report.scriptlets {
         if run.outcome.truncated {
-            eprintln!("warning: {}'s scriptlet output was truncated", run.package);
+            eprintln!("Warning: {}'s scriptlet output was truncated", run.package);
         }
         if !run.outcome.succeeded() {
             eprintln!(
-                "warning: {}'s {} scriptlet {}",
+                "Warning: {}'s {} scriptlet {}",
                 run.package,
                 run.kind.as_str(),
                 run.outcome.describe()
@@ -1149,28 +1211,28 @@ fn report_side_effects(report: &piko_txn::Report) {
     // Printed after the run, not before it, because the hook files are read once per phase
     // inside the transaction. That is the same reason every other hook diagnostic here is late.
     for problem in &report.hook_problems {
-        eprintln!("warning: {problem}");
+        eprintln!("Warning: {problem}");
     }
 
     // Neither record can fail a transaction, so a problem with one arrives here rather than
     // as an error. See `piko_txn::history`.
     for problem in &report.history_problems {
-        eprintln!("warning: {problem}");
+        eprintln!("Warning: {problem}");
     }
 
     for run in &report.hooks {
         if let Some(missing) = &run.unsatisfied {
-            eprintln!("warning: skipping hook {}: nothing installed satisfies {missing}", run.name);
+            eprintln!("Warning: skipping hook {}: nothing installed satisfies {missing}", run.name);
             continue;
         }
         let Some(outcome) = &run.outcome else {
             continue;
         };
         if outcome.truncated {
-            eprintln!("warning: hook {}'s output was truncated", run.name);
+            eprintln!("Warning: hook {}'s output was truncated", run.name);
         }
         if !outcome.succeeded() {
-            eprintln!("warning: hook {} {}", run.name, outcome.describe());
+            eprintln!("Warning: hook {} {}", run.name, outcome.describe());
         }
     }
 }
@@ -1191,10 +1253,13 @@ fn overwrite_from(patterns: Vec<String>) -> Overwrite {
 /// Read-only. It describes; it does not repair. There is nothing to repair to. See the
 /// note on atomicity in [`piko_txn::journal`].
 pub fn report(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
+    // `join` normalizes a `dbpath` the caller spelled with a trailing separator, which a
+    // formatted "{dbpath}/piko-journal" would print as a doubled slash.
+    let journal_path = dbpath.join(journal::JOURNAL_FILE);
     let record = match journal::read(dbpath) {
         Ok(Some(record)) => record,
         Ok(None) => {
-            emit!(out, "no unfinished transaction is recorded");
+            emit!(out, "No unfinished transaction is recorded");
             return ExitCode::SUCCESS;
         }
         Err(error) => {
@@ -1204,31 +1269,31 @@ pub fn report(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
     };
 
     if !record.begun {
-        emit!(out, "a transaction was recorded but never started; the system is unchanged");
-        emit!(out, "remove {}/piko-journal to clear it", dbpath.display());
+        emit!(out, "A transaction was recorded but never started; the system is unchanged");
+        emit!(out, "Remove {} to clear it", journal_path.display());
         return ExitCode::SUCCESS;
     }
 
-    emit!(out, "an unfinished transaction was interrupted");
-    emit!(out, "  root:   {}", record.root.display());
-    emit!(out, "  dbpath: {}", record.dbpath.display());
+    emit!(out, "An unfinished transaction was interrupted");
+    emit!(out, "  Root:   {}", record.root.display());
+    emit!(out, "  DBPath: {}", record.dbpath.display());
     emit!(out, "  {} of {} steps completed", record.completed.len(), record.steps.len());
 
     let outstanding = record.outstanding();
     if outstanding.is_empty() {
-        emit!(out, "every step completed; only the journal itself was left behind");
+        emit!(out, "Every step completed; only the journal itself was left behind");
     } else {
-        emit!(out, "not applied:");
+        emit!(out, "Not applied:");
         for intent in outstanding {
             match intent {
-                Intent::Install { package } => emit!(out, "  install {package}"),
-                Intent::Remove { entry } => emit!(out, "  remove {entry}"),
+                Intent::Install { package } => emit!(out, "  Install {package}"),
+                Intent::Remove { entry } => emit!(out, "  Remove {entry}"),
             }
         }
     }
 
     emit!(out, "");
-    emit!(out, "piko cannot undo what was applied; re-run the operation to finish it,");
-    emit!(out, "then remove {}/piko-journal", dbpath.display());
+    emit!(out, "The applied steps cannot be undone; re-run the operation to finish it,");
+    emit!(out, "Then remove {}", journal_path.display());
     ExitCode::SUCCESS
 }

@@ -115,9 +115,9 @@ fn declining_one_key_skips_only_that_key() {
     let output = run(&home, &["lsign-key", first, second], "n\ny\n");
     let printed = stdout(&output);
 
-    assert!(printed.contains(&format!("skipped {first}")), "{printed}");
-    assert!(printed.contains(&format!("locally signed {second}")), "{printed}");
-    assert!(!printed.contains(&format!("locally signed {first}")), "{printed}");
+    assert!(printed.contains(&format!("Skipped {first}")), "{printed}");
+    assert!(printed.contains(&format!("Locally signed {second}")), "{printed}");
+    assert!(!printed.contains(&format!("Locally signed {first}")), "{printed}");
     // A decline is not a failure. `crates/piko` ends a declined transaction the same way.
     assert!(output.status.success(), "{output:?}");
 }
@@ -130,7 +130,7 @@ fn an_unattended_run_declines_rather_than_proceeding() {
     let output = run(&home, &["lsign-key", &keys[0]], "");
     let printed = stdout(&output);
 
-    assert!(printed.contains(&format!("skipped {}", keys[0])), "{printed}");
+    assert!(printed.contains(&format!("Skipped {}", keys[0])), "{printed}");
     assert!(output.status.success(), "{output:?}");
 }
 
@@ -260,7 +260,7 @@ fn list_keys_fails_only_when_a_named_pattern_matches_nothing() {
 
     let missing = run(&home, &["list-keys", "absent@example.invalid"], "");
     assert!(!missing.status.success(), "{missing:?}");
-    assert!(stdout(&missing).contains("no matching keys"), "{}", stdout(&missing));
+    assert!(stdout(&missing).contains("No matching keys"), "{}", stdout(&missing));
 
     // No pattern given: the master key is listed, and the command succeeds.
     assert!(run(&home, &["list-keys"], "").status.success());
