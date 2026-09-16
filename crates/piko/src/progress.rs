@@ -752,6 +752,17 @@ mod tests {
         Event::ScriptletFinished { package: "foo", kind: ScriptletKind::PostInstall, outcome }
     }
 
+    /// Returns what a driver wrote, with styling removed.
+    ///
+    /// `console` decides on color by testing file descriptor 1, never the sink it is handed —
+    /// so a suite run from a terminal styles the ✓ these tests capture into a `Vec<u8>` and a
+    /// piped one does not. The subject here is which lines come out, in which order, at which
+    /// indent; the colors are [`crate::style`]'s to test.
+    fn rendered(out: Vec<u8>) -> String {
+        let text = String::from_utf8(out).unwrap();
+        console::strip_ansi_codes(&text).into_owned()
+    }
+
     /// The `SIGINT` handler runs `body` whether or not a command has built a list yet.
     ///
     /// `ACTIVE` is process-wide. These tests share a process with every other test in this
@@ -779,7 +790,6 @@ mod tests {
         row.finish_and_clear();
     }
 
-    /// `console` writes no ANSI codes into a `Vec<u8>`, so the ✓ arrives as plain text.
     #[test]
     fn a_silent_scriptlet_is_named_once_it_finishes() {
         let steplist = StepList::new();
@@ -789,7 +799,7 @@ mod tests {
         driver.handle(started());
         driver.handle(finished(&outcome));
         driver.finish();
-        assert_eq!(String::from_utf8(out).unwrap(), "  ✓ Running post install script\n");
+        assert_eq!(rendered(out), "  ✓ Running post install script\n");
     }
 
     #[test]
@@ -802,10 +812,7 @@ mod tests {
         driver.handle(output("Updating icon cache"));
         driver.handle(finished(&outcome));
         driver.finish();
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "  ✓ Running post install script\n    Updating icon cache\n"
-        );
+        assert_eq!(rendered(out), "  ✓ Running post install script\n    Updating icon cache\n");
     }
 
     /// The cascade: the package step is named before the scriptlet nested under it, although
@@ -823,7 +830,7 @@ mod tests {
         driver.handle(finished(&outcome));
         driver.finish();
         assert_eq!(
-            String::from_utf8(out).unwrap(),
+            rendered(out),
             "✓ Installing foo\n  ✓ Running post install script\n    Updating icon cache\n"
         );
     }
@@ -850,7 +857,7 @@ mod tests {
         driver.handle(Event::HookFinished { index: 0, total: 1, run: &run });
         driver.finish();
         assert_eq!(
-            String::from_utf8(out).unwrap(),
+            rendered(out),
             "✓ Reloading system manager configuration\n  Running in chroot\n"
         );
     }

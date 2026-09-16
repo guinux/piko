@@ -54,6 +54,7 @@ pub struct Request {
     recursive: bool,
     ignored_upgrades: Vec<IgnoredUpgrade>,
     provider_choices: Vec<ProviderChoice>,
+    group_choices: Vec<GroupChoice>,
 }
 
 impl Default for Request {
@@ -80,6 +81,7 @@ impl Request {
             recursive: false,
             ignored_upgrades: Vec::new(),
             provider_choices: Vec::new(),
+            group_choices: Vec::new(),
         }
     }
 
@@ -203,6 +205,28 @@ impl Request {
         &self.provider_choices
     }
 
+    /// Restricts one `%GROUPS%` group target to the members named in `choice`.
+    ///
+    /// Read by [`resolve_targets`], not by [`encode`]. A group names several targets. So the
+    /// answer settles which targets exist, not which candidate satisfies a clause.
+    ///
+    /// A group with no answer expands to every member. That is what an unanswered
+    /// `pacman -S <group>` installs too.
+    ///
+    /// An answer naming an id outside that group is ignored, as [`Self::choose_provider`]'s
+    /// is.
+    #[must_use]
+    pub fn choose_group(mut self, choice: GroupChoice) -> Self {
+        self.group_choices.push(choice);
+        self
+    }
+
+    /// The group questions this request carries answers for.
+    #[must_use]
+    pub fn group_choices(&self) -> &[GroupChoice] {
+        &self.group_choices
+    }
+
     /// Whether this request only takes packages away.
     ///
     /// A pure removal must never *install* anything. Left unconstrained, the solver happily
@@ -237,6 +261,44 @@ pub struct ProviderChoice {
     pub dependency: usize,
     /// The provider to satisfy it with.
     pub chosen: SolvableId,
+}
+
+/// One `%GROUPS%` group a target named, with the members it expands to.
+///
+/// Produced by [`resolve_targets`] on [`Resolution::groups`], so a frontend can ask which
+/// members to install.
+///
+/// The members keep [`Universe::group_members`]' order. That is the order
+/// [`resolve_targets`] targets them in. So numbering this list numbers what an unanswered
+/// expansion installs.
+///
+/// A member that is already installed is listed too, and selecting it plans a reinstall.
+/// `pacman -S <group>` offers the same. [`Universe::group_members`] passes over the installed
+/// *candidate* and keeps the repository one, so the names it yields are
+/// `alpm_find_group_pkgs`' names.
+#[derive(Clone, Debug)]
+pub struct GroupTarget {
+    /// The group name, as the user spelled it or as a pattern selected it.
+    pub name: String,
+    /// The members the group expands to. Never empty.
+    pub members: Box<[SolvableId]>,
+}
+
+/// One answer to a [`GroupTarget`]: which of a group's members to install.
+///
+/// Identified by the group's name, unlike [`ProviderChoice`]'s structural pair. A group name
+/// is what the user typed, and it names exactly one question. So the text is the identity
+/// here, and two different questions cannot share it.
+///
+/// A [`SolvableId`] is meaningful only for the [`Universe`] it came from, which is built once
+/// per run. An answer that outlives a run has to be keyed by package name instead.
+#[derive(Clone, Debug)]
+pub struct GroupChoice {
+    /// The group this answers, spelled as [`GroupTarget::name`] is.
+    pub group: String,
+    /// The members to install. Empty means the group contributes no target at all, which is
+    /// not the same as the group not existing.
+    pub chosen: Vec<SolvableId>,
 }
 
 /// A requirement clause, kept so the plan can tell whether the solver took the candidate
@@ -385,6 +447,15 @@ pub struct Resolution {
     /// One entry per glob target, in the order the targets were given. Empty when the caller
     /// named no pattern.
     pub expansions: Vec<Expansion>,
+    /// One entry per target that turned out to name a `%GROUPS%` group, in the order the loop
+    /// resolved them.
+    ///
+    /// Reported whether or not the request carried an answer for it. A frontend can therefore
+    /// ask, then resolve again with [`Request::choose_group`].
+    ///
+    /// The entries do not depend on the answers. A group stays a group once some of its
+    /// members are set aside.
+    pub groups: Vec<GroupTarget>,
 }
 
 /// Resolves `targets` against `universe`, adding each one to `request`.
@@ -417,6 +488,16 @@ pub struct Resolution {
 /// dropping one member leaves the target meaningful. A pattern whose every candidate is ignored
 /// is the literal case again, and fails.
 ///
+/// # A group's members can be chosen
+///
+/// Every group a target expanded to comes back on [`Resolution::groups`].
+/// [`Request::choose_group`] then restricts one group to the members the user kept.
+///
+/// piko cannot prompt from a library. So the question is data here, and the caller asks it.
+/// The caller resolves a second time with the answers. That second call cannot produce a
+/// different set of groups. Expansion reads the universe and the target list, never the
+/// answers.
+///
 /// # Errors
 ///
 /// [`TargetResolutionFailure`], naming the first target that could not be resolved.
@@ -438,6 +519,7 @@ pub fn resolve_targets(
     })?;
 
     let mut ignored: Vec<IgnoredTarget> = expanded.ignored;
+    let mut groups: Vec<GroupTarget> = Vec::new();
     for target in &expanded.names {
         let Ok(dep) = target.parse::<alpm_types::RelationOrSoname>() else {
             return Err(TargetResolutionFailure::InvalidDependencyString(target.clone()));
@@ -450,8 +532,14 @@ pub fn resolve_targets(
         let members = resolve_group(universe, target);
         let ignored_members: Vec<IgnoredTarget> =
             universe.ignored_in_group(target).map(IgnoredTarget::from_candidate).collect();
+        // Emptiness is what says "this name is not a group". So it is tested on the whole
+        // member list, and an answer narrows that list only afterwards. A group whose members
+        // were all set aside then contributes no target. That is a different answer from the
+        // name naming no group at all.
         if !members.is_empty() {
-            for member in members {
+            let selected = select_members(&request, target, &members);
+            groups.push(GroupTarget { name: target.clone(), members: members.into() });
+            for member in selected {
                 request = request.target(member);
             }
             ignored.extend(ignored_members);
@@ -467,7 +555,22 @@ pub fn resolve_targets(
         }
         return Err(TargetResolutionFailure::Ignored { target: target.clone(), candidates });
     }
-    Ok(Resolution { request, ignored, expansions: expanded.expansions })
+    Ok(Resolution { request, ignored, expansions: expanded.expansions, groups })
+}
+
+/// The members of `group` that `request`'s answer keeps, or all of them when it carries none.
+///
+/// The order is `members`' own. So the answer selects from the list a frontend numbered, and
+/// never re-orders it.
+///
+/// An id the group does not carry is dropped rather than targeted. An answer restricts this
+/// group. It is not a way to name a package outside it.
+fn select_members(request: &Request, group: &str, members: &[SolvableId]) -> Vec<SolvableId> {
+    let Some(choice) = request.group_choices().iter().find(|choice| choice.group == group) else {
+        return members.to_vec();
+    };
+    let chosen: HashSet<SolvableId> = choice.chosen.iter().copied().collect();
+    members.iter().copied().filter(|member| chosen.contains(member)).collect()
 }
 
 /// Compiles `request` against `universe`.
@@ -1875,6 +1978,137 @@ mod tests {
             .map(|candidate| candidate.version().to_string())
             .collect();
         assert_eq!(selected, ["1.0.0-1"], "core's build, and only it");
+    }
+
+    /// A scenario with a three-member group in `core`, plus one package outside it.
+    fn three_member_group() -> BuiltScenario {
+        Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("editor", "1.0.0-1").groups(["tools"]),
+                    PackageSpec::new("linker", "1.0.0-1").groups(["tools"]),
+                    PackageSpec::new("viewer", "1.0.0-1").groups(["tools"]),
+                    PackageSpec::new("unrelated", "1.0.0-1"),
+                ],
+            )
+            .build()
+    }
+
+    /// The question is reported whether or not it was answered, so a frontend can ask and then
+    /// resolve again.
+    #[test]
+    fn a_group_target_is_reported_with_its_members() {
+        let scenario = three_member_group();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let resolution =
+            resolve_targets(&universe, Request::new(), &["tools".to_owned()], &Limits::default())
+                .unwrap();
+        assert_eq!(resolution.groups.len(), 1);
+        assert_eq!(resolution.groups[0].name, "tools");
+        let mut members = named(&universe, &resolution.groups[0].members);
+        members.sort_unstable();
+        assert_eq!(members, ["editor", "linker", "viewer"]);
+    }
+
+    /// A literal target is not a group, so it raises no question.
+    #[test]
+    fn a_literal_target_reports_no_group() {
+        let scenario = three_member_group();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let resolution = resolve_targets(
+            &universe,
+            Request::new(),
+            &["unrelated".to_owned()],
+            &Limits::default(),
+        )
+        .unwrap();
+        assert!(resolution.groups.is_empty());
+    }
+
+    #[test]
+    fn an_answered_group_targets_only_the_members_it_names() {
+        let scenario = three_member_group();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let first =
+            resolve_targets(&universe, Request::new(), &["tools".to_owned()], &Limits::default())
+                .unwrap();
+        let chosen: Vec<SolvableId> = first.groups[0]
+            .members
+            .iter()
+            .copied()
+            .filter(|id| universe.get(*id).is_some_and(|m| m.name().as_ref() != "linker"))
+            .collect();
+        let request =
+            Request::new().choose_group(GroupChoice { group: "tools".to_owned(), chosen });
+
+        let answered =
+            resolve_targets(&universe, request, &["tools".to_owned()], &Limits::default()).unwrap();
+        let mut targets = named(&universe, answered.request.targets());
+        targets.sort_unstable();
+        assert_eq!(targets, ["editor", "viewer"]);
+    }
+
+    /// Keeping nothing is an answer, not a target that failed to resolve. The group still
+    /// exists. So the emptiness test that says "this name is not a group" must run before the
+    /// answer is applied.
+    #[test]
+    fn a_group_answered_with_nothing_resolves_to_no_target() {
+        let scenario = three_member_group();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let request = Request::new()
+            .choose_group(GroupChoice { group: "tools".to_owned(), chosen: Vec::new() });
+        let resolution =
+            resolve_targets(&universe, request, &["tools".to_owned()], &Limits::default())
+                .expect("an empty answer is not a resolution failure");
+
+        assert!(resolution.request.targets().is_empty());
+        assert_eq!(resolution.groups.len(), 1, "the question is still reported");
+    }
+
+    /// An answer restricts one group. It is not a second way of naming a package.
+    #[test]
+    fn an_answer_naming_a_package_outside_the_group_is_ignored() {
+        let scenario = three_member_group();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let outsider = universe.candidates_named("unrelated").first().copied().unwrap();
+        let request = Request::new()
+            .choose_group(GroupChoice { group: "tools".to_owned(), chosen: vec![outsider] });
+        let resolution =
+            resolve_targets(&universe, request, &["tools".to_owned()], &Limits::default()).unwrap();
+
+        assert!(resolution.request.targets().is_empty());
+    }
+
+    /// An answer names one group. Another group on the same command line is untouched by it.
+    #[test]
+    fn an_answer_applies_to_its_own_group_only() {
+        let scenario = Scenario::new()
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("editor", "1.0.0-1").groups(["tools"]),
+                    PackageSpec::new("linker", "1.0.0-1").groups(["tools"]),
+                    PackageSpec::new("viewer", "1.0.0-1").groups(["media"]),
+                ],
+            )
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let editor = universe.candidates_named("editor").first().copied().unwrap();
+        let request = Request::new()
+            .choose_group(GroupChoice { group: "tools".to_owned(), chosen: vec![editor] });
+        let targets = ["tools".to_owned(), "media".to_owned()];
+        let resolution = resolve_targets(&universe, request, &targets, &Limits::default()).unwrap();
+
+        let mut named = named(&universe, resolution.request.targets());
+        named.sort_unstable();
+        assert_eq!(named, ["editor", "viewer"]);
     }
 
     // --- `ALPM_QUESTION_SELECT_PROVIDER` -------------------------------------------------

@@ -127,6 +127,11 @@ fn every_dated_line_in_the_real_log_parses() {
 
 /// A finished transaction must not be reported as unfinished. `Interrupted` is reserved for a
 /// session the log genuinely never closed — a machine that lost power mid-upgrade.
+///
+/// Three messages close a session, not two. libalpm writes `completed` and `failed`. piko also
+/// writes `cancelled`, for a commit the user stopped between two steps. A log written by both
+/// tools carries all three. Counting only libalpm's two reports piko's own cancellations as
+/// sessions the reader failed to close.
 #[test]
 #[ignore = "requires a real /var/log/pacman.log"]
 fn a_closed_transaction_is_never_reported_as_interrupted() {
@@ -135,9 +140,8 @@ fn a_closed_transaction_is_never_reported_as_interrupted() {
         return;
     };
 
-    let closed = grep_count(&text, |line| {
-        line.contains("] transaction completed") || line.contains("] transaction failed")
-    });
+    let endings = ["] transaction completed", "] transaction failed", "] transaction cancelled"];
+    let closed = grep_count(&text, |line| endings.iter().any(|ending| line.contains(ending)));
     let lines = pacman_log::read(Path::new(LOG)).expect("the log reads");
     let sessions = pacman_log::sessions(&lines);
     let settled = sessions.iter().filter(|session| session.outcome != Outcome::Interrupted).count();

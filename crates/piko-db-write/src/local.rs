@@ -25,6 +25,7 @@ use std::{
     fs::File,
     io::Write as _,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use alpm_types::PackageInstallReason;
@@ -216,17 +217,27 @@ impl<'lock> LocalDbWriter<'lock> {
 
     /// Writes an arbitrary file into an existing entry, atomically.
     ///
-    /// This is for members that are copied verbatim rather than built: `mtree` and `install`,
-    /// which libalpm likewise extracts into the entry rather than into the root
+    /// This is for members that are copied verbatim rather than built: `mtree`, `install` and
+    /// `changelog`, which libalpm likewise extracts into the entry rather than into the root
     /// (`add.c:194`). They have no `%SECTION%` structure — `mtree` is gzipped binary — so
     /// [`Record`] does not apply, and the bytes are written as given.
+    ///
+    /// `modified` is the member's own modification time. Stamping it keeps the entry agreeing
+    /// with the `ALPM-MTREE` data that describes it. This is the per-file counterpart of
+    /// [`EntryWrite::raw`], which says more about why.
     ///
     /// # Errors
     ///
     /// [`Error::Io`] if the entry does not exist or the write fails at any stage.
-    pub fn write_raw(&self, entry: &EntryName, name: &str, contents: &[u8]) -> Result<()> {
+    pub fn write_raw(
+        &self,
+        entry: &EntryName,
+        name: &str,
+        contents: &[u8],
+        modified: Option<SystemTime>,
+    ) -> Result<()> {
         let path = self.entry_path(entry).join(name);
-        atomic_write(&path, contents)
+        atomic_write_at(&path, contents, modified)
     }
 
     /// Reads a `desc` or `files` file back out of an entry.
@@ -361,15 +372,27 @@ impl EntryWrite {
     ///
     /// [`Error::Io`] if the temporary cannot be created or written.
     pub fn record(&mut self, record: &Record) -> Result<()> {
-        self.raw(file_name(record.kind()), record.render().as_bytes())
+        // A `desc` or `files` is built here rather than copied out of an archive. It has no
+        // time of its own to carry, so it gets the time it was written.
+        self.raw(file_name(record.kind()), record.render().as_bytes(), None)
     }
 
-    /// Stages an arbitrary member — `mtree` or `install`, written verbatim.
+    /// Stages an arbitrary member — `mtree`, `install` or `changelog`, written verbatim.
+    ///
+    /// `modified` is the time the file should carry. For a member copied out of a package
+    /// archive, that is the archive's own.
+    ///
+    /// Stamping it is not cosmetic. The `ALPM-MTREE` data records a time for `.INSTALL`, and
+    /// `piko check` compares that record against this file. A member written with the time of
+    /// the transaction reads as altered on every check from then on. libalpm reaches the same
+    /// result through libarchive's `ARCHIVE_EXTRACT_TIME` (`add.c:194`).
+    ///
+    /// `None` leaves the time the write itself produced.
     ///
     /// # Errors
     ///
     /// [`Error::Io`] if the temporary cannot be created or written.
-    pub fn raw(&mut self, name: &str, contents: &[u8]) -> Result<()> {
+    pub fn raw(&mut self, name: &str, contents: &[u8], modified: Option<SystemTime>) -> Result<()> {
         let destination = self.dir.join(name);
         let temp = temp_path(&destination);
         let mut file = create_temp(&temp)?;
@@ -380,6 +403,15 @@ impl EntryWrite {
             drop(file);
             let _ = std::fs::remove_file(&temp);
             return Err(error);
+        }
+
+        // After the write, which would otherwise move the time forward again. Before
+        // `commit`'s `sync_all`, which is what makes it durable. The rename does not touch
+        // the time: it travels with the inode.
+        if let Some(source) = modified.and_then(|time| file.set_modified(time).err()) {
+            drop(file);
+            let _ = std::fs::remove_file(&temp);
+            return Err(Error::io(&temp, IoAction::Metadata, source));
         }
 
         // `mode` on the open above is masked by the caller's umask, so it is set explicitly
@@ -537,6 +569,15 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 /// 3. `rename` over the target. This is atomic within a directory.
 /// 4. `fsync` the directory. This makes the rename itself durable.
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    atomic_write_at(path, contents, None)
+}
+
+/// [`atomic_write`], with `modified` stamped onto the file before it lands.
+///
+/// The time is set after the write, so the write cannot move it forward again, and before the
+/// `fsync`, which makes it durable. See [`EntryWrite::raw`] for why a member copied out of an
+/// archive needs one.
+fn atomic_write_at(path: &Path, contents: &[u8], modified: Option<SystemTime>) -> Result<()> {
     let directory = path.parent().unwrap_or(Path::new("."));
     let temp = temp_path(path);
 
@@ -547,6 +588,7 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
         // to rename later, so each failure cleans up before returning.
         if let Err(error) = file
             .write_all(contents)
+            .and_then(|()| modified.map_or(Ok(()), |time| file.set_modified(time)))
             .and_then(|()| file.sync_all())
             .map_err(|source| Error::io(&temp, IoAction::Write, source))
         {
@@ -673,7 +715,7 @@ mod tests {
 
         let mut staged = writer.entry_write(&name);
         staged.record(&desc("foo", "1.0.0-1")).unwrap();
-        staged.raw("mtree", b"gzipped bytes").unwrap();
+        staged.raw("mtree", b"gzipped bytes", None).unwrap();
 
         // Nothing is visible under its real name until `commit`. The temporaries are.
         let dir = writer.entry_path(&name);
@@ -685,6 +727,40 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("mtree")).unwrap(), b"gzipped bytes");
         assert!(!dir.join("desc.new").exists(), "no temporary may survive a commit");
         assert!(!dir.join("mtree.new").exists());
+    }
+
+    /// A raw member keeps the time it was asked for, through both the staged path and the
+    /// per-file one.
+    ///
+    /// The `fsync` and the `rename` sit between the request and the result. Neither may move
+    /// the time. That is what keeps an entry's `install` agreeing with the `ALPM-MTREE` data
+    /// that records a time for it.
+    #[test]
+    fn a_raw_member_keeps_the_time_it_was_given() {
+        let stamp = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let harness = Harness::new();
+        let lock = harness.lock();
+        let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
+        let name = entry("foo-1.0.0-1");
+        writer.create_entry(&name).unwrap();
+        let dir = writer.entry_path(&name);
+
+        let mut staged = writer.entry_write(&name);
+        staged.raw("install", b"post_install() { :; }", Some(stamp)).unwrap();
+        staged.commit().unwrap();
+        writer.write_raw(&name, "changelog", b"1.0.0-1 first release", Some(stamp)).unwrap();
+
+        for member in ["install", "changelog"] {
+            let seen = std::fs::metadata(dir.join(member)).unwrap().modified().unwrap();
+            assert_eq!(seen, stamp, "{member} did not keep the requested time");
+        }
+
+        // A record has no time of its own to keep, so it gets the time of the write.
+        let mut staged = writer.entry_write(&name);
+        staged.record(&desc("foo", "1.0.0-1")).unwrap();
+        staged.commit().unwrap();
+        let written = std::fs::metadata(dir.join("desc")).unwrap().modified().unwrap();
+        assert!(written > stamp, "a record must not inherit some other member's time");
     }
 
     /// Dropping without committing must leave the entry exactly as it was. Otherwise a
@@ -702,7 +778,7 @@ mod tests {
         {
             let mut staged = writer.entry_write(&name);
             staged.record(&desc("foo", "1.0.0-1")).unwrap();
-            staged.raw("install", b"post_install() { :; }").unwrap();
+            staged.raw("install", b"post_install() { :; }", None).unwrap();
             assert!(dir.join("desc.new").exists());
         }
 

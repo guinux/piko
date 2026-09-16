@@ -157,11 +157,17 @@ pub(super) fn install_step(
     staged.record(&record::desc(&step.package.info, &step.package.raw, &facts))?;
     staged.record(&record::files(&extraction))?;
 
-    // `.MTREE` and `.INSTALL` belong in the entry under their libalpm names
-    // (`add.c:194`), not in the root.
-    for (member, stored) in [(".MTREE", "mtree"), (".INSTALL", "install")] {
-        if let Some(bytes) = extraction.metadata.get(member) {
-            staged.raw(stored, bytes)?;
+    // `.MTREE`, `.INSTALL` and `.CHANGELOG` belong in the entry under their libalpm names
+    // (`add.c:194`), not in the root. These three are the whole list `extract_db_file`
+    // redirects; every other `.`-prefixed member is reserved and skipped.
+    //
+    // Each keeps the time the archive gave it, so the entry agrees with the `ALPM-MTREE` data
+    // that describes it. `pacman -Qc` reads `changelog`, and `piko check` reads the times.
+    for (member, stored) in
+        [(".MTREE", "mtree"), (".INSTALL", "install"), (".CHANGELOG", "changelog")]
+    {
+        if let Some(captured) = extraction.metadata.get(member) {
+            staged.raw(stored, &captured.contents, captured.modified())?;
         }
     }
     staged.commit()?;

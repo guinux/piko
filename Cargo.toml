@@ -24,9 +24,6 @@ missing_docs = "deny"
 missing_debug_implementations = "deny"
 
 [workspace.lints.rustdoc]
-# A doc link is API documentation. A dead one points at an item that no longer exists, and a
-# private one renders as nothing for the reader of the public docs. Both are wrong answers,
-# not cosmetic slips. Denying them keeps `cargo doc --workspace --no-deps` a commit gate.
 broken_intra_doc_links = "deny"
 private_intra_doc_links = "deny"
 invalid_codeblock_attributes = "deny"
@@ -73,9 +70,7 @@ thiserror = "2"
 # rustls + platform-verifier: keeps piko's TLS stack pure Rust while still validating
 # against the system CA store, same as libcurl/pacman.
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
-# `local-offset` is what lets a timestamp be rendered in the machine's own time zone, the
-# way `pacman.log` spells one. The feature is gated because the offset can only be read
-# soundly while the process is single-threaded — see `piko_txn::history::LocalOffset`.
+# `local-offset` is what lets a timestamp be rendered in the machine's own time zone.
 time = { version = "0.3", features = ["local-offset"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
@@ -98,3 +93,7 @@ piko-txn = { path = "crates/piko-txn", version = "0.1.0" }
 overflow-checks = true
 codegen-units = 1
 lto = "fat"
+
+# Reduce test suite run time
+[profile.dev.package.piko-db]
+opt-level = 2

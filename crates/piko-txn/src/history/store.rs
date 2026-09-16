@@ -136,10 +136,13 @@ pub fn render(entry: &Entry, offset: LocalOffset) -> String {
 
 /// Reads the last `limit` transactions, newest last.
 ///
-/// Reads at most `tail_bytes` from the end of the file, then drops everything before the first
-/// `txn` line found — which is what makes an arbitrary seek into the middle of a block safe.
-/// So `limit` bounds what is returned and `tail_bytes` bounds what is read, and neither
-/// depends on the file's total size.
+/// Reads at most `tail_bytes` from the end of the file. It then drops the partial line the
+/// seek landed in, and everything before the first `txn` line found. That is what makes an
+/// arbitrary seek into the middle of a block safe. `limit` bounds what is returned and
+/// `tail_bytes` bounds what is read; neither depends on the file's total size.
+///
+/// Every *whole* block inside the window is returned. The block the seek landed inside is the
+/// only one lost. It is the only one whose `txn` header the window does not carry.
 ///
 /// A missing file is an empty history, not an error: nothing has been recorded yet.
 ///
@@ -155,41 +158,68 @@ pub fn read_last(path: &Path, limit: usize, tail_bytes: u64) -> std::io::Result<
 
     let length = file.metadata()?.len();
     let from = length.saturating_sub(tail_bytes);
-    // A tail read can land mid-block and mid-character. Both are handled below: the partial
-    // first block is dropped, and invalid UTF-8 is replaced rather than refused.
     let partial = from > 0;
-    file.seek(std::io::SeekFrom::Start(from))?;
+    // One byte earlier than asked, so the buffer carries the newline that ends the line before
+    // it. That byte tells a seek landing mid-line from one landing exactly on a boundary. It
+    // makes the first line either a real fragment or empty, so `after_first_line` is right in
+    // both cases without a second rule.
+    let (start, span) = if partial {
+        (from.saturating_sub(1), tail_bytes.saturating_add(1))
+    } else {
+        (from, tail_bytes)
+    };
+    file.seek(std::io::SeekFrom::Start(start))?;
     let mut bytes = Vec::new();
-    (&mut file).take(tail_bytes).read_to_end(&mut bytes)?;
-    let text = String::from_utf8_lossy(&bytes);
+    (&mut file).take(span).read_to_end(&mut bytes)?;
+    // A seek lands mid-character as readily as mid-line. The bytes are decoded leniently, so
+    // the damage stays inside the one line `after_first_line` then drops.
+    let decoded = String::from_utf8_lossy(&bytes);
+    let text = if partial { self::after_first_line(&decoded) } else { &decoded };
 
-    let mut entries = self::parse(&text, partial);
+    let mut entries = self::parse(text);
     if entries.len() > limit {
         entries.drain(..entries.len().saturating_sub(limit));
     }
     Ok(entries)
 }
 
+/// `text` without its first line, for a read that began part-way through the file.
+///
+/// A tail read starts at a byte offset. Its first line is the tail of a line this read did not
+/// see the start of. Dropping exactly that much makes every line after it a whole line. Every
+/// `txn` line is then a real block header, rather than something that happens to read as one.
+/// What remains of the block the seek landed inside carries no `txn` header, so [`parse`]
+/// discards it for having no block open.
+///
+/// Trim by line, not by block. Trimming by block drops the fragment *plus* the first whole
+/// transaction after it.
+///
+/// The caller includes the byte before its window. A seek that landed exactly on a line
+/// boundary therefore presents an empty first line here, and loses nothing.
+fn after_first_line(text: &str) -> &str {
+    match text.find('\n') {
+        Some(at) => text.get(at.saturating_add(1)..).unwrap_or_default(),
+        // One line and no newline: all of it is the fragment.
+        None => "",
+    }
+}
+
 /// Parses every complete block in `text`, oldest first.
 ///
-/// `skip_first` drops the leading block, for a read that began part-way through the file.
+/// Lines before the first `txn` belong to a block whose header `text` does not carry. They are
+/// dropped. A caller reading from part-way through a file trims the partial first *line* before
+/// calling this. [`read_last`] does that for its own tail read.
 #[must_use]
-pub fn parse(text: &str, skip_first: bool) -> Vec<Entry> {
+pub fn parse(text: &str) -> Vec<Entry> {
     let mut entries = Vec::new();
     let mut current: Option<Entry> = None;
     let mut version_understood = false;
-    let mut skipped = !skip_first;
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("txn ") {
             // A `txn` line always starts a block, even if the previous one had no `end`. A
             // block cut short by a full disk must not swallow the one written after it.
             entries.extend(current.take().filter(|_| version_understood));
-            if !skipped {
-                skipped = true;
-                version_understood = false;
-                continue;
-            }
             match self::parse_header(rest) {
                 Some((id, started)) => {
                     version_understood = true;
@@ -319,7 +349,7 @@ mod tests {
     fn an_entry_round_trips() {
         let entry = sample();
         let text = render(&entry, LocalOffset::UTC);
-        assert_eq!(parse(&text, false), vec![entry]);
+        assert_eq!(parse(&text), vec![entry]);
     }
 
     #[test]
@@ -329,7 +359,7 @@ mod tests {
             ..sample()
         };
         let text = render(&entry, LocalOffset::UTC);
-        assert_eq!(parse(&text, false), vec![entry]);
+        assert_eq!(parse(&text), vec![entry]);
     }
 
     /// A cancellation must not read back as an interruption. The two mean different things:
@@ -339,7 +369,7 @@ mod tests {
         let entry = Entry { outcome: Outcome::Cancelled, ..sample() };
         let text = render(&entry, LocalOffset::UTC);
         assert!(text.contains("end cancelled "), "{text}");
-        assert_eq!(parse(&text, false), vec![entry]);
+        assert_eq!(parse(&text), vec![entry]);
     }
 
     /// A `command` holding a newline must not be able to forge an `end` line, or a failed
@@ -351,7 +381,7 @@ mod tests {
             outcome: Outcome::Failed { reason: "it failed".to_owned() },
             ..sample()
         };
-        let parsed = parse(&render(&entry, LocalOffset::UTC), false);
+        let parsed = parse(&render(&entry, LocalOffset::UTC));
         assert!(matches!(parsed.first().map(|e| e.outcome.clone()), Some(Outcome::Failed { .. })));
     }
 
@@ -391,25 +421,53 @@ mod tests {
         );
     }
 
-    /// A tail read lands wherever the byte count puts it. The block it lands inside is
-    /// incomplete, and reporting half a transaction is worse than reporting one fewer.
-    #[test]
-    fn a_partial_leading_block_is_dropped() {
+    /// Writes four blocks of equal width and returns the file and one block's size.
+    ///
+    /// Equal width is what lets a test name a byte offset and know which block it falls in.
+    /// Each block differs only in an id of the same length and a timestamp of the same length.
+    fn four_blocks() -> (tempfile::TempDir, PathBuf, u64) {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let path = dir.path().join(HISTORY_FILE);
         for index in 0..4_i64 {
-            let entry =
-                Entry { id: format!("id-{index}"), started: 1_757_000_000 + index, ..sample() };
+            let started = 1_757_000_000_i64.saturating_add(index);
+            let entry = Entry { id: format!("id-{index}"), started, ..sample() };
             append(&path, &entry, LocalOffset::UTC).unwrap();
         }
         let whole = std::fs::metadata(&path).unwrap().len();
-        // Land part-way into the file, guaranteed to be inside a block rather than on a
-        // boundary.
-        let entries = read_last(&path, 10, whole / 2 + 7).unwrap();
-        assert!(entries.len() < 4, "{} blocks", entries.len());
+        assert_eq!(whole % 4, 0, "the four blocks are not of equal width");
+        (dir, path, whole / 4)
+    }
+
+    fn ids(entries: &[Entry]) -> Vec<String> {
+        entries.iter().map(|entry| entry.id.clone()).collect()
+    }
+
+    /// A tail read lands wherever the byte count puts it. The block it lands inside is
+    /// incomplete, and reporting half a transaction is worse than reporting one fewer.
+    ///
+    /// *One* fewer. Every whole block inside the window still comes back. A trim by block also
+    /// drops the first complete transaction after the fragment. That transaction then goes
+    /// silently missing from `piko history`, once the file outgrows the window.
+    #[test]
+    fn a_partial_leading_block_is_dropped_and_no_whole_block_with_it() {
+        let (_dir, path, block) = four_blocks();
+        // Seven bytes into `id-1`'s tail: two whole blocks, and part of a third.
+        let entries = read_last(&path, 10, block * 2 + 7).unwrap();
+
+        assert_eq!(ids(&entries), vec!["id-2".to_owned(), "id-3".to_owned()]);
         for entry in &entries {
             assert_eq!(entry.root, PathBuf::from("/"), "a partial block reached the reader");
         }
+    }
+
+    /// A window starting exactly on a block boundary has no fragment to drop. It must keep
+    /// every block it covers.
+    #[test]
+    fn a_window_landing_on_a_boundary_loses_nothing() {
+        let (_dir, path, block) = four_blocks();
+        let entries = read_last(&path, 10, block * 2).unwrap();
+
+        assert_eq!(ids(&entries), vec!["id-2".to_owned(), "id-3".to_owned()]);
     }
 
     /// A power cut mid-append leaves a block with no `end`. The next transaction appends after
@@ -420,7 +478,7 @@ mod tests {
             "txn 1 first 1970-01-01T00:00:00+0000\nroot /\ninstalled foo 1.0.0-1\n{}",
             render(&sample(), LocalOffset::UTC)
         );
-        let entries = parse(&text, false);
+        let entries = parse(&text);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries.first().map(|e| e.outcome.clone()), Some(Outcome::Interrupted));
         assert_eq!(entries.get(1).map(|e| e.outcome.clone()), Some(Outcome::Completed));
@@ -435,7 +493,7 @@ mod tests {
              1970-01-01T00:00:00+0000\n",
             render(&sample(), LocalOffset::UTC)
         );
-        let entries = parse(&text, false);
+        let entries = parse(&text);
         assert_eq!(entries.len(), 1);
         let names: Vec<&str> =
             entries.first().expect("one entry").actions.iter().map(Action::name).collect();
@@ -446,6 +504,6 @@ mod tests {
     fn an_unknown_keyword_is_ignored() {
         let text = "txn 1 x 1970-01-01T00:00:00+0000\nroot /\nsomething new\nend completed \
                     1970-01-01T00:00:00+0000\n";
-        assert_eq!(parse(text, false).len(), 1);
+        assert_eq!(parse(text).len(), 1);
     }
 }

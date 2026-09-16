@@ -111,14 +111,41 @@ pub struct Extraction {
     pub owned: Vec<PathBuf>,
     /// `%BACKUP%` hashes to record, keyed by path.
     pub backup_hashes: BTreeMap<PathBuf, Md5Checksum>,
-    /// Metadata members (`.PKGINFO`, `.MTREE`, `.INSTALL`, …) and their contents.
+    /// Metadata members (`.PKGINFO`, `.MTREE`, `.INSTALL`, …), keyed by archive name.
     ///
     /// piko captures these rather than extracting them: they belong in the database entry,
     /// not in the root. libalpm does the same, redirecting them in `extract_db_file`
     /// (`add.c:194`).
-    pub metadata: BTreeMap<String, Vec<u8>>,
+    pub metadata: BTreeMap<String, MetadataMember>,
     /// Paths whose hash could not be computed during backup resolution.
     pub unreadable: Vec<PathBuf>,
+}
+
+/// One captured metadata member.
+///
+/// The time travels with the bytes. A member is *copied* into the database entry rather than
+/// composed there, and the `ALPM-MTREE` data describes it as the archive holds it. An entry
+/// written without the time disagrees with the data that describes it. `piko check` then
+/// reports the file as altered, on the day it was installed and on every check after.
+///
+/// libalpm carries the time through the same way. It extracts these members with
+/// `ARCHIVE_EXTRACT_TIME` (`add.c:194`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataMember {
+    /// The member's bytes, verbatim.
+    pub contents: Vec<u8>,
+    /// The member's modification time, in seconds since the epoch, as the archive records it.
+    pub mtime: u64,
+}
+
+impl MetadataMember {
+    /// The time this member should carry on disk.
+    ///
+    /// `None` when the archive's value is not a time this platform can represent.
+    #[must_use]
+    pub fn modified(&self) -> Option<std::time::SystemTime> {
+        std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(self.mtime))
+    }
 }
 
 /// Largest metadata member piko holds in memory.
@@ -307,7 +334,7 @@ fn capture_metadata(member: &Member, contents: &mut dyn std::io::Read, into: &mu
     // is not payload, and the entry is still usable without, say, a `.CHANGELOG`.
     let mut limited = contents.take(MAX_METADATA_BYTES as u64);
     if std::io::Read::read_to_end(&mut limited, &mut buffer).is_ok() {
-        into.metadata.insert(name, buffer);
+        into.metadata.insert(name, MetadataMember { contents: buffer, mtime: member.mtime });
     }
 }
 
@@ -388,6 +415,15 @@ mod tests {
         builder.append_data(&mut h, name, contents).unwrap();
     }
 
+    /// [`file`], with a modification time of its own rather than the fixture's zero.
+    fn file_at(builder: &mut tar::Builder<Vec<u8>>, name: &str, contents: &[u8], mtime: u64) {
+        let mut h = header(0o644);
+        h.set_size(contents.len() as u64);
+        h.set_mtime(mtime);
+        h.set_cksum();
+        builder.append_data(&mut h, name, contents).unwrap();
+    }
+
     /// A directory member, spelled with the trailing slash a real package archive carries.
     fn dir(builder: &mut tar::Builder<Vec<u8>>, name: &str) {
         let mut h = header(0o755);
@@ -421,8 +457,31 @@ mod tests {
         assert_eq!(std::fs::read(dir.path().join("usr/bin/foo")).unwrap(), b"binary");
         assert_eq!(result.owned, [PathBuf::from("usr/bin/foo"), PathBuf::from("etc/foo.conf")]);
         // Metadata is captured for the database entry, not written into the root.
-        assert_eq!(result.metadata.get(".PKGINFO").unwrap(), b"pkgname = foo");
+        assert_eq!(result.metadata.get(".PKGINFO").unwrap().contents, b"pkgname = foo");
         assert!(!dir.path().join(".PKGINFO").exists());
+    }
+
+    /// A captured member carries the archive's time, not the time it was read.
+    ///
+    /// The bytes alone are not enough. A member is copied into the database entry, and the
+    /// `ALPM-MTREE` data that describes it records a time. See [`MetadataMember`].
+    #[test]
+    fn a_captured_metadata_member_carries_its_archive_time() {
+        let (_keep, pkg) = package(|b| {
+            file(b, ".PKGINFO", b"pkgname = foo");
+            file_at(b, ".INSTALL", b"post_install() { :; }", 1_700_000_000);
+            file(b, "usr/bin/foo", b"binary");
+        });
+        let (_dir, root) = root();
+
+        let result = run(&pkg, &root, &Filters::default());
+
+        let captured = result.metadata.get(".INSTALL").expect(".INSTALL was not captured");
+        assert_eq!(captured.mtime, 1_700_000_000);
+        assert_eq!(
+            captured.modified(),
+            Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
+        );
     }
 
     /// A member listed twice is owned once, because `%FILES%` is a set.

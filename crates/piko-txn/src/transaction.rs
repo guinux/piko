@@ -1403,6 +1403,79 @@ mod tests {
         assert!(crate::journal::read(db.path()).unwrap().is_none());
     }
 
+    /// The three metadata members `extract_db_file` redirects reach the entry, each carrying
+    /// the time the archive gave it.
+    ///
+    /// The time is the load-bearing half. `ALPM-MTREE` records a time for `.INSTALL`, and
+    /// `piko check` compares that record against the entry's own `install`. A member written
+    /// with the time of the transaction reads as altered from the moment it lands.
+    ///
+    /// `changelog` is the member easiest to leave out, because nothing else in piko reads it.
+    /// `pacman -Qc` does. So does `LocalPackage::verify_files`, against the same mtree data it
+    /// checks `install` against.
+    #[test]
+    fn the_database_members_keep_the_archive_time() {
+        /// Distinctive, and far enough from now that a fallback to the write time is obvious.
+        const STAMPED: u64 = 1_700_000_000;
+
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = tempfile::tempdir().unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut add = |path: &str, contents: &[u8], is_dir: bool| {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(if is_dir { 0o755 } else { 0o644 });
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(STAMPED);
+            header.set_size(contents.len() as u64);
+            if is_dir {
+                header.set_entry_type(tar::EntryType::Directory);
+            }
+            header.set_cksum();
+            builder.append_data(&mut header, path, contents).unwrap();
+        };
+        add(".PKGINFO", pkginfo("1.0.0-1", &[]).as_bytes(), false);
+        add(".INSTALL", b"post_install() { :; }\n", false);
+        add(".CHANGELOG", b"1.0.0-1 first release\n", false);
+        // Never parsed here. This test is about where the bytes land, not what they mean.
+        add(".MTREE", b"opaque\n", false);
+        add("usr/", &[][..], true);
+        add("usr/bin/", &[][..], true);
+        add("usr/bin/foo", b"binary", false);
+        std::fs::write(cache.path().join(name), builder.into_inner().unwrap()).unwrap();
+
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&source)
+            .unwrap()
+            .stage(&lock)
+            .unwrap()
+            .commit()
+            .unwrap();
+
+        let entry = db.path().join("local/foo-1.0.0-1");
+        assert_eq!(std::fs::read(entry.join("changelog")).unwrap(), b"1.0.0-1 first release\n");
+        for member in ["install", "changelog", "mtree"] {
+            let seen = std::fs::metadata(entry.join(member))
+                .unwrap_or_else(|error| panic!("{member} is not in the entry: {error}"))
+                .modified()
+                .unwrap()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            assert_eq!(seen, STAMPED, "{member} was stamped with the write time");
+        }
+    }
+
     /// A cancellation is read between two steps, so the step already running finishes.
     ///
     /// This pins all three halves of [`Transaction::cancel`]'s contract. The step that was

@@ -860,8 +860,15 @@ impl<'a> Universe<'a> {
     /// Empty if `name` names no group.
     ///
     /// This is what `pacman -S <group>` expands to: the group's members as a repository
-    /// offers them. An installed member is left out, because the "must remain" clause already
-    /// holds it in place and a target would only ask for it a second time.
+    /// offers them.
+    ///
+    /// The filter drops the *installed candidate* of a name, not the name. A package carrying
+    /// the group is interned twice, once from the local database and once from the repository,
+    /// and only the repository copy may be targeted. The installed copy is already held by the
+    /// "must remain" clause, so targeting it would ask for it a second time. The repository
+    /// copy survives, so a member that is already installed is still offered here and still
+    /// reinstallable — which is what `alpm_find_group_pkgs` does, reading the sync databases
+    /// and never asking whether a member is installed.
     ///
     /// The one-per-name rule is `alpm_find_group_pkgs`'s (`sync.c:295`): its
     /// `alpm_pkg_find(pkgs, pkg->name)` test keeps the first database to carry a member and

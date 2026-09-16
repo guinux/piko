@@ -11,8 +11,9 @@
 /// `piko search`/`piko list`. A commit's rows print that line as soon as they have output to
 /// frame, so the glyph marks the name of an item as much as the end of it; how the item ended
 /// is reported separately. Auto-detects terminal support the way every `console` style in this
-/// CLI does: piped output, and every test capturing into a `Vec<u8>`, gets plain text with no
-/// ANSI codes.
+/// CLI does, by testing file descriptor 1: piped output gets plain text with no ANSI codes. The
+/// sink a caller writes into is not consulted, so a test capturing into a `Vec<u8>` still sees
+/// the codes when the suite runs from a terminal, and strips them before asserting.
 pub(crate) fn checkmark() -> console::StyledObject<&'static str> {
     console::Style::new().green().apply_to("✓")
 }

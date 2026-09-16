@@ -649,3 +649,78 @@ fn answering_every_question_with_the_default_leaves_the_plan_unchanged() {
 
     eprintln!("examined {examined} target(s), {asked} provider question(s) in total");
 }
+
+/// A group target expands to exactly the members `pacman -Sgq` lists.
+///
+/// This is the acceptance gate for `Universe::group_members`, which is what a group prompt
+/// numbers. The two implementations must agree package for package, because the number a user
+/// types indexes that list.
+///
+/// A member that is already installed is part of the answer, not an exclusion.
+/// `alpm_find_group_pkgs` (`sync.c:295`) reads the sync databases and never asks whether a
+/// member is installed, so `pacman -S <group>` offers to reinstall one. piko interns a local
+/// candidate and a repository candidate per name; `group_members` passes over the local one and
+/// keeps the repository one, which leaves the same set of names. A test that only ran on a
+/// system with nothing installed could not tell the two readings apart.
+#[test]
+#[ignore = "requires a real ALPM system"]
+fn a_group_expands_to_exactly_what_pacman_lists() {
+    let repos = open_repos();
+    if repos.is_empty() {
+        eprintln!("skipping: no repository could be opened");
+        return;
+    }
+    let Ok(local) = LocalDatabase::open("/var/lib/pacman/local") else {
+        eprintln!("skipping: the local database could not be opened");
+        return;
+    };
+    let universe =
+        Universe::build(&local, repos.iter().map(|db| (DbUsage::ALL, db)), UniverseOptions::new())
+            .unwrap();
+
+    let names: Vec<String> = universe.installable_group_names().map(str::to_owned).collect();
+    assert!(names.len() > 20, "expected a substantial group list, got {}", names.len());
+
+    let mut compared = 0_usize;
+    let mut installed_members = 0_usize;
+    let mut disagreements = Vec::new();
+    for group in &names {
+        let output = std::process::Command::new("pacman").args(["-Sgq", group]).output();
+        let Ok(output) = output else {
+            eprintln!("skipping: pacman is not runnable");
+            return;
+        };
+        let expected: BTreeSet<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| line.trim().to_owned())
+            .filter(|line| !line.is_empty())
+            .collect();
+
+        let members = universe.group_members(group);
+        let got: BTreeSet<String> = members
+            .iter()
+            .filter_map(|id| universe.get(*id))
+            .map(|member| member.name().to_string())
+            .collect();
+        installed_members += got.iter().filter(|name| local.get_str(name).is_some()).count();
+
+        if expected == got {
+            compared += 1;
+            continue;
+        }
+        let missing: Vec<&String> = expected.difference(&got).collect();
+        let extra: Vec<&String> = got.difference(&expected).collect();
+        disagreements.push(format!("{group}: missing {missing:?}, extra {extra:?}"));
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "{} group(s) disagree: {disagreements:#?}",
+        disagreements.len()
+    );
+    assert!(
+        installed_members > 0,
+        "no group member is installed on this machine, so the installed half is untested"
+    );
+    eprintln!("compared {compared} group(s); {installed_members} member(s) already installed");
+}

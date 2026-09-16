@@ -25,10 +25,11 @@ mod why;
 pub use cache::{NoCache, PackageCache};
 pub use clause::{Clause, ClauseId, ClauseKind, Lit, Problem};
 pub use encode::{
-    Ambiguity, AmbiguityReport, Divergence, Encoded, Fidelity, FidelityReport, IgnoredChange,
-    IgnoredTarget, IgnoredUpgrade, Planned, ProviderChoice, Request, Requirement, Resolution,
-    Sysupgrade, TargetResolutionFailure, ambiguities, encode, fidelity, recurse_unneeded,
-    resolve_group, resolve_target, resolve_targets, solve_with_removals, sysupgrade,
+    Ambiguity, AmbiguityReport, Divergence, Encoded, Fidelity, FidelityReport, GroupChoice,
+    GroupTarget, IgnoredChange, IgnoredTarget, IgnoredUpgrade, Planned, ProviderChoice, Request,
+    Requirement, Resolution, Sysupgrade, TargetResolutionFailure, ambiguities, encode, fidelity,
+    recurse_unneeded, resolve_group, resolve_target, resolve_targets, solve_with_removals,
+    sysupgrade,
 };
 pub use explain::{Derivation, Fact, describe_candidate};
 pub use file::FilePackage;

@@ -37,3 +37,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Glob search terms: a `piko search` term carrying `*`, `?` or `[` is matched against the whole
   package name, `%PROVIDES%` name or `%GROUPS%` entry. pacman matches a `-Ss` term with an
   unanchored POSIX extended regular expression instead.
+- Group member selection: `piko install <group>` and `piko update <group>` list the group's
+  members numbered and ask which ones to install, reading pacman's own selection grammar
+  (numbers, `N-M` ranges, `^` to exclude, empty line for all). `--noconfirm` takes every
+  member, and `piko plan` states on stderr that it did the same. pacman's `-S <group>`
+  question. See `docs/libalpm-compat.md` §130.

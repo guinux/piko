@@ -197,7 +197,8 @@ pub fn install(
         }
     };
 
-    let resolution = match resolve_targets(&universe, Request::new(), &prepared.names, &limits) {
+    let mut resolution = match resolve_targets(&universe, Request::new(), &prepared.names, &limits)
+    {
         Ok(resolved) => resolved,
         Err(failure) => {
             crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
@@ -205,6 +206,34 @@ pub fn install(
             return ExitCode::FAILURE;
         }
     };
+
+    // Ask which members of each group target to install. Then resolve once more with the
+    // answers. A group names several targets, so an answer settles the target list rather than
+    // a clause inside the solve. That is why this is two calls, not the provider question's
+    // open-ended loop. The second call cannot uncover a group the first did not. Expansion
+    // reads the universe and the target list, never the answers.
+    if !resolution.groups.is_empty() && !options.noconfirm {
+        let choices = steplist.suspend(|| {
+            let mut ask = || crate::cmd::group::answer(&universe, &resolution.groups, out);
+            match &pre_cancel {
+                Some(handoff) => handoff.mode.during_prompt(ask),
+                None => ask(),
+            }
+        });
+        let mut answered = Request::new();
+        for choice in choices {
+            answered = answered.choose_group(choice);
+        }
+        resolution = match resolve_targets(&universe, answered, &prepared.names, &limits) {
+            Ok(resolved) => resolved,
+            Err(failure) => {
+                crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
+                crate::cmd::plan::report_target_resolution_failure(&failure);
+                return ExitCode::FAILURE;
+            }
+        };
+    }
+
     let mut request = resolution.request;
     // Through `suspend`, since the spinner is still running: an ordinary `eprintln!` here
     // lands inside the row indicatif is redrawing.

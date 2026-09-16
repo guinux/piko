@@ -471,6 +471,9 @@ pub fn plan(
     let mut request = resolution.request;
     print_expansions(&resolution.expansions);
     print_ignored_targets(&resolution.ignored);
+    // A group target is taken whole here. The reason is the one that answers a provider
+    // question with its default below: a preview never asks.
+    crate::cmd::group::report_defaults(&universe, &resolution.groups);
     // Targeted by id, for the reason `cmd::txn::install` gives: a name would find whichever
     // candidate the universe prefers rather than the file that was named.
     let file_ids = universe.file_candidates();

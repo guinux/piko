@@ -76,7 +76,9 @@ pub fn hold_pkg_allows(
     if noconfirm {
         // Deliberately does not name a flag. `piko remove` arrives here from `--noconfirm`;
         // `piko plan -R` arrives here always (see the call site for why `--print` forces it).
-        eprintln!("Error: HoldPkg was found in the target list, and this run cannot ask confirmation");
+        eprintln!(
+            "Error: HoldPkg was found in the target list, and this run cannot ask confirmation"
+        );
         return false;
     }
     crate::output::confirm(

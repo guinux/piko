@@ -10,11 +10,23 @@ use piko_db::config::{CleanMethod, DbUsage, SigLevel};
 ///
 /// Without the chain, "failed to parse .../desc" would omit the reason it failed to parse.
 pub fn report(error: &dyn std::error::Error) {
-    eprintln!("Error: {error}");
+    write_report(&mut std::io::stderr().lock(), error);
+}
+
+/// [`report`], into a writer rather than straight to stderr.
+///
+/// For a caller that produces its diagnostics somewhere it must not print from: off the main
+/// thread, or behind a live progress row. It renders here and prints later, so one error's
+/// cause chain stays whole and two cannot interleave.
+///
+/// Write failures are dropped. This is the reporting path; a caller whose stderr is gone has
+/// nowhere left to say so.
+pub fn write_report(out: &mut impl std::io::Write, error: &dyn std::error::Error) {
+    let _ = writeln!(out, "Error: {error}");
 
     let mut source = error.source();
     while let Some(cause) = source {
-        eprintln!("  Caused by: {cause}");
+        let _ = writeln!(out, "  Caused by: {cause}");
         source = cause.source();
     }
 }
@@ -119,6 +131,86 @@ pub fn select(out: &mut impl std::io::Write, prompt: &str, count: usize, default
             }
         }
     }
+}
+
+/// Prints `prompt` and waits for a selection among `count` numbered entries.
+///
+/// Returns one flag per entry, in the order the caller rendered them. `true` keeps that entry.
+/// This is pacman's `multiselect_question`, the reader `pacman -S <group>` puts its member list
+/// through.
+///
+/// The grammar is `multiselect_parse`'s. A space or a comma separates the answer's tokens.
+/// Each token is a 1-based number, or an `N-M` range. A `^` prefix on a token excludes rather
+/// than includes.
+///
+/// Every entry starts selected. So a line of exclusions alone means "all but these". A line
+/// that opens with an inclusion clears the selection first, and so means "only these". A later
+/// exclusion still applies over it.
+///
+/// An empty line keeps everything. A closed or empty stdin keeps everything too. That is
+/// [`select`]'s rule, for the reason written there, rather than [`confirm`]'s refusal. An
+/// unparseable or out-of-range line says so and asks again. That loop ends on its own, because
+/// a closed stdin returns.
+///
+/// This grammar lives in the frontend on purpose. It is a way of typing a set at a terminal.
+/// It is not a rule about what a group means. A graphical frontend renders the same question
+/// as checkboxes, and parses no text at all. What a group expands to, and what an answer does
+/// to it, are `piko_db::solve`'s (`GroupTarget`, `Request::choose_group`).
+pub fn multiselect(out: &mut impl std::io::Write, prompt: &str, count: usize) -> Box<[bool]> {
+    if count == 0 {
+        return Box::default();
+    }
+    loop {
+        if write!(out, "{prompt}").and_then(|()| out.flush()).is_err() {
+            return vec![true; count].into();
+        }
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            return vec![true; count].into();
+        }
+        if let Some(selected) = parse_multiselect(&line, count) {
+            return selected;
+        }
+        eprintln!("Invalid value: it must be a number or a range between 1 and {count}");
+    }
+}
+
+/// Reads one answered line of [`multiselect`], or `None` if it was malformed.
+///
+/// Split out from [`multiselect`] so the grammar is testable without a terminal.
+fn parse_multiselect(line: &str, count: usize) -> Option<Box<[bool]>> {
+    let mut selected = vec![true; count];
+    let mut first = true;
+    for token in line.split([' ', ',', '\t', '\n', '\r']).filter(|token| !token.is_empty()) {
+        let include = !token.starts_with('^');
+        let body = token.strip_prefix('^').unwrap_or(token);
+        // A first token that includes means the line lists what to keep. So nothing is kept
+        // until that line says so. A line of exclusions alone leaves the full selection
+        // standing.
+        if include && first {
+            selected.iter_mut().for_each(|keep| *keep = false);
+        }
+        first = false;
+
+        // The split looks for a `-` after the first character. That keeps the range separator
+        // apart from a leading sign. A negative bound fails the parse below either way.
+        let (start, end) = match body.get(1..).and_then(|rest| rest.find('-')) {
+            Some(offset) => {
+                let at = offset.saturating_add(1);
+                (body.get(..at)?, body.get(at.saturating_add(1)..)?)
+            }
+            None => (body, body),
+        };
+        let start: usize = start.trim().parse().ok()?;
+        let end: usize = end.trim().parse().ok()?;
+        if start < 1 || end > count || start > end {
+            return None;
+        }
+        for index in start..=end {
+            *selected.get_mut(index.saturating_sub(1))? = include;
+        }
+    }
+    Some(selected.into())
 }
 
 /// What one answered line of [`select`] meant.
@@ -367,6 +459,72 @@ mod tests {
     fn a_non_numeric_answer_is_invalid() {
         assert_eq!(parse_selection("y\n", 3), Selection::Invalid);
         assert_eq!(parse_selection("1a\n", 3), Selection::Invalid);
+    }
+
+    /// `parse_multiselect`'s flags, as the `1`-based numbers they keep.
+    fn kept(line: &str, count: usize) -> Option<Vec<usize>> {
+        let selected = parse_multiselect(line, count)?;
+        Some(
+            selected
+                .iter()
+                .enumerate()
+                .filter(|(_, keep)| **keep)
+                .map(|(index, _)| index.saturating_add(1))
+                .collect(),
+        )
+    }
+
+    /// An empty line takes the whole list, which is what `(default=all)` promises.
+    #[test]
+    fn an_empty_selection_keeps_every_member() {
+        assert_eq!(kept("\n", 3), Some(vec![1, 2, 3]));
+        assert_eq!(kept("   \n", 3), Some(vec![1, 2, 3]));
+    }
+
+    /// A line that opens with an inclusion lists what to keep, so it clears the selection
+    /// first. This is `multiselect_parse`'s `memset(array, 0, count)`.
+    #[test]
+    fn an_opening_inclusion_keeps_only_what_it_names() {
+        assert_eq!(kept("1 3 5\n", 5), Some(vec![1, 3, 5]));
+        assert_eq!(kept("1,2,3\n", 5), Some(vec![1, 2, 3]));
+        assert_eq!(kept("2-4\n", 5), Some(vec![2, 3, 4]));
+        assert_eq!(kept("  1   4  \n", 5), Some(vec![1, 4]));
+    }
+
+    /// A line of exclusions alone leaves the full selection standing and takes names out of it.
+    #[test]
+    fn a_line_of_exclusions_alone_starts_from_everything() {
+        assert_eq!(kept("^2\n", 4), Some(vec![1, 3, 4]));
+        assert_eq!(kept("^2 ^4\n", 4), Some(vec![1, 3]));
+        assert_eq!(kept("^2-3\n", 4), Some(vec![1, 4]));
+    }
+
+    /// An exclusion after an inclusion narrows what the inclusion kept, left to right.
+    #[test]
+    fn an_exclusion_applies_over_an_earlier_inclusion() {
+        assert_eq!(kept("1-5 ^3\n", 5), Some(vec![1, 2, 4, 5]));
+        assert_eq!(kept("1-5 ^2-4\n", 5), Some(vec![1, 5]));
+        assert_eq!(kept("3 ^3\n", 5), Some(vec![]));
+    }
+
+    /// The list is numbered from 1, and a range must run forwards.
+    #[test]
+    fn a_selection_outside_the_list_is_refused() {
+        assert!(parse_multiselect("0\n", 3).is_none());
+        assert!(parse_multiselect("4\n", 3).is_none());
+        assert!(parse_multiselect("1-4\n", 3).is_none());
+        assert!(parse_multiselect("3-1\n", 3).is_none());
+        assert!(parse_multiselect("^0\n", 3).is_none());
+    }
+
+    #[test]
+    fn a_malformed_selection_is_refused() {
+        assert!(parse_multiselect("y\n", 3).is_none());
+        assert!(parse_multiselect("1a\n", 3).is_none());
+        assert!(parse_multiselect("-1\n", 3).is_none());
+        assert!(parse_multiselect("^\n", 3).is_none());
+        assert!(parse_multiselect("1-\n", 3).is_none());
+        assert!(parse_multiselect("99999999999999999999999999\n", 3).is_none());
     }
 
     #[test]

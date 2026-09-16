@@ -39,7 +39,7 @@ fn print_providers(
 
     let mut current: Option<String> = None;
     for (index, id) in providers.iter().enumerate() {
-        let origin = origin_label(universe, *id);
+        let origin = crate::cmd::origin_label(universe, *id);
         if current.as_deref() != Some(origin.as_str()) {
             writeln!(out, ":: {origin}")?;
             current = Some(origin);
@@ -52,20 +52,6 @@ fn print_providers(
         writeln!(out, "   {}) {described}", index.saturating_add(1))?;
     }
     Ok(())
-}
-
-/// Where a candidate came from, as the group heading it is listed under.
-fn origin_label(universe: &Universe<'_>, id: SolvableId) -> String {
-    match universe.get(id).map(|solvable| solvable.origin()) {
-        Some(piko_db::solve::Origin::Repository(index)) => universe
-            .repository_name(index)
-            .map_or_else(|| "Repository ?".to_owned(), |name| format!("Repository {name}")),
-        // Reachable: a package file named on the command line is interned as a candidate, and
-        // can provide a dependency like any other (`UniverseOptions::files`).
-        Some(piko_db::solve::Origin::File(_)) => "Package file".to_owned(),
-        // An installed provider suppresses the question, so `ambiguities` never yields one.
-        Some(piko_db::solve::Origin::Installed) | None => "Installed".to_owned(),
-    }
 }
 
 /// Asks which provider answers each question in `report`, returning one answer per question.

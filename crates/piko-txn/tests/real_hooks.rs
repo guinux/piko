@@ -149,11 +149,22 @@ fn inverted_targets_in_real_hooks_exclude_what_they_name() {
             .iter()
             .find(|trigger| trigger.targets.iter().any(|t| t.starts_with('!')))
             .unwrap();
-        assert!(
-            hook.needs_targets,
-            "{}: this test can only read a hook's matches through NeedsTargets",
-            hook.name
-        );
+
+        // The probe below needs two things from a hook. It reads the matches out of the target
+        // list the hook reports, which only a `NeedsTargets` hook builds. And it extends a
+        // directory pattern by one segment, to put one probe either side of the exclusion.
+        //
+        // A hook offering neither is not a counter-example. It is one this technique cannot ask
+        // the question of. `36-systemd-modules-load.hook` is the real case: it pairs
+        // `etc/modules-load.d/*.conf` with `!usr/lib/modules/*/vmlinuz`, two patterns naming
+        // unrelated trees, and it sets no `NeedsTargets`.
+        //
+        // The `asserted` floor at the end is what these skips rest on. Without it, a system
+        // whose hooks all fell outside the technique would pass this test having checked
+        // nothing. The paragraph below states that failure mode in full.
+        if !hook.needs_targets {
+            continue;
+        }
 
         // Both probes must match the **positive** pattern, or the inverted one is never
         // consulted and the test proves nothing. Two earlier versions of this test got that
@@ -166,13 +177,12 @@ fn inverted_targets_in_real_hooks_exclude_what_they_name() {
         // So the included probe is one segment deep, and the excluded probe is the same path
         // with a further segment. That is exactly the pair `!usr/lib/modules/*/?*` exists to
         // separate.
-        let positive = trigger.targets.iter().find(|t| !t.starts_with('!')).unwrap();
+        let Some(positive) =
+            trigger.targets.iter().find(|t| !t.starts_with('!') && t.ends_with('/'))
+        else {
+            continue;
+        };
         let included = positive.replace("?*", "leaf").replace('*', "branch");
-        assert!(
-            included.ends_with('/'),
-            "{}: this test assumes a directory pattern, got {positive}",
-            hook.name
-        );
         let excluded = format!("{included}deeper/");
 
         let summary = Summary {

@@ -331,22 +331,38 @@ impl Refresher {
                     // The signature comes from the same server as the database. Taking it
                     // from another would let a well-behaved mirror vouch for a hostile one.
                     let sig_destination = sync_dir.join(format!("{name}.sig"));
-                    let signature = self.fetch_signature(
+                    match self.fetch_signature(
                         &url,
                         &sig_destination,
                         &name,
                         policy,
                         cancel,
                         progress,
-                    )?;
-                    self.install(
-                        Downloaded { database, signature, sig_destination },
-                        &name,
-                        keyring,
-                        policy,
-                        progress,
-                    )?;
-                    return Ok(Outcome::Updated);
+                    ) {
+                        Ok(signature) => {
+                            // Past this point a failure is an answer, not a transport
+                            // problem. `install` refuses a signature that does not verify,
+                            // and another mirror would only be one more chance at a yes.
+                            // So "could not check" falls through to the next server, and
+                            // "checked and wrong" stops here.
+                            self.install(
+                                Downloaded { database, signature, sig_destination },
+                                &name,
+                                keyring,
+                                policy,
+                                progress,
+                            )?;
+                            return Ok(Outcome::Updated);
+                        }
+                        Err(Error::Cancelled) => return Err(Error::Cancelled),
+                        // This server served the database but could not be asked for its
+                        // signature: a 500, a timeout, a redirect. The two must come from
+                        // one server, so the recovery is the next server for *both*. Pairing
+                        // this database with someone else's signature is the thing that rule
+                        // forbids. `database` is dropped uncommitted here, and `AtomicFile`
+                        // takes its temporary with it, so the live file is untouched.
+                        Err(error) => attempts.push((url, error.to_string())),
+                    }
                 }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(error) => attempts.push((url, error.to_string())),
@@ -714,14 +730,26 @@ impl Refresher {
                 }
                 Ok(Some(file)) => {
                     let sig_destination = cache_dir.join(format!("{name}.sig"));
-                    let signature = self.fetch_signature(
+                    let signature = match self.fetch_signature(
                         &url,
                         &sig_destination,
                         &name,
                         policy,
                         cancel,
                         progress,
-                    )?;
+                    ) {
+                        Ok(signature) => signature,
+                        Err(Error::Cancelled) => return Err(Error::Cancelled),
+                        // As in `refresh_one`. A server that served the package but could
+                        // not be asked for its signature loses both halves to the next
+                        // server, because the pair has to come from one server. `file` is
+                        // dropped uncommitted, so nothing reaches the cache.
+                        Err(error) => {
+                            attempts.push((url, error.to_string()));
+                            continue;
+                        }
+                    };
+                    // Nothing below talks to a server, so a failure here is local and final.
                     file.commit()?;
                     // Unlike a database, a package archive's name encodes its version, so the
                     // bytes under a given file name never change. A `.sig` left from an

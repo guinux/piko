@@ -68,7 +68,7 @@ fn per_file(writer: &LocalDbWriter<'_>, mtree: &[u8]) {
         writer.create_entry(entry).unwrap();
         writer.write_record(entry, &desc(&format!("pkg{index}"), index)).unwrap();
         writer.write_record(entry, &files(index)).unwrap();
-        writer.write_raw(entry, "mtree", mtree).unwrap();
+        writer.write_raw(entry, "mtree", mtree, None).unwrap();
     }
 }
 
@@ -79,7 +79,7 @@ fn staged(writer: &LocalDbWriter<'_>, mtree: &[u8]) {
         let mut write = writer.entry_write(entry);
         write.record(&desc(&format!("pkg{index}"), index)).unwrap();
         write.record(&files(index)).unwrap();
-        write.raw("mtree", mtree).unwrap();
+        write.raw("mtree", mtree, None).unwrap();
         write.commit().unwrap();
     }
 }
