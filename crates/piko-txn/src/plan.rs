@@ -19,6 +19,28 @@ use crate::source::{CacheDirSource, DownloadTarget, PackageSource};
 use crate::transaction::Verification;
 use crate::{Error, Result, Step};
 
+/// How each incoming package's install reason is decided.
+///
+/// libalpm settles this in three stages, and the last one wins. A pulled-in package is
+/// `Depend` (`sync.c:492`). An upgrade copies the reason the installed copy had
+/// (`add.c:476`). An `ALPM_TRANS_FLAG_ALLDEPS` or `ALLEXPLICIT` flag then overwrites whatever
+/// the first two produced (`add.c:499`).
+///
+/// That third stage runs per package in `trans->add`, which holds the resolved dependencies
+/// as well as the named targets. So a flag covers the whole transaction, not the command
+/// line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReasonPolicy {
+    /// No flag. A named target is `Explicit`, an upgrade keeps the reason it had, and a fresh
+    /// dependency is `Depend`.
+    #[default]
+    AsResolved,
+    /// `--asdeps`: record every incoming package as a dependency.
+    AllDeps,
+    /// `--asexplicit`: record every incoming package as explicitly installed.
+    AllExplicit,
+}
+
 /// Turns a solved plan into commit-engine steps, resolving each incoming candidate's cache
 /// file name from its repository `desc`.
 ///
@@ -32,7 +54,7 @@ pub fn install_steps(
     universe: &Universe<'_>,
     built: &Plan,
     targets: &[SolvableId],
-    as_deps: bool,
+    reasons: ReasonPolicy,
 ) -> Result<Vec<Step>> {
     let mut steps = Vec::with_capacity(built.steps().len());
     for step in built.steps() {
@@ -44,12 +66,12 @@ pub fn install_steps(
                 });
             }
             SolveStep::Install { candidate, .. } => {
-                let reason = reason_for(*candidate, targets, as_deps, None);
+                let reason = reason_for(*candidate, targets, reasons, None);
                 steps.push(Step::Install { package: file_name_of(universe, *candidate)?, reason });
             }
             SolveStep::Change { from, to, .. } => {
                 let previous = universe.get(*from).and_then(|solvable| solvable.install_reason());
-                let reason = reason_for(*to, targets, as_deps, previous);
+                let reason = reason_for(*to, targets, reasons, previous);
                 steps.push(Step::Install { package: file_name_of(universe, *to)?, reason });
             }
         }
@@ -59,22 +81,27 @@ pub fn install_steps(
 
 /// The reason recorded for one incoming package.
 ///
-/// This is `Explicit` for a package named on the command line, unless `--asdeps` downgrades it.
-/// That is `_alpm_sync_prepare`'s rule (`sync.c`), the same one `piko_db::solve::Plan::assemble`
-/// applies for a fresh install. An upgrade of a package that was already installed is not
-/// renamed by the plan itself — `solve::Step::Change` carries no reason of its own — so it
-/// keeps whatever reason it already had, rather than falling to `Depend`. Only a package with
-/// no previous install (a fresh dependency) defaults to `Depend`.
+/// [`ReasonPolicy::AsResolved`] records `Explicit` for a package named on the command line.
+/// That is `_alpm_sync_prepare`'s rule (`sync.c`), the same one
+/// `piko_db::solve::Plan::assemble` applies for a fresh install. An upgrade of a package that
+/// was already installed is not renamed by the plan itself — `solve::Step::Change` carries no
+/// reason of its own — so it keeps whatever reason it already had, rather than falling to
+/// `Depend`. Only a package with no previous install (a fresh dependency) defaults to
+/// `Depend`.
+///
+/// Either override replaces that answer outright. It reaches every incoming package, and it
+/// outranks the reason an upgraded package carried.
 fn reason_for(
     candidate: SolvableId,
     targets: &[SolvableId],
-    as_deps: bool,
+    reasons: ReasonPolicy,
     previous: Option<PackageInstallReason>,
 ) -> PackageInstallReason {
-    if targets.contains(&candidate) && !as_deps {
-        PackageInstallReason::Explicit
-    } else {
-        previous.unwrap_or(PackageInstallReason::Depend)
+    match reasons {
+        ReasonPolicy::AllDeps => PackageInstallReason::Depend,
+        ReasonPolicy::AllExplicit => PackageInstallReason::Explicit,
+        ReasonPolicy::AsResolved if targets.contains(&candidate) => PackageInstallReason::Explicit,
+        ReasonPolicy::AsResolved => previous.unwrap_or(PackageInstallReason::Depend),
     }
 }
 
@@ -303,4 +330,103 @@ pub fn download_only(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a failing assertion in a test should abort it loudly"
+)]
+mod tests {
+    use super::*;
+    use piko_db::config::DbUsage;
+    use piko_db::fixture::{PackageSpec, Scenario};
+    use piko_db::solve::UniverseOptions;
+
+    /// Two candidate ids: the one a command line named, and one the solver pulled in.
+    fn named_and_pulled() -> (SolvableId, SolvableId) {
+        let scenario = Scenario::new()
+            .repo("core", [PackageSpec::new("app", "1.0.0-1"), PackageSpec::new("lib", "1.0.0-1")])
+            .build();
+        let universe = Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new().usage(DbUsage::ALL),
+        )
+        .unwrap();
+        let named = *universe.candidates_named("app").first().unwrap();
+        let pulled = *universe.candidates_named("lib").first().unwrap();
+        (named, pulled)
+    }
+
+    #[test]
+    fn a_named_target_is_explicit_and_a_pulled_dependency_is_not() {
+        let (named, pulled) = named_and_pulled();
+        let targets = [named];
+        let policy = ReasonPolicy::AsResolved;
+
+        assert_eq!(
+            reason_for(named, &targets, policy, None),
+            PackageInstallReason::Explicit,
+            "the package the user asked for"
+        );
+        assert_eq!(
+            reason_for(pulled, &targets, policy, None),
+            PackageInstallReason::Depend,
+            "a fresh package nothing named"
+        );
+    }
+
+    /// `add.c:476`: an upgrade copies the reason the installed copy carried. A dependency
+    /// therefore stays a dependency through an upgrade.
+    #[test]
+    fn an_upgrade_keeps_the_reason_it_had() {
+        let (named, pulled) = named_and_pulled();
+        let targets = [named];
+
+        assert_eq!(
+            reason_for(
+                pulled,
+                &targets,
+                ReasonPolicy::AsResolved,
+                Some(PackageInstallReason::Depend)
+            ),
+            PackageInstallReason::Depend
+        );
+        assert_eq!(
+            reason_for(
+                pulled,
+                &targets,
+                ReasonPolicy::AsResolved,
+                Some(PackageInstallReason::Explicit)
+            ),
+            PackageInstallReason::Explicit
+        );
+    }
+
+    /// `add.c:499`: either override runs last and covers every incoming package. It reaches a
+    /// dependency the command line never named, and an upgrade that carried its own reason.
+    #[test]
+    fn an_override_covers_the_whole_transaction_and_outranks_the_previous_reason() {
+        let (named, pulled) = named_and_pulled();
+        let targets = [named];
+
+        for candidate in [named, pulled] {
+            for previous in [None, Some(PackageInstallReason::Explicit)] {
+                assert_eq!(
+                    reason_for(candidate, &targets, ReasonPolicy::AllDeps, previous),
+                    PackageInstallReason::Depend,
+                    "--asdeps"
+                );
+            }
+            for previous in [None, Some(PackageInstallReason::Depend)] {
+                assert_eq!(
+                    reason_for(candidate, &targets, ReasonPolicy::AllExplicit, previous),
+                    PackageInstallReason::Explicit,
+                    "--asexplicit"
+                );
+            }
+        }
+    }
 }

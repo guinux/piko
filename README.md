@@ -24,53 +24,60 @@ Overall the aim is to make piko **secure**, **robust** and **simple**.
 
 ## Status
 
-piko is stil an **Alpha software.** Do not run transactions with piko on a production system yet.
+piko is still **alpha software**. Do not run transactions with piko on a production
+system yet.
 
 It can:
-- read local database and repositories
+- read the local database and the repositories
 - refresh databases and download packages
-- run transaction including signatures verification, and running hooks and scriptlets.
+- run a transaction, with signature verification, hooks and scriptlets
 
-Some features are not yet built: 
- - resume downloads
- - disk-space check
- 
+Some features are not yet built:
+- resumed downloads
+- a disk-space check
+
 ## Quick start
 
-You can run these read-only commands against your installed system. None of them change anything:
+You can run these read-only commands against your installed system. None of them change
+anything:
 
 ```bash
-piko list --i          # like pacman -Q
+piko list -i           # like pacman -Q
 piko search firefox    # like pacman -Ss firefox
-piko why systemd                # shortest dependency chain keeping it installed
-piko plan -u                    # preview a sysupgrade; changes nothing
+piko files bash        # like pacman -Ql bash
+piko why systemd       # shortest dependency chain keeping it installed
+piko plan -u           # preview a sysupgrade; changes nothing
 ```
 
 See [Main commands](#main-commands) below for the full command reference.
 
 ## Main commands
 
-Read databases:
+Read databases. None of these write anything:
 
 | Command | Alias | Purpose |
 |---|---|---|
-| `piko list [--installed\|--repos\|--repo [name]] [-f <names>...]` | `ls` | List installed packages (default), a repository's packages, or configured repository names; `-f` lists the named packages' files instead. |
-| `piko info <package>... [--installed\|--repo <name>]` | `if` | Show one or more packages' metadata, from the installed database or a repository. |
-| `piko search <terms>... [--installed\|--repos\|--repo <name>]` | `se` | Search installed packages, repositories, or both together. |
+| `piko list [-i\|--repos\|--repo <name>] [-g [names]...]` | `ls` | List installed packages (default), a repository's packages, or the configured repository names. `-g` lists groups instead. |
+| `piko files <packages>... [-i\|--repo <name>]` | | List the files one or more packages own, like `pacman -Ql`. |
+| `piko info <packages>... [-i\|--repo <name>]` | `if` | Show one or more packages' metadata, from the installed database or a repository. |
+| `piko search <terms>... [-i\|--repos\|--repo <name>]` | `se` | Search installed packages, repositories, or both together. |
+| `piko check [packages]...` | | Check that installed files still match the package's `ALPM-MTREE` data. |
 | `piko check-updates` | `cu` | List packages with a pending upgrade. |
-| `piko why <package>` | Show the shortest dependency chain that keeps a package installed. |
-| `piko conf` | | Parse and print the effective `pacman.conf`. |
+| `piko why <package>` | | Show the shortest dependency chain that keeps a package installed. |
+| `piko resolve <dependency>` | | Print the repository package(s) that satisfy a dependency string. |
+| `piko conf [directive]` | | Parse and print the effective `pacman.conf`, or one directive's value. |
+| `piko history [-n <count>]` | | Show the transactions this system has run. It reads pacman's log too, so it covers both tools. |
+| `piko report` | | Report an unfinished transaction, if the database records one. |
 
 Transaction:
 
 | Command | Alias | Purpose |
 |---|---|---|
 | `piko refresh [repos]...` | `rf` | Download and verify repository databases. |
-| `piko plan <targets>...` | Preview an install, removal (`-R`), or upgrade (`-u`) plan. |
-| `piko install <packages>...` | `in` | Install packages and their dependencies. |
+| `piko plan [targets]...` | | Preview an install, a removal (`-R`), or an upgrade (`-u`) plan. Changes nothing. |
+| `piko install <targets>...` | `in` | Install packages and their dependencies. A target may also be a package file or a URL. `--needed` skips a target already at that version; `-w` downloads without installing. |
 | `piko update [targets]...` | `up` | Upgrade the system, or the given targets. |
 | `piko remove <packages>...` | `rm` | Remove packages. Supports `-s`/`--recursive`, `-c`/`--cascade`. |
-| `piko report` | | Report an unfinished transaction. |
 
 Keyring management (`piko-key`):
 

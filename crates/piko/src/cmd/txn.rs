@@ -48,8 +48,15 @@ pub fn note(recording: &piko_txn::Recording, message: &str) {
 /// The install-side options, gathered so the entry point keeps a readable signature.
 #[derive(Clone, Debug, Default)]
 pub struct InstallOptions {
-    /// Record the packages as dependencies rather than explicitly installed.
-    pub as_deps: bool,
+    /// `--asdeps`/`--asexplicit`: what install reason each incoming package is recorded with.
+    pub reasons: piko_txn::ReasonPolicy,
+    /// `--needed`: drop a target already at the version that would be installed, rather than
+    /// reinstalling it.
+    ///
+    /// It governs the named targets only. A dependency is never a reinstall, since piko
+    /// installs one only where something needs it. `--sysupgrade` compares versions on its
+    /// own, so it is unaffected too.
+    pub needed: bool,
     /// `--overwrite` glob patterns, matched against each path.
     pub overwrite: Vec<String>,
     /// The GnuPG keyring directory, from `pacman.conf`'s `GPGDir`.
@@ -197,8 +204,8 @@ pub fn install(
         }
     };
 
-    let mut resolution = match resolve_targets(&universe, Request::new(), &prepared.names, &limits)
-    {
+    let base = Request::new().needed(options.needed);
+    let mut resolution = match resolve_targets(&universe, base.clone(), &prepared.names, &limits) {
         Ok(resolved) => resolved,
         Err(failure) => {
             crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
@@ -220,7 +227,7 @@ pub fn install(
                 None => ask(),
             }
         });
-        let mut answered = Request::new();
+        let mut answered = base;
         for choice in choices {
             answered = answered.choose_group(choice);
         }
@@ -386,7 +393,7 @@ pub fn install(
     // it while a download runs. `run` reads this one once, after every download is over.
     let cancel_flag = cancel.clone();
 
-    let steps = match piko_txn::install_steps(&universe, &built, &explicit_targets, options.as_deps)
+    let steps = match piko_txn::install_steps(&universe, &built, &explicit_targets, options.reasons)
     {
         Ok(steps) => steps,
         Err(error) => {

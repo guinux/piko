@@ -322,7 +322,9 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
         Command::Install {
             root,
             packages,
+            needed,
             asdeps,
+            asexplicit,
             overwrite,
             noscriptlet,
             hookdir,
@@ -336,7 +338,8 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 SyncArgs {
                     root: &root,
                     targets: packages,
-                    as_deps: *asdeps,
+                    reasons: reason_policy(*asdeps, *asexplicit),
+                    needed: *needed,
                     sysupgrade: None,
                     refresh: false,
                     force: false,
@@ -353,6 +356,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
         Command::Update {
             root,
             targets,
+            needed,
             downgrade,
             norefresh,
             force,
@@ -369,7 +373,8 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 SyncArgs {
                     root: &root,
                     targets,
-                    as_deps: false,
+                    reasons: piko_txn::ReasonPolicy::AsResolved,
+                    needed: *needed,
                     sysupgrade: Some(*downgrade),
                     refresh: !*norefresh,
                     force: *force,
@@ -468,13 +473,24 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
     Ok(code)
 }
 
+/// The two install-reason flags, as one value.
+///
+/// clap rejects them together, so the third combination cannot reach here.
+const fn reason_policy(as_deps: bool, as_explicit: bool) -> piko_txn::ReasonPolicy {
+    match (as_deps, as_explicit) {
+        (true, _) => piko_txn::ReasonPolicy::AllDeps,
+        (_, true) => piko_txn::ReasonPolicy::AllExplicit,
+        (false, false) => piko_txn::ReasonPolicy::AsResolved,
+    }
+}
+
 /// The arguments `piko install` and `piko update` pass to [`sync`].
 ///
-/// The two subcommands differ in exactly four fields. `install` honors `--asdeps` and never
-/// refreshes; `update` never records a dependency, always runs a sysupgrade pass, refreshes
-/// by default, and can force that refresh. Every other flag matches in name, meaning, and
-/// default. This struct
-/// gathers them so [`sync`] keeps a readable signature, the same idiom
+/// The two subcommands differ in exactly four fields. `install` honors `--asdeps` and
+/// `--asexplicit`, and never refreshes; `update` overrides no install reason, always runs a
+/// sysupgrade pass, refreshes by default, and can force that refresh. Every other flag
+/// matches in name, meaning, and default. This struct gathers them so [`sync`] keeps a
+/// readable signature, the same idiom
 /// `cmd::txn::InstallOptions` and `cmd::txn::Catalog` use one layer down.
 ///
 /// `cli.rs` keeps two separate sets of clap fields on purpose. The flags match, but the help
@@ -487,8 +503,12 @@ struct SyncArgs<'a> {
     root: &'a Path,
     /// The packages to install, or the extra targets to upgrade alongside everything else.
     targets: &'a [String],
-    /// `--asdeps`. Always `false` for `update`, which has no such flag.
-    as_deps: bool,
+    /// `--asdeps`/`--asexplicit`. Always [`piko_txn::ReasonPolicy::AsResolved`] for `update`,
+    /// which has neither flag.
+    reasons: piko_txn::ReasonPolicy,
+    /// `--needed`: skip a named target already installed at the version that would be
+    /// installed.
+    needed: bool,
     /// `Some(downgrade)` runs `update`'s full-system upgrade pass. `None` is a plain install.
     sysupgrade: Option<bool>,
     /// Refresh repository databases before planning. Always `false` for `install`, which has
@@ -569,7 +589,8 @@ fn sync(
         cmd::txn::Catalog { local: &local, repos: &opened, ignores, configs: &parsed.repositories },
         args.targets,
         cmd::txn::InstallOptions {
-            as_deps: args.as_deps,
+            reasons: args.reasons,
+            needed: args.needed,
             overwrite: args.overwrite.to_vec(),
             gpg_dir: signing.gpg_dir,
             sig_level: signing.sig_level,

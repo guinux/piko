@@ -426,13 +426,29 @@ pub enum Command {
         /// version requirement.
         #[arg(required = true)]
         packages: Vec<String>,
-        /// Record the named packages as dependencies rather than explicitly installed.
+        /// Skip a target whose installed version is already the one that would be
+        /// installed.
         ///
-        /// A package pulled in only to satisfy another's dependency is always recorded as a
-        /// dependency, regardless of this flag. This flag governs only the packages named on
-        /// the command line.
+        /// pacman's flag of the same name. It governs the packages named on the command
+        /// line. A dependency is unaffected. piko installs one only where something needs
+        /// it, so it is never a reinstall.
+        #[arg(long)]
+        needed: bool,
+        /// Record every installed package as a dependency rather than explicitly installed.
+        ///
+        /// pacman's flag of the same name. It covers the whole transaction, resolved
+        /// dependencies included. It also overrides the reason an upgraded package already
+        /// carried. Conflicts with `--asexplicit`.
         #[arg(long)]
         asdeps: bool,
+        /// Record every installed package as explicitly installed rather than as a dependency.
+        ///
+        /// pacman's flag of the same name, and `--asdeps` reversed. It covers the whole
+        /// transaction. It also overrides the reason an upgraded package already carried. A
+        /// dependency installed under it is not an orphan candidate for
+        /// `piko list --orphans`.
+        #[arg(long, conflicts_with = "asdeps")]
+        asexplicit: bool,
         /// Overwrite files another package owns, for paths matching these glob patterns.
         ///
         /// piko refuses by default. Writing a file another package owns leaves the database
@@ -496,6 +512,14 @@ pub enum Command {
         /// none, every installed package is checked. A target carrying `*`, `?` or `[` is a
         /// glob pattern, expanded exactly as `piko install` expands one.
         targets: Vec<String>,
+        /// Skip a named target whose installed version is already the one that would be
+        /// installed.
+        ///
+        /// pacman's flag of the same name. It governs the targets named on the command line.
+        /// The upgrade pass compares versions on its own. It leaves a current package alone
+        /// whether or not this flag is given.
+        #[arg(long)]
+        needed: bool,
         /// Accept a repository version older than the installed one (`pacman -Suu`).
         #[arg(long)]
         downgrade: bool,

@@ -120,7 +120,8 @@ pub use file_target::FileTarget;
 pub use history::{Action, LocalOffset, Recording};
 pub use install::{Extraction, Filters, install};
 pub use plan::{
-    DownloadOnlyOutcome, download_only, download_targets, install_steps, verification_from,
+    DownloadOnlyOutcome, ReasonPolicy, download_only, download_targets, install_steps,
+    verification_from,
 };
 pub use remove::{RemovalContext, RemovalDisposition, decide_removal, pacsave_rotation};
 pub use rootfs::{Resolved, RootDir, UnsafePath};

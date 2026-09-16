@@ -1647,6 +1647,63 @@ mod tests {
         ids.iter().filter_map(|id| universe.get(*id)).map(|s| s.name().as_ref()).collect()
     }
 
+    /// The repository build of `name`. A target named on the command line resolves to this
+    /// one.
+    fn from_repository(universe: &Universe<'_>, name: &str) -> SolvableId {
+        universe
+            .candidates_named(name)
+            .iter()
+            .copied()
+            .find(|id| universe.get(*id).is_some_and(|candidate| !candidate.is_installed()))
+            .unwrap()
+    }
+
+    /// `--needed` drops the target's unit clause. Nothing then forces the solver to pick the
+    /// repository build, and "every installed package must remain" keeps the installed copy.
+    /// That is the reinstall `pacman -S --needed` skips.
+    #[test]
+    fn a_needed_target_already_at_the_repository_version_keeps_the_installed_copy() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("app", "1.0.0-1"))
+            .repo("core", [PackageSpec::new("app", "1.0.0-1")])
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let limits = Limits::default();
+        let target = from_repository(&universe, "app");
+
+        let plain = solve_with_removals(&universe, &Request::new().target(target), &limits)
+            .unwrap()
+            .expect("reinstalling a package at its own version must solve");
+        assert!(
+            plain.selected.contains(&target),
+            "without --needed the target clause forces the repository build"
+        );
+
+        let request = Request::new().needed(true).target(target);
+        let planned = solve_with_removals(&universe, &request, &limits)
+            .unwrap()
+            .expect("a skipped target leaves a solvable request");
+        assert!(!planned.selected.contains(&target), "--needed must not reinstall app");
+    }
+
+    /// The test compares versions. A target the repository has moved on from is still
+    /// upgraded.
+    #[test]
+    fn a_needed_target_the_repository_has_moved_on_from_is_still_upgraded() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("app", "1.0.0-1"))
+            .repo("core", [PackageSpec::new("app", "2.0.0-1")])
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let target = from_repository(&universe, "app");
+
+        let request = Request::new().needed(true).target(target);
+        let planned = solve_with_removals(&universe, &request, &Limits::default())
+            .unwrap()
+            .expect("an upgrade must solve");
+        assert!(planned.selected.contains(&target), "--needed must not hold back an upgrade");
+    }
+
     #[test]
     fn a_newer_repository_version_is_an_upgrade() {
         let scenario = Scenario::new()
