@@ -1288,19 +1288,14 @@ fn report_side_effects(report: &piko_txn::Report) {
         eprintln!("Warning: {problem}");
     }
 
+    // One place decides what a hook's failure is called. So this warning and the `AbortOnFail`
+    // refusal name the same cause the same way.
     for run in &report.hooks {
-        if let Some(missing) = &run.unsatisfied {
-            eprintln!("Warning: skipping hook {}: nothing installed satisfies {missing}", run.name);
-            continue;
-        }
-        let Some(outcome) = &run.outcome else {
-            continue;
-        };
-        if outcome.truncated {
+        if run.outcome.as_ref().is_some_and(|outcome| outcome.truncated) {
             eprintln!("Warning: hook {}'s output was truncated", run.name);
         }
-        if !outcome.succeeded() {
-            eprintln!("Warning: hook {} {}", run.name, outcome.describe());
+        if !run.succeeded() {
+            eprintln!("Warning: hook {} {}", run.name, run.failure_reason());
         }
     }
 }

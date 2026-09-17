@@ -1118,17 +1118,11 @@ impl Transaction<Staged<'_>> {
             &mut report,
             progress,
         )?;
-        if let Some(name) = aborted {
+        if let Some(error) = aborted {
             // The journal is removed. Nothing was applied, so leaving one behind would make a
             // refused transaction look like an interrupted one.
             state.journal.finish()?;
-            let output = report
-                .hooks
-                .last()
-                .and_then(|run| run.outcome.as_ref())
-                .map(|outcome| outcome.output.clone())
-                .unwrap_or_default();
-            return Err(Error::HookAborted { hook: name, output });
+            return Err(error);
         }
 
         let total = state.steps.len();
@@ -1250,7 +1244,8 @@ impl Transaction<Staged<'_>> {
 
 /// Runs the hooks for one phase, appending each to `report`.
 ///
-/// Returns the name of the hook that demands the transaction be abandoned, if one does.
+/// Returns the refusal a hook raises when it demands the transaction be abandoned, if one does.
+/// The error is built here, where the [`hook::Run`] carrying the cause is still in hand.
 ///
 /// # The hook files are read here, not once up front
 ///
@@ -1273,7 +1268,7 @@ fn run_hooks(
     summary: &hook::Summary,
     report: &mut Report,
     progress: &mut dyn FnMut(Event<'_>),
-) -> Result<Option<String>> {
+) -> Result<Option<Error>> {
     if hook_dirs.is_empty() {
         return Ok(None);
     }
@@ -1304,11 +1299,15 @@ fn run_hooks(
         let run = hook::run(runner, &local, hook, &targets, &mut |line| {
             progress(Event::HookOutputLine { index, total, line });
         })?;
-        let fatal = run.fatal.then(|| run.name.clone());
+        let fatal = run.fatal.then(|| Error::HookAborted {
+            hook: run.name.clone(),
+            reason: run.failure_reason(),
+            output: run.outcome.as_ref().map_or_else(Vec::new, |outcome| outcome.output.clone()),
+        });
         progress(Event::HookFinished { index, total, run: &run });
         report.hooks.push(run);
-        if let Some(name) = fatal {
-            return Ok(Some(name));
+        if let Some(error) = fatal {
+            return Ok(Some(error));
         }
     }
     Ok(None)

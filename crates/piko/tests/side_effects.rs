@@ -591,6 +591,34 @@ fn an_unsatisfied_hook_dependency_skips_the_hook() {
     assert!(seen.contains("nothing installed satisfies definitely-not-installed"), "{seen}");
 }
 
+/// An `AbortOnFail` refusal must name its cause, even when the hook printed nothing.
+///
+/// A hook that never ran has no output to show. The refusal is then the only place the cause
+/// can appear. The report that carries the ordinary warning is not returned when the commit
+/// fails.
+#[test]
+fn an_abort_on_fail_refusal_names_a_cause_the_hook_never_printed() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    sandbox.write_hook(
+        "00-abort.hook",
+        "[Trigger]\nOperation = Install\nType = Package\nTarget = *\n\n\
+         [Action]\nDescription = Creating a snapshot...\nWhen = PreTransaction\n\
+         Depends = definitely-not-installed\nExec = /bin/true\nAbortOnFail\n",
+    );
+
+    let output = sandbox.install("1.0.0-1", &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "the transaction should have been refused:\n{seen}");
+    assert!(seen.contains("AbortOnFail"), "{seen}");
+    assert!(
+        seen.contains("nothing installed satisfies definitely-not-installed"),
+        "the refusal did not say why the hook failed:\n{seen}"
+    );
+    assert!(!sandbox.path("root/usr/bin/foo").exists(), "files were written anyway");
+}
+
 /// A hook whose trigger does not match must not run at all.
 #[test]
 fn a_hook_for_another_package_does_not_run() {

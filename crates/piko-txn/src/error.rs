@@ -223,20 +223,24 @@ pub enum Error {
     ///
     /// The system is untouched: this is raised from the pre-transaction phase, before the
     /// first step runs. That is exactly what `alpm-hooks(5)` restricts `AbortOnFail` to
-    /// `PreTransaction` for. The hook's own output is in the report, so the caller can say
-    /// *why* it failed as well as that it did.
+    /// `PreTransaction` for.
+    ///
+    /// The cause travels with the error, in two parts. `reason` says what went wrong.
+    /// `output` says what the hook printed before it failed.
+    ///
+    /// The error carries both, because a failed commit returns no report. Without them, the
+    /// user learns that a hook stopped the transaction and nothing more. A hook that never ran
+    /// prints nothing at all. `reason` is then the only part that names the cause.
     #[error(
-        "the transaction was stopped by the hook {hook}, which sets AbortOnFail{}",
+        "the transaction was stopped by the hook {hook}, which sets AbortOnFail: it {reason}{}",
         if output.is_empty() { String::new() } else { format!("\n  {}", output.join("\n  ")) }
     )]
     HookAborted {
         /// The hook's file name.
         hook: String,
+        /// Why it did not succeed, from [`crate::hook::Run::failure_reason`].
+        reason: String,
         /// What the hook printed before it failed.
-        ///
-        /// This is carried in the error rather than left in the report, because the report is
-        /// not returned when the commit fails. Without it, the user is told a hook stopped the
-        /// transaction with no way to find out why.
         output: Vec<String>,
     },
 

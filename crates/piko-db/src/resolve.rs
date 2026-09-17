@@ -117,10 +117,18 @@ use crate::{
 /// crate's lazy-loading rule (see [`crate::lazy`]) applied to a question where getting it wrong
 /// means skipping a hook the system needed.
 ///
+/// The read is the **eager** tier, [`crate::LocalPackage::eager`], never the full typed parse.
+/// `%PROVIDES%` is the only field this needs. The eager tier is the tier that holds it.
+///
+/// The typed parse converts `%LICENSE%`, `%PACKAGER%`, `%VALIDATION%` and the checksum fields
+/// as well. So it fails on an entry whose relation sections are readable. One malformed field
+/// in one unrelated entry would then answer "not satisfied" for every hook `Depends`. A
+/// `PreTransaction` hook with `AbortOnFail` refuses the transaction on that answer.
+///
 /// # Errors
 ///
-/// [`crate::SharedError`] if an entry's `desc` cannot be read, and no earlier package satisfied
-/// `dep` literally.
+/// [`crate::SharedError`] if an entry's relation sections cannot be read, and no earlier package
+/// satisfied `dep` literally.
 pub fn installed_satisfier<'a>(
     local: &'a crate::LocalDatabase,
     dep: &PackageRelation,
@@ -129,7 +137,7 @@ pub fn installed_satisfier<'a>(
         if depcmp::literal_satisfies(package.name(), package.version(), dep) {
             return Ok(Some(package));
         }
-        if depcmp::satisfies(package.name(), package.version(), package.desc()?.provides(), dep) {
+        if depcmp::satisfies(package.name(), package.version(), package.eager()?.provides(), dep) {
             return Ok(Some(package));
         }
     }
@@ -1315,5 +1323,35 @@ Foobar McFooface <foobar@mcfooface.org>
         let names: Vec<_> =
             matches.iter().map(|resolved| resolved.package().name().as_ref()).collect();
         assert_eq!(names, ["example", "other-example"]);
+    }
+
+    /// `installed_satisfier` reads the eager tier, which holds `%PROVIDES%`.
+    ///
+    /// The entry named `aaa` carries a `%PACKAGER%` the typed parse refuses. Two things must
+    /// still work past it. A package listed after it is found. Its own `%PROVIDES%` is read.
+    ///
+    /// The hook engine's `Depends` check is the only caller, and it reads an error as "nothing
+    /// satisfies this". One malformed field would otherwise answer for every hook.
+    #[test]
+    fn a_desc_only_the_typed_parse_refuses_still_answers_a_dependency() {
+        let db = crate::fixture::DbFixture::new();
+        let refused = crate::fixture::MINIMAL_DESC_V1
+            .replacen("%NAME%\nfoo", "%NAME%\naaa", 1)
+            .replacen("%BASE%\nfoo", "%BASE%\naaa", 1)
+            .replacen("Foobar McFooface <foobar@mcfooface.org>", "Some One <not-an-email>", 1)
+            + "%PROVIDES%\nsnapshot-tool\n\n";
+        db.package("aaa-1.0.0-1").desc(&refused).files(crate::fixture::MINIMAL_FILES).build();
+        db.package("timeshift-1.0.0-1").with_defaults().build();
+
+        let local = crate::LocalDatabase::open(db.path()).unwrap();
+        let broken = local.iter().find(|package| package.name().as_ref() == "aaa").unwrap();
+        assert!(broken.desc().is_err(), "the fixture must carry a typed parse the parser refuses");
+        assert!(broken.eager().is_ok(), "the relation sections are readable");
+
+        let literal = installed_satisfier(&local, &"timeshift".parse().unwrap()).unwrap();
+        assert_eq!(literal.map(|package| package.name().as_ref()), Some("timeshift"));
+
+        let provided = installed_satisfier(&local, &"snapshot-tool".parse().unwrap()).unwrap();
+        assert_eq!(provided.map(|package| package.name().as_ref()), Some("aaa"));
     }
 }

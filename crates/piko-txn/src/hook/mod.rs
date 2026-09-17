@@ -278,6 +278,26 @@ impl Run {
     pub fn succeeded(&self) -> bool {
         self.outcome.as_ref().is_some_and(Outcome::succeeded)
     }
+
+    /// Why the hook did not succeed, as a phrase that follows the hook's name.
+    ///
+    /// Three things can go wrong, and each needs a different fix:
+    ///
+    /// - a `Depends` nothing installed satisfies,
+    /// - a command that could not be started,
+    /// - a command that ran and failed.
+    ///
+    /// This function is the one place that turns the three into words. A warning and an
+    /// `AbortOnFail` refusal therefore name the same cause the same way.
+    ///
+    /// A hook that succeeded gets [`Outcome::describe`]'s "succeeded".
+    #[must_use]
+    pub fn failure_reason(&self) -> String {
+        if let Some(missing) = &self.unsatisfied {
+            return format!("was skipped: nothing installed satisfies {missing}");
+        }
+        self.outcome.as_ref().map_or_else(|| "did not run".to_owned(), Outcome::describe)
+    }
 }
 
 /// Runs one hook. The caller must already have established that it is triggered.
