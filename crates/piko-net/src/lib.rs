@@ -87,7 +87,9 @@
 //!
 //! - **Resumed or segmented downloads.** pacman does the first. Neither changes correctness,
 //!   and both add failure modes to a path that must be trustworthy before it is fast.
-//! - **A disk-space check.** Nothing here inspects free space before writing.
+//! - **A disk-space check.** `CheckSpace` is answered a layer up, by `piko_txn`'s `space`
+//!   module: the batch this crate is handed has already been weighed against the destination
+//!   filesystem. Nothing here inspects free space on its own.
 //! - **`Include`d mirrorlists.** Already handled: `piko_db::config` resolves `Server` and
 //!   `CacheServer` with `$repo`/`$arch` substituted before this crate sees them.
 

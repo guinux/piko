@@ -34,7 +34,6 @@ It can:
 
 Some features are not yet built:
 - resumed downloads
-- a disk-space check
 
 ## Quick start
 

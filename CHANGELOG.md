@@ -37,6 +37,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Glob search terms: a `piko search` term carrying `*`, `?` or `[` is matched against the whole
   package name, `%PROVIDES%` name or `%GROUPS%` entry. pacman matches a `-Ss` term with an
   unanchored POSIX extended regular expression instead.
+- `CheckSpace`: a transaction is weighed against free disk space before anything is written.
+  Every filesystem it writes to must hold its peak occupancy — not its net growth, which an
+  upgrade can answer with zero while still needing a gigabyte half-way through — and a
+  filesystem it merely touches must not be mounted read only. Downloads are weighed separately,
+  against the cache directory, before the first byte is fetched. Off unless `pacman.conf` sets
+  the directive, and there is no flag for it, exactly as in pacman. See
+  `docs/libalpm-compat.md` §133.
 - Group member selection: `piko install <group>` and `piko update <group>` list the group's
   members numbered and ask which ones to install, reading pacman's own selection grammar
   (numbers, `N-M` ranges, `^` to exclude, empty line for all). `--noconfirm` takes every

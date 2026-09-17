@@ -143,6 +143,26 @@ pub fn read_capped_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
 ///
 /// As `read_capped`, except that a final symlink is resolved rather than refused.
 pub fn read_capped_utf8_following(path: &Path, limit: Limit, max: u64) -> Result<String> {
+    let bytes = read_capped_following(path, limit, max)?;
+    decode(path, bytes)
+}
+
+/// Reads `path` in full as bytes, **following a final symlink**.
+///
+/// The bytes counterpart of [`read_capped_utf8_following`], for a file whose contents are
+/// paths rather than text. The kernel's mount table is the case: `/etc/mtab` is a symlink to
+/// `/proc/self/mounts`, and a mount directory is a byte string the filesystem never promised
+/// would decode as UTF-8. Refusing the whole table over one such directory would disable the
+/// disk-space check on the system that needs it.
+///
+/// The rest of the door is unchanged: `O_NONBLOCK`, an `fstat` that refuses anything but a
+/// regular file, and a bounded read. A procfs file reports a size of zero, which only means
+/// the read starts with no capacity hint; the bound still applies to what actually arrives.
+///
+/// # Errors
+///
+/// As `read_capped`, except that a final symlink is resolved rather than refused.
+pub fn read_capped_following(path: &Path, limit: Limit, max: u64) -> Result<Vec<u8>> {
     let file = open_following_symlinks(path)?;
     let metadata = ensure_regular_file(&file, path)?;
 
@@ -155,7 +175,7 @@ pub fn read_capped_utf8_following(path: &Path, limit: Limit, max: u64) -> Result
         return Err(Error::LimitExceeded { path: path.to_path_buf(), limit, max });
     }
 
-    decode(path, buffer)
+    Ok(buffer)
 }
 
 /// Decodes bytes read from `path` as UTF-8.

@@ -248,6 +248,11 @@ struct Prepared {
     /// names the entry the install must replace, drives the fake removal, and supplies the
     /// `%BACKUP%` baseline extraction compares against.
     replaces: Option<Superseded>,
+    /// What each of its payload members will occupy, for the disk-space estimate.
+    ///
+    /// Collected during the same archive walk that built [`Self::files`]. The package is not
+    /// installed yet, so the archive is the only place its per-file sizes exist.
+    footprint: Vec<crate::space::MemberFootprint>,
 }
 
 impl Prepared {
@@ -291,9 +296,11 @@ struct Superseded {
 pub struct Patterns {
     /// `NoExtract`: never written, and therefore never owned.
     ///
-    /// libalpm consults this in exactly two places — extraction (`add.c:224`) and the
-    /// disk-space estimate. **Not** in conflict detection, so a `NoExtract` path is still
-    /// checked for conflicts, and piko matches that.
+    /// libalpm consults this in exactly two places, and only one of them decides anything:
+    /// extraction (`add.c:224`). The other suppresses a warning in the disk-space estimate,
+    /// which charges for a `NoExtract` path regardless; piko does not count what it will not
+    /// write. Neither implementation consults it in conflict detection, so a `NoExtract` path
+    /// is still checked for conflicts.
     pub no_extract: Vec<String>,
     /// `NoUpgrade`: never overwritten; the packaged version lands beside it as `.pacnew`.
     ///
@@ -304,7 +311,7 @@ pub struct Patterns {
 
 impl Patterns {
     /// Whether `path` is never extracted.
-    fn skips(&self, path: &Path) -> bool {
+    pub(crate) fn skips(&self, path: &Path) -> bool {
         piko_db::resolve::matches_any(&self.no_extract, &path.to_string_lossy())
     }
 
@@ -354,6 +361,11 @@ pub struct Verified {
     /// the new one. An upgrade's `old_files` and a removal's file list are only readable while
     /// the packages are still installed.
     summary: hook::Summary,
+    /// What the disk-space estimate could not measure, if it ran at all.
+    ///
+    /// Returned rather than logged, like every other diagnostic this crate produces. Empty
+    /// when `CheckSpace` is off, and empty on the ordinary system where everything measured.
+    space_problems: Vec<crate::space::Problem>,
 }
 
 /// The lock is held, the journal is written, and the records are open.
@@ -389,6 +401,7 @@ pub struct Transaction<S> {
     scriptlets: bool,
     hook_dirs: Vec<PathBuf>,
     recording: Recording,
+    check_space: bool,
     cancel: Option<piko_net::Cancel>,
     state: S,
 }
@@ -414,6 +427,9 @@ impl Transaction<Planned> {
             hook_dirs: Vec::new(),
             // Records nothing by default, like `scriptlets`. A library caller opts in.
             recording: Recording::default(),
+            // Off by default. libalpm's own default is off too; it is Arch's shipped
+            // `pacman.conf` that turns `CheckSpace` on, and the CLI reads that directive.
+            check_space: false,
             // No flag by default, so the commit runs to the end. A library caller opts in.
             cancel: None,
             state: Planned { steps },
@@ -427,6 +443,21 @@ impl Transaction<Planned> {
     #[must_use]
     pub const fn scriptlets(mut self, enabled: bool) -> Self {
         self.scriptlets = enabled;
+        self
+    }
+
+    /// Refuses the transaction during [`Transaction::verify`] unless every filesystem it writes
+    /// to can hold its peak occupancy — `pacman.conf`'s `CheckSpace`.
+    ///
+    /// Off by default, as it is in libalpm. Only the transaction's own writes are weighed here;
+    /// the space a download needs is a separate question, asked by
+    /// [`crate::DownloadingSource::check_space`] before anything is fetched.
+    ///
+    /// A transaction that installs nothing runs no check. A removal can only free space, and
+    /// libalpm skips the whole check for one for that reason.
+    #[must_use]
+    pub const fn check_space(mut self, enabled: bool) -> Self {
+        self.check_space = enabled;
         self
     }
 
@@ -675,7 +706,7 @@ impl Transaction<Planned> {
         let mut packages = Vec::with_capacity(located.len());
         for (path, validated) in located {
             self.stop_if_cancelled(total_steps)?;
-            let conflict::LoadedPackage { target, info, raw } =
+            let conflict::LoadedPackage { target, info, raw, footprint } =
                 conflict::load_package(&path, &self.limits)?;
             let entry = self::entry_name(&path, &info)?;
 
@@ -705,6 +736,7 @@ impl Transaction<Planned> {
                 files: target.files.clone(),
                 backups: target.backups.clone(),
                 replaces,
+                footprint,
             });
             targets.push(target);
             verified_installs = verified_installs.saturating_add(1);
@@ -731,6 +763,16 @@ impl Transaction<Planned> {
             return Err(Error::FileConflicts { conflicts: check.conflicts });
         }
 
+        // Where `_alpm_sync_check` asks it, and the last point at which refusing costs nothing:
+        // `stage` writes the journal. An install-free transaction is not asked at all, matching
+        // libalpm, which keeps the whole of `_alpm_sync_check` behind `if(trans->add)`.
+        let space_problems = if self.check_space && total_installs > 0 {
+            progress(VerifyEvent::DiskSpaceCheckStarted);
+            self.weigh_space(&root, &packages, &doomed_entries)?
+        } else {
+            Vec::new()
+        };
+
         Ok(Transaction {
             root_path: self.root_path,
             dbpath: self.dbpath,
@@ -744,6 +786,7 @@ impl Transaction<Planned> {
             scriptlets: self.scriptlets,
             hook_dirs: self.hook_dirs,
             recording: self.recording,
+            check_space: self.check_space,
             cancel: self.cancel,
             state: Verified {
                 steps: self.state.steps,
@@ -751,8 +794,44 @@ impl Transaction<Planned> {
                 removals: doomed_entries,
                 skip_remove: check.skip_remove,
                 summary,
+                space_problems,
             },
         })
+    }
+
+    /// Weighs what this transaction will write against what each filesystem has free.
+    ///
+    /// The root is canonicalized once. The mount table is the host's. So a relative `--root`,
+    /// or one reached through a symlink, would match no mount point at all. It would then fail
+    /// the coherence check for a reason that has nothing to do with disk space. libalpm
+    /// resolves only its cache directory, and would mis-attribute such a root.
+    fn weigh_space(
+        &self,
+        root: &RootDir,
+        packages: &[Prepared],
+        removals: &[Doomed],
+    ) -> Result<Vec<crate::space::Problem>> {
+        let canonical =
+            std::fs::canonicalize(&self.root_path).unwrap_or_else(|_| self.root_path.clone());
+        let doomed: Vec<&[PathBuf]> =
+            removals.iter().map(|entry| entry.installed.files.as_slice()).collect();
+        let installs: Vec<crate::space::Install<'_>> = packages
+            .iter()
+            .map(|package| crate::space::Install {
+                footprint: &package.footprint,
+                replaced: package.replaces.as_ref().map(|old| old.files.as_slice()),
+            })
+            .collect();
+        crate::space::check_install(
+            crate::space::mounts::MountTable::load()?,
+            &canonical,
+            root,
+            &doomed,
+            &installs,
+            // libalpm charges for `NoExtract` bytes although its own extraction then declines
+            // to write them. piko does not count what it will not write.
+            &|path| self.patterns.skips(path),
+        )
     }
 }
 
@@ -874,6 +953,17 @@ fn doomed(entry: &EntryName, package: &LocalPackage, want_script: bool) -> Resul
 }
 
 impl Transaction<Verified> {
+    /// What the disk-space estimate could not measure.
+    ///
+    /// Empty when `CheckSpace` is off, and empty on a system where every path mapped to a
+    /// readable filesystem. A problem here means part of the estimate is missing. It does not
+    /// mean the transaction was refused: a refusal is [`Error::DiskSpace`], raised by
+    /// [`Transaction::verify`] in place of a return value.
+    #[must_use]
+    pub fn space_problems(&self) -> &[crate::space::Problem] {
+        &self.state.space_problems
+    }
+
     /// Writes the journal under the held lock, reaching the point of no return.
     ///
     /// `lock` must be the lock for this transaction's `dbpath`. The check belongs here rather
@@ -906,6 +996,7 @@ impl Transaction<Verified> {
             scriptlets: self.scriptlets,
             hook_dirs: self.hook_dirs,
             recording: self.recording,
+            check_space: self.check_space,
             cancel: self.cancel,
             state: Staged {
                 steps: self.state.steps,
@@ -1474,6 +1565,87 @@ mod tests {
                 .as_secs();
             assert_eq!(seen, STAMPED, "{member} was stamped with the write time");
         }
+    }
+
+    /// `CheckSpace` runs inside `verify`, reports itself, and lets a transaction that fits
+    /// through.
+    ///
+    /// The unit tests in `space` prove the arithmetic and `space_hardening.rs` proves the
+    /// refusal. What is left to pin is the wiring: that the builder reaches the check at all,
+    /// that the check runs against the transaction's own root rather than `/`, and that the
+    /// caller is told it started. A silent no-op would pass every other test in this crate.
+    #[test]
+    fn a_space_checked_transaction_reports_the_check_and_installs() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+
+        let mut announced = false;
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let verified = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .check_space(true)
+            .verify_with_progress(&source, &mut |event| {
+                if matches!(event, VerifyEvent::DiskSpaceCheckStarted) {
+                    announced = true;
+                }
+            })
+            .unwrap();
+        assert!(announced, "the disk-space check ran without saying so");
+        assert!(verified.space_problems().is_empty(), "{:?}", verified.space_problems());
+
+        verified.stage(&lock).unwrap().commit().unwrap();
+        assert!(root.path().join("usr/bin/foo").is_file());
+    }
+
+    /// A transaction that installs nothing is not weighed, and says nothing about space.
+    ///
+    /// libalpm keeps the whole of `_alpm_sync_check` behind `if(trans->add)`, so `pacman -R`
+    /// runs no check at all. A removal can only free space.
+    #[test]
+    fn a_removal_only_transaction_is_not_weighed() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Install {
+                package: name.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+        )
+        .ownership(Ownership::Inherit)
+        .verify(&source)
+        .unwrap()
+        .stage(&lock)
+        .unwrap()
+        .commit()
+        .unwrap();
+
+        let mut announced = false;
+        let removal =
+            Step::Remove { entry: EntryName::parse("foo-1.0.0-1").unwrap(), no_save: false };
+        let verified = Transaction::new(root.path(), db.path(), vec![removal])
+            .check_space(true)
+            .verify_with_progress(&source, &mut |event| {
+                if matches!(event, VerifyEvent::DiskSpaceCheckStarted) {
+                    announced = true;
+                }
+            })
+            .unwrap();
+        assert!(!announced, "a removal-only transaction must not be weighed");
+        assert!(verified.space_problems().is_empty());
     }
 
     /// A cancellation is read between two steps, so the step already running finishes.

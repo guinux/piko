@@ -140,12 +140,18 @@ pub trait PackageSource: fmt::Debug + Send + Sync {
     /// Cancellation is the exception. It is not a fact about one package. There is no point
     /// letting `locate` retry each file to rediscover that the user asked to stop.
     ///
+    /// A `CheckSpace` refusal is the other exception, and for the same reason. It is a fact
+    /// about the whole batch and the filesystem under it, not about any one package. `locate`
+    /// could not rediscover it one file at a time. Writing nothing before it answers is also
+    /// the point of the check.
+    ///
     /// The default does nothing. That is right for a source that only checks what already
     /// exists, and it keeps [`PackageSource::locate`] the only path that can download.
     ///
     /// # Errors
     ///
-    /// [`Error::Download`] wrapping `piko_net::Error::Cancelled`, and nothing else.
+    /// [`Error::Download`] wrapping `piko_net::Error::Cancelled`, [`Error::DiskSpace`] or
+    /// [`Error::MountTableUnreadable`], and nothing else.
     fn prefetch(&self, _file_names: &[PackageFileName]) -> Result<()> {
         Ok(())
     }
@@ -512,7 +518,10 @@ pub struct DownloadTarget {
     /// `policy_overrides`. See that module for why the two stay separate instead of verifying
     /// here too.
     pub policy: piko_sig::Policy,
-    /// `%CSIZE%`, used only to download the largest packages first.
+    /// `%CSIZE%`: what the download is expected to weigh.
+    ///
+    /// Two readers. The scheduler downloads the largest packages first, and — when
+    /// [`DownloadingSource::check_space`] is on — the disk-space check sums it over the batch.
     ///
     /// This is never a bound. A repository's claimed size is only a claim.
     /// `piko_net::refresh::Limits` still enforces against the bytes that actually arrive, so a
@@ -532,6 +541,7 @@ pub struct DownloadTarget {
 pub struct DownloadingSource {
     cache: CacheDirSource,
     download_dir: DownloadDir,
+    check_space: bool,
     refresher: piko_net::Refresher,
     targets: HashMap<String, DownloadTarget>,
     cancel: piko_net::Cancel,
@@ -581,11 +591,26 @@ impl DownloadingSource {
             cache,
             download_dir,
             refresher: piko_net::Refresher::default(),
+            check_space: false,
             targets,
             cancel,
             concurrency,
             progress: Box::new(progress),
         })
+    }
+
+    /// Refuses a batch of downloads unless the chosen directory can hold it —
+    /// `pacman.conf`'s `CheckSpace`, on the download side.
+    ///
+    /// Off by default, as it is in libalpm. Separate from
+    /// [`crate::Transaction::check_space`] because the two weigh different things against
+    /// different filesystems: this one the compressed archives against the cache directory,
+    /// that one the extracted payload against the root. `pacman -Sw` runs this and not that,
+    /// because `download_files` sits ahead of the `DOWNLOADONLY` return.
+    #[must_use]
+    pub const fn check_space(mut self, enabled: bool) -> Self {
+        self.check_space = enabled;
+        self
     }
 
     /// Where a download will be written, and what was passed over to get there.
@@ -667,6 +692,18 @@ impl PackageSource for DownloadingSource {
             .collect();
         if wanted.is_empty() {
             return Ok(());
+        }
+
+        // Before the first byte is written, over exactly the files that will really be
+        // fetched: a package already in the cache never reaches `wanted`. libalpm reaches the
+        // same set through `find_dl_candidates`, and discounts a partial `.part` file on top;
+        // piko never resumes a download, so a file that is not cached costs its whole
+        // `%CSIZE%`.
+        if self.check_space {
+            crate::space::check_download(
+                self.download_dir.path(),
+                wanted.iter().map(|fetch| fetch.size),
+            )?;
         }
 
         let results = self.refresher.fetch_packages(

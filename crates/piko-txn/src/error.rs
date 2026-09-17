@@ -317,6 +317,43 @@ pub enum Error {
         source: Box<piko_db::Error>,
     },
 
+    /// A filesystem this transaction writes to cannot hold it, or cannot be written to at all.
+    ///
+    /// Raised only when `CheckSpace` is configured. Both lists are carried whole, for the
+    /// reason [`Error::FileConflicts`] carries every conflict. Naming one partition at a time
+    /// makes the user free space, re-run, and be told about the next one.
+    ///
+    /// The estimate is approximate by construction. It models the peak at package boundaries,
+    /// not at file boundaries. So a refusal here means "this does not fit with libalpm's
+    /// margin", not "this would fill the disk to the last byte".
+    #[error(
+        "the transaction does not fit:\n  {}",
+        too_full.iter().take(MAX_SHOWN).map(ToString::to_string)
+            .chain(read_only.iter().take(MAX_SHOWN)
+                .map(|path| format!("{} is mounted read only", path.display())))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    )]
+    DiskSpace {
+        /// Every filesystem whose free space is short of the peak this transaction needs.
+        too_full: Vec<crate::space::PartitionSpace>,
+        /// Every filesystem this transaction touches that is mounted read only.
+        read_only: Vec<PathBuf>,
+    },
+
+    /// The kernel's mount table cannot be read, or describes a different system.
+    ///
+    /// Only the disk-space check needs it, so this is reachable only under `CheckSpace`.
+    /// libalpm returns a bare `-1` here without setting an error code at all, which leaves its
+    /// caller reporting "unexpected error"; the path and the reason are named instead.
+    #[error("the mount table at {} cannot be used: {reason}", path.display())]
+    MountTableUnreadable {
+        /// The file that was read, or the path that could not be placed on any filesystem.
+        path: PathBuf,
+        /// What went wrong.
+        reason: String,
+    },
+
     /// No configured cache directory can receive a download.
     #[error(
         "no configured cache directory can be written into ({})",

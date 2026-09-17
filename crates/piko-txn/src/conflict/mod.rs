@@ -816,6 +816,13 @@ pub struct LoadedPackage {
     /// [`crate::record::desc`] needs both the bytes and the interpretation, for the fields
     /// that must survive byte-for-byte.
     pub raw: String,
+    /// What each payload member will occupy, for the disk-space estimate.
+    ///
+    /// Not on [`Target`], although it comes from the same walk. A size is not a
+    /// conflict-detection concern, and [`target_from_installed`] builds a `Target` out of an
+    /// installed package's `%FILES%`, which records no sizes at all. This is the type that
+    /// already means "the archive, read once".
+    pub footprint: Vec<crate::space::MemberFootprint>,
 }
 
 /// Reads a package archive: its member list, its `.INSTALL`, and its `.PKGINFO`.
@@ -834,6 +841,7 @@ pub fn load_package(
     limits: &crate::extract::PackageLimits,
 ) -> Result<LoadedPackage> {
     let mut paths: Vec<String> = Vec::new();
+    let mut footprint: Vec<crate::space::MemberFootprint> = Vec::new();
     let mut pkginfo: Option<String> = None;
     let mut install_script: Option<Vec<u8>> = None;
 
@@ -864,6 +872,18 @@ pub fn load_package(
             spelled.push('/');
         }
         paths.push(spelled);
+        // Only what will really occupy blocks. libarchive reports a directory, a symlink and
+        // a hard link as zero-sized, and the disk-space estimate skips all three. Collecting
+        // them would cost work and answer nothing.
+        if member.entry != crate::extract::decision::EntryKind::Directory
+            && !member.is_symlink()
+            && !member.is_hard_link()
+        {
+            footprint.push(crate::space::MemberFootprint {
+                path: member.path.clone(),
+                size: member.size,
+            });
+        }
         Ok(())
     })?;
 
@@ -896,6 +916,7 @@ pub fn load_package(
         target: Target { name, version, files: FileList::new(paths), backups, install_script },
         info,
         raw,
+        footprint,
     })
 }
 

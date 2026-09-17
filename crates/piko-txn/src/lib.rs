@@ -110,6 +110,7 @@ pub mod remove;
 pub mod rootfs;
 pub mod scriptlet;
 pub mod source;
+pub mod space;
 pub mod target;
 pub mod transaction;
 
@@ -129,5 +130,6 @@ pub use source::{
     CacheDirSource, DownloadDir, DownloadTarget, DownloadingSource, FileSource, Location,
     PackageSource, RejectedCacheDir, RejectionReason, Skipped, select_download_dir,
 };
+pub use space::{MemberFootprint, PartitionSpace};
 pub use target::{TargetKind, classify};
 pub use transaction::{Patterns, Report, Step, Transaction};

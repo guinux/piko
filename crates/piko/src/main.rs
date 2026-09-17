@@ -607,6 +607,7 @@ fn sync(
             sysupgrade: args.sysupgrade,
             download_only: args.download_only,
             parallel_downloads: parsed.options.parallel_downloads,
+            check_space: parsed.options.check_space,
             pre_cancel,
         },
         out,

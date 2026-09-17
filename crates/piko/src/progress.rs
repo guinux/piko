@@ -420,6 +420,7 @@ pub(crate) struct VerifyDriver<'a, W> {
     signature_row: Option<Row>,
     verify_row: Option<Row>,
     conflict_row: Option<Row>,
+    space_row: Option<Row>,
 }
 
 impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
@@ -440,6 +441,7 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
             signature_row: None,
             verify_row: None,
             conflict_row: None,
+            space_row: None,
         }
     }
 
@@ -468,6 +470,13 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
                 self.settle_signature();
                 self.settle_verify();
                 self.conflict_row = Some(self.steplist.spinner("Checking file conflicts"));
+            }
+            E::DiskSpaceCheckStarted => {
+                self.finish_download();
+                self.settle_signature();
+                self.settle_verify();
+                self.settle_conflict();
+                self.space_row = Some(self.steplist.spinner("Checking available disk space"));
             }
             // `VerifyEvent` is `#[non_exhaustive]`.
             _ => {}
@@ -499,6 +508,18 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
         }
     }
 
+    fn settle_conflict(&mut self) {
+        if let Some(row) = self.conflict_row.take() {
+            self.settle(row, "Checking file conflicts");
+        }
+    }
+
+    fn settle_space(&mut self) {
+        if let Some(row) = self.space_row.take() {
+            self.settle(row, "Checking available disk space");
+        }
+    }
+
     fn settle(&mut self, row: Row, text: &str) {
         settle_row(self.steplist, self.out, row, text);
     }
@@ -510,9 +531,8 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
         self.finish_download();
         self.settle_signature();
         self.settle_verify();
-        if let Some(row) = self.conflict_row.take() {
-            self.settle(row, "Checking file conflicts");
-        }
+        self.settle_conflict();
+        self.settle_space();
     }
 }
 

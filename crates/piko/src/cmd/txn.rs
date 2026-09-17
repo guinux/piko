@@ -91,6 +91,9 @@ pub struct InstallOptions {
     /// `pacman.conf`'s `ParallelDownloads`, raw. Clamped where it is used — see
     /// [`piko_net::Concurrency::new`].
     pub parallel_downloads: u32,
+    /// `pacman.conf`'s `CheckSpace`: weigh the transaction against free disk space before
+    /// writing anything. There is no flag for it, because pacman has none either.
+    pub check_space: bool,
     /// A `SIGINT` handler already installed by an earlier step (`update`'s pre-refresh),
     /// reused instead of installing a second one. `ctrlc::set_handler` accepts exactly one
     /// registration per process; a second call would panic. `None` when nothing installed
@@ -431,7 +434,9 @@ pub fn install(
         cancel,
         piko_net::Concurrency::new(options.parallel_downloads),
         rig.sink,
-    ) {
+    )
+    .map(|source| source.check_space(options.check_space))
+    {
         Ok(source) => source,
         Err(error) => {
             crate::progress::clear_download_rows(rig.row, rig.head);
@@ -465,6 +470,7 @@ pub fn install(
         hook_dirs: options.side_effects.hook_dirs.clone(),
         patterns: options.patterns,
         recording: options.side_effects.recording.clone(),
+        check_space: options.check_space,
         cancel: Some(cancel_flag),
     };
     run(
@@ -662,6 +668,27 @@ fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::Dow
         }
         if dir.created() {
             eprintln!("Warning: no {} cache exists, creating...", dir.path().display());
+        }
+    });
+}
+
+/// Names what the disk-space estimate could not measure.
+///
+/// Each of these means part of the estimate is missing. A transaction that passed may have
+/// passed on incomplete arithmetic: a path on a filesystem nothing could stat is a path
+/// charged to nobody. libalpm logs the same facts as warnings. Silence is the ordinary case.
+///
+/// Written through `StepList::suspend` for the reason [`report_download_dir`] is.
+fn report_space_problems(
+    steplist: &crate::progress::StepList,
+    problems: &[piko_txn::space::Problem],
+) {
+    if problems.is_empty() {
+        return;
+    }
+    steplist.suspend(|| {
+        for problem in problems {
+            eprintln!("Warning: {problem}");
         }
     });
 }
@@ -1049,6 +1076,9 @@ struct Settings {
     patterns: piko_txn::Patterns,
     /// Where the transaction records what it does.
     recording: piko_txn::Recording,
+    /// `pacman.conf`'s `CheckSpace`. Always `false` for a removal: a removal only frees space,
+    /// and libalpm runs no check for one either.
+    check_space: bool,
     /// The `SIGINT` flag, read once between verification and the commit.
     ///
     /// [`run`] holds that check, and explains it. This is `None` for a transaction with no
@@ -1136,7 +1166,8 @@ fn run(
         .scriptlets(settings.scriptlets)
         .hook_dirs(settings.hook_dirs)
         .patterns(settings.patterns)
-        .recording(settings.recording);
+        .recording(settings.recording)
+        .check_space(settings.check_space);
     // The commit reads the same flag the check below reads. It stops between two steps.
     // `Cancel` is a cheap handle, so both readers hold one.
     let planned = match settings.cancel.clone() {
@@ -1159,6 +1190,7 @@ fn run(
             return ExitCode::FAILURE;
         }
     };
+    report_space_problems(progress.steplist, verified.space_problems());
 
     // This covers the window between verification's last read and the commit's first. It is
     // also the last point where a stop leaves nothing behind. `stage` opens the journal, and

@@ -46,6 +46,14 @@
 //! |------------------------------|-------------------------|---------------|
 //! | `hook_bytes`                 | 638 B                   | 1 MiB |
 //!
+//! The kernel's mount table is host state rather than package data, and is read once per
+//! disk-space check. It is bounded anyway, because its size is not a property of this
+//! machine: a container host can publish thousands of mounts into a namespace.
+//!
+//! | file                        | observed                | default limit |
+//! |------------------------------|-------------------------|---------------|
+//! | `mount_table_bytes`          | 2.7 KB (29 mounts)      | 4 MiB |
+//!
 //! Diagnostics are bounded separately (`max_diagnostics`, default 4096). They are the one
 //! part of an open whose size is attacker-controlled *without* the package count growing: a
 //! directory of a million badly-named entries yields no packages at all. So neither
@@ -85,6 +93,13 @@ pub enum Limit {
     /// bound is much larger and much less curated than the single configuration file behind
     /// that one.
     Hook,
+    /// The maximum size of the kernel's mount table.
+    ///
+    /// Separate from [`Self::PacmanConf`] and [`Self::Hook`] for the reason those two are
+    /// separate from each other: the provenance differs. No user and no package writes this
+    /// file. The kernel generates it, and its length is the number of mounts in this
+    /// namespace.
+    MountTable,
 }
 
 impl Limit {
@@ -102,6 +117,7 @@ impl Limit {
             Self::RepoEntry => "repository archive member",
             Self::PacmanConf => "pacman.conf file",
             Self::Hook => "hook file",
+            Self::MountTable => "mount table",
         }
     }
 }
@@ -192,6 +208,12 @@ pub struct Limits {
     pub pacman_conf_bytes: u64,
     /// Maximum size in bytes of an alpm `.hook` file.
     pub hook_bytes: u64,
+    /// Maximum size in bytes of the kernel's mount table.
+    ///
+    /// The table is read once per disk-space check, to decide which filesystem each path a
+    /// transaction writes belongs to. Its length is the number of mounts in this namespace,
+    /// which this machine does not control: a container host can publish thousands.
+    pub mount_table_bytes: u64,
     /// Maximum number of candidate packages a single planning run may consider.
     ///
     /// One candidate per installed package plus one per package in every configured
@@ -273,6 +295,7 @@ impl Default for Limits {
             repo_max_packages: 1 << 20,
             pacman_conf_bytes: MIB,
             hook_bytes: MIB,
+            mount_table_bytes: 4 * MIB,
             solve_max_solvables: 1 << 21,
             solve_max_conflicts: 1 << 20,
             solve_max_clauses: 1 << 24,
@@ -300,6 +323,7 @@ impl Limits {
             Limit::RepoEntry => self.repo_entry_bytes,
             Limit::PacmanConf => self.pacman_conf_bytes,
             Limit::Hook => self.hook_bytes,
+            Limit::MountTable => self.mount_table_bytes,
         }
     }
 }

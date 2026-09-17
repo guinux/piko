@@ -201,4 +201,11 @@ pub enum VerifyEvent {
     /// this is a start marker with no matching "finished" event. The caller learns it ended
     /// when `verify_with_progress` returns.
     ConflictCheckStarted,
+    /// The file-conflict check has passed. The disk-space estimate is about to run.
+    ///
+    /// Fires only when `CheckSpace` is configured and the transaction installs something. Like
+    /// [`ConflictCheckStarted`](VerifyEvent::ConflictCheckStarted) this is a start marker with
+    /// no matching "finished" event: the estimate stats one filesystem per mount point the
+    /// transaction touches, which is a handful of syscalls, not a countable per-package walk.
+    DiskSpaceCheckStarted,
 }
