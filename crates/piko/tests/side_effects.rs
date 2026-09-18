@@ -35,11 +35,12 @@ use std::{
 const PIKO: &str = env!("CARGO_BIN_EXE_piko");
 
 /// A `.PKGINFO` for `name` at `version`.
-fn pkginfo(name: &str, version: &str) -> String {
+fn pkginfo(name: &str, version: &str, depends: &[&str]) -> String {
+    let depends: String = depends.iter().map(|entry| format!("depend = {entry}\n")).collect();
     format!(
         "pkgname = {name}\npkgbase = {name}\npkgver = {version}\npkgdesc = x\n\
          url = https://example.org/\nbuilddate = 1733737242\n\
-         packager = A <a@b.c>\nsize = 4\narch = x86_64\nlicense = MIT\n"
+         packager = A <a@b.c>\nsize = 4\narch = x86_64\nlicense = MIT\n{depends}"
     )
 }
 
@@ -57,7 +58,7 @@ fn write_package(cache: &Path, version: &str, script: Option<&str>) {
 fn write_package_as_root(cache: &Path, version: &str, script: Option<&str>) {
     std::fs::write(
         cache.join(format!("foo-{version}-x86_64.pkg.tar")),
-        package_tar_owned("foo", version, script, &[], 0, 0),
+        package_tar_owned("foo", version, script, &[], &[], 0, 0),
     )
     .unwrap();
 }
@@ -77,6 +78,27 @@ fn write_package_with(
     std::fs::write(
         cache.join(format!("{name}-{version}-x86_64.pkg.tar")),
         package_tar(name, version, script, extra),
+    )
+    .unwrap();
+}
+
+/// As [`write_package_with`], for a package whose `.PKGINFO` declares `depends`.
+///
+/// The repository `desc` a test writes is not what the installed entry carries: an install
+/// copies `.PKGINFO`, so a package whose dependency must survive into `<dbpath>/local` has to
+/// declare it here too.
+fn write_package_depending_on(cache: &Path, name: &str, version: &str, depends: &[&str]) {
+    std::fs::write(
+        cache.join(format!("{name}-{version}-x86_64.pkg.tar")),
+        package_tar_owned(
+            name,
+            version,
+            None,
+            &[],
+            depends,
+            u64::from(rustix::process::getuid().as_raw()),
+            u64::from(rustix::process::getgid().as_raw()),
+        ),
     )
     .unwrap();
 }
@@ -101,6 +123,7 @@ fn package_tar(name: &str, version: &str, script: Option<&str>, extra: &[(&str, 
         version,
         script,
         extra,
+        &[],
         u64::from(rustix::process::getuid().as_raw()),
         u64::from(rustix::process::getgid().as_raw()),
     )
@@ -112,6 +135,7 @@ fn package_tar_owned(
     version: &str,
     script: Option<&str>,
     extra: &[(&str, &str)],
+    depends: &[&str],
     uid: u64,
     gid: u64,
 ) -> Vec<u8> {
@@ -131,7 +155,7 @@ fn package_tar_owned(
         builder.append_data(&mut header, path, contents).unwrap();
     };
 
-    add(".PKGINFO", pkginfo(name, version).as_bytes(), false);
+    add(".PKGINFO", pkginfo(name, version, depends).as_bytes(), false);
     if let Some(script) = script {
         add(".INSTALL", script.as_bytes(), false);
     }
@@ -833,6 +857,56 @@ fn installing_by_name_pulls_in_its_dependency() {
         bar_desc.contains("%REASON%\n1"),
         "the dependency was not recorded as one:\n{bar_desc}"
     );
+}
+
+/// A force-removed dependency must not make every later transaction plan its dependents away.
+///
+/// This runs the real binary. `foo` depends on `bar`, `bar` is taken out with `--nodeps`
+/// (pacman's `-Rdd`), and something unrelated is installed afterwards. `alpm_checkdeps` raises
+/// a dependency of an installed package only when the transaction itself breaks it
+/// (`deps.c:369`). So the plan must not touch `foo`, and must not reinstall `bar` to repair
+/// the dependency either.
+#[test]
+fn a_force_removed_dependency_does_not_take_its_dependents_with_it() {
+    let sandbox = Sandbox::new();
+    write_package_depending_on(&sandbox.path("cache"), "foo", "1.0.0-1", &["bar"]);
+    write_package_with(&sandbox.path("cache"), "bar", "1.0.0-1", None, &[]);
+    write_package_with(&sandbox.path("cache"), "baz", "1.0.0-1", None, &[]);
+    write_package_with(&sandbox.path("cache"), "qux", "1.0.0-1", None, &[]);
+    sandbox.write_repo(&[
+        ("foo", "1.0.0-1", &["bar"]),
+        ("bar", "1.0.0-1", &[]),
+        ("baz", "1.0.0-1", &[]),
+    ]);
+    assert!(sandbox.run_install(&["foo"], &[]).status.success());
+
+    let removed = sandbox.run_remove(&["bar"], &["--nodeps", "--noconfirm"], None);
+    assert!(removed.status.success(), "--nodeps did not remove bar:\n{}", text(&removed));
+    assert!(!sandbox.path("root/usr/bin/bar").exists(), "bar survived the forced removal");
+
+    // First, with `bar` still in the repository. An available satisfier is not a reason to
+    // repair the dependency. pacman leaves it unmet, and so does piko.
+    let output = sandbox.run_install(&["baz"], &[]);
+    let seen = text(&output);
+    assert!(output.status.success(), "{seen}");
+    assert!(seen.contains("1 to install"), "the plan was more than the named target:\n{seen}");
+    assert!(!sandbox.path("root/usr/bin/bar").exists(), "the broken dependency was repaired");
+    assert!(
+        seen.contains("Warning: foo requires bar, which nothing installed provides"),
+        "the broken dependency was not reported:\n{seen}"
+    );
+
+    // Then with `bar` gone from the repository too. This is the reported system's shape: a
+    // dependency no repository can supply, so the clause would have no satisfier at all.
+    sandbox.write_repo(&[("foo", "1.0.0-1", &["bar"]), ("qux", "1.0.0-1", &[])]);
+    let output = sandbox.run_install(&["qux"], &[]);
+    let seen = text(&output);
+    assert!(output.status.success(), "{seen}");
+
+    assert!(!seen.contains("remove    foo"), "foo was planned away over a broken dep:\n{seen}");
+    assert!(seen.contains("1 to install"), "the plan was more than the named target:\n{seen}");
+    assert!(sandbox.path("db/local/foo-1.0.0-1").exists(), "foo's entry was removed");
+    assert!(sandbox.path("root/usr/bin/foo").exists(), "foo's files were removed");
 }
 
 /// `--asdeps` must apply to the named target too, not only to what it pulls in.

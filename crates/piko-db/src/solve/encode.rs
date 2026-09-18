@@ -318,11 +318,25 @@ pub struct Requirement {
     pub preferred: Option<SolvableId>,
 }
 
+/// A `%DEPENDS%` entry of an installed package that nothing installed satisfies.
+///
+/// Pre-existing system state: whatever broke it did so before this transaction was asked
+/// for. Named by index rather than by rendered text, like [`Divergence`] and [`Ambiguity`],
+/// so a report quotes the relation by indexing `dependent`'s `%DEPENDS%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BrokenDependency {
+    /// The installed package whose `%DEPENDS%` declared it.
+    pub dependent: SolvableId,
+    /// Which of `dependent`'s `%DEPENDS%` entries this was.
+    pub dependency: usize,
+}
+
 /// A compiled problem, plus what is needed to interpret its solution.
 #[derive(Clone, Debug)]
 pub struct Encoded {
     problem: Problem,
     requirements: Vec<Requirement>,
+    broken: Vec<BrokenDependency>,
 }
 
 impl Encoded {
@@ -336,6 +350,18 @@ impl Encoded {
     #[must_use]
     pub fn requirements(&self) -> &[Requirement] {
         &self.requirements
+    }
+
+    /// The `%DEPENDS%` entries of installed packages that no clause was emitted for, because
+    /// nothing installed satisfies them.
+    ///
+    /// Not bounded here. The list is at most one entry per `%DEPENDS%` entry of the installed
+    /// set, which `Limits::solve_max_clauses` already bounds; a second bound would truncate
+    /// the report without protecting anything. The caller turning these into diagnostics
+    /// applies `Limits::max_diagnostics`.
+    #[must_use]
+    pub fn broken(&self) -> &[BrokenDependency] {
+        &self.broken
     }
 
     /// Explains why this compiled problem has no solution, as a chain of human-readable facts.
@@ -590,6 +616,7 @@ pub fn encode(
 ) -> Result<Encoded> {
     let mut problem = Problem::new(universe.len());
     let mut requirements = Vec::new();
+    let mut broken = Vec::new();
 
     // Deliberately built *after* the cone, and never fed into it. The cone must keep every
     // candidate of every name group, or the "something called X must remain" and at-most-one
@@ -668,6 +695,26 @@ pub fn encode(
 
         for (index, dep) in solvable.depends()?.iter().enumerate() {
             let mut satisfiers = in_cone(&cone, &universe.satisfiers(dep));
+            // `alpm_checkdeps`' reverse pass (`deps.c:369`) raises a dependency of an
+            // installed package only when the transaction itself breaks it: "we won't break
+            // this depend, if it is already broken, we ignore it". A `%DEPENDS%` entry that
+            // nothing installed answers today is pre-existing state, so no clause encodes it.
+            // A hard clause here has no positive literal, which reduces it to the unit
+            // `¬dependent`. That contradicts "every installed package must remain", and the
+            // relaxation loop then plans the package away over a dependency the transaction
+            // never touched.
+            //
+            // The test is "some *installed* candidate satisfies it", never "some candidate":
+            // a satisfier this transaction removes or upgrades stays in the clause, which is
+            // the breakage libalpm does report. A repository candidate that could satisfy it
+            // is not consulted either, because repairing a dependency that was already broken
+            // is not something libalpm ever does.
+            if solvable.is_installed()
+                && !satisfiers.iter().any(|id| universe.get(*id).is_some_and(|s| s.is_installed()))
+            {
+                broken.push(BrokenDependency { dependent: *id, dependency: index });
+                continue;
+            }
             // The caller answered `ALPM_QUESTION_SELECT_PROVIDER` for this entry, so only the
             // provider they named satisfies it now. An answer naming something that cannot
             // satisfy it is dropped: the alternative is a clause with no satisfier, which
@@ -733,7 +780,7 @@ pub fn encode(
         }
     }
 
-    Ok(Encoded { problem, requirements })
+    Ok(Encoded { problem, requirements, broken })
 }
 
 /// Whether the installed copy of `target`'s package is already at `target`'s version.
@@ -2473,5 +2520,152 @@ mod tests {
         let installing = named(&universe, &planned.selected);
         assert!(installing.contains(&"impl-a"), "the list stands: {installing:?}");
         assert!(!installing.contains(&"stranger"), "{installing:?}");
+    }
+
+    /// A scenario with `broken` installed and depending on `absent`, which nothing installed
+    /// provides: the state a `pacman -Rdd` of `absent` leaves behind.
+    ///
+    /// `absent_in_repository` decides whether a repository could supply it. `broken` always
+    /// has a repository copy at its own version. That copy is what gives the relaxation loop
+    /// a clause to relax, so this shape costs one package rather than the whole transaction.
+    fn broken_scenario(absent_in_repository: bool) -> BuiltScenario {
+        let mut core = vec![PackageSpec::new("app", "1.0.0-1")];
+        if absent_in_repository {
+            core.push(PackageSpec::new("absent", "1.0.0-1"));
+        }
+        Scenario::new()
+            .installed(PackageSpec::new("broken", "26.04-1").depends(["absent"]))
+            .installed(PackageSpec::new("bystander", "1.0.0-1"))
+            .repo("core", core)
+            .repo("third", [PackageSpec::new("broken", "26.04-1").depends(["absent"])])
+            .build()
+    }
+
+    /// Installing something unrelated leaves a package with an unsatisfiable dependency
+    /// alone.
+    ///
+    /// `alpm_checkdeps` never raises such a dependency (`deps.c:369`), so no clause encodes
+    /// it. A clause for it carries no positive literal. It contradicts "every installed
+    /// package must remain", and the relaxation loop then removes the package.
+    #[test]
+    fn an_already_broken_dependency_of_an_untouched_installed_package_is_not_a_removal() {
+        let scenario = broken_scenario(false);
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let target = from_repository(&universe, "app");
+
+        let planned =
+            solve_with_removals(&universe, &Request::new().target(target), &Limits::default())
+                .unwrap()
+                .expect("a pre-existing broken dependency must not make the request impossible");
+
+        assert!(
+            planned.removed.is_empty(),
+            "nothing was asked to be removed: {:?}",
+            named(&universe, &planned.removed)
+        );
+        assert!(named(&universe, &planned.selected).contains(&"app"), "the target was dropped");
+    }
+
+    /// The dependency is left broken, not repaired.
+    ///
+    /// pacman does not install a satisfier for a dependency that was already unmet, so a
+    /// candidate that could supply one must not be pulled into the transaction either.
+    #[test]
+    fn an_already_broken_dependency_is_not_repaired_either() {
+        let scenario = broken_scenario(true);
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let target = from_repository(&universe, "app");
+
+        let planned =
+            solve_with_removals(&universe, &Request::new().target(target), &Limits::default())
+                .unwrap()
+                .expect("an available satisfier must not change the answer");
+
+        let selected = named(&universe, &planned.selected);
+        assert!(planned.removed.is_empty(), "{:?}", named(&universe, &planned.removed));
+        assert!(!selected.contains(&"absent"), "the broken dependency was repaired: {selected:?}");
+    }
+
+    /// Without a repository copy of the broken package, no `ClauseKind::Installed` clause is
+    /// available to relax.
+    ///
+    /// An encoded clause then costs the whole transaction rather than one package. The
+    /// unsatisfiable core names nothing the relaxation loop can give up, so
+    /// `solve_with_removals` returns `Err`.
+    #[test]
+    fn an_already_broken_dependency_without_a_repository_copy_still_solves() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("broken", "26.04-1").depends(["absent"]))
+            .repo("core", [PackageSpec::new("app", "1.0.0-1")])
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let target = from_repository(&universe, "app");
+
+        let planned =
+            solve_with_removals(&universe, &Request::new().target(target), &Limits::default())
+                .unwrap()
+                .expect("the request has a solution: leave the broken package alone");
+        assert!(planned.removed.is_empty(), "{:?}", named(&universe, &planned.removed));
+    }
+
+    /// The skip is for installed candidates only. A repository build's `%DEPENDS%` stays hard,
+    /// so upgrading a package whose dependency is unsatisfiable is still refused.
+    ///
+    /// `alpm_checkdeps`' forward pass runs over `trans->add` and raises exactly this, which is
+    /// the `ALPM_ERR_UNSATISFIED_DEPS` a `pacman -Su` reports.
+    #[test]
+    fn upgrading_a_package_whose_dependency_is_unsatisfiable_is_still_refused() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("broken", "26.04-1").depends(["absent"]))
+            .repo("third", [PackageSpec::new("broken", "27.01-1").depends(["absent"])])
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let target = from_repository(&universe, "broken");
+
+        let outcome =
+            solve_with_removals(&universe, &Request::new().target(target), &Limits::default())
+                .unwrap();
+        assert!(outcome.is_err(), "the upgrade cannot be planned; its dependency has no satisfier");
+    }
+
+    /// A requirement no clause encodes is also a requirement neither self-report may count.
+    ///
+    /// Both read `Encoded::requirements`, so dropping the entry is what keeps a broken
+    /// dependency out of the fidelity measure and out of the provider question at once.
+    #[test]
+    fn an_already_broken_dependency_reaches_neither_self_report() {
+        let scenario = broken_scenario(true);
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let limits = Limits::default();
+        let target = from_repository(&universe, "app");
+
+        let planned = solve_with_removals(&universe, &Request::new().target(target), &limits)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(planned.fidelity.fidelity(), Fidelity::Greedy, "{:?}", planned.fidelity);
+        let questions = ambiguities(&universe, &planned.encoded, &planned.selected, &limits);
+        assert!(questions.found().is_empty(), "{:?}", questions.found());
+    }
+
+    /// The skipped entry is reported rather than dropped, naming the package and which of its
+    /// `%DEPENDS%` entries went unanswered.
+    #[test]
+    fn an_already_broken_dependency_is_recorded_on_the_encoding() {
+        let scenario = broken_scenario(false);
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let target = from_repository(&universe, "app");
+
+        let planned =
+            solve_with_removals(&universe, &Request::new().target(target), &Limits::default())
+                .unwrap()
+                .unwrap();
+
+        let installed_broken = universe.installed_named("broken").unwrap().id();
+        assert_eq!(
+            planned.encoded.broken(),
+            [BrokenDependency { dependent: installed_broken, dependency: 0 }],
+            "the encoding must name what it left out"
+        );
     }
 }

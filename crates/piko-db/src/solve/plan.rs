@@ -93,6 +93,20 @@ pub enum PlanDiagnostic {
         /// The package whose dependencies piko could not read.
         package: SolvableId,
     },
+
+    /// An installed package declares a `%DEPENDS%` entry nothing installed satisfies.
+    ///
+    /// Pre-existing system state, not something this transaction caused, and not something it
+    /// repairs: `alpm_checkdeps` ignores an already-broken dependency (`deps.c:369`) and so
+    /// does piko. It is reported because a system reaches this state only by having a package
+    /// force-removed out from under its dependents, and nothing else would say so.
+    BrokenDependency {
+        /// The installed package whose `%DEPENDS%` declared it.
+        package: SolvableId,
+        /// Which of `package`'s `%DEPENDS%` entries this was. Index `package`'s `%DEPENDS%`
+        /// with it to quote the relation.
+        dependency: usize,
+    },
 }
 
 /// An ordered transaction plan.
@@ -193,6 +207,16 @@ impl Plan {
         let mut sink = Sink::new(limits);
         let mut download_size = 0_u64;
         let mut installed_delta = 0_i64;
+
+        // What the encoding left out, because libalpm would not have raised it either. Pushed
+        // before the ordering walk so the report leads with the system state that explains
+        // why a dependency is going unmet, rather than with the ordering it did not affect.
+        for entry in planned.encoded.broken() {
+            sink.push(|| PlanDiagnostic::BrokenDependency {
+                package: entry.dependent,
+                dependency: entry.dependency,
+            });
+        }
 
         // Everything the solution selected that is not already installed is a change.
         // The installed copies it also selected are the status quo, not steps.
@@ -576,6 +600,47 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item, PlanDiagnostic::DependencyCycle { .. })),
             "the cycle must be reported: {:?}",
+            plan.diagnostics()
+        );
+    }
+
+    /// A dependency that is already unsatisfiable is left alone, and reported.
+    ///
+    /// The plan must carry no removal at all. The reason must reach the caller as data: a
+    /// system reaches this state only when a package its dependents need is force-removed,
+    /// and nothing else reports that.
+    #[test]
+    fn an_already_broken_dependency_is_reported_and_costs_no_step() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("broken", "26.04-1").depends(["absent"]))
+            .repo("core", [PackageSpec::new("app", "1.0.0-1")])
+            .repo("third", [PackageSpec::new("broken", "26.04-1").depends(["absent"])])
+            .build();
+        let limits = Limits::default();
+        let universe = crate::solve::Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new(),
+        )
+        .unwrap();
+        let id = resolve_target(&universe, &"app".parse().unwrap()).unwrap();
+        let request = Request::new().target(id);
+        let planned = solve_with_removals(&universe, &request, &limits).unwrap().unwrap();
+        let plan = Plan::assemble(&universe, &planned, request.targets(), &limits, &NoCache);
+
+        assert!(
+            !plan.steps().iter().any(|step| matches!(step, Step::Remove { .. })),
+            "nothing is removed over a dependency that was broken beforehand: {:?}",
+            plan.steps()
+        );
+        let installed_broken = universe.installed_named("broken").unwrap().id();
+        assert!(
+            plan.diagnostics().iter().any(|item| matches!(
+                item,
+                PlanDiagnostic::BrokenDependency { package, dependency: 0 }
+                    if *package == installed_broken
+            )),
+            "the broken dependency must be reported: {:?}",
             plan.diagnostics()
         );
     }

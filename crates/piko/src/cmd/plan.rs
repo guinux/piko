@@ -269,6 +269,13 @@ pub(crate) fn print_diagnostics(universe: &Universe<'_>, built: &Plan) {
                      before something it depends on"
                 );
             }
+            PlanDiagnostic::BrokenDependency { package, dependency } => {
+                let name = universe
+                    .get(*package)
+                    .map_or_else(|| "<unknown>".to_owned(), |solvable| solvable.name().to_string());
+                let relation = relation_of(universe, *package, *dependency);
+                eprintln!("Warning: {name} requires {relation}, which nothing installed provides");
+            }
             // `PlanDiagnostic` is `#[non_exhaustive]`. A kind added later must still be
             // shown, not silently dropped.
             other => eprintln!("Warning: {other:?}"),
@@ -278,6 +285,24 @@ pub(crate) fn print_diagnostics(universe: &Universe<'_>, built: &Plan) {
         eprintln!("Warning: {} further problem(s) not shown", built.diagnostics_dropped());
     }
     print_divergences(universe, built);
+}
+
+/// Quotes one of `package`'s `%DEPENDS%` entries, the way the solver named it.
+///
+/// A requirement travels as a `(package, index)` pair rather than as rendered text, so every
+/// report that quotes one resolves it here: divergences, broken dependencies, and the
+/// provider question in `cmd::provider`. `?` stands in for an entry that cannot be read,
+/// which is the same `%DEPENDS%` failure `PlanDiagnostic::DependsUnreadable` reports.
+pub(crate) fn relation_of(
+    universe: &Universe<'_>,
+    package: SolvableId,
+    dependency: usize,
+) -> String {
+    universe
+        .get(package)
+        .and_then(|solvable| solvable.depends().ok())
+        .and_then(|depends| depends.get(dependency).map(ToString::to_string))
+        .unwrap_or_else(|| "?".to_owned())
 }
 
 /// Reports the requirements where the solver did not take libalpm's first choice.
@@ -296,11 +321,7 @@ fn print_divergences(universe: &Universe<'_>, built: &Plan) {
          pacman would not have tried first; the plan is valid and may differ from `pacman -Sp`"
     );
     for divergence in built.divergences() {
-        let relation = universe
-            .get(divergence.dependent)
-            .and_then(|s| s.depends().ok())
-            .and_then(|depends| depends.get(divergence.dependency).map(ToString::to_string))
-            .unwrap_or_else(|| "?".to_owned());
+        let relation = relation_of(universe, divergence.dependent, divergence.dependency);
         eprintln!(
             "  {} requires {relation}: took {}, pacman would have tried {}",
             name_of(divergence.dependent),

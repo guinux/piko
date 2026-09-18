@@ -18,11 +18,7 @@ use crate::output;
 /// question, not two: libalpm asks once and its accumulated package list answers the rest
 /// (`deps.c:816`).
 fn relation_of(universe: &Universe<'_>, ambiguity: &Ambiguity) -> String {
-    universe
-        .get(ambiguity.dependent)
-        .and_then(|solvable| solvable.depends().ok())
-        .and_then(|depends| depends.get(ambiguity.dependency).map(ToString::to_string))
-        .unwrap_or_else(|| "?".to_owned())
+    crate::cmd::plan::relation_of(universe, ambiguity.dependent, ambiguity.dependency)
 }
 
 /// Writes the numbered candidate list, grouped by the repository each came from.
