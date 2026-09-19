@@ -254,10 +254,23 @@ pub(crate) fn report_unsatisfiable(universe: &Universe<'_>, encoded: Encoded, li
     }
 }
 
+/// Which installed packages a command speaks for.
+///
+/// A broken dependency belongs to a package the transaction does not touch. Reporting it fits
+/// a command that already decides something about every installed package. It is noise under
+/// `piko install foo`, which was asked about `foo`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Reach {
+    /// `piko update`, and `piko plan -u` which previews it.
+    WholeSystem,
+    /// `piko install`, `piko plan` without `-u`, and `piko remove`.
+    NamedTargets,
+}
+
 /// Prints a plan's diagnostics: what it noticed while assembling steps, not the steps
 /// themselves. Shared with `cmd::txn::install`, which assembles a plan the same way `piko
 /// plan` does before turning it into commit-engine steps.
-pub(crate) fn print_diagnostics(universe: &Universe<'_>, built: &Plan) {
+pub(crate) fn print_diagnostics(universe: &Universe<'_>, built: &Plan, reach: Reach) {
     for diagnostic in built.diagnostics() {
         match diagnostic {
             PlanDiagnostic::DependencyCycle { package } => {
@@ -269,13 +282,6 @@ pub(crate) fn print_diagnostics(universe: &Universe<'_>, built: &Plan) {
                      before something it depends on"
                 );
             }
-            PlanDiagnostic::BrokenDependency { package, dependency } => {
-                let name = universe
-                    .get(*package)
-                    .map_or_else(|| "<unknown>".to_owned(), |solvable| solvable.name().to_string());
-                let relation = relation_of(universe, *package, *dependency);
-                eprintln!("Warning: {name} requires {relation}, which nothing installed provides");
-            }
             // `PlanDiagnostic` is `#[non_exhaustive]`. A kind added later must still be
             // shown, not silently dropped.
             other => eprintln!("Warning: {other:?}"),
@@ -284,7 +290,34 @@ pub(crate) fn print_diagnostics(universe: &Universe<'_>, built: &Plan) {
     if built.diagnostics_dropped() > 0 {
         eprintln!("Warning: {} further problem(s) not shown", built.diagnostics_dropped());
     }
+    print_broken_dependencies(universe, built, reach);
     print_divergences(universe, built);
+}
+
+/// Names the installed packages whose `%DEPENDS%` nothing installed answers.
+///
+/// Printed only for [`Reach::WholeSystem`]. pacman never reports this at all.
+///
+/// What it names is the state a forced removal leaves behind. That state belongs to the
+/// system, not to the targets. So the command that already speaks for the whole system is the
+/// one that says it.
+fn print_broken_dependencies(universe: &Universe<'_>, built: &Plan, reach: Reach) {
+    if reach != Reach::WholeSystem {
+        return;
+    }
+    for entry in built.broken_dependencies() {
+        let name = universe
+            .get(entry.dependent)
+            .map_or_else(|| "<unknown>".to_owned(), |solvable| solvable.name().to_string());
+        let relation = relation_of(universe, entry.dependent, entry.dependency);
+        eprintln!("Warning: {name} requires {relation}, which nothing installed provides");
+    }
+    if built.broken_dependencies_dropped() > 0 {
+        eprintln!(
+            "Warning: {} further broken dependency(ies) not shown",
+            built.broken_dependencies_dropped()
+        );
+    }
 }
 
 /// Quotes one of `package`'s `%DEPENDS%` entries, the way the solver named it.
@@ -472,7 +505,7 @@ pub fn plan(
                 if !crate::cmd::removal::hold_pkg_allows(&names, hold_pkg, true, out) {
                     return ExitCode::FAILURE;
                 }
-                render(&universe, &built, format, out)
+                render(&universe, &built, format, Reach::NamedTargets, out)
             }
             Err(failure) => {
                 crate::cmd::removal::report(&failure);
@@ -535,7 +568,14 @@ pub fn plan(
     );
 
     let built = Plan::assemble(&universe, &planned, request.targets(), &limits, cache);
-    render(&universe, &built, format, out)
+    // `-u` is what makes this a preview of `piko update`, so it is what turns the broken
+    // dependency report on. Without it, the command was asked about the named targets only.
+    let reach = if matches!(mode, Mode::Install { sysupgrade: true, .. }) {
+        Reach::WholeSystem
+    } else {
+        Reach::NamedTargets
+    };
+    render(&universe, &built, format, reach, out)
 }
 
 /// Prints a plan's diagnostics and steps.
@@ -547,9 +587,10 @@ fn render(
     universe: &Universe<'_>,
     built: &Plan,
     format: Format,
+    reach: Reach,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
-    print_diagnostics(universe, built);
+    print_diagnostics(universe, built, reach);
     print_steps(universe, built, format, out)
 }
 

@@ -349,7 +349,15 @@ pub fn install(
 
     let built = Plan::assemble(&universe, &planned, request.targets(), &limits, &cache);
     crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-    crate::cmd::plan::print_diagnostics(&universe, &built);
+    // `piko update` decides something about every installed package, so it is the command
+    // that reports a dependency broken before it ran. `piko install foo` was asked about
+    // `foo`.
+    let reach = if options.sysupgrade.is_some() {
+        crate::cmd::plan::Reach::WholeSystem
+    } else {
+        crate::cmd::plan::Reach::NamedTargets
+    };
+    crate::cmd::plan::print_diagnostics(&universe, &built, reach);
 
     if built.steps().is_empty() {
         emit!(out, "Nothing to do");
@@ -998,7 +1006,7 @@ fn planned(
         }
     };
 
-    crate::cmd::plan::print_diagnostics(&universe, &plan);
+    crate::cmd::plan::print_diagnostics(&universe, &plan, crate::cmd::plan::Reach::NamedTargets);
 
     // Before the step list is printed, matching `pacman_remove`'s own order. Otherwise the
     // guard's warnings would be buried under a plan the user is about to be refused. It runs

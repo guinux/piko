@@ -26,7 +26,7 @@ use alpm_types::PackageInstallReason;
 
 use crate::Limits;
 use crate::diagnostics::Sink;
-use crate::solve::encode::{Divergence, Fidelity, Planned};
+use crate::solve::encode::{BrokenDependency, Divergence, Fidelity, Planned};
 use crate::solve::{PackageCache, Solvable, SolvableId, Universe};
 
 /// What a plan does to one package.
@@ -93,20 +93,6 @@ pub enum PlanDiagnostic {
         /// The package whose dependencies piko could not read.
         package: SolvableId,
     },
-
-    /// An installed package declares a `%DEPENDS%` entry nothing installed satisfies.
-    ///
-    /// Pre-existing system state, not something this transaction caused, and not something it
-    /// repairs: `alpm_checkdeps` ignores an already-broken dependency (`deps.c:369`) and so
-    /// does piko. It is reported because a system reaches this state only by having a package
-    /// force-removed out from under its dependents, and nothing else would say so.
-    BrokenDependency {
-        /// The installed package whose `%DEPENDS%` declared it.
-        package: SolvableId,
-        /// Which of `package`'s `%DEPENDS%` entries this was. Index `package`'s `%DEPENDS%`
-        /// with it to quote the relation.
-        dependency: usize,
-    },
 }
 
 /// An ordered transaction plan.
@@ -118,6 +104,8 @@ pub struct Plan {
     divergences_dropped: usize,
     diagnostics: Box<[PlanDiagnostic]>,
     diagnostics_dropped: usize,
+    broken_dependencies: Box<[BrokenDependency]>,
+    broken_dependencies_dropped: usize,
     download_size: u64,
     installed_size_delta: i64,
 }
@@ -164,6 +152,28 @@ impl Plan {
         self.diagnostics_dropped
     }
 
+    /// The `%DEPENDS%` entries of installed packages that nothing installed satisfies.
+    ///
+    /// This is pre-existing system state. The transaction neither caused it nor repairs it:
+    /// `alpm_checkdeps` ignores an already-broken dependency (`deps.c:369`), and so does piko.
+    ///
+    /// A caller may report these for some commands and not others. They therefore get a list
+    /// of their own rather than a [`PlanDiagnostic`]: a filtered [`PlanDiagnostic`] still
+    /// spends the shared bound on entries the command never prints.
+    ///
+    /// Each entry names a package and one of its `%DEPENDS%` entries. Index that `%DEPENDS%`
+    /// to quote the relation.
+    #[must_use]
+    pub fn broken_dependencies(&self) -> &[BrokenDependency] {
+        &self.broken_dependencies
+    }
+
+    /// How many broken dependencies [`Limits::max_diagnostics`] withheld.
+    #[must_use]
+    pub const fn broken_dependencies_dropped(&self) -> usize {
+        self.broken_dependencies_dropped
+    }
+
     /// Total `%CSIZE%` of everything that would actually be downloaded.
     ///
     /// A candidate that the [`PackageCache`] passed to [`Plan::assemble`] reports as already
@@ -208,14 +218,12 @@ impl Plan {
         let mut download_size = 0_u64;
         let mut installed_delta = 0_i64;
 
-        // What the encoding left out, because libalpm would not have raised it either. Pushed
-        // before the ordering walk so the report leads with the system state that explains
-        // why a dependency is going unmet, rather than with the ordering it did not affect.
+        // What the encoding left out, because libalpm would not have raised it either. This
+        // takes a sink of its own rather than the diagnostic sink. A caller reports these for
+        // some commands only, and must not spend the shared bound on what it never prints.
+        let mut broken = Sink::new(limits);
         for entry in planned.encoded.broken() {
-            sink.push(|| PlanDiagnostic::BrokenDependency {
-                package: entry.dependent,
-                dependency: entry.dependency,
-            });
+            broken.push(|| *entry);
         }
 
         // Everything the solution selected that is not already installed is a change.
@@ -283,6 +291,7 @@ impl Plan {
         }
 
         let (diagnostics, diagnostics_dropped) = sink.finish();
+        let (broken_dependencies, broken_dependencies_dropped) = broken.finish();
         Self {
             steps: steps.into_boxed_slice(),
             fidelity: planned.fidelity.fidelity(),
@@ -290,6 +299,8 @@ impl Plan {
             divergences_dropped: planned.fidelity.dropped(),
             diagnostics,
             diagnostics_dropped,
+            broken_dependencies,
+            broken_dependencies_dropped,
             download_size,
             installed_size_delta: installed_delta,
         }
@@ -634,13 +645,14 @@ mod tests {
             plan.steps()
         );
         let installed_broken = universe.installed_named("broken").unwrap().id();
+        assert_eq!(
+            plan.broken_dependencies(),
+            [BrokenDependency { dependent: installed_broken, dependency: 0 }],
+            "the broken dependency must reach the caller"
+        );
         assert!(
-            plan.diagnostics().iter().any(|item| matches!(
-                item,
-                PlanDiagnostic::BrokenDependency { package, dependency: 0 }
-                    if *package == installed_broken
-            )),
-            "the broken dependency must be reported: {:?}",
+            plan.diagnostics().is_empty(),
+            "a broken dependency must not spend the diagnostic bound: {:?}",
             plan.diagnostics()
         );
     }

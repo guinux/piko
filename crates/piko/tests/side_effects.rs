@@ -891,10 +891,7 @@ fn a_force_removed_dependency_does_not_take_its_dependents_with_it() {
     assert!(output.status.success(), "{seen}");
     assert!(seen.contains("1 to install"), "the plan was more than the named target:\n{seen}");
     assert!(!sandbox.path("root/usr/bin/bar").exists(), "the broken dependency was repaired");
-    assert!(
-        seen.contains("Warning: foo requires bar, which nothing installed provides"),
-        "the broken dependency was not reported:\n{seen}"
-    );
+    assert!(!seen.contains(BROKEN_WARNING), "install was asked about baz, not foo:\n{seen}");
 
     // Then with `bar` gone from the repository too. This is the reported system's shape: a
     // dependency no repository can supply, so the clause would have no satisfier at all.
@@ -907,6 +904,43 @@ fn a_force_removed_dependency_does_not_take_its_dependents_with_it() {
     assert!(seen.contains("1 to install"), "the plan was more than the named target:\n{seen}");
     assert!(sandbox.path("db/local/foo-1.0.0-1").exists(), "foo's entry was removed");
     assert!(sandbox.path("root/usr/bin/foo").exists(), "foo's files were removed");
+}
+
+/// The line `piko update` prints for a dependency nothing installed answers.
+const BROKEN_WARNING: &str = "Warning: foo requires bar, which nothing installed provides";
+
+/// Only `piko update` reports a dependency that was broken before it ran.
+///
+/// `update` decides something about every installed package, so pre-existing state of an
+/// untouched one is its business. `install` and `remove` were asked about their targets. pacman
+/// reports this at no point at all, so the choice of command is piko's own.
+#[test]
+fn only_a_sysupgrade_reports_a_dependency_broken_before_it_ran() {
+    let sandbox = Sandbox::new();
+    write_package_depending_on(&sandbox.path("cache"), "foo", "1.0.0-1", &["bar"]);
+    write_package_with(&sandbox.path("cache"), "bar", "1.0.0-1", None, &[]);
+    write_package_with(&sandbox.path("cache"), "baz", "1.0.0-1", None, &[]);
+    sandbox.write_repo(&[
+        ("foo", "1.0.0-1", &["bar"]),
+        ("bar", "1.0.0-1", &[]),
+        ("baz", "1.0.0-1", &[]),
+    ]);
+    assert!(sandbox.run_install(&["foo"], &[]).status.success());
+    assert!(sandbox.run_remove(&["bar"], &["--nodeps", "--noconfirm"], None).status.success());
+
+    // `bar` leaves the repository too, so no transaction can answer `foo`'s dependency.
+    sandbox.write_repo(&[("foo", "1.0.0-1", &["bar"]), ("baz", "1.0.0-1", &[])]);
+
+    let installing = text(&sandbox.run_install(&["baz"], &[]));
+    assert!(!installing.contains(BROKEN_WARNING), "install must stay quiet:\n{installing}");
+
+    let removing = text(&sandbox.run_remove(&["baz"], &["--noconfirm"], None));
+    assert!(!removing.contains(BROKEN_WARNING), "remove must stay quiet:\n{removing}");
+
+    // No `Server` is configured in this sandbox, so the refresh a real `update` runs first has
+    // nowhere to go.
+    let updating = text(&sandbox.run_update(&[], &["--norefresh"]));
+    assert!(updating.contains(BROKEN_WARNING), "update must report it:\n{updating}");
 }
 
 /// `--asdeps` must apply to the named target too, not only to what it pulls in.
