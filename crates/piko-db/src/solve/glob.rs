@@ -1,15 +1,14 @@
 //! Expanding a glob target into the package names it selects.
 //!
 //! A target carrying `*`, `?` or `[` names a pattern rather than a package. Expanding it is a
-//! **rewrite of the target list**, and nothing more: what comes back is a list of ordinary
-//! names, which the caller then resolves exactly as if the user had typed them. That is what
-//! makes `piko install`, `piko plan` and `piko update` agree on a pattern by construction —
-//! all three reach the planner through the same rewrite, so none of them can read one
-//! differently.
+//! **rewrite of the target list**, and nothing more. What comes back is a list of ordinary
+//! names. The caller then resolves them exactly as if the user had typed them. That is what
+//! makes `piko install`, `piko plan` and `piko update` agree on a pattern by construction.
+//! All three reach the planner through the same rewrite, so none can read one differently.
 //!
-//! The domain is package names and `%GROUPS%` group names, the two things a literal target can
-//! already mean. `%PROVIDES%` is deliberately out: a provides name is not something a user
-//! installs by name, so selecting one would plan a package whose name the pattern never
+//! The domain is package names and `%GROUPS%` group names, the two things a literal target
+//! can already mean. `%PROVIDES%` is deliberately out. A provides name is not something a
+//! user installs by name. Selecting one would plan a package whose name the pattern never
 //! matched.
 
 use std::collections::BTreeSet;
@@ -80,8 +79,8 @@ pub enum ExpansionFailure {
     },
     /// The pattern selected more names than [`Limits::glob_max_expansion`] allows.
     ///
-    /// Carries no count. The bound stops the scan where it prevents the work, so the total is
-    /// never computed — reporting it would mean doing the thing the bound refuses.
+    /// Carries no count. The bound stops the scan where it prevents the work, so the total
+    /// is never computed. Reporting it would mean doing the thing the bound refuses.
     TooBroad {
         /// The pattern as the user spelled it.
         pattern: String,
@@ -90,8 +89,9 @@ pub enum ExpansionFailure {
     },
     /// Every candidate the pattern selected is covered by `IgnorePkg` or `IgnoreGroup`.
     ///
-    /// A different fact from [`ExpansionFailure::NoMatch`], and it calls for a different
-    /// action: the pattern is right, and `pacman.conf` says not to touch what it names.
+    /// This is a different fact from [`ExpansionFailure::NoMatch`], and it calls for a
+    /// different action. The pattern is right, and `pacman.conf` says not to touch what it
+    /// names.
     AllIgnored {
         /// The pattern as the user spelled it.
         pattern: String,
@@ -100,9 +100,9 @@ pub enum ExpansionFailure {
     },
     /// The pattern also carries a version requirement, such as `python-*>=3.0`.
     ///
-    /// Refused rather than guessed at. The string has two honest readings — the names matching
-    /// `python-*`, constrained to `>= 3.0`, or the literal pattern `python-*>=3.0` — and
-    /// nothing in the target decides between them.
+    /// Refused rather than guessed at. The string has two honest readings. It is either the
+    /// names matching `python-*` constrained to `>= 3.0`, or the literal pattern
+    /// `python-*>=3.0`. Nothing in the target decides between them.
     Versioned(String),
 }
 
@@ -118,9 +118,9 @@ enum Reading {
 
 /// Classifies `target`.
 ///
-/// The version test runs *before* the pattern is compiled, so `python-*>=3.0` is refused by its
-/// shape rather than expanded into a pattern that matches nothing and reported as "no match" —
-/// a message that would be true and useless.
+/// The version test runs *before* the pattern is compiled. So `python-*>=3.0` is refused by
+/// its shape. Otherwise it expands into a pattern that matches nothing. It is then reported
+/// as "no match", a message that would be true and useless.
 fn read(target: &str) -> Reading {
     if !is_pattern(target) {
         return Reading::Literal;
@@ -183,8 +183,8 @@ impl Selection {
 /// Rewrites `targets`, replacing each pattern with what `select` finds for it.
 ///
 /// A literal target is copied through unchanged and **in place**, so the caller's order is the
-/// order it typed. An expansion that found nothing is returned as an empty [`Expansion`] rather
-/// than refused here: only the caller knows whether an ignored candidate explains it.
+/// order it typed. An expansion that found nothing comes back as an empty [`Expansion`] rather
+/// than a refusal. Only the caller knows whether an ignored candidate explains it.
 fn expand_all(
     targets: &[String],
     limits: &Limits,
@@ -216,13 +216,13 @@ fn first_empty(expansions: &[Expansion], side: Side) -> Option<ExpansionFailure>
         .map(|expansion| ExpansionFailure::NoMatch { pattern: expansion.pattern.clone(), side })
 }
 
-/// Rewrites `targets` against what an install could select: names with a candidate that is not
-/// already installed, and the `%GROUPS%` groups those candidates carry.
+/// Rewrites `targets` against what an install could select. That is names with a candidate
+/// not already installed, and the `%GROUPS%` groups those candidates carry.
 ///
 /// The third return value names the ignored candidates the patterns passed over.
-/// [`Universe::ignored`] holds them, and no index does: `IgnorePkg` is applied while candidates
-/// are interned, so a scan of the name index alone would drop an ignored package in silence
-/// rather than reporting it.
+/// [`Universe::ignored`] holds them, and no index does. `IgnorePkg` is applied while
+/// candidates are interned. So a scan of the name index alone would drop an ignored package
+/// in silence rather than reporting it.
 ///
 /// A pattern that selected only ignored candidates comes back as an empty [`Expansion`] with
 /// those candidates listed, rather than as a refusal. Its caller reports "every package
@@ -294,8 +294,8 @@ fn ignored_for(universe: &Universe<'_>, expansion: &Expansion) -> Vec<IgnoredTar
 /// [`expand_installable_targets`]' removal counterpart: installed names, and the `%GROUPS%`
 /// groups installed packages carry.
 ///
-/// `IgnorePkg` does not apply to a removal — it means "do not upgrade it", not "pretend it is
-/// not there" — so nothing is passed over and nothing is reported.
+/// `IgnorePkg` does not apply to a removal. It means "do not upgrade it", not "pretend it is
+/// not there". So nothing is passed over, and nothing is reported.
 ///
 /// # Errors
 ///
@@ -509,8 +509,8 @@ mod tests {
     }
 
     /// A pattern every candidate of which is ignored is not "no match". The two call for
-    /// opposite actions: one means the pattern is wrong, the other that `pacman.conf` says not
-    /// to touch what it names.
+    /// opposite actions. One means the pattern is wrong. The other means `pacman.conf` says
+    /// not to touch what it names.
     #[test]
     fn a_wholly_ignored_pattern_is_not_reported_as_a_miss() {
         let scenario = scenario();

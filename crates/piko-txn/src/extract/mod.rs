@@ -2,10 +2,10 @@
 //!
 //! This module splits deliberately into a part that decides and a part that acts:
 //!
-//! - [`decision`] is pure. Every rule libalpm applies per entry — the six-case
-//!   filesystem/package matrix, `NoExtract`, `NoUpgrade`, and the three-way backup
-//!   comparison — is a function from values to values. All of it can be enumerated in
-//!   tests without a filesystem, an archive, or a package.
+//! - [`decision`] is pure. Every rule libalpm applies per entry is a function from values to
+//!   values. That covers the six-case filesystem/package matrix, `NoExtract`, `NoUpgrade`,
+//!   and the three-way backup comparison. All of it can be enumerated in tests without a
+//!   filesystem, an archive, or a package.
 //! - The writing half acts on those decisions through [`crate::rootfs`], so that no decision
 //!   can be applied outside the root.
 //!

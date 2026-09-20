@@ -100,12 +100,9 @@ codegen-units = 1
 lto = "fat"
 
 # The solver is the one piece of this workspace whose test cost is dominated by how fast the
-# code runs, not by how much of it there is. `plan_real_system` solves real removal cascades
-# over the machine's own 1258 packages: a `-Rc` of a package most of the system depends on is
-# one 17-second call unoptimized. Optimizing this crate alone takes that file from 225 s to
+# code runs. `plan_real_system` solves real removal cascades : a `-Rc` of a package can be
+# one 17-second call unoptimized. Optimizing this crate alone takes that test from 225 s to
 # 33 s, with the same sample and the same assertions.
-#
-# `debug-assertions` stays on, and with it `overflow-checks`, which the arithmetic lints above
-# make load-bearing. Incremental rebuilds are unchanged, measured at 3 s either way.
+# `debug-assertions` stays on, and with it `overflow-checks`.
 [profile.dev.package.piko-db]
 opt-level = 2

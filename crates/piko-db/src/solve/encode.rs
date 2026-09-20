@@ -144,8 +144,8 @@ impl Request {
     /// effect on a transaction.
     ///
     /// `piko plan -u` and `piko update` both need exactly this. The second only commits what
-    /// the first prints. The logic lives here once, instead of as a hand-written loop at each
-    /// call site that could drift apart from the other.
+    /// the first prints. The logic lives here once. A hand-written loop at each call site
+    /// could drift apart from the other.
     #[must_use]
     pub fn with_sysupgrade(mut self, universe: &Universe<'_>, downgrade: bool) -> Self {
         let upgrade = sysupgrade(universe, downgrade);
@@ -161,11 +161,11 @@ impl Request {
 
     /// The upgrades `IgnorePkg`/`IgnoreGroup` kept out of this request.
     ///
-    /// Empty unless [`Self::with_sysupgrade`] was applied. Carried on the request rather than
-    /// returned separately so the one call that decides `-Su`'s targets also carries what it
-    /// decided against: a caller that reports these cannot forget to ask, and a second
-    /// [`sysupgrade`] call to recover them could not disagree with the first but would walk
-    /// the installed set twice.
+    /// Empty unless [`Self::with_sysupgrade`] was applied. These ride on the request rather
+    /// than coming back separately. So the one call that decides `-Su`'s targets also carries
+    /// what it decided against. A caller that reports these cannot forget to ask. A second
+    /// [`sysupgrade`] call could recover them instead. It could not disagree with the first,
+    /// but it would walk the installed set twice.
     #[must_use]
     pub fn ignored_upgrades(&self) -> &[IgnoredUpgrade] {
         &self.ignored_upgrades
@@ -181,18 +181,19 @@ impl Request {
     /// `choice.chosen` satisfies it.
     ///
     /// This is `ALPM_QUESTION_SELECT_PROVIDER`'s `use_index`, carried as policy rather than
-    /// asked through a callback: a library returns its questions and takes their answers, and
+    /// asked through a callback. A library returns its questions and takes their answers, and
     /// prompts nobody. [`encode`] then compiles that requirement with the chosen candidate as
     /// its **only** satisfier.
     ///
     /// Narrowing, not reordering. [`Solver::decide`](crate::solve::Solver) skips a clause
-    /// another clause has already satisfied, so a merely reordered list would leave the answer
-    /// unapplied in exactly the case that motivates asking: a provider selected for some
-    /// unrelated requirement already answering this one.
+    /// another clause has already satisfied. So a merely reordered list would leave the answer
+    /// unapplied in exactly the case that motivates asking. That case: a provider selected for
+    /// some unrelated requirement already answers this one.
     ///
     /// An answer naming a candidate that cannot satisfy the requirement is ignored, leaving
-    /// the full candidate list. The alternative is a clause with no satisfier at all, which
-    /// forbids the dependent outright and reports itself as an unexplained impossibility.
+    /// the full candidate list. The alternative is a clause with no satisfier at all. Such a
+    /// clause forbids the dependent outright, and reports itself as an unexplained
+    /// impossibility.
     #[must_use]
     pub fn choose_provider(mut self, choice: ProviderChoice) -> Self {
         self.provider_choices.push(choice);
@@ -229,13 +230,13 @@ impl Request {
 
     /// Whether this request only takes packages away.
     ///
-    /// A pure removal must never *install* anything. Left unconstrained, the solver happily
-    /// satisfies an orphaned dependency by pulling in some other package that provides the
-    /// same name. Asked to remove `bubblewrap`, it proposed installing `bubblewrap-suid`,
-    /// which provides `bubblewrap`, so that `glycin` and `loupe` stayed satisfied. That is a
-    /// correct solution to the constraints, and the wrong answer to the question: `pacman -R`
-    /// removes or refuses, and never substitutes. So a removal-only request restricts the
-    /// candidate set to what is already installed.
+    /// A pure removal must never *install* anything. Left unconstrained, the solver satisfies
+    /// an orphaned dependency by pulling in some other package that provides the same name.
+    /// Asked to remove `bubblewrap`, it proposes `bubblewrap-suid`, which provides
+    /// `bubblewrap`, so that `glycin` and `loupe` stay satisfied. That is a correct solution
+    /// to the constraints, and the wrong answer to the question. `pacman -R` removes or
+    /// refuses, and never substitutes. So a removal-only request restricts the candidate set
+    /// to what is already installed.
     #[must_use]
     pub fn is_removal_only(&self) -> bool {
         !self.removals.is_empty() && self.targets.is_empty()
@@ -245,11 +246,11 @@ impl Request {
 /// One answer to an [`Ambiguity`]: which provider satisfies one package's one dependency.
 ///
 /// Identified by `(dependent, dependency)` rather than by the dependency's text. [`encode`]
-/// emits a requirement for every `%DEPENDS%` entry of every candidate in the cone, and the
-/// cone is seeded with the whole installed set — so a text-keyed answer would also rewrite the
-/// same dependency of an installed package this transaction never touches, and pull a new
-/// provider in for it. The pair is what [`Divergence`] and [`ClauseKind::Requires`] already
-/// use.
+/// emits a requirement for every `%DEPENDS%` entry of every candidate in the cone. The cone is
+/// seeded with the whole installed set. So a text-keyed answer would also rewrite the same
+/// dependency of an installed package this transaction never touches. It would pull a new
+/// provider in for that package too. The pair is what [`Divergence`] and
+/// [`ClauseKind::Requires`] already use.
 ///
 /// A [`SolvableId`] is meaningful only for the [`Universe`] it came from, which is built once
 /// per run. An answer that outlives a run has to be keyed by name and relation text instead.
@@ -313,16 +314,16 @@ pub struct Requirement {
     /// relation instead of guessing at it. [`ClauseKind::Requires`] carries the same index.
     /// It is kept here too, so naming a requirement costs no clause lookup.
     pub dependency: usize,
-    /// The candidate libalpm's greedy descent would have chosen: the first satisfier in
-    /// preference order, or `None` if the dependency has no satisfier at all.
+    /// The candidate libalpm's greedy descent would have chosen. That is the first satisfier
+    /// in preference order. `None` if the dependency has no satisfier at all.
     pub preferred: Option<SolvableId>,
 }
 
 /// A `%DEPENDS%` entry of an installed package that nothing installed satisfies.
 ///
 /// Pre-existing system state: whatever broke it did so before this transaction was asked
-/// for. Named by index rather than by rendered text, like [`Divergence`] and [`Ambiguity`],
-/// so a report quotes the relation by indexing `dependent`'s `%DEPENDS%`.
+/// for. Named by index rather than by rendered text, like [`Divergence`] and [`Ambiguity`].
+/// So a report quotes the relation by indexing `dependent`'s `%DEPENDS%`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BrokenDependency {
     /// The installed package whose `%DEPENDS%` declared it.
@@ -356,7 +357,7 @@ impl Encoded {
     /// nothing installed satisfies them.
     ///
     /// Not bounded here. The list is at most one entry per `%DEPENDS%` entry of the installed
-    /// set, which `Limits::solve_max_clauses` already bounds; a second bound would truncate
+    /// set, which `Limits::solve_max_clauses` already bounds. A second bound would truncate
     /// the report without protecting anything. The caller turning these into diagnostics
     /// applies `Limits::max_diagnostics`.
     #[must_use]
@@ -368,8 +369,8 @@ impl Encoded {
     ///
     /// Re-solves rather than requiring the caller to have kept the
     /// [`Unsatisfiable`](crate::solve::Unsatisfiable) certificate around. This is fast, since
-    /// the problem is already compiled, so any caller holding an `Encoded` that came back from
-    /// [`solve_with_removals`]'s `Err` arm can explain it without repeating the encode step.
+    /// the problem is already compiled. So a caller holding an `Encoded` from
+    /// [`solve_with_removals`]'s `Err` arm can explain it without a second encode step.
     /// Returns an empty vector if the problem turns out solvable after all. That should not
     /// happen for an `Encoded` obtained that way, but this function does not assume it.
     #[must_use]
@@ -404,8 +405,8 @@ pub fn resolve_target(universe: &Universe<'_>, dep: &RelationOrSoname) -> Option
 ///
 /// `pacman -S gnome` installs every member of the `gnome` group. The group is not a package,
 /// so it resolves to nothing on its own. Returns the members in the order
-/// [`Universe::group_members`] found them — one per package name, whatever the number of
-/// repositories carrying it — or an empty vector if `name` is not a group.
+/// [`Universe::group_members`] found them, one per package name, whatever the number of
+/// repositories carrying it. Returns an empty vector if `name` is not a group.
 ///
 /// Checked only *after* [`resolve_target`] fails. This matches pacman, which prefers a
 /// package to a group of the same name rather than installing both.
@@ -424,14 +425,14 @@ pub enum TargetResolutionFailure {
     NotFound(String),
     /// A glob target could not be expanded into names.
     ///
-    /// Wraps the expansion's own refusal, so the two commands that expand — install and
-    /// removal — quote one set of messages rather than two.
+    /// Wraps the expansion's own refusal. So the two commands that expand, install and
+    /// removal, quote one set of messages rather than two.
     Pattern(ExpansionFailure),
     /// A target resolved to nothing only because `IgnorePkg`/`IgnoreGroup` covered every
     /// candidate for it.
     ///
-    /// Distinct from [`Self::NotFound`] because the two call for opposite actions: one means
-    /// the name is wrong, the other means `pacman.conf` says not to touch it. libalpm draws
+    /// Distinct from [`Self::NotFound`] because the two call for opposite actions. One means
+    /// the name is wrong. The other means `pacman.conf` says not to touch it. libalpm draws
     /// the same line, between `ALPM_ERR_PKG_IGNORED` and `ALPM_ERR_PKG_NOT_FOUND`
     /// (`deps.c:743`).
     Ignored {
@@ -492,27 +493,29 @@ pub struct Resolution {
 /// always wins over a group of the same name.
 ///
 /// Shared by `piko plan` and `piko install`. A name-based install resolves its arguments
-/// through exactly this rule, so both commands treat `foo`, `foo>=1.0`, and a group name
+/// through exactly this rule. So both commands treat `foo`, `foo>=1.0`, and a group name
 /// alike.
 ///
 /// # A glob target is rewritten before any of that
 ///
-/// A target carrying `*`, `?` or `[` is a pattern, expanded into the names it selects by
-/// [`expand_installable_targets`] ahead of the loop below. So the loop sees only names the user
-/// could have typed, and a pattern plans exactly what naming its expansion would have planned.
-/// Doing it here rather than in a frontend is what keeps `piko install`, `piko plan` and
-/// `piko update` from reading one differently: all three arrive through this function.
+/// A target carrying `*`, `?` or `[` is a pattern. [`expand_installable_targets`] expands it
+/// into the names it selects, ahead of the loop below. So the loop sees only names the user
+/// could have typed. A pattern then plans exactly what naming its expansion would plan. This
+/// expansion belongs here rather than in a frontend, so that `piko install`, `piko plan` and
+/// `piko update` cannot read one pattern differently. All three arrive through this function.
 ///
 /// # `IgnorePkg` is reported, never overridden
 ///
 /// A target every candidate of which is ignored fails with
 /// [`TargetResolutionFailure::Ignored`] rather than being installed anyway. pacman asks
-/// `ALPM_QUESTION_INSTALL_IGNOREPKG` here and installs on a yes; piko does not ask, and the
-/// answer is always no. A group target is the partial case: its non-ignored members are still
-/// resolved, and the ignored ones come back in the returned list so the caller can say what it
-/// left out. A pattern behaves as a group does, for the same reason: it names a set, and
-/// dropping one member leaves the target meaningful. A pattern whose every candidate is ignored
-/// is the literal case again, and fails.
+/// `ALPM_QUESTION_INSTALL_IGNOREPKG` here and installs on a yes. piko does not ask, and the
+/// answer is always no.
+///
+/// A group target is the partial case. Its non-ignored members are still resolved. The ignored
+/// ones come back in the returned list, so the caller can say what it left out. A pattern
+/// behaves as a group does, and for the same reason. It names a set, so dropping one member
+/// leaves the target meaningful. A pattern whose every candidate is ignored is the literal case
+/// again, and fails.
 ///
 /// # A group's members can be chosen
 ///
@@ -521,7 +524,7 @@ pub struct Resolution {
 ///
 /// piko cannot prompt from a library. So the question is data here, and the caller asks it.
 /// The caller resolves a second time with the answers. That second call cannot produce a
-/// different set of groups. Expansion reads the universe and the target list, never the
+/// different set of groups. Expansion reads the universe and the target list, and never the
 /// answers.
 ///
 /// # Errors
@@ -606,7 +609,7 @@ fn select_members(request: &Request, group: &str, members: &[SolvableId]) -> Vec
 /// [`Error::SolveBudgetExhausted`] is not raised here — that is the solver's bound.
 /// [`Error::TooManyClauses`] is raised if the encoding exceeds
 /// [`Limits::solve_max_clauses`](crate::Limits::solve_max_clauses). The bound is checked
-/// while clauses are emitted, not afterwards, so a pathological repository costs a comparison
+/// while clauses are emitted, not afterwards. So a pathological repository costs a comparison
 /// rather than the whole encoding.
 pub fn encode(
     universe: &Universe<'_>,
@@ -619,10 +622,10 @@ pub fn encode(
     let mut broken = Vec::new();
 
     // Deliberately built *after* the cone, and never fed into it. The cone must keep every
-    // candidate of every name group, or the "something called X must remain" and at-most-one
-    // clauses lose members; the providers an answer sets aside also stay legitimate candidates
-    // for other requirements. A cone that varied with the answers would also stop a caller's
-    // ask-and-solve-again loop from being provably finite.
+    // candidate of every name group. Otherwise the "something called X must remain" and
+    // at-most-one clauses lose members. The providers an answer sets aside also stay legitimate
+    // candidates for other requirements. A cone that varied with the answers would also stop a
+    // caller's ask-and-solve-again loop from being provably finite.
     let cone = reachable_cone(universe, request, limits)?;
     let choices: HashMap<(SolvableId, usize), SolvableId> = request
         .provider_choices
@@ -641,7 +644,7 @@ pub fn encode(
     }
 
     // 1b. Removals. Nothing sharing the name may be selected. This is stronger than simply
-    //     dropping the "must remain" clause below: without these units, the solver could
+    //     dropping the "must remain" clause below. Without these units, the solver could
     //     satisfy a dependency by *upgrading* the package the user asked to remove.
     let mut removed_names: BTreeSet<&str> = BTreeSet::new();
     for removal in &request.removals {
@@ -659,9 +662,9 @@ pub fn encode(
         if removed_names.contains(solvable.name().as_ref()) {
             continue;
         }
-        // A relaxed package is one an earlier attempt found to be standing in the way of the
-        // request: the `ALPM_QUESTION_CONFLICT_PKG` case. Dropping its clause lets the solver
-        // plan its removal. See `solve_with_removals`.
+        // A relaxed package is one the relaxation loop found to stand in the way of the
+        // request. That is the `ALPM_QUESTION_CONFLICT_PKG` case. Dropping its clause lets the
+        // solver plan its removal. See `solve_with_removals`.
         if relaxed.contains(&solvable.id()) {
             continue;
         }
@@ -696,19 +699,19 @@ pub fn encode(
         for (index, dep) in solvable.depends()?.iter().enumerate() {
             let mut satisfiers = in_cone(&cone, &universe.satisfiers(dep));
             // `alpm_checkdeps`' reverse pass (`deps.c:369`) raises a dependency of an
-            // installed package only when the transaction itself breaks it: "we won't break
-            // this depend, if it is already broken, we ignore it". A `%DEPENDS%` entry that
-            // nothing installed answers today is pre-existing state, so no clause encodes it.
-            // A hard clause here has no positive literal, which reduces it to the unit
-            // `¬dependent`. That contradicts "every installed package must remain", and the
-            // relaxation loop then plans the package away over a dependency the transaction
+            // installed package only when the transaction itself breaks it. Its comment: "we
+            // won't break this depend, if it is already broken, we ignore it". A `%DEPENDS%`
+            // entry that nothing installed answers today is pre-existing state, so no clause
+            // encodes it. A hard clause here has no positive literal, which reduces it to the
+            // unit `¬dependent`. That contradicts "every installed package must remain". The
+            // relaxation loop then plans the package away, over a dependency the transaction
             // never touched.
             //
-            // The test is "some *installed* candidate satisfies it", never "some candidate":
-            // a satisfier this transaction removes or upgrades stays in the clause, which is
-            // the breakage libalpm does report. A repository candidate that could satisfy it
-            // is not consulted either, because repairing a dependency that was already broken
-            // is not something libalpm ever does.
+            // The test is "some *installed* candidate satisfies it", never "some candidate".
+            // So a satisfier this transaction removes or upgrades stays in the clause, which
+            // is the breakage libalpm does report. A repository candidate that could satisfy
+            // it is not consulted either. Repairing a dependency that was already broken is
+            // not something libalpm ever does.
             if solvable.is_installed()
                 && !satisfiers.iter().any(|id| universe.get(*id).is_some_and(|s| s.is_installed()))
             {
@@ -717,7 +720,7 @@ pub fn encode(
             }
             // The caller answered `ALPM_QUESTION_SELECT_PROVIDER` for this entry, so only the
             // provider they named satisfies it now. An answer naming something that cannot
-            // satisfy it is dropped: the alternative is a clause with no satisfier, which
+            // satisfy it is dropped. The alternative is a clause with no satisfier, which
             // forbids `id` outright and explains nothing.
             let answered = choices.get(&(*id, index)).filter(|chosen| satisfiers.contains(chosen));
             if let Some(chosen) = answered {
@@ -747,7 +750,7 @@ pub fn encode(
                 let Some(candidate) = universe.get(*other) else { continue };
                 // `check_conflict` (`conflict.c`) uses `_alpm_depcmp`, so this matches
                 // through `%PROVIDES%` as well as by name. Both directions are covered
-                // without a second pass: every installed package is in the cone, so its own
+                // without a second pass. Every installed package is in the cone, so its own
                 // conflicts are iterated here too.
                 if candidate.satisfies(conflict) {
                     problem.add(
@@ -759,9 +762,9 @@ pub fn encode(
             }
         }
 
-        // `%REPLACES%` matches by literal name only — `check_replacers` (`sync.c:124`) is
-        // explicit that "we only want to consider literal matches at this point", so a
-        // replacement never fires through `%PROVIDES%` the way a conflict does.
+        // `%REPLACES%` matches by literal name only. `check_replacers` (`sync.c:124`) is
+        // explicit: "we only want to consider literal matches at this point". So a replacement
+        // never fires through `%PROVIDES%` the way a conflict does.
         if !solvable.is_installed() {
             for replaces in solvable.replaces() {
                 for other in in_cone(&cone, universe.candidates_named(replaces.name.as_ref())) {
@@ -794,8 +797,9 @@ fn already_current(universe: &Universe<'_>, target: SolvableId) -> bool {
 /// The candidates that could take part, starting from the installed set and the targets and
 /// closing over every dependency's satisfiers.
 ///
-/// Returned sorted. This keeps the encoding, and therefore the clause order the solver scans,
-/// and therefore which candidate a tie picks, independent of hash iteration order.
+/// Returned sorted. That keeps the encoding independent of hash iteration order. The clause
+/// order the solver scans follows the encoding, and which candidate a tie picks follows that
+/// order.
 fn reachable_cone(
     universe: &Universe<'_>,
     request: &Request,
@@ -877,7 +881,7 @@ pub enum Fidelity {
     Greedy,
     /// Some requirement was satisfied by a lower-preference candidate.
     ///
-    /// The plan is valid; it may simply not be the one `pacman -Sp` prints. **This does not
+    /// The plan is valid. It may simply not be the one `pacman -Sp` prints. **This does not
     /// mean pacman would have failed.** Two different situations produce it, and the count
     /// does not distinguish them:
     ///
@@ -898,9 +902,9 @@ pub enum Fidelity {
 /// One requirement that took a candidate other than the one libalpm would have taken.
 ///
 /// Candidates are identified rather than rendered. Naming them needs a [`Universe`], which
-/// the caller already has, and formatting here would allocate for a report that may never be
-/// shown. To quote the relation, index `dependent`'s `%DEPENDS%` with `dependency`: the same
-/// resolution `solve::explain` performs for [`ClauseKind::Requires`].
+/// the caller already has. Formatting here would also allocate for a report that may never be
+/// shown. To quote the relation, index `dependent`'s `%DEPENDS%` with `dependency`. That is the
+/// same resolution `solve::explain` performs for [`ClauseKind::Requires`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Divergence {
     /// The package whose `%DEPENDS%` declared the requirement.
@@ -959,27 +963,27 @@ struct Raised<'a> {
 /// [`encode`] emits a requirement for every `%DEPENDS%` entry of every candidate in the cone.
 /// The cone is seeded with the whole installed set, and "every installed package must remain"
 /// keeps all of them selected. So `encoded.requirements` covers the entire installed system,
-/// not the transaction. libalpm reaches the preference order only through `alpm_checkdeps`,
-/// which raises a dependency **only when the package list it has already accumulated does not
-/// satisfy it**. Three things are in that list before the order is ever consulted, and a
-/// requirement any of them answers is one libalpm never walked:
+/// not the transaction. libalpm reaches the preference order only through `alpm_checkdeps`. That
+/// raises a dependency **only when the package list it has already accumulated does not satisfy
+/// it**. Three things are in that list before the order is ever consulted. A requirement any of
+/// them answers is one libalpm never walked:
 ///
 /// - an installed package the transaction keeps,
 /// - a package the user named, which is in the list before resolution starts,
-/// - a provider pulled in for an *earlier* `%DEPENDS%` entry of the same dependent, since
-///   libalpm resolves one package's dependencies in declaration order.
+/// - a provider pulled in for an *earlier* `%DEPENDS%` entry of the same dependent. libalpm
+///   resolves one package's dependencies in declaration order.
 ///
 /// That third filter is modeled per dependent, not across the whole descent. libalpm's outer
-/// queue order also decides which provider arrives first, and reproducing that would mean
-/// running a second resolver alongside the one whose answer is being audited. The measured
-/// false positives came from the inner loop: `cl-alexandria` declares `cl-asdf` before
+/// queue order also decides which provider arrives first. To reproduce that, piko would have to
+/// run a second resolver alongside the one whose answer is being audited. The measured false
+/// positives came from the inner loop instead. `cl-alexandria` declares `cl-asdf` before
 /// `common-lisp`, so `ecl` answers both and `clisp` is never tried.
 ///
-/// Both [`fidelity`] and [`ambiguities`] ask this same question — "would the descent have
-/// reached this requirement at all?" — and they must not answer it two different ways. Each
-/// dropped filter here brought back a measured false positive (`corrosion`,
-/// `tesseract-data-sun`, `cl-alexandria` respectively), so a second copy is a second chance
-/// for one of them to go missing.
+/// Both [`fidelity`] and [`ambiguities`] ask one same question. "Would the descent have
+/// reached this requirement at all?" They must not answer it two different ways. Drop any one
+/// filter here and a measured false positive comes back (`corrosion`, `tesseract-data-sun`,
+/// `cl-alexandria` respectively). A second copy of the filters is a second chance for one of
+/// them to go missing.
 fn visit_raised_requirements(
     universe: &Universe<'_>,
     encoded: &Encoded,
@@ -995,7 +999,7 @@ fn visit_raised_requirements(
         .copied()
         .filter(|id| universe.get(*id).is_some_and(|solvable| !solvable.is_installed()))
         .collect();
-    // libalpm puts every named target in its package list before resolving anything, so a
+    // libalpm puts every named target in its package list before resolving anything. So a
     // dependency one of them satisfies is never raised.
     let targets: HashSet<SolvableId> = encoded
         .problem
@@ -1009,8 +1013,8 @@ fn visit_raised_requirements(
     // entries. Keyed by dependent, because that inner loop is the part of libalpm's order
     // this models. See the note on the outer queue above.
     let mut pulled: HashMap<SolvableId, HashSet<SolvableId>> = HashMap::new();
-    // Reused across requirements. Most stop at the two cheap checks below and never fill it,
-    // so this loop runs over the whole encoding without allocating per requirement.
+    // Reused across requirements. Most stop at the two cheap checks below and never fill it.
+    // So this loop runs over the whole encoding without allocating per requirement.
     let mut satisfiers: Vec<SolvableId> = Vec::new();
 
     for requirement in &encoded.requirements {
@@ -1049,8 +1053,8 @@ fn visit_raised_requirements(
             continue;
         }
         // Already answered by what an earlier `%DEPENDS%` entry of this same dependent pulled
-        // in. Tested against every satisfier, not just the selected ones, because libalpm's
-        // pick for that earlier entry need not be in this plan at all.
+        // in. Tested against every satisfier, not just the selected ones. libalpm's pick for
+        // that earlier entry need not be in this plan at all.
         if pulled
             .get(&requirement.dependent)
             .is_some_and(|acc| satisfiers.iter().any(|id| acc.contains(id)))
@@ -1068,19 +1072,20 @@ fn visit_raised_requirements(
 
 /// Compares a solution against the greedy choice each requirement would have made.
 ///
-/// This is the honest fidelity measure. The solver's backjump counter is not: unit
-/// propagation can reject libalpm's first choice without any decision ever being retracted,
-/// so a run with zero conflicts may still have diverged. Only the requirements themselves
-/// know which candidate was preferred.
+/// This is the honest fidelity measure. The solver's backjump counter is not. Unit propagation
+/// can reject libalpm's first choice without any decision ever being retracted. So a run with
+/// zero conflicts may still have diverged. Only the requirements themselves know which
+/// candidate was preferred.
 ///
-/// Two filters keep the measure meaningful. Both close a bug in which it fired on every plan it was
-/// ever shown. The second — "only requirements libalpm would have raised at all" — is
-/// `visit_raised_requirements`, which [`ambiguities`] walks too. The first is here:
+/// Two filters keep the measure meaningful. Without either one, it fires on every plan. The
+/// second filter is "only requirements libalpm would have raised at all", which
+/// `visit_raised_requirements` applies and [`ambiguities`] walks too. The first is here:
 ///
-/// **Compared by package name, not by candidate.** A requirement whose preferred satisfier
-/// was the installed copy of `foo`, and whose selected satisfier is `foo` from a repository,
-/// has not diverged. That is what an upgrade *is*, and during `-Su` it describes most of the
-/// transaction. Counting those made a clean 59-package sysupgrade report 28 divergences.
+/// **Compared by package name, not by candidate.** Take a requirement whose preferred
+/// satisfier was the installed copy of `foo`. Its selected satisfier is `foo` from a
+/// repository. That has not diverged. That is what an upgrade *is*, and during `-Su` it
+/// describes most of the transaction. Counting those reports 28 divergences for a clean
+/// 59-package sysupgrade.
 ///
 /// A genuine divergence is a different package answering a dependency the transaction
 /// reached: `fcron` where libalpm would have taken `cronie`.
@@ -1169,7 +1174,7 @@ impl AmbiguityReport {
 
     /// How many further questions the bound withheld.
     ///
-    /// Each of those keeps libalpm's own default answer, so the cost of the bound is "pacman
+    /// Each of those keeps libalpm's own default answer. So the cost of the bound is "pacman
     /// with nobody at the keyboard", not a failure. Reported rather than swallowed, so a
     /// caller cannot mistake a truncated list for the complete one.
     #[must_use]
@@ -1190,22 +1195,21 @@ impl AmbiguityReport {
 /// three escapes from asking:
 ///
 /// 1. **A literal match ends the search.** The literal pass `return`s before `%PROVIDES%` is
-///    consulted at all (`deps.c:644-675`), so a dependency some package is literally named
+///    consulted at all (`deps.c:644-675`). So a dependency some package is literally named
 ///    after is never a question, however many others provide it.
 /// 2. **An installed provider returns early** (`deps.c:709`), before the providers list is
 ///    even finished. Tested against every candidate of the clause rather than only the
-///    selected ones: a provider this transaction removes is still in the local database
+///    selected ones. A provider this transaction removes is still in the local database
 ///    `resolvedep` consults.
 /// 3. **One provider is taken without asking** — `count > 1` gates the question
 ///    (`deps.c:719`).
 ///
-/// Which requirements the descent would have reached at all is `visit_raised_requirements`, shared
-/// with [`fidelity`].
+/// Which requirements the descent would have reached at all is `visit_raised_requirements`,
+/// shared with [`fidelity`].
 ///
 /// There is no "already answered" test. An answered requirement is encoded with its chosen
-/// candidate as its only satisfier, so it fails the third test on its own. That is what lets a
-/// caller loop — ask, answer, solve again — without tracking which questions it has already
-/// put.
+/// candidate as its only satisfier. So it fails the third test on its own. That is what lets a
+/// caller ask, answer and solve again, without tracking which questions it has already put.
 #[must_use]
 pub fn ambiguities(
     universe: &Universe<'_>,
@@ -1274,14 +1278,14 @@ pub struct Planned {
 /// This is `_alpm_sync_prepare`'s conflict step (`sync.c:367`) expressed as a loop rather
 /// than as a callback. libalpm asks `ALPM_QUESTION_CONFLICT_PKG` in the middle of resolution.
 /// If the answer is yes, it appends the offending local package to `sync->removes` and
-/// carries on. Its own default answer is **no**, which is why a library caller sees
-/// `ALPM_ERR_CONFLICTING_DEPS` where `pacman`, whose frontend asks the user, proceeds.
+/// carries on. Its own default answer is **no**. That is why a library caller sees
+/// `ALPM_ERR_CONFLICTING_DEPS` where `pacman` proceeds, since pacman's frontend asks the user.
 ///
-/// piko cannot prompt from a library: diagnostics are returned to the caller, never printed
-/// or logged. So the question becomes a policy on the [`Request`], and the retry becomes explicit:
-/// solve with every installed package pinned, and if that is unsatisfiable, relax exactly the pins the
-///  unsatisfiable core blames, then solve again. A package is only ever a candidate
-/// for removal once the solver has already proved the request impossible while it stays.
+/// piko cannot prompt from a library. Diagnostics are returned to the caller, never printed
+/// or logged. So the question becomes a policy on the [`Request`], and the retry becomes
+/// explicit. Solve with every installed package pinned. If that is unsatisfiable, relax exactly
+/// the pins the unsatisfiable core blames, then solve again. A package is only ever a candidate
+/// for removal once the solver has proved the request impossible while it stays.
 ///
 /// # Errors
 ///
@@ -1329,12 +1333,12 @@ pub fn solve_with_removals(
                         .collect();
                     // Seeded from *everything* being removed, not just what the user named.
                     // `_alpm_remove_prepare` (`remove.c:249`) runs `_alpm_recursedeps` over
-                    // `trans->remove` *after* the cascade has appended the dependents to it,
-                    // per its own comment: "`-Rcs` == `-Rc` then `-Rs`". Seeding from the
-                    // named targets alone leaves every cascaded dependent's own dependencies
-                    // behind. `piko remove -cs phonon-qt6` took 4 packages where
-                    // `pacman -Rcs` takes 35, because the 31 belonged to the cascaded
-                    // `phonon-qt6-vlc`, not to the target.
+                    // `trans->remove` *after* the cascade has appended the dependents to it.
+                    // Its own comment: "`-Rcs` == `-Rc` then `-Rs`". Seeding from the named
+                    // targets alone leaves every cascaded dependent's own dependencies behind.
+                    // Unseeded, `piko remove -cs phonon-qt6` takes 4 packages where
+                    // `pacman -Rcs` takes 35. The 31 belong to the cascaded `phonon-qt6-vlc`,
+                    // not to the target.
                     let orphans = recurse_unneeded(universe, &removed, &survivors, false);
                     let gone: HashSet<SolvableId> = orphans.iter().copied().collect();
                     selected.retain(|id| !gone.contains(id));
@@ -1384,10 +1388,10 @@ pub fn solve_with_removals(
 /// 3. **Re-widen**: anything a surviving `keep` package still needs moves back out of `rem`.
 ///    Run to a fixpoint, because rescuing one package can rescue its dependencies too.
 ///
-/// The seeding in phase 2 is the part that is easy to get wrong and impossible to spot
-/// without real data. Sweeping *every* orphan on the system — any installed dependency
-/// nothing needs any more — looks like it converges to the same fixpoint. It does not. A
-/// system accumulates orphans that have nothing to do with the package being removed:
+/// The seeding in phase 2 is easy to get wrong, and impossible to spot without real data. A
+/// sweep of *every* orphan on the system looks like it converges to the same fixpoint. An
+/// orphan here is any installed dependency nothing needs any more. It does not converge to the
+/// same fixpoint. A system accumulates orphans unrelated to the package being removed.
 /// `pacman -Rs amberol` removes one package where a whole-system sweep removes eighty-one.
 /// `-Rs` is scoped to the targets' own dependencies, not to tidiness.
 #[must_use]
@@ -1481,8 +1485,8 @@ pub enum IgnoredChange {
 /// A change a full system upgrade would have made, had `IgnorePkg`/`IgnoreGroup` not covered
 /// one of the two packages involved.
 ///
-/// The available side is carried by value rather than as a [`SolvableId`]: an ignored
-/// repository candidate is never interned, so no id names it. `installed` still is one — the
+/// The available side is carried by value rather than as a [`SolvableId`]. An ignored
+/// repository candidate is never interned, so no id names it. `installed` still is one. The
 /// installed set is interned unconditionally.
 #[derive(Clone, Debug)]
 pub struct IgnoredUpgrade {
@@ -1504,24 +1508,24 @@ pub struct IgnoredUpgrade {
 /// Chooses what `-Su` would do, mirroring `alpm_sync_sysupgrade` (`sync.c:200`).
 ///
 /// For each installed package, repositories are walked in `pacman.conf` order. The **first
-/// one that carries the name at all** decides the outcome, even if it carries the same
-/// version and so yields no upgrade. That is libalpm's `found = 1; break`, and it is what
-/// makes repository priority mean something here rather than "whichever repo happens to have
+/// one that carries the name at all** decides the outcome. That holds even if it carries the
+/// same version and so yields no upgrade. That is libalpm's `found = 1; break`. It is what
+/// makes repository priority mean something here, rather than "whichever repo happens to have
 /// the newest build".
 ///
 /// Within a repository, `%REPLACES%` is checked **before** the literal name. A replacement
-/// matches by `_alpm_depcmp_literal` only. `check_replacers` is explicit that "we only want to
-/// consider literal matches at this point", so unlike a conflict it never fires through
+/// matches by `_alpm_depcmp_literal` only. `check_replacers` is explicit: "we only want to
+/// consider literal matches at this point". So unlike a conflict it never fires through
 /// `%PROVIDES%`.
 ///
-/// The `Usage` gate here is `Upgrade` **alone** (`sync.c:229`), a different mask from the
-/// `Install|Upgrade` that `resolvedep` applies when the resulting targets' dependencies are
-/// resolved. The universe is built with the wider mask, and this applies the narrower one,
-/// because a repository marked `Usage = Install` may satisfy a dependency but must not
-/// volunteer upgrades.
+/// The `Usage` gate here is `Upgrade` **alone** (`sync.c:229`). That is a different mask from
+/// the `Install|Upgrade` that `resolvedep` applies when the resulting targets' dependencies are
+/// resolved. The universe is built with the wider mask, and this applies the narrower one. A
+/// repository marked `Usage = Install` may satisfy a dependency, but must not volunteer
+/// upgrades.
 ///
-/// `enable_downgrade` is `-Suu`. Without it, a repository version older than the installed
-/// one is left alone (libalpm warns "local (%s) is newer than %s (%s)"); this function simply
+/// `enable_downgrade` is `-Suu`. Without it, a repository version older than the installed one
+/// is left alone. libalpm warns "local (%s) is newer than %s (%s)" there. This function simply
 /// does not select it.
 ///
 /// # `IgnorePkg`/`IgnoreGroup` is tested on both sides, and an ignored copy still settles the
@@ -1529,21 +1533,21 @@ pub struct IgnoredUpgrade {
 ///
 /// `check_literal` and `check_replacers` both test
 /// `alpm_pkg_should_ignore(spkg) || alpm_pkg_should_ignore(lpkg)`. Only the repository side
-/// can be filtered while the universe is interned, because an installed package is always
-/// interned — `IgnorePkg` means "do not upgrade it", not "pretend it is not there". The
-/// installed side is therefore tested here, through [`Universe::ignores`]. Without it an
-/// `IgnoreGroup` that the installed `desc` carries but the repository `desc` does not is
-/// silently bypassed, and piko upgrades a package pacman leaves alone.
+/// can be filtered while the universe is interned. An installed package is always interned,
+/// because `IgnorePkg` means "do not upgrade it", not "pretend it is not there". So the
+/// installed side is tested here, through [`Universe::ignores`]. Without that test, one case
+/// is silently bypassed: an `IgnoreGroup` the installed `desc` carries and the repository
+/// `desc` does not. piko then upgrades a package pacman leaves alone.
 ///
 /// The repository walk also has to *see* an ignored candidate. `_alpm_db_get_pkgfromcache`
-/// finds a package whatever its ignore status, and the caller then `break`s
-/// (`sync.c:239-246`), so the first repository carrying the name settles the outcome even
-/// when that outcome is "nothing, it is ignored". Skipping ignored candidates here instead
-/// would let a lower-priority repository volunteer an upgrade that pacman never offers.
+/// finds a package whatever its ignore status, and the caller then `break`s (`sync.c:239-246`).
+/// So the first repository carrying the name settles the outcome, even when that outcome is
+/// "nothing, it is ignored". Skipping ignored candidates here instead would let a
+/// lower-priority repository volunteer an upgrade that pacman never offers.
 /// [`Universe::ignored_named`] is what makes them visible again.
 ///
-/// What was passed over is returned in [`Sysupgrade::ignored`], decided by this one walk
-/// rather than by a second pass that would have to reproduce the same priority rules.
+/// What was passed over is returned in [`Sysupgrade::ignored`]. This one walk decides it. A
+/// second pass would have to reproduce the same priority rules.
 #[must_use]
 pub fn sysupgrade(universe: &Universe<'_>, enable_downgrade: bool) -> Sysupgrade {
     let mut result = Sysupgrade::default();
@@ -1560,8 +1564,8 @@ pub fn sysupgrade(universe: &Universe<'_>, enable_downgrade: bool) -> Sysupgrade
             }
 
             // `%REPLACES%` first. An ignored replacer is reported and skipped rather than
-            // ending the search, matching `check_replacers`' `continue`: a second replacer in
-            // the same repository is still considered, and so is the literal name below.
+            // ending the search, matching `check_replacers`' `continue`. So a second replacer
+            // in the same repository is still considered, and so is the literal name below.
             let replaces_installed = |entry: &alpm_types::PackageRelation| {
                 entry.name.as_ref() == name
                     && crate::depcmp::version_satisfies(installed.version(), entry)
@@ -1599,8 +1603,8 @@ pub fn sysupgrade(universe: &Universe<'_>, enable_downgrade: bool) -> Sysupgrade
                 break;
             }
 
-            // Then the literal name. Finding it settles the matter for this package, whether
-            // or not it turns out to be newer, and whether or not it is ignored.
+            // Then the literal name. A match settles the matter for this package. That holds
+            // whether or not it is newer, and whether or not it is ignored.
             let literal = universe.candidates_named(name).iter().copied().find(|id| {
                 universe.get(*id).is_some_and(|c| c.origin() == Origin::Repository(index))
             });
@@ -1621,7 +1625,7 @@ pub fn sysupgrade(universe: &Universe<'_>, enable_downgrade: bool) -> Sysupgrade
                 break;
             }
 
-            // No usable candidate: the repository may still carry an ignored copy, which
+            // No usable candidate. The repository may still carry an ignored copy, which
             // settles the search the same way an ordinary one would.
             let mut ignored_here = universe.ignored_named(name).filter(|c| c.repository() == index);
             if let Some(candidate) = ignored_here.next() {
@@ -1649,10 +1653,10 @@ pub fn sysupgrade(universe: &Universe<'_>, enable_downgrade: bool) -> Sysupgrade
 /// Which change a version pair would have produced, or `None` when it would have produced
 /// none.
 ///
-/// The ignore test is nested inside the version comparison, never the other way round: an
-/// ignored package already at the repository version has had nothing prevented, and neither
-/// has one whose repository copy is older while `-Suu` was not asked for. `check_literal`
-/// nests them the same way, which is why it stays silent in both cases.
+/// The ignore test is nested inside the version comparison, never the other way round. An
+/// ignored package already at the repository version has had nothing prevented. Neither has one
+/// whose repository copy is older while `-Suu` was not asked for. `check_literal` nests them
+/// the same way, which is why it stays silent in both cases.
 fn ignored_change(
     installed: &FullVersion,
     available: &FullVersion,
@@ -1955,8 +1959,8 @@ mod tests {
     }
 
     /// `check_literal` tests `should_ignore(spkg) || should_ignore(lpkg)`. Only the repository
-    /// side can be filtered while interning, so an `IgnoreGroup` that only the installed
-    /// `desc` carries is the case that a candidate-side filter alone lets through.
+    /// side can be filtered while interning. So an `IgnoreGroup` that only the installed `desc`
+    /// carries is the case a candidate-side filter alone lets through.
     #[test]
     fn an_ignore_group_carried_only_by_the_installed_package_still_holds_the_upgrade_back() {
         let scenario = Scenario::new()
@@ -1976,13 +1980,13 @@ mod tests {
     }
 
     /// `_alpm_db_get_pkgfromcache` finds a package whatever its ignore status, and the caller
-    /// then `break`s: the first repository carrying the name settles the outcome. A candidate
+    /// then `break`s. So the first repository carrying the name settles the outcome. A candidate
     /// filtered out of the universe must not let a lower-priority repository volunteer an
     /// upgrade pacman never offers.
     #[test]
     fn an_ignored_copy_in_the_first_repository_settles_the_search() {
-        // Only `core`'s copy carries the ignored group, so `extra`'s newer copy is a perfectly
-        // ordinary candidate — and must still never be reached.
+        // Only `core`'s copy carries the ignored group. So `extra`'s newer copy is a perfectly
+        // ordinary candidate. It must still never be reached.
         let scenario = Scenario::new()
             .installed(PackageSpec::new("app", "1.0.0-1"))
             .repo("core", [PackageSpec::new("app", "2.0.0-1").groups(["held"])])
@@ -2027,8 +2031,8 @@ mod tests {
         assert_eq!(members, ["editor", "linker"]);
     }
 
-    /// pacman tries the name as a package first, so a package and a group sharing a name
-    /// install the package alone rather than both.
+    /// pacman tries the name as a package first. So a package and a group sharing a name
+    /// install the package alone, rather than both.
     #[test]
     fn a_package_wins_over_a_group_of_the_same_name() {
         let scenario = Scenario::new()
@@ -2056,9 +2060,9 @@ mod tests {
         assert!(matches!(failure, TargetResolutionFailure::NotFound(name) if name == "absent"));
     }
 
-    /// A member both enabled repositories carry expands to one target, so the at-most-one
-    /// clause on its name has one unit to agree with rather than two to contradict. Offering
-    /// both candidates makes this request unsatisfiable.
+    /// A member both enabled repositories carry expands to one target. So the at-most-one
+    /// clause on its name has one unit to agree with, not two to contradict. Offering both
+    /// candidates makes this request unsatisfiable.
     #[test]
     fn a_member_carried_by_two_repositories_still_solves() {
         let scenario = Scenario::new()
@@ -2217,8 +2221,8 @@ mod tests {
 
     // --- `ALPM_QUESTION_SELECT_PROVIDER` -------------------------------------------------
 
-    /// Solves `target` against `scenario`, returning what it would install and the questions
-    /// it raised, both as names so no id outlives the universe they belong to.
+    /// Solves `target` against `scenario`. Returns what it would install and the questions it
+    /// raised, both as names, so no id outlives the universe it belongs to.
     fn ask(scenario: &BuiltScenario, target: &str) -> (Vec<String>, Vec<(String, Vec<String>)>) {
         let limits = Limits::default();
         let universe = universe_of(scenario, DbUsage::ALL);
@@ -2278,8 +2282,8 @@ mod tests {
         assert_eq!(questions[0].1, ["impl-a", "impl-b"], "in preference order");
     }
 
-    /// The literal pass `return`s before `%PROVIDES%` is read at all (`deps.c:644-675`), so a
-    /// dependency some package is literally named after is never a question — however many
+    /// The literal pass `return`s before `%PROVIDES%` is read at all (`deps.c:644-675`). So a
+    /// dependency some package is literally named after is never a question, however many
     /// other packages provide it.
     #[test]
     fn a_literal_match_is_never_a_question() {
@@ -2335,9 +2339,9 @@ mod tests {
         assert!(questions.is_empty(), "{questions:?}");
     }
 
-    /// The scope filter, shared with [`fidelity`]: `encode` emits a requirement for every
-    /// `%DEPENDS%` entry of every candidate in the cone, so without it an unrelated installed
-    /// package's ambiguous dependency would be asked about on every plan.
+    /// The scope filter, shared with [`fidelity`]. `encode` emits a requirement for every
+    /// `%DEPENDS%` entry of every candidate in the cone. Without the filter, an unrelated
+    /// installed package's ambiguous dependency would be asked about on every plan.
     #[test]
     fn an_untouched_installed_package_raises_no_question() {
         let scenario = Scenario::new()
@@ -2406,7 +2410,7 @@ mod tests {
     ///
     /// `Solver::decide` skips a clause another clause has already satisfied, so its literal
     /// order is never consulted there. Here `impl-b` is selected for `helper`'s `asdf`, which
-    /// also satisfies `app`'s `virtual` — the shape measured on real data as
+    /// also satisfies `app`'s `virtual`. Real data shows the same shape as
     /// `cl-hu-dwim-stefil requires common-lisp`, answered by the `ecl` that `cl-alexandria`
     /// pulled in. A reordered candidate list would leave the answer unapplied in exactly this
     /// case.
@@ -2450,9 +2454,9 @@ mod tests {
     }
 
     /// The answer is keyed by `(dependent, dependency)`, not by the dependency's text. The
-    /// cone is seeded with the whole installed set, so a text-keyed answer would rewrite
-    /// `host`'s identical requirement too and pull a second provider in for a package this
-    /// transaction never touches.
+    /// cone is seeded with the whole installed set. So a text-keyed answer would rewrite
+    /// `host`'s identical requirement too. It would pull a second provider in for a package
+    /// this transaction never touches.
     #[test]
     fn an_answer_does_not_reach_an_untouched_installed_package() {
         let scenario = Scenario::new()
@@ -2523,11 +2527,11 @@ mod tests {
     }
 
     /// A scenario with `broken` installed and depending on `absent`, which nothing installed
-    /// provides: the state a `pacman -Rdd` of `absent` leaves behind.
+    /// provides. That is the state a `pacman -Rdd` of `absent` leaves behind.
     ///
     /// `absent_in_repository` decides whether a repository could supply it. `broken` always
-    /// has a repository copy at its own version. That copy is what gives the relaxation loop
-    /// a clause to relax, so this shape costs one package rather than the whole transaction.
+    /// has a repository copy at its own version. That copy gives the relaxation loop a clause
+    /// to relax. So this shape costs one package rather than the whole transaction.
     fn broken_scenario(absent_in_repository: bool) -> BuiltScenario {
         let mut core = vec![PackageSpec::new("app", "1.0.0-1")];
         if absent_in_repository {
@@ -2568,7 +2572,7 @@ mod tests {
 
     /// The dependency is left broken, not repaired.
     ///
-    /// pacman does not install a satisfier for a dependency that was already unmet, so a
+    /// pacman does not install a satisfier for a dependency that was already unmet. So a
     /// candidate that could supply one must not be pulled into the transaction either.
     #[test]
     fn an_already_broken_dependency_is_not_repaired_either() {
@@ -2630,8 +2634,8 @@ mod tests {
 
     /// A requirement no clause encodes is also a requirement neither self-report may count.
     ///
-    /// Both read `Encoded::requirements`, so dropping the entry is what keeps a broken
-    /// dependency out of the fidelity measure and out of the provider question at once.
+    /// Both read `Encoded::requirements`. So dropping the entry keeps a broken dependency out
+    /// of the fidelity measure and out of the provider question at once.
     #[test]
     fn an_already_broken_dependency_reaches_neither_self_report() {
         let scenario = broken_scenario(true);

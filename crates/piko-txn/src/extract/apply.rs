@@ -9,20 +9,20 @@
 //! libalpm passes `ARCHIVE_EXTRACT_UNLINK` (`add.c:121`). This makes libarchive remove an
 //! existing object before creating the new one. This is not a convenience. It stops the write
 //! from following a symlink already sitting at the destination. piko does the same thing
-//! explicitly: `unlinkat` removes a symlink rather than following it, then `openat` runs with
+//! explicitly. `unlinkat` removes a symlink rather than following it. Then `openat` runs with
 //! `O_CREAT | O_EXCL | O_NOFOLLOW`. `O_EXCL` means the create fails if anything reappears at
 //! the path between the two calls, rather than writing through it.
 //!
 //! # Ownership before mode, never the reverse
 //!
 //! `chown(2)` clears `S_ISUID` and `S_ISGID` on a regular file. On Linux this happens even for
-//! root, and even when the owner does not change: `chown_common` adds
-//! `ATTR_KILL_SUID | ATTR_KILL_SGID` for anything that is not a directory, before
+//! root, and even when the owner does not change. `chown_common` adds
+//! `ATTR_KILL_SUID | ATTR_KILL_SGID` for anything that is not a directory. It does so before
 //! `notify_change` compares the ids. So `fchmod` followed by `fchown` silently strips the
-//! setuid bit off every setuid binary a package ships — `sudo`, `mount`, `su`, `passwd`.
+//! setuid bit off every setuid binary a package ships: `sudo`, `mount`, `su`, `passwd`.
 //!
 //! piko applies ownership first and the mode second, for this reason. libarchive does the
-//! same: `archive_write_disk_posix.c` calls `set_ownership` before `set_perm`.
+//! same. `archive_write_disk_posix.c` calls `set_ownership` before `set_perm`.
 use std::{
     io::{Read, Write as _},
     os::fd::AsFd,
@@ -146,11 +146,11 @@ fn write_member(
 ///
 /// The target is a path relative to the installation root, so [`RootDir`] resolves it like any
 /// other path. A hard link is the one archive construct that can reach an *existing* file by
-/// name, so confining it matters as much as confining the destination. This uses
-/// `AtFlags::empty()` rather than `SYMLINK_FOLLOW`: linking to the symlink itself, rather than
+/// name. Confining it matters as much as confining the destination. This uses
+/// `AtFlags::empty()` rather than `SYMLINK_FOLLOW`. Linking to the symlink itself, rather than
 /// to whatever it points at, keeps the result inside the root.
 ///
-/// Mode, ownership, and times are not set here. A hard link is a second name for one inode, so
+/// Mode, ownership and times are not set here. A hard link is a second name for one inode, so
 /// it has no metadata of its own. Applying the archive's metadata would silently rewrite the
 /// target's.
 fn write_hard_link(
@@ -215,8 +215,8 @@ fn write_directory(
     }
 
     // Ownership is applied before the mode, as for a file. A directory is actually exempt
-    // from the setgid-clearing rule — measured: `chown_common` sets `ATTR_KILL_SUID` only for
-    // `!S_ISDIR` — so this order changes nothing today. This keeps the two functions from
+    // from the setgid-clearing rule. Measured: `chown_common` sets `ATTR_KILL_SUID` only for
+    // `!S_ISDIR`. So this order changes nothing today. It keeps the two functions from
     // drifting apart, and keeps a setgid directory from depending on that exemption.
     apply_ownership_at(resolved, name, member, ownership)?;
     // As for files, `mkdirat`'s mode is umask-masked.

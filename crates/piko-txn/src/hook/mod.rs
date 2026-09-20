@@ -52,8 +52,8 @@ const HOOK_SUFFIX: &str = ".hook";
 /// **and** additional custom directories specified in pacman.conf(5)". It is compiled into
 /// libalpm, not configured. `pacman-conf HookDir` prints only `/etc/pacman.d/hooks/`, but a
 /// real Arch system's actual hooks mostly live here. A caller that reads only `HookDir` would
-/// silently run none of them. This constant lives next to [`Hooks::collect`], not in a
-/// frontend, so every caller building a directory list gets it, not only this crate's own CLI.
+/// silently run none of them. This constant lives next to [`Hooks::collect`], not in a frontend.
+/// So every caller building a directory list gets it, not only this crate's own CLI.
 pub const SYSTEM_HOOK_DIR: &str = "/usr/share/libalpm/hooks";
 
 /// Largest `.hook` file piko reads, from [`piko_db::Limits`].
@@ -361,8 +361,8 @@ pub fn run(
 
 /// The first `Depends` entry no installed package satisfies.
 ///
-/// A `Depends` line piko cannot parse counts as unsatisfied: libalpm's `alpm_find_satisfier`
-/// returns nothing for an unparseable dependency string too, and running a hook whose stated
+/// A `Depends` line piko cannot parse counts as unsatisfied. libalpm's `alpm_find_satisfier`
+/// returns nothing for an unparseable dependency string too. And running a hook whose stated
 /// requirement could not even be understood is not the safe direction.
 fn unsatisfied_dependency(local: &LocalDatabase, hook: &Hook) -> Option<String> {
     hook.depends
@@ -414,8 +414,8 @@ Exec = /bin/true
         assert_eq!(hooks.all().first().unwrap().name, "a.hook");
     }
 
-    /// Ordering ignores the suffix, so `10-a` sorts before `10-a-b` — comparing whole file
-    /// names would put `.` (0x2e) against `-` (0x2d) and reverse them.
+    /// Ordering ignores the suffix, so `10-a` sorts before `10-a-b`. Comparing whole file names
+    /// would put `.` (0x2e) against `-` (0x2d), and reverse them.
     #[test]
     fn hooks_are_ordered_by_name_without_the_suffix() {
         let dir = tempfile::tempdir().unwrap();

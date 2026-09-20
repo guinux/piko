@@ -69,9 +69,9 @@ fn every_mount_the_kernel_reports_is_in_the_table() {
 #[test]
 #[ignore = "requires a real ALPM system"]
 fn a_duplicated_mount_directory_appears_once() {
-    // This machine mounts `/boot` twice: an autofs placeholder, then the vfat filesystem that
-    // shadows it. libalpm keeps both records and its stable sort makes the scan always answer
-    // with the first, so the second is never checked; dropping it is the same answer.
+    // This machine mounts `/boot` twice: an autofs placeholder, then the vfat filesystem
+    // that shadows it. libalpm keeps both records. Its stable sort makes the scan always
+    // answer with the first, so the second is never checked. Dropping it is the same answer.
     let raw = std::fs::read_to_string("/proc/self/mounts").unwrap();
     let mut seen: Vec<&str> =
         raw.lines().filter_map(|line| line.split_whitespace().nth(1)).collect();
@@ -171,8 +171,8 @@ fn the_free_space_read_per_mount_point_agrees_with_stat_f() {
         let fs = rustix::fs::statvfs(dir).unwrap();
         assert_eq!(fs.f_bsize, block_size, "{} block size", dir.display());
         assert_eq!(fs.f_blocks, blocks, "{} capacity", dir.display());
-        // Free space moves under a running system, so this is a sanity band rather than an
-        // equality: the two readings are seconds apart.
+        // Free space moves under a running system. So this is a sanity band rather than an
+        // equality. The two readings are seconds apart.
         let drift = fs.f_bavail.abs_diff(available);
         assert!(
             drift * 100 <= blocks.max(1),

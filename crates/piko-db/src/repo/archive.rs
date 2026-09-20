@@ -14,10 +14,10 @@
 //!    what tells a limit violation apart from a genuinely corrupt archive after `tar` fails.
 //! 3. **`tar::Archive` driven directly, not through `alpm-compress::TarballReader`.**
 //!    `TarballReader`'s field is concretely `Archive<CompressionDecoder>`, not generic over
-//!    `Read`, so a bounding wrapper cannot be inserted into it. Its `read_entry` also re-calls
-//!    `entries()` on every invocation, and `tar` refuses that once the stream has moved past
-//!    position 0 — impossible to satisfy against a decompressor. So `entries()` is called
-//!    exactly once here.
+//!    `Read`. So a bounding wrapper cannot be inserted into it. Its `read_entry` also re-calls
+//!    `entries()` on every invocation. `tar` refuses that once the stream has moved past position
+//!    0, which is impossible to satisfy against a decompressor. So `entries()` is called exactly
+//!    once here.
 
 use std::{
     collections::HashSet,
@@ -72,10 +72,10 @@ pub(crate) struct Skipped {
 
 /// Opens, decompresses and walks a repository archive exactly once.
 ///
-/// `on_item` is called for every valid `desc` or `files` member. `on_skip` is called for
-/// every member that was not one, with the reason. Directory members (the
-/// `<name>-<version>/` entries themselves) are skipped with no callback at all — the same
-/// silent skip the local database applies to `ALPM_DB_VERSION`.
+/// `on_item` is called for every valid `desc` or `files` member. `on_skip` is called for every
+/// member that was not one, with the reason. Directory members are skipped with no callback at
+/// all. Those are the `<name>-<version>/` entries themselves. The local database applies the same
+/// silent skip to `ALPM_DB_VERSION`.
 ///
 /// `on_item` returns a `Result`, unlike `on_skip`, because a caller-side resource limit (the
 /// files arena's byte cap, say) can fire there. Such a failure must abort the whole open, the
@@ -124,9 +124,9 @@ pub(crate) fn walk(
     let classify = |source: std::io::Error| classify_io_error(path, source, &tripped, limits);
 
     let entries = archive.entries().map_err(classify)?;
-    // Keyed on the *parsed* identity — the entry directory name plus which member it is —
-    // rather than on the raw path string. A path spelled differently but denoting the same
-    // member (an interior `.` component, say) would slip past a raw-string key. The
+    // Keyed on the *parsed* identity, rather than on the raw path string. That identity is the
+    // entry directory name plus which member it is. A path spelled differently but denoting the
+    // same member, with an interior `.` component say, would slip past a raw-string key. The
     // duplicate check would then disagree with the identity everything downstream uses.
     let mut seen: HashSet<(Box<str>, Member)> = HashSet::new();
 
@@ -141,9 +141,9 @@ pub(crate) fn walk(
         }
         let is_regular = entry.header().entry_type() == tar::EntryType::Regular;
 
-        // Classified while the borrow on `entry` is live. The outcome is owned, which ends
-        // that borrow so the member can be read below. The full path string is built only
-        // for a member that is about to be reported — an accepted one never allocates it.
+        // Classified while the borrow on `entry` is live. The outcome is owned, which ends that
+        // borrow so the member can be read below. The full path string is built only for a member
+        // that is about to be reported. An accepted one never allocates it.
         let classified = match entry.path() {
             Err(_) => Classified::NonUtf8,
             Ok(raw) => classify_member(&raw, is_regular),
@@ -256,7 +256,7 @@ enum Classified {
 
 /// Decides what a tar member is from its path alone.
 ///
-/// Allocating the path as a `String` is deferred to the branches that actually report it: an
+/// Allocating the path as a `String` is deferred to the branches that actually report it. An
 /// accepted member never needs one, and it is by far the common case.
 fn classify_member(raw: &Path, is_regular: bool) -> Classified {
     let rejected = |reason: SkipReason| Classified::Rejected {
@@ -283,23 +283,24 @@ fn classify_member(raw: &Path, is_regular: bool) -> Classified {
 /// Walks a `.files` archive looking only for `wanted`'s `files` members, stopping as soon as
 /// every one of them has been seen.
 ///
-/// Unlike [`walk`], this is not a general-purpose primitive: it never looks at `desc`
-/// members, skips any entry whose directory does not name one of `wanted` without buffering
-/// or parsing it, and returns without reading the rest of the archive once `wanted` is
-/// exhausted. It exists for `FilesSource::file_lists_for`, where a caller wants file lists
-/// for a handful of packages out of a repository that may hold thousands.
+/// Unlike [`walk`], this is not a general-purpose primitive. It never looks at `desc` members. It
+/// skips any entry whose directory does not name one of `wanted`, without buffering or parsing it.
+/// And it returns without reading the rest of the archive once `wanted` is exhausted. It exists for
+/// `FilesSource::file_lists_for`. There, a caller wants file lists for a handful of packages out of
+/// a repository that may hold thousands.
 ///
-/// Skipping a non-matching entry only saves the allocation and UTF-8 validation it would
-/// otherwise cost — the underlying gzip stream is still sequential, so every byte up to the
-/// last matched entry is still decompressed regardless. Stopping early is what actually saves
-/// work, and it is only possible once every wanted name has been *seen* — not resolved: a
-/// package present at a different version than expected still counts as seen here (its
-/// `files` member is handed to `on_item`), and any version mismatch is reported later by
-/// `FilesArena::file_list` at lookup time, exactly as it is for a full walk. Only a package
-/// genuinely absent from the whole archive forces a full walk, with no way to know that
-/// short of reaching the end.
+/// Skipping a non-matching entry only saves the allocation and UTF-8 validation it would otherwise
+/// cost. The underlying gzip stream is still sequential, so every byte up to the last matched entry
+/// is still decompressed regardless.
 ///
-/// There is no `on_skip`: diagnostics from this walk are not collected, matching
+/// Stopping early is what actually saves work. It is only possible once every wanted name has been
+/// *seen*, which is not the same as resolved. A package present at a different version than
+/// expected still counts as seen here, and its `files` member is handed to `on_item`. Any version
+/// mismatch is reported later by `FilesArena::file_list` at lookup time, exactly as it is for a
+/// full walk. Only a package genuinely absent from the whole archive forces a full walk. There is
+/// no way to know that short of reaching the end.
+///
+/// There is no `on_skip`. Diagnostics from this walk are not collected, matching
 /// `FilesSource::load`'s existing lazy `.files` walk, which already discards them.
 ///
 /// # Errors
@@ -353,8 +354,8 @@ pub(crate) fn walk_matching(
         }
 
         // Nothing is reported from this walk, so no member's path is ever materialised as a
-        // `String` — the identity is parsed straight out of the borrowed path and the entry
-        // is skipped without allocating if it is not one of `wanted`.
+        // `String`. The identity is parsed straight out of the borrowed path. An entry that is
+        // not one of `wanted` is skipped without allocating.
         let entry_name = match entry.path() {
             Ok(raw) => match two_components_of(&raw) {
                 Some((dir_str, "files")) => match EntryName::parse(dir_str) {
@@ -407,16 +408,16 @@ pub(crate) fn walk_matching(
 
 /// Splits `raw_path` into `(directory, member)` if it has exactly two normal components.
 ///
-/// Anything else — extra nesting, a leading `..` or `/`, a single component — is rejected by
-/// returning `None`, which the caller turns into [`SkipReason::UnexpectedShape`]. There is no
-/// filesystem write anywhere in this crate, so this is about refusing a malformed shape, not
-/// preventing extraction — but a `..` component still cannot reach `Component::Normal`, so it
-/// is rejected the same way regardless.
+/// Anything else is rejected by returning `None`, which the caller turns into
+/// [`SkipReason::UnexpectedShape`]. That covers extra nesting, a leading `..` or `/`, and a single
+/// component. There is no filesystem write anywhere in this crate, so this is about refusing a
+/// malformed shape, not preventing extraction. A `..` component still cannot reach
+/// `Component::Normal`, so it is rejected the same way regardless.
 ///
-/// Note that [`Path::components`] normalises away interior `.` components, so
-/// `foo-1.0.0-1/./desc` splits exactly as `foo-1.0.0-1/desc` does. That is why [`walk`]'s
-/// duplicate check is keyed on this function's output rather than on the raw path: the two
-/// spellings denote the same member and must be treated as such.
+/// Note that [`Path::components`] normalises away interior `.` components, so `foo-1.0.0-1/./desc`
+/// splits exactly as `foo-1.0.0-1/desc` does. That is why [`walk`]'s duplicate check is keyed on
+/// this function's output rather than on the raw path. The two spellings denote the same member,
+/// and must be treated as such.
 fn two_components_of(raw_path: &Path) -> Option<(&str, &str)> {
     let mut components = raw_path.components();
     let (Some(Component::Normal(dir)), Some(Component::Normal(member)), None) =
@@ -445,9 +446,9 @@ fn sniff_file(file: &mut std::fs::File, path: &Path) -> Result<DecompressionSett
 
 /// Identifies a compression format from its magic bytes.
 ///
-/// The [alpm-repo-db] spec also allows `.Z`, `.lrz`, `.lz`, `.lz4` and `.lzo` suffixes;
-/// `alpm-compress` implements none of them (confirmed: its `DecompressionSettings` has no
-/// variant for any of the five), so archives using them are read by nothing in this crate.
+/// The [alpm-repo-db] spec also allows `.Z`, `.lrz`, `.lz`, `.lz4` and `.lzo` suffixes.
+/// `alpm-compress` implements none of them. Confirmed: its `DecompressionSettings` has no variant
+/// for any of the five. So archives using them are read by nothing in this crate.
 ///
 /// [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
 fn sniff(header: &[u8]) -> Option<DecompressionSettings> {
@@ -468,9 +469,9 @@ fn sniff(header: &[u8]) -> Option<DecompressionSettings> {
 
 /// Tells a genuine bound violation apart from an unrelated I/O or tar-format failure.
 ///
-/// `tar` propagates [`BoundedReader`]'s error as an opaque [`std::io::Error`], so the shared
-/// `tripped` flag — set only when the configured limit was actually exceeded — is what lets
-/// this be reported as [`Error::LimitExceeded`] rather than a generic parse failure.
+/// `tar` propagates [`BoundedReader`]'s error as an opaque [`std::io::Error`]. So the shared
+/// `tripped` flag is what lets this be reported as [`Error::LimitExceeded`] rather than a generic
+/// parse failure. That flag is set only when the configured limit was actually exceeded.
 fn classify_io_error(
     path: &Path,
     source: std::io::Error,
@@ -548,10 +549,10 @@ mod tests {
 
     /// As [`gzip_tar`], but writes each member's name into the header field verbatim.
     ///
-    /// `tar::Builder::append_data` normalises the path it is given, so it cannot produce a
-    /// member named `foo-1.0.0-1/./desc` — which is exactly the shape the duplicate check
-    /// needs to be tested against. Writing the name bytes directly is the only way to build
-    /// one, and mirrors what a non-Rust archiver could legitimately emit.
+    /// `tar::Builder::append_data` normalises the path it is given, so it cannot produce a member
+    /// named `foo-1.0.0-1/./desc`. That is exactly the shape the duplicate check needs to be tested
+    /// against. Writing the name bytes directly is the only way to build one, and mirrors what a
+    /// non-Rust archiver could legitimately emit.
     fn gzip_tar_raw(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut tar_bytes = Vec::new();
 
@@ -763,8 +764,8 @@ mod tests {
         assert_eq!(duplicate_skips, 1);
     }
 
-    /// The duplicate check keys on the parsed identity, not the raw path, so a second
-    /// spelling of the same member is caught rather than silently accepted as a new one.
+    /// The duplicate check keys on the parsed identity, not the raw path. So a second spelling of
+    /// the same member is caught, rather than silently accepted as a new one.
     /// `Path::components` normalises the interior `.` away, so both paths denote
     /// `foo-1.0.0-1/desc`.
     #[test]
@@ -868,9 +869,9 @@ mod tests {
         assert!(found.is_empty());
     }
 
-    /// The property the whole function exists for: once every wanted name has been seen,
-    /// the rest of the archive is never decompressed at all — proven by a limit that a full
-    /// walk of the same archive genuinely cannot satisfy, but a stopped-early walk can.
+    /// The property the whole function exists for. Once every wanted name has been seen, the rest
+    /// of the archive is never decompressed at all. The proof is a limit that a full walk of the
+    /// same archive genuinely cannot satisfy, but a stopped-early walk can.
     #[test]
     fn walk_matching_stops_decompressing_once_every_wanted_name_is_found() {
         let dir = tempfile::tempdir().unwrap();
@@ -894,9 +895,9 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found.first().map(|(name, _)| name.as_str()), Some("foo-1.0.0-1"));
 
-        // Sanity check the premise: this archive and limit cannot be walked in full without
-        // tripping the limit, so the success above is proof of stopping early, not of
-        // `bar`'s entry merely fitting anyway.
+        // Sanity check the premise. This archive and limit cannot be walked in full without
+        // tripping the limit. So the success above is proof of stopping early, not of `bar`'s
+        // entry merely fitting anyway.
         let err = walk(&path, &limits, |_| Ok(()), |_| {}).unwrap_err();
         assert!(
             matches!(&err, Error::LimitExceeded { limit: Limit::RepoInflated, .. }),

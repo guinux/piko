@@ -3,7 +3,7 @@
 use std::{path::Path, process::ExitCode};
 
 use piko_db::config::PacmanConfig;
-use piko_net::{Cancel, Concurrency, Outcome, Refresher, RepoRefresh};
+use piko_net::{Cancel, Concurrency, DatabaseKind, Outcome, Refresher, RepoRefresh};
 
 use crate::output::report;
 
@@ -11,17 +11,19 @@ use crate::output::report;
 ///
 /// Refreshes named repositories only when `only` is non-empty, every configured one
 /// otherwise. `force` bypasses the conditional request, so a `304` can never come back.
+/// `files` adds each selected repository's `<repo>.files` archive beside its `<repo>.db`.
+/// pacman fetches that archive through a separate `-Fy` operation.
 ///
 /// A repository that fails does not stop the others. One dead mirror set should not prevent
 /// the rest of the system from being refreshed. The exit code still reports that something
 /// failed, so a script cannot mistake a partial refresh for a complete one.
 ///
 /// `ParallelDownloads` of them run at once. Nothing is printed from a worker. `refresh_all`
-/// hands back one result per repository in configuration order, and they are reported here
+/// hands back one result per repository in configuration order. They are reported here
 /// afterwards, so what the user reads does not depend on which mirror was quick.
 ///
 /// `cancel` is already installed by the caller rather than by this function. `update` runs a
-/// refresh immediately before a transaction that installs its own handler; sharing one
+/// refresh immediately before a transaction that installs its own handler. Sharing one
 /// registration is required, since `ctrlc::set_handler` accepts only one per process. See
 /// `crate::signal`.
 pub fn refresh(
@@ -29,6 +31,7 @@ pub fn refresh(
     dbpath: &Path,
     only: &[String],
     force: bool,
+    files: bool,
     cancel: &Cancel,
 ) -> ExitCode {
     let sync_dir = dbpath.join("sync");
@@ -60,12 +63,22 @@ pub fn refresh(
         .iter()
         .filter(|repo| only.is_empty() || only.contains(&repo.name.to_string()))
         .collect();
-    let names: Vec<String> = selected.iter().map(|repo| repo.name.to_string()).collect();
-    let requests: Vec<RepoRefresh<'_>> = selected
+    // One entry per file, not per repository: with `--files` a repository contributes two.
+    // Its `.db` and its `.files` are separate downloads, each with its own result, its own
+    // row, and its own `Last-Modified`. The two entries sit next to each other, so the output
+    // reads repository by repository. The pool schedules them in any order.
+    let kinds: &[DatabaseKind] =
+        if files { &[DatabaseKind::Db, DatabaseKind::Files] } else { &[DatabaseKind::Db] };
+    let expanded: Vec<(&piko_db::config::RepositoryConfig, DatabaseKind)> =
+        selected.iter().flat_map(|repo| kinds.iter().map(|kind| (*repo, *kind))).collect();
+    let targets: Vec<(String, DatabaseKind)> =
+        expanded.iter().map(|(repo, kind)| (repo.name.to_string(), *kind)).collect();
+    let requests: Vec<RepoRefresh<'_>> = expanded
         .iter()
-        .zip(&names)
-        .map(|(repo, name)| RepoRefresh {
+        .zip(&targets)
+        .map(|((repo, kind), (name, _))| RepoRefresh {
             name,
+            kind: *kind,
             servers: &repo.servers,
             policy: piko_sig::Policy::for_database(
                 repo.effective_sig_level(config.options.sig_level),
@@ -76,8 +89,10 @@ pub fn refresh(
     // One list holds every repository's row, rather than one list per repository. With
     // several refreshes in flight there is no longer a single row at a time to draw.
     let steps = crate::progress::StepList::new();
-    let rows: Vec<crate::progress::Row> =
-        names.iter().map(|name| steps.download(&format!("Synchronizing {name}"), 0)).collect();
+    let rows: Vec<crate::progress::Row> = targets
+        .iter()
+        .map(|(name, kind)| steps.download(&format!("Synchronizing {}", label(name, *kind)), 0))
+        .collect();
     let sinks: Vec<_> =
         rows.iter().map(|row| crate::progress::database_download_sink(row.clone())).collect();
     let dispatch = |index: usize, event: piko_net::Event| {
@@ -97,10 +112,12 @@ pub fn refresh(
     );
 
     let mut failed = false;
-    for ((name, row), result) in names.iter().zip(rows).zip(results) {
+    for (((name, kind), row), result) in targets.iter().zip(rows).zip(results) {
         match result {
             Ok(Outcome::Updated) => row.finish(),
-            Ok(Outcome::UpToDate) => row.finish_plain(format!("{name} (up to date)")),
+            Ok(Outcome::UpToDate) => {
+                row.finish_plain(format!("{} (up to date)", label(name, *kind)));
+            }
             Err(error) => {
                 row.finish();
                 steps.suspend(|| report(&error));
@@ -124,4 +141,15 @@ pub fn refresh(
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// The name the output shows for one refresh target.
+///
+/// A `.db` shows its repository name, as pacman prints it. A `.files` shows its file name. Two
+/// rows for one repository then differ by more than the order they were printed in.
+fn label(name: &str, kind: DatabaseKind) -> String {
+    match kind {
+        DatabaseKind::Db => name.to_owned(),
+        DatabaseKind::Files => kind.file_name(name),
+    }
 }

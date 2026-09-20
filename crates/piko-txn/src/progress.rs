@@ -27,17 +27,17 @@ pub enum Event<'a> {
         step: &'a Step,
         /// For a [`Step::Install`], the entry it will replace, if any. This is `None` for a
         /// fresh install and always `None` for a [`Step::Remove`]. `Transaction::verify`
-        /// already worked this out for every candidate, so a caller can tell an update from a
-        /// fresh install before the step runs, not only from [`StepOutcome::Installed`]'s
-        /// `replaced` once it has run.
+        /// already worked this out for every candidate. So a caller can tell an update from a
+        /// fresh install before the step runs. It need not wait for
+        /// [`StepOutcome::Installed`]'s `replaced`.
         replaces: Option<&'a EntryName>,
     },
     /// The step most recently started completed without error. Its journal entry is durably
     /// recorded.
     ///
     /// A step that fails surfaces through `commit_with_progress`'s `Result` instead. This
-    /// event is never emitted for a step that did not finish, and it is never the only record
-    /// that a step did finish — see [`crate::Report`].
+    /// event is never emitted for a step that did not finish. It is also never the only record
+    /// that a step did finish. See [`crate::Report`].
     StepFinished {
         /// The step that just finished — the same value the matching [`Event::StepStarted`]
         /// carried.
@@ -158,8 +158,8 @@ pub enum StepOutcome<'a> {
 /// One thing happening while [`crate::transaction::Transaction::verify_with_progress`] locates,
 /// verifies, and reads every package a plan needs.
 ///
-/// This is the same exception as [`Event`]; see this module's doc comment. It is
-/// `#[non_exhaustive]` for the same reason `Event` is: a caller must not be able to
+/// This is the same exception as [`Event`]. See this module's doc comment. It is
+/// `#[non_exhaustive]` for the same reason `Event` is. A caller must not be able to
 /// exhaustively match today and break on the next variant this module adds.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
@@ -169,8 +169,8 @@ pub enum VerifyEvent {
     ///
     /// This fires only for [`Step::Install`], for the same reason as
     /// [`PackageVerified`](Self::PackageVerified). It exists because signature checking hashes
-    /// the whole package file and can be the slowest single step in `verify_with_progress` for
-    /// a large package. Without it, nothing is reported between the last download finishing
+    /// the whole package file. For a large package that can be the slowest single step in
+    /// `verify_with_progress`. Without it, nothing is reported between the last download finishing
     /// and the first [`PackageVerified`](Self::PackageVerified), which also waits on the
     /// archive read.
     SignatureChecked {
@@ -180,8 +180,8 @@ pub enum VerifyEvent {
         /// The plan's total install-candidate count, known up front from the plan itself.
         total: usize,
     },
-    /// One install candidate has been located (downloaded if it was not already cached),
-    /// had its signature checked, and had its archive opened and parsed.
+    /// One install candidate is ready. It has been located, downloaded if it was not already
+    /// cached, signature-checked, and had its archive opened and parsed.
     ///
     /// This fires only for [`Step::Install`]. A [`Step::Remove`] neither downloads nor
     /// verifies anything, so it does not count toward `total`.
@@ -204,8 +204,8 @@ pub enum VerifyEvent {
     /// The file-conflict check has passed. The disk-space estimate is about to run.
     ///
     /// Fires only when `CheckSpace` is configured and the transaction installs something. Like
-    /// [`ConflictCheckStarted`](VerifyEvent::ConflictCheckStarted) this is a start marker with
-    /// no matching "finished" event: the estimate stats one filesystem per mount point the
-    /// transaction touches, which is a handful of syscalls, not a countable per-package walk.
+    /// [`ConflictCheckStarted`](VerifyEvent::ConflictCheckStarted), this is a start marker with
+    /// no matching "finished" event. The estimate stats one filesystem per mount point the
+    /// transaction touches. That is a handful of syscalls, not a countable per-package walk.
     DiskSpaceCheckStarted,
 }

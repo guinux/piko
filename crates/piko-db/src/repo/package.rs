@@ -30,8 +30,8 @@ use crate::{
 
 /// A repository `desc` entry's full typed parse, plus the fields kept beside it.
 ///
-/// `%URL%` and `%PACKAGER%` are taken out of the text before the upstream parse, so a value
-/// their typed conversion refuses cannot make the entry unreadable. See
+/// `%URL%` and `%PACKAGER%` are taken out of the text before the upstream parse. So a value their
+/// typed conversion refuses cannot make the entry unreadable. See
 /// [`crate::desc_compat::take_fields`].
 #[derive(Debug)]
 pub(crate) struct LoadedDesc {
@@ -43,14 +43,14 @@ pub(crate) struct LoadedDesc {
 ///
 /// One instance is shared (via [`Arc`]) across every [`RepoPackage`] in a
 /// [`super::RepoDatabase`]. The file list for *any* package requires decompressing the
-/// *whole* `.files` archive — there is no random access into a gzip-over-tar stream.
-/// Building it once, on first use, and sharing the result is what makes opening `<repo>.db`
-/// and never calling [`RepoPackage::file_list`] cost nothing beyond the `desc` pass.
+/// *whole* `.files` archive, because there is no random access into a gzip-over-tar stream. It is
+/// built once, on first use, and the result is shared. That is what makes opening `<repo>.db` and
+/// never calling [`RepoPackage::file_list`] cost nothing beyond the `desc` pass.
 #[derive(Debug)]
 pub(crate) struct FilesSource {
     lazy: Lazy<FilesArena>,
-    /// The `.files` archive to load from. `None` means `<repo>.db` was opened with no
-    /// sibling `<repo>.files` at all — every [`RepoPackage::file_list`] call then fails with
+    /// The `.files` archive to load from. `None` means `<repo>.db` was opened with no sibling
+    /// `<repo>.files` at all. Every [`RepoPackage::file_list`] call then fails with
     /// [`Error::FilesUnavailable`], cached the same way any other failure is.
     archive_path: Option<PathBuf>,
     limits: Limits,
@@ -68,8 +68,8 @@ impl FilesSource {
         Self { lazy: Lazy::new(), archive_path: Some(archive_path), limits, repo }
     }
 
-    /// A source whose arena has already been built — the `.files`-only variant, where the
-    /// requirement is to populate everything in the same pass as `desc`, not to defer it.
+    /// A source whose arena has already been built. That is the `.files`-only variant, where
+    /// everything must be populated in the same pass as `desc`, not deferred.
     pub(crate) fn preloaded(repo: RepoName, limits: Limits, arena: FilesArena) -> Self {
         let source = Self { lazy: Lazy::new(), archive_path: None, limits, repo };
         // Seeding the slot here, instead of special-casing an already-built arena
@@ -100,7 +100,7 @@ impl FilesSource {
                 if let Ok(parsed) = RepoFilesV1::from_str(&text) {
                     // A same-archive duplicate keeps the first entry. There is nowhere to
                     // report it from here, for the same reason `on_skip` below discards its
-                    // diagnostics — `RepoDatabase::diagnostics()` was finalised at open time.
+                    // diagnostics. `RepoDatabase::diagnostics()` was finalised at open time.
                     let _ = arena.insert(
                         archive_path,
                         entry.name().clone(),
@@ -126,12 +126,12 @@ impl FilesSource {
     /// Returns the file list for each of `packages`, touching as little of the `.files`
     /// archive as the requested set allows.
     ///
-    /// If the shared arena is already loaded — successfully or not, from an earlier
-    /// [`RepoPackage::file_list`] call, or because this repository's variant preloads
-    /// everything at open time — every lookup is served from that cache with no further I/O.
+    /// The shared arena may already be loaded, successfully or not. That happens through an
+    /// earlier [`RepoPackage::file_list`] call, or because this repository's variant preloads
+    /// everything at open time. Every lookup is then served from that cache with no further I/O.
     /// This includes replaying a cached failure instead of retrying it, matching [`Lazy`]'s
-    /// contract. Otherwise this performs one dedicated walk via [`archive::walk_matching`],
-    /// scoped to exactly `packages`' names.
+    /// contract. Otherwise this performs one dedicated walk via [`archive::walk_matching`], scoped
+    /// to exactly `packages`' names.
     ///
     /// That walk is **never** written back into the shared cache. It may cover only part of
     /// the archive, and the cache's contract is "the whole thing or nothing". A later
@@ -170,7 +170,7 @@ impl FilesSource {
         let mut arena = FilesArena::new();
         let walk_result =
             archive::walk_matching(archive_path, &self.limits, &wanted, |entry, text| {
-                // As in `load`: a member that fails to parse here is dropped, not fatal — it
+                // As in `load`, a member that fails to parse here is dropped, not fatal. It
                 // surfaces as `Error::FilesMissingForPackage` for that one package.
                 if let Ok(parsed) = RepoFilesV1::from_str(&text) {
                     let _ = arena.insert(
@@ -199,8 +199,8 @@ impl FilesSource {
     }
 }
 
-/// Looks `package` up in `arena`, collecting its paths into an owned `Vec` since `arena` may
-/// be a temporary, walk-scoped one that does not outlive the caller.
+/// Looks `package` up in `arena`, collecting its paths into an owned `Vec`. `arena` may be a
+/// temporary, walk-scoped one that does not outlive the caller.
 fn collect_file_list(
     arena: &FilesArena,
     package: &RepoPackage,
@@ -213,26 +213,26 @@ fn collect_file_list(
 
 /// A single package described by a repository database.
 ///
-/// The name and version are known as soon as the database is opened, from the entry directory
-/// name in the archive, exactly as [`crate::LocalPackage`] does.
+/// The name and version are known as soon as the database is opened. Both come from the entry
+/// directory name in the archive, exactly as [`crate::LocalPackage`] does.
 ///
 /// # Two tiers of `desc`
 ///
-/// Reading the archive at all requires decompressing it, so every `desc` entry's **text** is
-/// in memory by the time a package exists. Converting that text to typed values is a separate
-/// cost, and a large one: measured at 67% of the whole open against this machine's real
-/// `extra.db`. The conversion is split for this reason.
+/// Reading the archive at all requires decompressing it. So every `desc` entry's **text** is in
+/// memory by the time a package exists. Converting that text to typed values is a separate cost,
+/// and a large one. It measured at 67% of the whole open against this machine's real `extra.db`.
+/// The conversion is split for this reason.
 ///
 /// - **Eager** — [`Self::depends`], [`Self::provides`], [`Self::conflicts`],
 ///   [`Self::replaces`], [`Self::groups`], [`Self::compressed_size`],
 ///   [`Self::installed_size`]. Infallible and free after open. [`crate::solve::Universe`]
 ///   reads these fields for *every* candidate, so deferring them would buy nothing. See
 ///   `repo::eager`.
-/// - **Deferred** — everything else, through [`Self::desc`], which parses the retained text
-///   on first access and caches the outcome exactly as [`crate::LocalPackage::desc`] does.
+/// - **Deferred** — everything else, through [`Self::desc`]. That parses the retained text on
+///   first access, and caches the outcome exactly as [`crate::LocalPackage::desc`] does.
 ///
-/// The file list is a third tier — see `FilesSource` — because it may require decompressing a
-/// *second*, much larger archive that has not been touched yet.
+/// The file list is a third tier; see `FilesSource`. It may require decompressing a *second*, much
+/// larger archive that has not been touched yet.
 pub struct RepoPackage {
     entry: EntryName,
     eager: EagerFields,
@@ -398,15 +398,15 @@ impl RepoPackage {
 
     /// Whether the deferred `desc` parse has already run.
     ///
-    /// Exists for the same reason [`crate::LocalPackage::is_desc_loaded`] does: proving, from
+    /// Exists for the same reason [`crate::LocalPackage::is_desc_loaded`] does. It proves, from
     /// outside the crate, that opening a database does not parse what it should not.
     #[must_use]
     pub fn is_desc_loaded(&self) -> bool {
         self.desc.is_loaded()
     }
 
-    /// The paths owned by this package, loading and caching the whole `.files` archive on
-    /// first access — by any package, since the store is shared.
+    /// The paths owned by this package. The whole `.files` archive is loaded and cached on first
+    /// access, by any package, since the store is shared.
     ///
     /// # Errors
     ///
@@ -415,9 +415,9 @@ impl RepoPackage {
     /// - [`Error::FilesMissingForPackage`] if the `.files` archive has no entry for this
     ///   package at all.
     /// - [`Error::FilesVersionSkew`] if the `.files` archive has this package at a
-    ///   **different version** than this database. `<repo>.db` and `<repo>.files` are
-    ///   refreshed independently by pacman (`-Sy` versus `-Fy`) and routinely disagree —
-    ///   measured at 12 of `core`'s 296 packages on the machine this was developed against.
+    ///   **different version** than this database. pacman refreshes `<repo>.db` and
+    ///   `<repo>.files` independently, with `-Sy` versus `-Fy`, and they routinely disagree.
+    ///   Measured at 12 of `core`'s 296 packages on the machine this was developed against.
     ///   Serving the wrong build's paths silently would be worse than refusing outright.
     pub fn file_list(&self) -> std::result::Result<PathIter<'_>, SharedError> {
         let arena = self.files.arena()?;
@@ -426,10 +426,10 @@ impl RepoPackage {
 
     /// Whether the shared file-list arena has already been loaded.
     ///
-    /// Since the arena is shared across every package in the database (see `FilesSource`), this
+    /// The arena is shared across every package in the database; see `FilesSource`. So this
     /// reflects the database's state, not just this one package's. It exists for the same reason
-    /// [`crate::LocalPackage::is_desc_loaded`] does: proving, from outside the crate, that opening
-    /// a database does not load what it should not.
+    /// [`crate::LocalPackage::is_desc_loaded`] does. It proves, from outside the crate, that
+    /// opening a database does not load what it should not.
     #[must_use]
     pub fn is_files_loaded(&self) -> bool {
         self.files.lazy.is_loaded()
@@ -553,9 +553,9 @@ mod tests {
             [PathBuf::from("usr/"), PathBuf::from("usr/bin/"), PathBuf::from("usr/bin/foo")]
         );
 
-        // A batch lookup must never populate the shared, whole-database cache: it may have
-        // covered only part of the archive, and a later request for `bar` must still trigger
-        // its own load rather than see a false `FilesMissingForPackage` from a partial arena.
+        // A batch lookup must never populate the shared, whole-database cache. It may have
+        // covered only part of the archive. A later request for `bar` must still trigger its own
+        // load, rather than see a false `FilesMissingForPackage` from a partial arena.
         assert!(!foo.is_files_loaded(), "a targeted walk must not mark the shared arena loaded");
     }
 
@@ -575,8 +575,8 @@ mod tests {
         assert!(foo.file_list().is_ok());
         assert!(foo.is_files_loaded());
 
-        // Now remove the archive from disk entirely: if the batch path re-walked it, this
-        // would fail with an I/O error instead of serving the cached answer.
+        // Now remove the archive from disk entirely. If the batch path re-walked it, this would
+        // fail with an I/O error instead of serving the cached answer.
         std::fs::remove_file(&archive_path).unwrap();
 
         let mut results = files.file_lists_for(&[&foo]);
@@ -657,8 +657,8 @@ mod tests {
         assert!(package.is_desc_loaded(), "asking for desc must load it");
     }
 
-    /// `%DEPENDS%` is deferred like the rest of `desc`, so a package malformed only there is
-    /// kept at open and fails when its dependencies are read — cached, not retried.
+    /// `%DEPENDS%` is deferred like the rest of `desc`. So a package malformed only there is kept
+    /// at open, and fails when its dependencies are read. The failure is cached, not retried.
     #[test]
     fn a_malformed_depends_fails_on_access_and_is_cached() {
         let text = format!("{MINIMAL_DESC}%DEPENDS%\nbash>=\n\n");
@@ -677,12 +677,12 @@ mod tests {
         assert!(!package.is_desc_loaded(), "a %DEPENDS% failure must not force the full parse");
     }
 
-    /// A `desc` that is well-formed in its eager sections but broken in a deferred one is
-    /// kept, and reports the failure identically on every access rather than retrying it.
+    /// A `desc` that is well-formed in its eager sections but broken in a deferred one is kept. It
+    /// reports the failure identically on every access, rather than retry it.
     #[test]
     fn a_deferred_parse_failure_is_cached_not_retried() {
-        // `%PACKAGER%` is mandatory to `alpm-repo-db` but is not one of the eager fields, so
-        // removing it produces exactly the split this test is about.
+        // `%PACKAGER%` is mandatory to `alpm-repo-db`, but is not one of the eager fields.
+        // Removing it produces exactly the split this test is about.
         let text =
             MINIMAL_DESC.replace("%PACKAGER%\nFoobar McFooface <foobar@mcfooface.org>\n\n", "");
         let files = Arc::new(FilesSource::unavailable(a_repo_name(), Limits::default()));

@@ -1,8 +1,8 @@
 //! `CheckSpace`: will this transaction fit?
 //!
 //! libalpm's `diskspace.c`, transcribed. The question is not "how much bigger does the system
-//! get", which an upgrade can answer with zero while still needing a gigabyte half-way
-//! through. It is "what is the **peak** occupancy, per filesystem, over the transaction's
+//! get". An upgrade can answer that with zero and still need a gigabyte half-way through. The
+//! question is "what is the **peak** occupancy, per filesystem, over the transaction's
 //! timeline".
 //!
 //! So the accounting keeps two numbers per mount point. `blocks_needed` is the running net
@@ -23,13 +23,13 @@
 //! transaction *writes to* is then checked for space. One that only loses files is not, because
 //! it can only end up emptier.
 //!
-//! Every refusal is collected before any is raised, so one run names every partition that is
-//! in the way rather than the first.
+//! Every refusal is collected before any is raised. So one run names every partition that is
+//! in the way, rather than the first.
 //!
 //! Sizes come from two different places, and neither is the database's `%SIZE%`. An install is
 //! measured by the archive's own member sizes, because the package is not installed yet. A
-//! removal is measured by what is actually on disk, because the installed size recorded in a
-//! `desc` describes the build rather than this filesystem. Directories and symbolic links
+//! removal is measured by what is actually on disk. The installed size recorded in a `desc`
+//! describes the build rather than this filesystem. Directories and symbolic links
 //! count as zero on both sides, matching what libarchive reports for them.
 
 pub mod mounts;
@@ -123,8 +123,8 @@ impl std::fmt::Display for PartitionSpace {
 ///
 /// libalpm logs each of these as a warning and carries on. piko returns them instead
 /// (`crate`'s "diagnostics are returned, never logged"), so the caller decides whether a user
-/// sees them. None of them is an error: an estimate that refuses to run at all is strictly
-/// worse than one that is missing a few files' worth of blocks.
+/// sees them. None of them is an error. An estimate that refuses to run at all is strictly
+/// worse than one that misses a few files' worth of blocks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Problem {
@@ -273,7 +273,7 @@ impl Ledger {
     /// Charges `size` bytes to whichever filesystem holds `path`.
     ///
     /// `installing` says which of the two `used` flags this sets, and which way the delta
-    /// moves: an install adds blocks, a removal gives them back.
+    /// moves. An install adds blocks. A removal gives them back.
     fn charge(&mut self, path: &Path, size: u64, installing: bool) {
         let Some(index) = self.locate(path) else { return };
         let Some(entry) = self.entries.get_mut(index) else { return };
@@ -326,7 +326,7 @@ fn read_stats(mount_point: &Path) -> std::result::Result<Stats, String> {
         available: fs.f_bavail,
         // On Linux this flag comes from `statfs`'s `f_flags`, where `ST_RDONLY` and `MS_RDONLY`
         // are the same bit. A kernel too old to report mount flags leaves it clear, which
-        // reads as "writable" — a missed refusal rather than a false one.
+        // reads as "writable". That is a missed refusal rather than a false one.
         read_only: fs.f_flag.contains(StatVfsMountFlags::RDONLY),
     })
 }
@@ -370,17 +370,17 @@ fn shortfall(mount_point: &Path, peak: i64, stats: &Stats) -> Option<PartitionSp
 /// `rootfs` is that same root as an open directory. It stats a file that is going away without
 /// following a symlink out of the root.
 ///
-/// `skips_extraction` answers `NoExtract`. libalpm does not consult it here, and charges for
-/// bytes its own extraction will then decline to write; piko does not count what it will not
+/// `skips_extraction` answers `NoExtract`. libalpm does not consult it here. It charges for
+/// bytes its own extraction will then decline to write. piko does not count what it will not
 /// write.
 ///
 /// Returns the problems it worked around. None of them is a failure.
 ///
 /// # Errors
 ///
-/// [`Error::DiskSpace`] if any filesystem is too full or mounted read only — every offender is
+/// [`Error::DiskSpace`] if any filesystem is too full or mounted read only. Every offender is
 /// named, not just the first. [`Error::MountTableUnreadable`] if the root maps to no mount
-/// point at all, which means the table describes a different system than the one being written
+/// point at all. That means the table describes a different system than the one being written
 /// to.
 pub fn check_install(
     table: MountTable,
@@ -400,8 +400,8 @@ pub fn check_install(
         });
     }
 
-    // Every removal is credited before any install is charged, because that is the order the
-    // commit runs in: a replaced or conflicting package is gone before the next archive is
+    // Every removal is credited before any install is charged. That is the order the commit
+    // runs in. A replaced or conflicting package is gone before the next archive is
     // extracted.
     for files in removals {
         credit_removal(&mut ledger, root, rootfs, files);
@@ -448,8 +448,8 @@ fn credit_removal(ledger: &mut Ledger, root: &Path, rootfs: &RootDir, files: &[P
 
 /// The size `file` occupies under `rootfs`, `None` if it cannot be stat'ed.
 ///
-/// The inner `None` means "found, but counts as zero": a directory or a symbolic link, which
-/// libarchive reports as zero-sized and libalpm therefore skips.
+/// The inner `None` means "found, but counts as zero". That is a directory or a symbolic
+/// link, which libarchive reports as zero-sized and libalpm therefore skips.
 ///
 /// Resolution goes component by component through the root's own descent, not through a
 /// concatenated path. libalpm uses a plain `lstat` here. piko already owns the descent that
@@ -468,7 +468,7 @@ fn on_disk_size(rootfs: &RootDir, file: &Path) -> Option<Option<u64>> {
 
 /// Refuses a batch of downloads unless the directory receiving them can hold it.
 ///
-/// `sizes` are the bytes still to be fetched — a package already in the cache contributes
+/// `sizes` are the bytes still to be fetched. A package already in the cache contributes
 /// nothing, because it is not in the batch.
 ///
 /// Unlike [`check_install`], every problem here is fatal. There is one directory and one
@@ -477,12 +477,12 @@ fn on_disk_size(rootfs: &RootDir, file: &Path) -> Option<Option<u64>> {
 /// # Errors
 ///
 /// [`Error::DiskSpace`] if the filesystem cannot hold the batch.
-/// [`Error::MountTableUnreadable`] if the table cannot be read, if no mount point covers the
-/// directory, or if that filesystem's free space cannot be read.
+/// [`Error::MountTableUnreadable`] covers three cases. The table cannot be read, no mount
+/// point covers the directory, or that filesystem's free space cannot be read.
 pub fn check_download(directory: &Path, sizes: impl IntoIterator<Item = u64>) -> Result<()> {
     let table = MountTable::load()?;
-    // libalpm resolves this path and only this one, so a symlinked cache directory is charged
-    // to the filesystem that actually receives the bytes. A failure falls back to the
+    // libalpm resolves this path and only this one. So a symlinked cache directory is
+    // charged to the filesystem that actually receives the bytes. A failure falls back to the
     // unresolved path, as it does there.
     let resolved = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf());
     let index = table.match_point(&resolved).ok_or_else(|| Error::MountTableUnreadable {
@@ -649,8 +649,8 @@ mod tests {
 
     #[test]
     fn a_read_only_filesystem_is_reported_as_read_only_rather_than_as_too_full() {
-        // libalpm's `else if`: the two verdicts never fire for the same mount point, and
-        // "mounted read only" is the one that explains what to do about it.
+        // libalpm's `else if`. The two verdicts never fire for the same mount point.
+        // "Mounted read only" is the one that explains what to do about it.
         let mut ledger = ledger();
         let root = index_of(&ledger, "/");
         ledger.entries[root].fsinfo =

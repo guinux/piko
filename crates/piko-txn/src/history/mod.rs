@@ -1,40 +1,40 @@
 //! A durable record of what transactions did.
 //!
-//! The [journal](crate::journal) is deliberately short-lived: it exists so an *interrupted*
-//! transaction is detectable, and it is deleted the moment one finishes. Nothing else recorded
-//! that a transaction happened at all. A package removed last month left no trace, and
+//! The [journal](crate::journal) is deliberately short-lived. It exists so an *interrupted*
+//! transaction is detectable, and it is deleted the moment one finishes. Nothing else records
+//! that a transaction happened at all. A package removed last month leaves no trace, and
 //! `%INSTALLDATE%` answers only "when was what is here now put here".
 //!
 //! This module writes two records, because they answer different questions.
 //!
 //! # `pacman.log`, the shared record
 //!
-//! The `LogFile` directive was already parsed and already reported by `piko conf`; nothing
-//! consumed it. So on a system driven by both tools, `/var/log/pacman.log` had a hole exactly
-//! where piko acted. [`PacmanLog`] fills it, reproducing `_alpm_log_leader`'s format
-//! (`log.c`) so one file holds both tools' lines and existing readers keep working.
+//! The `LogFile` directive is parsed, and `piko conf` reports it. Without a consumer, a
+//! system driven by both tools has a hole in `/var/log/pacman.log` exactly where piko acts.
+//! [`PacmanLog`] fills it. It reproduces `_alpm_log_leader`'s format (`log.c`), so one file
+//! holds both tools' lines and existing readers keep working.
 //!
 //! piko's lines are spelled `[PIKO]` where libalpm spells `[ALPM]`. Reading the file then
-//! always says which tool acted. The cost is real and is the reason this is a choice rather
-//! than an oversight: third-party tooling that greps for `[ALPM]` will not see piko's
+//! always says which tool acted. The cost is real, and it is why this is a choice rather than
+//! an oversight. Third-party tooling that greps for `[ALPM]` will not see piko's
 //! transactions.
 //!
 //! # `piko-history`, the detailed record
 //!
-//! `pacman.log`'s line format cannot carry what piko knows — the exact command line, the
-//! transaction's outcome as a value rather than a sentence, which `.pacnew` files it left.
+//! `pacman.log`'s line format cannot carry what piko knows. That is the exact command line,
+//! the transaction's outcome as a value rather than a sentence, and the `.pacnew` files left.
 //! [`store`] appends one self-delimiting block per transaction to `<dbpath>/piko-history`,
 //! beside the journal and the lock.
 //!
 //! # Neither one can fail a transaction
 //!
-//! Both sinks are best-effort, and problems come back as [`Problem`] values on
-//! [`crate::Report`] rather than as errors — principle 7, "diagnostics are returned, never
-//! logged", applies to this module's own failures even though its whole job is writing a log.
+//! Both sinks are best-effort. Problems come back as [`Problem`] values on [`crate::Report`]
+//! rather than as errors. Principle 7, "diagnostics are returned, never logged", applies to
+//! this module's own failures, even though its whole job is writing a log.
 //!
 //! For `pacman.log` this diverges from libalpm, which raises `ALPM_ERR_BADPERMS`. Refusing a
 //! transaction because `<root>/var/log/` does not exist would break bootstrapping a new root
-//! and buy nothing. For the store the reasoning is different but lands in the same place: its
+//! and buy nothing. For the store the reasoning differs but lands in the same place. Its
 //! block is appended *after* every step succeeded, so failing there would report a completed
 //! transaction as a failed one.
 
@@ -57,8 +57,8 @@ use crate::progress::{Event, StepOutcome};
 ///
 /// The four install verbs are `add.c:641-655`'s, and the removal verb is `remove.c:722`'s.
 /// Which one applies is decided **here and nowhere else**, so the two sinks cannot come to
-/// different conclusions about the same step — the same reason `check_validity` is shared
-/// between `piko install -w` and `Transaction::verify`.
+/// different conclusions about the same step. `check_validity` is shared between
+/// `piko install -w` and `Transaction::verify` for the same reason.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
     /// Nothing of this name was installed before.
@@ -305,8 +305,8 @@ pub struct Entry {
 
 /// Where a transaction should record what it does.
 ///
-/// Configuration only: nothing is opened until the transaction stages. Both paths are
-/// optional, and the default records nothing — a library caller opts in, the same way it opts
+/// This is configuration only. Nothing is opened until the transaction stages. Both paths are
+/// optional, and the default records nothing. A library caller opts in, the same way it opts
 /// in to scriptlets.
 #[derive(Clone, Debug, Default)]
 pub struct Recording {
@@ -390,8 +390,8 @@ pub struct Query {
 
 /// Reads both records and merges them into one history, oldest first.
 ///
-/// A missing file is an empty record rather than an error: a system that has run no
-/// transaction through a given tool has no file for it, which is not a failure to report.
+/// A missing file is an empty record rather than an error. A system that has run no
+/// transaction through a given tool has no file for it. That is not a failure to report.
 ///
 /// # Errors
 ///
@@ -441,9 +441,9 @@ pub fn merge(
         let detail = session.id.as_ref().and_then(|id| by_id.remove(id));
         records.push(self::joined(session, detail));
     }
-    // A transaction the store knows and the log does not: the log was unwritable when it ran,
-    // or it was written to a different `LogFile`. Dropping it would hide exactly the
-    // transactions whose recording went wrong.
+    // The store knows some transactions the log does not. Either the log was unwritable when
+    // one ran, or it went to a different `LogFile`. Dropping such a transaction would hide
+    // exactly the ones whose recording went wrong.
     records.extend(by_id.into_values().map(Record::from));
 
     records.sort_by_key(|record| record.started.unwrap_or(i64::MIN));
@@ -541,8 +541,8 @@ pub fn note(recording: &Recording, message: &str) -> Result<(), Problem> {
 /// The open sinks, held for the duration of a transaction.
 ///
 /// Driven by [`crate::progress::Event`] rather than by its own call sites. That is not a
-/// shortcut: `StepFinished` is emitted only after the journal has durably recorded the step,
-/// so feeding this from the event stream makes it structurally impossible for the log to
+/// shortcut. `StepFinished` is emitted only after the journal has durably recorded the step.
+/// So feeding this from the event stream makes it structurally impossible for the log to
 /// claim something the journal does not.
 #[derive(Debug)]
 pub(crate) struct Recorder {
@@ -613,8 +613,8 @@ impl Recorder {
 
     /// Records a finished step: what it left behind first, then what it did.
     ///
-    /// The `.pacnew`/`.pacsave` warnings precede the verb, matching libalpm, which emits them
-    /// from extraction and removal while the final `installed`/`removed` line is written after
+    /// The `.pacnew`/`.pacsave` warnings precede the verb, matching libalpm. libalpm emits
+    /// them from extraction and removal. It writes the final `installed`/`removed` line after
     /// the database entry is updated (`add.c:641`).
     fn step(&mut self, step: &crate::Step, outcome: &StepOutcome<'_>) {
         let (action, pacsaves) = match *outcome {
@@ -629,8 +629,8 @@ impl Recorder {
                 }
                 (Action::installed(entry, replaced), pacsaves)
             }
-            // What was removed is named by the step, not by the outcome: the entry is gone by
-            // the time this fires, so the outcome carries only what the step left behind.
+            // The step names what was removed, not the outcome. The entry is gone by the
+            // time this fires, so the outcome carries only what the step left behind.
             StepOutcome::Removed { pacsaves } => match step {
                 crate::Step::Remove { entry, .. } => (Action::removed(entry), pacsaves),
                 crate::Step::Install { .. } => return,
@@ -670,8 +670,8 @@ impl Recorder {
         }
     }
 
-    /// Drops the log after a write failure, so one broken file does not produce one problem
-    /// per line for the rest of the transaction.
+    /// Drops the log after a write failure. One broken file must not produce one problem per
+    /// line for the rest of the transaction.
     fn note_log_failure(&mut self, error: &std::io::Error) {
         self.log = None;
         if let Some(path) = self.log_path.clone() {
@@ -709,8 +709,8 @@ impl Recorder {
 /// Identifies one transaction: when it started, and which process ran it.
 ///
 /// Unique in practice without a counter or any shared state. `db.lck` already serialises
-/// transactions against one database, so a collision would need two processes with the same
-/// pid starting in the same second against two different databases.
+/// transactions against one database. So a collision needs two processes with the same pid,
+/// starting in the same second, against two different databases.
 fn transaction_id(started: i64) -> String {
     format!("{started}-{}", std::process::id())
 }
@@ -736,8 +736,8 @@ fn strip_pacnew(path: &Path) -> PathBuf {
 
 /// The path a `.pacsave` was rotated from.
 ///
-/// pacman numbers repeated saves `.pacsave.1`, `.pacsave.2`, … so the suffix is matched at the
-/// last `.pacsave`, not only at the end of the string.
+/// pacman numbers repeated saves `.pacsave.1`, `.pacsave.2`, and so on. So the suffix is
+/// matched at the last `.pacsave`, not only at the end of the string.
 fn strip_pacsave(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     match text.rfind(".pacsave") {

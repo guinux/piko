@@ -27,9 +27,9 @@ pub struct Cli {
     /// Directory to read and download package files from. Repeatable, in decreasing
     /// priority.
     ///
-    /// Each directory given here comes before the `CacheDir` list from the parsed
-    /// pacman.conf, rather than replacing it, the same way pacman's flag of the same name
-    /// does. A package downloads into the first directory, and every directory is searched
+    /// Each directory given here comes before the `CacheDir` list from the parsed pacman.conf,
+    /// rather than replacing it. pacman's flag of the same name behaves the same way. A package
+    /// downloads into the first directory, and every directory is searched
     /// for a package already there. With no `--cachedir` and no readable config, this is
     /// `/var/cache/pacman/pkg`.
     #[arg(long = "cachedir", global = true, value_name = "PATH")]
@@ -55,17 +55,16 @@ pub enum Command {
     /// With neither `--repos` nor `--repo`, lists every installed package, same as
     /// `--installed`. This shows directory names only; no package metadata is opened.
     /// `--repo <NAME>` lists that repository's packages instead. `--repos` lists the
-    /// repositories configured in pacman.conf instead, one per line, in file order — no
-    /// database is opened for that case. Ends with a one-line summary, unless `--quiet` is
-    /// given.
+    /// repositories configured in pacman.conf instead, one per line, in file order. No database
+    /// is opened for that case. Ends with a one-line summary, unless `--quiet` is given.
     ///
     /// `-e/--explicit`, `-o/--orphans` and `-m/--foreign` each replace the plain installed
     /// listing with a different filter: `pacman -Qe`/`-Qdtt`/`-Qm` respectively. Each is
     /// rejected together with `--repos`, `--repo`, and with the others.
     ///
-    /// `-g/--groups` lists groups rather than packages, and is the one filter that reads
-    /// either side: installed packages by default (`pacman -Qg`), every configured
-    /// repository with `--repos`, or one with `--repo <NAME>` (`pacman -Sg`).
+    /// `-g/--groups` lists groups rather than packages. It is the one filter that reads either
+    /// side. It lists installed packages by default (`pacman -Qg`). With `--repos` it reads every
+    /// configured repository, and with `--repo <NAME>` just that one (`pacman -Sg`).
     #[command(visible_alias = "ls")]
     List {
         /// List installed packages. This is the default when neither `--repos` nor `--repo`
@@ -88,8 +87,8 @@ pub enum Command {
         )]
         explicit: bool,
         /// List installed packages that were pulled in only as a dependency and that no
-        /// installed package still requires via `%DEPENDS%` — `%OPTDEPENDS%` never counts,
-        /// matching `piko why`/`piko plan -R -s`. Equivalent to `pacman -Qdtt`.
+        /// installed package still requires via `%DEPENDS%`. `%OPTDEPENDS%` never counts, which
+        /// matches `piko why`/`piko plan -R -s`. Equivalent to `pacman -Qdtt`.
         #[arg(
             short,
             long,
@@ -131,16 +130,16 @@ pub enum Command {
     ///
     /// Prints `"{package} /{path}"` for every file each named package owns, one per line.
     /// `--quiet` drops the package-name prefix and prints just `"/{path}"`. That differs from
-    /// `list`'s quiet convention (bare names): a files listing has no name to reduce to, since
-    /// quiet mode removes the package prefix itself. A name that cannot be found, or whose
-    /// file list cannot be read, is reported to stderr. The rest are still processed. The exit
-    /// code is a failure only once something was missing or unreadable.
+    /// `list`'s quiet convention, which prints bare names. A files listing has no name to reduce
+    /// to, since quiet mode removes the package prefix itself. A name that cannot be found, or
+    /// whose file list cannot be read, is reported to stderr. The rest are still processed. The
+    /// exit code is a failure only once something was missing or unreadable.
     ///
-    /// With neither `--installed` nor `--repo`, each name is looked up among installed
-    /// packages first, then in the configured repositories in file (priority) order.
-    /// `--installed` restricts the lookup to installed packages only. `--repo <NAME>` looks
-    /// the named packages up in that one repository's `.files` archive instead, walked once
-    /// for all of them rather than once per package.
+    /// With neither `--installed` nor `--repo`, each name is looked up among installed packages
+    /// first. It is then looked up in the configured repositories, in file (priority) order.
+    /// `--installed` restricts the lookup to installed packages only. `--repo <NAME>` looks the
+    /// named packages up in that one repository's `.files` archive instead. That archive is
+    /// walked once for all of them, rather than once per package.
     Files {
         /// The package(s) whose files to list.
         #[arg(required = true)]
@@ -156,14 +155,46 @@ pub enum Command {
         quiet: bool,
     },
 
+    /// Name the installed package that owns a file.
+    ///
+    /// Prints `"{path} is owned by {package} {version}"` for each path given. `--quiet` prints the
+    /// package name alone. This is the inverse of `files`, and it reads the same `files` data, from
+    /// the other direction. It reads every installed package's file list once, however many paths
+    /// are named.
+    ///
+    /// A relative path resolves against the working directory. A target that holds no `/` and does
+    /// not exist as given is looked up in `$PATH`, so `owns vim` names the package shipping the
+    /// `vim` on the path. Existence is the whole test there: an entry earlier in `$PATH` wins even
+    /// where a shell would pass it over.
+    ///
+    /// This resolves every component but the last through its symlinks. It never resolves the last
+    /// one. So `owns /usr/bin/vi` names the package shipping that symlink, not the package shipping
+    /// what it points at. Both are entries in a package's file list.
+    ///
+    /// The installation root comes from `RootDir` in pacman.conf, as `check`'s does. A path outside
+    /// it belongs to another root's database, so the answer names no owner.
+    ///
+    /// A directory names every package that owns it, since packages sharing a directory is
+    /// ordinary. A file names the first owner only. A path nothing owns is reported to stderr and
+    /// the remaining paths are still processed. The exit code is a failure only once something was
+    /// unowned.
+    Owns {
+        /// The file path(s) whose owning package to name.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Print only the owning package's name, dropping the path and the version.
+        #[arg(short, long)]
+        quiet: bool,
+    },
+
     /// Show one or more packages' metadata, from their `desc` file (installed) or a repository
     /// database archive (same as `list --repo`).
     ///
     /// With neither `--installed` nor `--repo`, each package is looked up among installed
-    /// packages first, then in the configured repositories in file (priority) order, stopping
-    /// as soon as one has it. This is the same "first configured match wins" rule `resolve`
-    /// applies to a literal name. `--installed` restricts the lookup to installed packages
-    /// only. `--repo <NAME>` looks every package up in that one repository only.
+    /// packages first. It is then looked up in the configured repositories, in file (priority)
+    /// order, stopping as soon as one has it. This is the same "first configured match wins" rule
+    /// `resolve` applies to a literal name. `--installed` restricts the lookup to installed
+    /// packages only. `--repo <NAME>` looks every package up in that one repository only.
     ///
     /// A repository package's metadata carries fields an installed package's `desc` does not
     /// (File Name, Make/Check Deps, Compressed Size, checksums, PGP-signature presence). It
@@ -191,13 +222,13 @@ pub enum Command {
     /// Check that entries agree with their `desc` files, and that installed files match their
     /// `ALPM-MTREE` data.
     ///
-    /// For every file a package owns, this compares existence, type, ownership, mode,
-    /// modification time, size, and SHA-256 digest (symlink target, for a symlink) against the
-    /// package's recorded `mtree` data. A package with no `mtree` file is reported and
-    /// skipped, not treated as a failure. A `%BACKUP%` file's own modification time, size, or
-    /// digest may differ; an edited config file is expected to differ. Every other mismatch
-    /// still fails, backup file or not. A missing file matching `NoExtract` is not reported at
-    /// all.
+    /// For every file a package owns, this compares seven things against the package's recorded
+    /// `mtree` data. Those are existence, type, ownership, mode, modification time, size, and
+    /// SHA-256 digest. For a symlink it compares the symlink target instead of the digest. A
+    /// package with no `mtree` file is reported and skipped, not treated as a failure. A
+    /// `%BACKUP%` file's own modification time, size, or digest may differ, because an edited
+    /// config file is expected to differ. Every other mismatch still fails, backup file or not. A
+    /// missing file matching `NoExtract` is not reported at all.
     Check {
         /// The package name(s) to check. Checks every installed package when omitted.
         packages: Vec<String>,
@@ -207,28 +238,28 @@ pub enum Command {
     ///
     /// Every term must match for a package to be included (e.g. `firefox browser` only finds
     /// packages matching both). Quote a multi-word phrase (`"web browser"`) to search for it
-    /// as a single term instead. Results are ranked most-relevant-first: an exact name match,
-    /// then an exact `provides` match, then a name prefix, a name substring, a description
-    /// substring, and finally an exact group match. A package matching several terms is
-    /// ranked by the best of those matches. A package whose `desc` cannot be read is skipped
-    /// unless it matches by name alone.
+    /// as a single term instead. Results are ranked most-relevant-first. An exact name match
+    /// ranks first, then an exact `provides` match, then a name prefix. A name substring ranks
+    /// next, then a description substring, then an exact group match. A package matching several
+    /// terms is ranked by the best of those matches. A package whose `desc` cannot be read is
+    /// skipped unless it matches by name alone.
     ///
     /// With neither `--installed` nor `--repos`, both are searched. Every matching installed
     /// package is printed first, tagged `[Installed]`, followed by every matching repository
     /// package that is not installed. A package that is both installed and in a repository is
     /// shown once, from the installed side, never twice.
     ///
-    /// `--installed` searches only installed packages; no repository is opened at all.
-    /// `--repos` searches only the configured repositories, printing every match regardless of
+    /// `--installed` searches only installed packages, and opens no repository at all.
+    /// `--repos` searches only the configured repositories. It prints every match regardless of
     /// install status, one repository after another in file (priority) order, mirroring
     /// `pacman -Ss`.
     ///
     /// `--repo` restricts the search to a single named repository, e.g. `core`, and implies
     /// `--repos`. A specific repository is itself a repos-only request. Otherwise a package's
-    /// `[Installed]` line would show up identically no matter which repository was named,
-    /// since being installed has nothing to do with any one repository. Every configured
-    /// repository is searched, in file (priority) order, when `--repo` is omitted. It
-    /// conflicts with `--installed`.
+    /// `[Installed]` line would show up identically whichever repository was named. Being
+    /// installed has nothing to do with any one repository. Every configured repository is
+    /// searched, in file (priority) order, when `--repo` is omitted. It conflicts with
+    /// `--installed`.
     #[command(visible_alias = "se")]
     Search {
         /// The search term(s); a package must match all of them.
@@ -261,11 +292,10 @@ pub enum Command {
     /// (e.g. built locally or installed from a foreign source) is skipped.
     ///
     /// With no repository archive paths given, this resolves repositories from the parsed
-    /// pacman.conf instead: `<dbpath>/sync/<name>.db` for every configured repository, in the
-    /// order they appear in the file (the same order that is repository priority). A
-    /// configured repository with no synced database on disk is skipped with a warning,
-    /// rather than failing the whole check. Not every configured repository needs to have
-    /// been synced.
+    /// pacman.conf instead. It takes `<dbpath>/sync/<name>.db` for every configured repository,
+    /// in the order they appear in the file. That order is repository priority. A configured
+    /// repository with no synced database on disk is skipped with a warning, rather than fail the
+    /// whole check. Not every configured repository needs to have been synced.
     ///
     /// Ends with a one-line summary ("N update(s) available"), unless `--quiet` is given.
     /// `--quiet` prints just each package's name, one per line, matching `list`/`search`'s
@@ -285,27 +315,27 @@ pub enum Command {
     /// satisfy it, one per line.
     ///
     /// Opens every repository configured in the parsed pacman.conf and tries a literal match
-    /// first. This checks each repository in the file's `[repo]` order for one whose `Usage`
-    /// includes `Install` or `Upgrade`, that is literally named `target` (satisfying its
-    /// version constraint, if any), and that is not covered by the parsed config's
-    /// `IgnorePkg`/`IgnoreGroup`. Resolution falls through to the next repository otherwise,
-    /// same as libalpm. A package present in more than one configured repository resolves to
-    /// the earliest-listed one, even if a later repository carries a newer version.
+    /// first. It checks each repository in the file's `[repo]` order for one that meets three
+    /// tests. Its `Usage` must include `Install` or `Upgrade`. It must be literally named
+    /// `target`, and satisfy any version constraint. And it must not be covered by the parsed
+    /// config's `IgnorePkg`/`IgnoreGroup`. Resolution falls through to the next repository, same
+    /// as libalpm. A package present in more than one configured repository resolves to the
+    /// earliest-listed one. That holds even if a later repository carries a newer version.
     ///
-    /// If no package is literally named `target`, this searches every `%PROVIDES%` across
-    /// every configured repository instead, and prints every matching package's name, not
-    /// just one. A name can be provided by more than one package (e.g. several
-    /// implementations of the same virtual package, or the same soname built for more than
-    /// one architecture). A plain name (`foo`, `foo>=1.0`, `foo=1.2.3-1`; a bare name matches
-    /// any version) matches a `%PROVIDES%` entry the same way `_alpm_depcmp_provides` does: an
-    /// unversioned provide satisfies only an unconstrained request, and an exact-version
-    /// provide (`foo=1.2.3`) satisfies a compatible constraint. A soname
-    /// (`lib:libexample.so.1`, `libexample.so=1.0.0-64`) matches a `%PROVIDES%` entry only by
-    /// exact equality, per the `alpm-soname` "exact match" rule.
+    /// If no package is literally named `target`, this searches every `%PROVIDES%` across every
+    /// configured repository instead. It then prints every matching package's name, not just one.
+    /// A name can be provided by more than one package. Examples are several implementations of
+    /// the same virtual package, or the same soname built for more than one architecture.
     ///
-    /// This is not full dependency resolution. It does no conflict or replacement handling,
-    /// and unlike a real transaction, it has no preference for a provider that is already
-    /// installed.
+    /// A plain name (`foo`, `foo>=1.0`, `foo=1.2.3-1`) matches a `%PROVIDES%` entry the same way
+    /// `_alpm_depcmp_provides` does. A bare name matches any version. An unversioned provide
+    /// satisfies only an unconstrained request, and an exact-version provide (`foo=1.2.3`)
+    /// satisfies a compatible constraint. A soname (`lib:libexample.so.1`,
+    /// `libexample.so=1.0.0-64`) matches a `%PROVIDES%` entry only by exact equality, per the
+    /// `alpm-soname` "exact match" rule.
+    ///
+    /// This is not full dependency resolution. It does no conflict or replacement handling. And
+    /// unlike a real transaction, it has no preference for a provider that is already installed.
     Resolve {
         /// The dependency string: a package name with an optional version constraint (`foo`,
         /// `foo>=1.0`, `foo=1.2.3-1`), or a soname (`lib:libexample.so.1`,
@@ -320,12 +350,12 @@ pub enum Command {
     /// `%CONFLICTS%` and `%REPLACES%`, and prints the resulting package set. Nothing is
     /// downloaded, extracted, or written. This command only plans.
     ///
-    /// The plan reproduces pacman's own resolution whenever pacman succeeds. Where pacman
-    /// would fail — a first-choice provider that turns out to conflict — the solver backs out
-    /// and reports that it did, rather than giving up.
+    /// The plan reproduces pacman's own resolution whenever pacman succeeds. pacman fails on one
+    /// case piko does not: a first-choice provider that turns out to conflict. There the solver
+    /// backs out and reports that it did, rather than give up.
     Plan {
-        /// The package(s) to plan for: a dependency string (`foo`, `foo>=1.0`), a `%GROUPS%`
-        /// group name, or a path to a package file. May be empty with `--sysupgrade`.
+        /// The package(s) to plan for: a dependency string (`foo`, `foo>=1.0`), a group name
+        /// or a path to a package file. May be empty with `--sysupgrade`.
         ///
         /// With `--remove`, a target names an installed package, or a group to take every
         /// installed member of.
@@ -384,9 +414,9 @@ pub enum Command {
 
     /// Install one or more packages.
     ///
-    /// Resolves a target naming a package exactly as `piko plan` does: through the configured
-    /// repositories, a literal name or dependency string (`foo`, `foo>=1.0`) first, then a
-    /// `%GROUPS%` member expansion. A target naming a package file is read from that file. It
+    /// Resolves a target naming a package exactly as `piko plan` does, through the configured
+    /// repositories. It tries a literal name or dependency string (`foo`, `foo>=1.0`) first, then
+    /// a `%GROUPS%` member expansion. A target naming a package file is read from that file. It
     /// then plans the full transitive closure of dependencies, conflicts, and replacements
     /// before installing any of it. `piko install foo` is `piko plan foo` turned into a
     /// transaction.
@@ -395,8 +425,8 @@ pub enum Command {
     /// its own repository's configured servers, verified, and cached before installing. This
     /// is the same sequential, unresumed download `piko refresh` already does for a database.
     ///
-    /// With no `--root`, this resolves `RootDir` from the parsed pacman.conf instead (see
-    /// `--config`), falling back to `/` with a warning if that cannot be read.
+    /// With no `--root`, this resolves `RootDir` from the parsed pacman.conf instead. See
+    /// `--config`. It falls back to `/` with a warning if that cannot be read.
     ///
     /// Package signatures are checked according to the `SigLevel` of the repository each
     /// package was resolved from. A package file named by path is held to `LocalFileSigLevel`
@@ -412,13 +442,14 @@ pub enum Command {
         /// Where to install. Use `/` for the running system.
         #[arg(long)]
         root: Option<PathBuf>,
-        /// The package(s) to install: a dependency string (`foo`, `foo>=1.0`), a `%GROUPS%`
-        /// group name, a path to a package file, or its URL.
+        /// The package(s) to install: a dependency string (`foo`, `foo>=1.0`), a group name,
+        /// a path to a package file, or its URL.
         ///
-        /// A target is read as a package file when it contains `://` (a URL), when it
-        /// contains `/` (a path), or when it ends in `.pkg.tar[.gz|.bz2|.xz|.zst]` and names a
-        /// file that exists here. Anything else is a name. Write `./foo.pkg.tar.zst` to say
-        /// "the file" where both readings are possible.
+        /// A target is read as a package file in three cases. When it contains `://`, it is a
+        /// URL. When it contains `/`, it is a path. And when it ends in
+        /// `.pkg.tar[.gz|.bz2|.xz|.zst]` and names a file that exists here, it is that file.
+        /// Anything else is a name. Write `./foo.pkg.tar.zst` to say "the file" where both
+        /// readings are possible.
         ///
         /// A name carrying `*`, `?` or `[` is a glob pattern, matched against whole package
         /// and group names. Quote it, or the shell expands it first. The file readings above
@@ -452,8 +483,8 @@ pub enum Command {
         /// Overwrite files another package owns, for paths matching these glob patterns.
         ///
         /// piko refuses by default. Writing a file another package owns leaves the database
-        /// claiming two owners for one path, and removing either package then deletes a file
-        /// the other still needs. Repeatable, matched against the path without a leading `/`.
+        /// claiming two owners for one path. Removing either package then deletes a file the
+        /// other still needs. Repeatable, matched against the path without a leading `/`.
         #[arg(long, value_name = "GLOB")]
         overwrite: Vec<String>,
         /// Do not run a package's `.INSTALL` scriptlet.
@@ -465,9 +496,9 @@ pub enum Command {
         noscriptlet: bool,
         /// Read hooks from these directories instead of the configured ones.
         ///
-        /// pacman's flag of the same name. Repeatable, and in increasing priority — a hook
-        /// file name found in a later directory overrides the same name in an earlier one.
-        /// Point it at an empty directory to run no hooks at all.
+        /// pacman's flag of the same name. Repeatable, and in increasing priority. A hook file
+        /// name found in a later directory overrides the same name in an earlier one. Point it
+        /// at an empty directory to run no hooks at all.
         #[arg(long, value_name = "DIR")]
         hookdir: Vec<PathBuf>,
         /// Assume "yes" to the confirmation prompt instead of asking.
@@ -488,18 +519,16 @@ pub enum Command {
     /// Upgrade installed packages.
     ///
     /// Resolves the full-system upgrade exactly as `piko plan -u` does. For each installed
-    /// package, the first configured repository that carries its name at all decides the
-    /// outcome, checking a `%REPLACES%` pair before the literal name, gated on `Usage =
-    /// Upgrade`. The resulting transaction is planned through the same solver `install` uses.
-    /// So a repository build that conflicts with something installed removes it, and a newly
-    /// required dependency is pulled in, the same way `install` handles either case.
-    /// `piko plan -u [targets]` is this command's preview: it prints the same plan this
-    /// command commits.
+    /// package, the first configured repository that carries its name at all decides the outcome.
+    /// It checks a `%REPLACES%` pair before the literal name, gated on `Usage = Upgrade`. The
+    /// resulting transaction is planned through the same solver `install` uses. So a repository
+    /// build that conflicts with something installed removes it, and a newly required dependency
+    /// is pulled in. `install` handles either case the same way. `piko plan -u [targets]` is this
+    /// command's preview, and prints the same plan this command commits.
     ///
-    /// Refreshes every configured repository first, `pacman -Syu`. `--norefresh` skips that
-    /// and plans against whatever is already on disk, `pacman -Su`. A refresh that fails
-    /// stops here: the upgrade is not planned against a database the refresh could not
-    /// confirm is current.
+    /// Refreshes every configured repository first, `pacman -Syu`. `--norefresh` skips that and
+    /// plans against whatever is already on disk, `pacman -Su`. A refresh that fails stops here.
+    /// The upgrade is not planned against a database the refresh could not confirm is current.
     ///
     /// As with `install`, with no `--root`, this resolves `RootDir` from the parsed
     /// pacman.conf instead.
@@ -558,16 +587,16 @@ pub enum Command {
     /// A target names an installed package, or a group, which takes every installed member
     /// of it. A package wins over a group of the same name.
     ///
-    /// The set of packages removed is decided by the same planner `piko plan -R` prints, so
-    /// that command is an exact preview of this one. Removing a package something else still
-    /// depends on is refused. `-c` cascades instead. `-s` also takes away dependencies
-    /// nothing needs any more.
+    /// The set of packages removed is decided by the same planner `piko plan -R` prints. So that
+    /// command is an exact preview of this one. Removing a package something else still depends
+    /// on is refused. `-c` cascades instead. `-s` also takes away dependencies nothing needs any
+    /// more.
     #[command(visible_alias = "rm")]
     Remove {
         /// Where to remove from. Use `/` for the running system.
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Installed package names, or a `%GROUPS%` group name to remove every installed
+        /// Installed package names, or a group name to remove every installed
         /// member of.
         ///
         /// A name carrying `*`, `?` or `[` is a glob pattern, matched against whole installed
@@ -606,13 +635,13 @@ pub enum Command {
 
     /// Download repository databases.
     ///
-    /// pacman's `-Sy`. Each configured repository's `Server` list is tried in order; the
-    /// first that answers wins. A conditional request means an unchanged database costs one
-    /// round trip rather than a download.
+    /// pacman's `-Sy`. With `--files`, also its `-Fy`. Each configured repository's `Server`
+    /// list is tried in order; the first that answers wins. A conditional request means an
+    /// unchanged database costs one round trip rather than a download.
     ///
-    /// **The signature is checked before the download replaces anything.** A database that
-    /// fails its repository's `SigLevel` is discarded, and the existing one is left in place.
-    /// So a hostile or broken mirror cannot degrade a working system.
+    /// **The signature is checked before the download replaces anything.** A database that fails
+    /// its repository's `SigLevel` is discarded. The existing one is left in place. So a hostile
+    /// or broken mirror cannot degrade a working system.
     #[command(visible_alias = "rf")]
     Refresh {
         /// Repositories to refresh. Refreshes every configured one when omitted.
@@ -624,6 +653,13 @@ pub enum Command {
         /// `Last-Modified`.
         #[arg(short, long)]
         force: bool,
+        /// Also refresh each repository's `<repo>.files` database.
+        ///
+        /// The file lists `piko files --repo <NAME>` reads. pacman splits this across two
+        /// operations, `-Sy` and `-Fy`. One pass leaves both archives describing the same
+        /// builds.
+        #[arg(long)]
+        files: bool,
     },
 
     /// Report an unfinished transaction, if the database records one.
@@ -639,11 +675,11 @@ pub enum Command {
     /// writes too, so this covers transactions run by either tool. Each is shown with the
     /// tool that ran it, the command line when the log recorded one, and what it did.
     ///
-    /// piko's own transactions carry more than the log format can hold — the exact command
-    /// line, the `.pacnew` files left behind, why a transaction failed. That detail comes from
-    /// `<dbpath>/piko-history` and is merged in where it exists.
+    /// piko's own transactions carry more than the log format can hold. That is the exact command
+    /// line, the `.pacnew` files left behind, and why a transaction failed. That detail comes from
+    /// `<dbpath>/piko-history`, and is merged in where it exists.
     ///
-    /// Read-only. It reports; it changes nothing, and it cannot undo a transaction.
+    /// Read-only. It reports, changes nothing, and cannot undo a transaction.
     History {
         /// Show at most this many transactions. The newest are kept.
         #[arg(short = 'n', long, value_name = "COUNT", default_value_t = 20)]
@@ -677,10 +713,10 @@ pub enum Command {
 
     /// Parse and dump a pacman.conf-style configuration file.
     ///
-    /// Prints `[options]` followed by every in-scope directive, after defaults are resolved —
-    /// a directive absent from the file still shows its default value, the same way
-    /// `pacman-conf` does. Then it prints one `[reponame]` block per configured repository,
-    /// in the order they appear in the file (this is repository priority order).
+    /// Prints `[options]` followed by every in-scope directive, after defaults are resolved. A
+    /// directive absent from the file still shows its default value, the same way `pacman-conf`
+    /// does. Then it prints one `[reponame]` block per configured repository, in the order they
+    /// appear in the file. That order is repository priority.
     ///
     /// One directive name prints that directive's value alone instead, with no `[options]`
     /// header and no name. A directive holding several values prints one per line. A flag

@@ -3,8 +3,8 @@
 //! This is a leaf module. [`crate::resolve`] shares it to answer one dependency at a time,
 //! from a keyed lookup. [`crate::solve`] shares it to answer thousands, from an index. Both
 //! must agree on what "satisfies" means down to the last edge case. The cheapest way to
-//! guarantee that is a single implementation. A copy in the solver that drifted from the copy
-//! in the resolver would stay invisible until it produced a plan a user could not explain.
+//! guarantee that is a single implementation. A copy in the solver could drift from the copy
+//! in the resolver. That drift stays invisible until it produces a plan a user cannot explain.
 //!
 //! The rules encoded here, all from `deps.c`:
 //!
@@ -62,12 +62,12 @@ pub(crate) fn literal_satisfies(name: &Name, version: &FullVersion, dep: &Packag
     *name == dep.name && version_satisfies(version, dep)
 }
 
-/// The version half of [`literal_satisfies`], for a caller that already matched the name
-/// through a keyed lookup and would only be re-comparing it.
+/// The version half of [`literal_satisfies`]. This serves a caller that already matched the
+/// name through a keyed lookup, and would only be re-comparing it.
 ///
-/// The conversion is the one piece piko supplies rather than delegates: a package's
-/// [`FullVersion`] has a mandatory `pkgrel`, while the [`Version`] a requirement compares
-/// against has an optional one. It is lossless and provided by `alpm-types` itself.
+/// The conversion is the one piece piko supplies rather than delegates. A package's
+/// [`FullVersion`] has a mandatory `pkgrel`. The [`Version`] a requirement compares against
+/// has an optional one. The conversion is lossless, and `alpm-types` provides it.
 pub(crate) fn version_satisfies(version: &FullVersion, dep: &PackageRelation) -> bool {
     dep.version_requirement
         .as_ref()
@@ -108,8 +108,8 @@ pub(crate) fn provides_satisfies(provided: &RelationOrSoname, dep: &RelationOrSo
             // reassembling and parsing a `Version` below, because that parse can fail on a
             // real, pacman-accepted package. `SonameV1::Unversioned`'s grammar reuses the
             // soname itself as the "version" (`example.so=example.so-64`). The reconstructed
-            // string is not a valid `<pkgver>-<pkgrel>` — it has no numeric release — so
-            // `Version::from_str` rejects it even when `dep` and `provided` are the same
+            // string is not a valid `<pkgver>-<pkgrel>`, because it has no numeric release.
+            // So `Version::from_str` rejects it even when `dep` and `provided` are the same
             // struct. Real case: `gimp` depends on
             // `libgegl-npd-0.4.so=libgegl-npd-0.4.so-64`, and `gegl` `%PROVIDES%`s the
             // identical text. libalpm has no such parse step. It feeds the two raw strings
@@ -122,10 +122,10 @@ pub(crate) fn provides_satisfies(provided: &RelationOrSoname, dep: &RelationOrSo
             // applies the same rule to named relations: `dep_vercmp(provision->version,
             // dep->mod, dep->version)`, a real version comparison, not a string comparison.
             // `alpm-types` splits a v1 soname's `<version>-<arch>` into two typed fields, while
-            // libalpm's `alpm_depend_t` holds one version string. A mismatched pair — a plain
-            // relation dependency like `libalpm.so>=14` against a soname provide like
-            // `libalpm.so=16-64` — needs that string reassembled and parsed back into a
-            // `Version` before the comparison. Falling back to structural equality of two
+            // libalpm's `alpm_depend_t` holds one version string. A mismatched pair needs
+            // that string reassembled and parsed back into a `Version` before the comparison.
+            // One such pair is a plain relation dependency like `libalpm.so>=14` against a
+            // soname provide like `libalpm.so=16-64`. Falling back to structural equality of two
             // different enum variants would never match, regardless of the values inside.
             let (Some(dep_requirement), Some(provided_version)) =
                 (v1_requirement(dep), exact_v1_version(provided))
@@ -161,9 +161,9 @@ fn v1_requirement(dep: &RelationOrSoname) -> Option<VersionRequirement> {
 }
 
 /// The exact version a `%PROVIDES%` entry asserts, the way `_alpm_depcmp_provides` requires.
-/// Returns `None` for an unconstrained (`ALPM_DEP_MOD_ANY`) provide, and for a named relation
-/// provide whose own comparison is not `=` — an inequality provide can never stand in for an
-/// exact one.
+/// Returns `None` for an unconstrained (`ALPM_DEP_MOD_ANY`) provide. It also returns `None`
+/// for a named relation provide whose own comparison is not `=`. An inequality provide can
+/// never stand in for an exact one.
 fn exact_v1_version(provided: &RelationOrSoname) -> Option<Version> {
     match provided {
         RelationOrSoname::Relation(relation) => {
@@ -187,7 +187,7 @@ fn exact_v1_version(provided: &RelationOrSoname) -> Option<Version> {
 /// Returns `None` for **alpm-sonamev2**, which is matched whole rather than by name.
 ///
 /// Crate-visible because it is also the **index key** [`crate::solve::Universe`] files
-/// `%PROVIDES%` entries under. Matching is by name plus a version rule, so an index keyed by
+/// `%PROVIDES%` entries under. Matching is by name plus a version rule. So an index keyed by
 /// anything finer than the name would miss the pairs this module exists to match.
 pub(crate) fn v1_name(value: &RelationOrSoname) -> Option<&str> {
     match value {
@@ -215,9 +215,9 @@ fn is_unversioned(value: &RelationOrSoname) -> bool {
 
 /// `_alpm_depcmp_provides`'s per-entry check (`deps.c`). An unconstrained `dep` is satisfied
 /// by any same-named provide, versioned or not. A version-constrained `dep` is satisfied only
-/// by a same-named provide that itself carries an exact (`=`) version meeting the constraint —
-/// `dep_vercmp(provision->version, dep->mod, dep->version)`, gated on `provision->mod ==
-/// ALPM_DEP_MOD_EQ`.
+/// by a same-named provide that itself carries an exact (`=`) version meeting the constraint.
+/// That is `dep_vercmp(provision->version, dep->mod, dep->version)`, gated on
+/// `provision->mod == ALPM_DEP_MOD_EQ`.
 pub(crate) fn relation_provide_satisfies(
     dep: &PackageRelation,
     provided: &PackageRelation,

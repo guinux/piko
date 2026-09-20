@@ -1,18 +1,18 @@
 //! Progress events for a download, reported through an optional, caller-supplied callback.
 //!
-//! An event duplicates no information the returned `Result<Outcome>` does not already
-//! carry, and [`crate::Refresher::refresh`] (no callback) remains available and produces the
-//! same effect without one. Nothing here may be used to decide anything. See
+//! An event duplicates no information the returned `Result<Outcome>` does not already carry.
+//! [`crate::Refresher::refresh`] takes no callback, and produces the same effect without one.
+//! Nothing here may be used to decide anything. See
 //! [`crate::Refresher::refresh_with_progress`].
 //!
 //! # Events are per-file, and several files can be in flight
 //!
 //! A sink is called from whichever worker owns the transfer, so with `ParallelDownloads > 1`
-//! events for different files interleave. Every event therefore either names its file
-//! ([`Event::Started`], [`Event::Downloaded`]) or is safe to add up across files
-//! ([`Event::Progress`], which reports a delta rather than a running total for exactly this
-//! reason). A sink that needs to know which transfers are live pairs `Started` with
-//! `Downloaded` by file name.
+//! events for different files interleave. So every event does one of two things. It names its
+//! file, as [`Event::Started`] and [`Event::Downloaded`] do. Or it is safe to add up across
+//! files, as [`Event::Progress`] is. That one reports a delta rather than a running total, for
+//! exactly this reason. A sink that needs to know which transfers are live pairs `Started`
+//! with `Downloaded` by file name.
 
 /// One thing happening while a database or a package is fetched.
 #[derive(Clone, Debug)]
@@ -33,14 +33,14 @@ pub enum Event {
     },
     /// More bytes have arrived for a file that is in flight.
     Progress {
-        /// What kind of file they arrived for, so a sink can leave a `.sig` out of a total it
-        /// is showing for the package or database beside it.
+        /// What kind of file they arrived for. A sink can then leave a `.sig` out of a
+        /// total it is showing for the package or database beside it.
         kind: Kind,
         /// Bytes received since the previous event for this file — a delta, not a running
         /// total.
         ///
-        /// A total would become unusable the moment two files are in flight at once: a sink
-        /// adding several files' bytes into one figure cannot subtract the previous value of a
+        /// A total becomes unusable the moment two files are in flight at once. A sink adds
+        /// several files' bytes into one figure. It cannot subtract the previous value of a
         /// file it did not last hear from. Summing deltas needs no per-file bookkeeping.
         bytes: u64,
     },

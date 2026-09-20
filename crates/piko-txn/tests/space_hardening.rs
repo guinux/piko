@@ -1,12 +1,12 @@
 //! Exercises the disk-space estimate's refusals and its fail-open paths against a real
 //! filesystem, in a temporary directory.
 //!
-//! Not `#[ignore]`d: everything here runs inside a `tempfile::TempDir`, reads the real mount
-//! table, and never touches a system path. Only the `statvfs` numbers come from the machine,
-//! and the assertions are shaped so they hold whatever those numbers are.
+//! These are not `#[ignore]`d. Everything here runs inside a `tempfile::TempDir`, reads the
+//! real mount table, and never touches a system path. Only the `statvfs` numbers come from the
+//! machine, and the assertions hold whatever those numbers are.
 //!
 //! The two directions both matter. A check that never refuses protects nothing. A check that
-//! refuses a transaction which would have fitted is worse: it stops a correct install and
+//! refuses a transaction which would have fitted is worse. It stops a correct install, and
 //! teaches the user to turn `CheckSpace` off.
 
 #![allow(
@@ -193,8 +193,8 @@ fn a_directory_in_a_file_list_counts_as_nothing() {
     std::fs::create_dir_all(root.path().join("usr/lib")).unwrap();
     let rootfs = RootDir::open(root.path()).unwrap();
 
-    // Both spellings: `%FILES%` writes a directory with a trailing slash, but a list that
-    // omits it must reach the same answer through the entry's mode.
+    // Both spellings. `%FILES%` writes a directory with a trailing slash. A list that omits
+    // it must reach the same answer through the entry's mode.
     let doomed = vec![PathBuf::from("usr/lib/"), PathBuf::from("usr/lib")];
     let members = footprint(&[("usr/bin/tiny", 4096)]);
     let problems = check_install(
@@ -214,9 +214,9 @@ fn a_root_no_mount_point_covers_is_refused_by_name() {
     let root = tempfile::tempdir().unwrap();
     let rootfs = RootDir::open(root.path()).unwrap();
 
-    // A table that describes some other system. libalpm resolves the root's mount point first
-    // and fails when it finds none, for exactly this reason: an estimate against a table that
-    // does not describe this filesystem is not an estimate.
+    // A table that describes some other system. libalpm resolves the root's mount point
+    // first and fails when it finds none, for exactly this reason. An estimate against a
+    // table that does not describe this filesystem is not an estimate.
     let elsewhere = MountTable::parse(b"device /nowhere/at/all ext4 rw 0 0\n");
     let error =
         check_install(elsewhere, Path::new("/tmp"), &rootfs, &[], &[], &extracts_everything)

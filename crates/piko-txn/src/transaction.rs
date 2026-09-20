@@ -133,10 +133,10 @@ pub struct Planned {
 /// How package signatures are checked.
 ///
 /// Defaulting to [`Verification::Disabled`] is a deliberate and uncomfortable choice. It keeps
-/// this crate usable without a keyring (a chroot built from scratch has none), but it means a
-/// caller who forgets to configure it installs unverified packages. The CLI therefore always
-/// passes a real policy, taken from `pacman.conf`'s `SigLevel`, rather than relying on this
-/// default.
+/// this crate usable without a keyring, and a chroot built from scratch has none. But it also
+/// means a caller who forgets to configure it installs unverified packages. The CLI therefore
+/// always passes a real policy, taken from `pacman.conf`'s `SigLevel`, rather than relying on
+/// this default.
 #[derive(Debug, Default)]
 pub enum Verification {
     /// Do not check signatures. `%VALIDATION%` will record `none`, truthfully.
@@ -159,15 +159,15 @@ pub enum Verification {
 ///
 /// The policy applied is `policy_overrides`' entry for `file_name`, keyed by cache file name —
 /// a repository's `SigLevel` can differ from another's. It falls back to
-/// [`Verification::Enabled`]'s own `policy` when `file_name` has no more specific answer (in
-/// current practice, only a candidate whose repository could not be resolved).
+/// [`Verification::Enabled`]'s own `policy` when `file_name` has no more specific answer. In
+/// current practice that is only a candidate whose repository could not be resolved.
 ///
 /// This is a free function rather than a method, because `piko install -w` verifies what it
 /// downloaded without ever building a [`Transaction`]. libalpm checks under `-Sw` too:
 /// `check_validity` (`sync.c:1275`) runs before `_alpm_sync_load`'s
-/// `ALPM_TRANS_FLAG_DOWNLOADONLY` return. Sharing the function keeps the two answers from
-/// drifting — the same reason [`Transaction::verify`] and the download path share
-/// `Keyring::check` rather than each deciding what a missing `.sig` means.
+/// `ALPM_TRANS_FLAG_DOWNLOADONLY` return. One shared function keeps the two answers from
+/// drifting. [`Transaction::verify`] and the download path share `Keyring::check` for the same
+/// reason, rather than each deciding what a missing `.sig` means.
 ///
 /// # Errors
 ///
@@ -219,9 +219,9 @@ struct Prepared {
     entry: EntryName,
     /// Its `.PKGINFO`, parsed.
     ///
-    /// Parsed here rather than during the commit, and that placement is the point. Parsing it
+    /// Parsed here rather than during the commit, and that placement is the point. A parse
     /// after [`crate::install::install`] has run would fail the step on a `.PKGINFO`
-    /// `alpm-pkginfo` rejects, with the package's payload already written into the root.
+    /// `alpm-pkginfo` rejects. The package's payload would already be written into the root.
     info: PackageInfo,
     /// Its `.PKGINFO` text, verbatim, which [`record::desc`] needs as well as the parse.
     raw: String,
@@ -239,14 +239,18 @@ struct Prepared {
     files: FileList,
     /// Every path it declares `backup =` in its `.PKGINFO`.
     ///
-    /// Two things need it: extraction, to divert the path to a `.pacnew` rather than overwrite
-    /// the user's copy, and the fake removal, to leave that copy alone.
+    /// Two things need it. Extraction diverts the path to a `.pacnew` rather than overwrite
+    /// the user's copy. The fake removal leaves that copy alone.
     backups: BTreeSet<String>,
     /// The version already installed under this package's name, if any.
     ///
-    /// Decides `pre_install` against `pre_upgrade`, supplies the scriptlet's second argument,
-    /// names the entry the install must replace, drives the fake removal, and supplies the
-    /// `%BACKUP%` baseline extraction compares against.
+    /// Five things read it:
+    ///
+    /// - it decides `pre_install` against `pre_upgrade`,
+    /// - it supplies the scriptlet's second argument,
+    /// - it names the entry the install must replace,
+    /// - it drives the fake removal,
+    /// - it supplies the `%BACKUP%` baseline extraction compares against.
     replaces: Option<Superseded>,
     /// What each of its payload members will occupy, for the disk-space estimate.
     ///
@@ -265,9 +269,10 @@ impl Prepared {
 /// The installed version an install replaces, read while its entry is still there.
 ///
 /// This is libalpm's `oldpkg`. Carrying it is what lets [`install_step`] run the "fake remove
-/// transaction" of `add.c:508` — `_alpm_remove_single_package(handle, oldpkg, newpkg, 0, 0)` —
-/// which deletes the old version's files before the new version is extracted. Without it, a
-/// package that drops a file between versions leaves that file on disk owned by nobody.
+/// transaction" of `add.c:508`, spelled
+/// `_alpm_remove_single_package(handle, oldpkg, newpkg, 0, 0)`. That deletes the old version's
+/// files before the new version is extracted. Without it, a package that drops a file between
+/// versions leaves that file on disk owned by nobody.
 #[derive(Clone, Debug)]
 struct Superseded {
     /// The installed entry, `<name>-<version>`.
@@ -289,16 +294,17 @@ struct Superseded {
 /// hook is told changed. Those two answers have to come from one matcher, or they will
 /// eventually disagree about a `!` inversion.
 ///
-/// This holds patterns rather than the predicates [`crate::Filters`] takes, because this is the
-/// *configured* policy, and it has to be handed on to [`hook::Summary`] as data. `Filters` stays a
-/// predicate so a test can supply an exact answer instead of a pattern that has to be right twice.
+/// This holds patterns rather than the predicates [`crate::Filters`] takes. This is the
+/// *configured* policy, and it has to be handed on to [`hook::Summary`] as data. `Filters` stays
+/// a predicate, so a test can supply an exact answer instead of a pattern that has to be right
+/// twice.
 #[derive(Clone, Debug, Default)]
 pub struct Patterns {
     /// `NoExtract`: never written, and therefore never owned.
     ///
     /// libalpm consults this in exactly two places, and only one of them decides anything:
     /// extraction (`add.c:224`). The other suppresses a warning in the disk-space estimate,
-    /// which charges for a `NoExtract` path regardless; piko does not count what it will not
+    /// which charges for a `NoExtract` path regardless. piko does not count what it will not
     /// write. Neither implementation consults it in conflict detection, so a `NoExtract` path
     /// is still checked for conflicts.
     pub no_extract: Vec<String>,
@@ -380,7 +386,7 @@ pub struct Staged<'lock> {
     /// Where this transaction records what it does. Opened with the journal, before the
     /// first mutation, so an unwritable `LogFile` is reported while nothing has changed.
     ///
-    /// An `Option` so the commit can take it out of the state: the ending is then written
+    /// An `Option` so the commit can take it out of the state. The ending is then written
     /// from one place, after the apply loop has returned however it returned.
     recorder: Option<Recorder>,
     lock: &'lock DbLock,
@@ -449,8 +455,8 @@ impl Transaction<Planned> {
     /// Refuses the transaction during [`Transaction::verify`] unless every filesystem it writes
     /// to can hold its peak occupancy — `pacman.conf`'s `CheckSpace`.
     ///
-    /// Off by default, as it is in libalpm. Only the transaction's own writes are weighed here;
-    /// the space a download needs is a separate question, asked by
+    /// Off by default, as it is in libalpm. Only the transaction's own writes are weighed here.
+    /// The space a download needs is a separate question, asked by
     /// [`crate::DownloadingSource::check_space`] before anything is fetched.
     ///
     /// A transaction that installs nothing runs no check. A removal can only free space, and
@@ -468,7 +474,7 @@ impl Transaction<Planned> {
     /// deliberate.
     ///
     /// The directories are taken rather than an already-collected [`Hooks`] **on purpose**. The
-    /// set of hook files is read once per phase, at the moment that phase runs, so a hook file
+    /// set of hook files is read once per phase, at the moment that phase runs. So a hook file
     /// the transaction itself installs or deletes is seen exactly as libalpm sees it.
     #[must_use]
     pub fn hook_dirs(mut self, directories: Vec<PathBuf>) -> Self {
@@ -492,8 +498,8 @@ impl Transaction<Planned> {
 
     /// Releases the paths `overwrite` accepts from file-conflict detection.
     ///
-    /// pacman's `--overwrite`. It excuses a *file* whose owner disagrees, never a directory
-    /// and never a path a package would replace with a directory — see
+    /// pacman's `--overwrite`. It excuses a *file* whose owner disagrees. It never excuses a
+    /// directory, and never a path a package would replace with a directory. See
     /// [`conflict::decision::Resolution::Overwritten`].
     #[must_use]
     pub fn overwrite(mut self, overwrite: Overwrite) -> Self {
@@ -503,8 +509,8 @@ impl Transaction<Planned> {
 
     /// Sets how package signatures are checked.
     ///
-    /// Without this, nothing is verified and `%VALIDATION%` records `none` — see
-    /// [`Verification`] for why that is the default and why the CLI never relies on it.
+    /// Without this, nothing is verified and `%VALIDATION%` records `none`. See
+    /// [`Verification`] for why that is the default, and why the CLI never relies on it.
     #[must_use]
     pub fn verification(mut self, verification: Verification) -> Self {
         self.verification = verification;
@@ -516,9 +522,9 @@ impl Transaction<Planned> {
     /// has no `Hash` impl).
     ///
     /// A repository's `SigLevel` can differ from another's, unlike a database's single value.
-    /// This is how a package is checked against the policy that actually governs *its*
-    /// repository, rather than one value for the whole transaction. `verification`'s own
-    /// `policy` remains the fallback for a file this map has no answer for.
+    /// So a package is checked against the policy that governs *its* repository, rather than
+    /// against one value for the whole transaction. `verification`'s own `policy` remains the
+    /// fallback for a file this map has no answer for.
     #[must_use]
     pub fn policy_overrides(mut self, overrides: HashMap<String, Policy>) -> Self {
         self.policy_overrides = overrides;
@@ -528,8 +534,8 @@ impl Transaction<Planned> {
     /// Applies `pacman.conf`'s `NoExtract` and `NoUpgrade` patterns.
     ///
     /// The default is empty, which treats no path specially. The `NoExtract` half also reaches
-    /// [`hook::Summary`], so hooks and extraction cannot disagree about what was written —
-    /// which is why this is one setting rather than two.
+    /// [`hook::Summary`], so hooks and extraction cannot disagree about what was written. That
+    /// is why this is one setting rather than two.
     #[must_use]
     pub fn patterns(mut self, patterns: Patterns) -> Self {
         self.patterns = patterns;
@@ -585,9 +591,9 @@ impl Transaction<Planned> {
 
     /// Verifies one package's detached signature, returning whether it was actually checked.
     ///
-    /// Delegates to [`check_signature`], which is a free function so that a caller with no
-    /// `Transaction` — `piko install -w`, which installs nothing — checks a package by the
-    /// same rule this does.
+    /// Delegates to [`check_signature`], which is a free function. So a caller with no
+    /// `Transaction` checks a package by the same rule this does. `piko install -w` is that
+    /// caller, and it installs nothing.
     fn check_signature(&self, file_name: &PackageFileName, package: &Path) -> Result<bool> {
         check_signature(&self.verification, &self.policy_overrides, file_name, package)
     }
@@ -595,16 +601,21 @@ impl Transaction<Planned> {
     /// Locates and reads every package, verifies its signature, checks every entry to be
     /// removed, and finds file conflicts.
     ///
-    /// Doing this up front shortens the commit's failure modes. A missing package file, a
-    /// `.PKGINFO` that cannot be recorded, or a file two packages both claim, is found before
-    /// anything has changed, rather than half-way through. The check needs no lock of its own
-    /// — the caller holds one by the time it matters — but it does read the local database. A
-    /// `Verified` transaction is only as current as the moment it was verified.
+    /// This up-front pass shortens the commit's failure modes. Three failures are found before
+    /// anything has changed, rather than half-way through:
+    ///
+    /// - a missing package file,
+    /// - a `.PKGINFO` that cannot be recorded,
+    /// - a file two packages both claim.
+    ///
+    /// The check needs no lock of its own, since the caller holds one by the time it matters. It
+    /// does read the local database, so a `Verified` transaction is only as current as the
+    /// moment it was verified.
     ///
     /// # Errors
     ///
-    /// [`Error::NotAvailable`] if a package cannot be supplied, [`Error::UnusableSource`] if
-    /// an entry to be removed is not installed or a package's `.PKGINFO` cannot be read, or
+    /// [`Error::NotAvailable`] if a package cannot be supplied. [`Error::UnusableSource`] if an
+    /// entry to be removed is not installed, or a package's `.PKGINFO` cannot be read.
     /// [`Error::FileConflicts`] if the transaction would write a file it does not own.
     pub fn verify(
         self,
@@ -616,9 +627,10 @@ impl Transaction<Planned> {
     /// As [`Transaction::verify`], reporting progress through `progress` as it runs.
     ///
     /// `progress` is the same narrow, deliberate exception to "diagnostics are returned, not
-    /// logged" as [`Transaction::commit_with_progress`] — see [`crate::progress`]'s documentation.
-    /// It takes `FnMut` rather than `Fn` for the same reason `commit_with_progress` does: a caller
-    /// driving a terminal UI needs a mutable borrow of whatever it draws with.
+    /// logged" as [`Transaction::commit_with_progress`]. See [`crate::progress`]'s
+    /// documentation. It takes `FnMut` rather than `Fn` for the same reason
+    /// `commit_with_progress` does. A caller driving a terminal UI needs a mutable borrow of
+    /// whatever it draws with.
     ///
     /// # Errors
     ///
@@ -632,9 +644,9 @@ impl Transaction<Planned> {
             .map_err(|error| Error::local_db(self.dbpath.join("local"), error))?;
 
         // Fetched up front, `ParallelDownloads` at a time, so the loop below finds every
-        // package already in the cache. The verification order does not change: a download
-        // that failed here is simply still missing, and `locate` reports it exactly where it
-        // always did — see `PackageSource::prefetch`.
+        // package already in the cache. The verification order does not change. A download
+        // that failed here is simply still missing, and `locate` reports it in its usual place.
+        // See `PackageSource::prefetch`.
         let incoming: Vec<PackageFileName> = self
             .state
             .steps
@@ -697,8 +709,8 @@ impl Transaction<Planned> {
             }
         }
 
-        // Reading each archive is the only way to know what a package not yet installed will
-        // write, and the only way to know whether its `.PKGINFO` is one piko can record.
+        // Reading each archive answers two questions, and nothing else can answer either. What
+        // will a package not yet installed write? And is its `.PKGINFO` one piko can record?
         // pacman loads the same files for the same reason before its own check, so this is not
         // a cost piko added. One walk answers both questions.
         let mut verified_installs = 0_usize;
@@ -711,10 +723,10 @@ impl Transaction<Planned> {
             let entry = self::entry_name(&path, &info)?;
 
             // The installed package of the same name, looked up once and used five ways. It
-            // decides `pre_install` against `pre_upgrade`, supplies the scriptlet's `oldver`
-            // argument, names the entry `install_step` has to replace, supplies the file list
-            // its fake removal deletes, and supplies the `%BACKUP%` baseline extraction needs
-            // to tell an edited config file from an untouched one.
+            // decides `pre_install` against `pre_upgrade`. It supplies the scriptlet's `oldver`
+            // argument. It names the entry `install_step` has to replace. It supplies the file
+            // list its fake removal deletes. And it supplies the `%BACKUP%` baseline extraction
+            // needs, to tell an edited config file from an untouched one.
             let replaces = superseded(local.get_str(&target.name))?;
             let old_files = replaces.as_ref().map(|old| spell(&old.files)).unwrap_or_default();
 
@@ -863,16 +875,16 @@ fn spell(files: &[PathBuf]) -> Vec<String> {
 /// # Errors
 ///
 /// [`Error::UnreadableEntry`] if the installed entry exists but its `%FILES%` or `%BACKUP%`
-/// cannot be read. Defaulting to an empty list is not an option here: the install is about to
-/// delete that entry, so an empty list would leave every file it owned on disk with nothing
+/// cannot be read. An empty list is not an acceptable default here. The install is about to
+/// delete that entry. An empty list would then leave every file it owned on disk, with nothing
 /// recording who put them there. That is the exact shape of the cached-emptiness bug, in the
 /// one place where it destroys data. Raising it at `verify` also keeps the promise `Verified`
-/// makes: the commit does not fail for something that could have been read up front.
+/// makes. The commit does not fail for something that could have been read up front.
 fn superseded(installed: Option<&LocalPackage>) -> Result<Option<Superseded>> {
     let Some(package) = installed else { return Ok(None) };
-    // Unreachable in practice — the database produced this name and version by parsing a
-    // directory name that `EntryName` itself accepted. Not worth an error of its own: without
-    // an entry name there is no directory to remove and nothing to remove it from.
+    // Unreachable in practice. The database produced this name and version by parsing a
+    // directory name that `EntryName` itself accepted. This is not worth an error of its own.
+    // Without an entry name there is no directory to remove, and nothing to remove it from.
     let Ok(entry) = EntryName::new(package.name(), package.version()) else {
         return Ok(None);
     };
@@ -881,10 +893,10 @@ fn superseded(installed: Option<&LocalPackage>) -> Result<Option<Superseded>> {
 
 /// One installed entry's `%FILES%` and `%BACKUP%`, read while it is still on disk.
 ///
-/// Shared by the two things that take an installed entry apart — an upgrade's fake removal and
-/// a real removal — rather than written twice. This way the rule that neither list may be
-/// defaulted cannot be applied in one place and skipped in the other. `remove_files` is one
-/// function with two callers for the same reason.
+/// Shared by the two things that take an installed entry apart, rather than written twice.
+/// Those two are an upgrade's fake removal and a real removal. This way the rule that neither
+/// list may be defaulted cannot be applied in one place and skipped in the other.
+/// `remove_files` is one function with two callers for the same reason.
 ///
 /// # Errors
 ///
@@ -913,16 +925,16 @@ fn installed_state(entry: &EntryName, package: &LocalPackage) -> Result<Supersed
 /// Everything a removal step needs, read while the entry is still installed.
 ///
 /// The mirror of [`Prepared`]. It exists to stop the local database being re-opened once per
-/// removal step. The step only ever wants one entry, and opening a database to reach it means
-/// a `readdir` of every installed package — ~1200 of them on this machine — repeated for every
-/// package a `-Rcs` removes.
+/// removal step. The step only ever wants one entry. Opening a database to reach it means a
+/// `readdir` of every installed package, ~1200 of them on this machine. That `readdir`
+/// repeats for every package a `-Rcs` removes.
 ///
-/// **Reading `%BACKUP%` here rather than in the step is a structural change, not a bug fix,
-/// and the difference is worth stating.** It looks like it closes a hole in what `Verified`
-/// promises, since a step reads its entry after `pre_remove` has already run. It closes
-/// nothing: `%FILES%` and `%BACKUP%` are one `files` file behind a single `Lazy<DbFiles>` in
-/// `LocalPackage`. Forcing the file list — which `verify` does — forces the backup list with
-/// it, so `backups()` cannot fail where `file_list()` succeeded. See
+/// **Reading `%BACKUP%` here rather than in the step buys the `readdir`, and nothing about
+/// safety.** It looks like it closes a hole in what `Verified` promises. A step reads its
+/// entry after `pre_remove` has already run. It closes nothing. `%FILES%` and `%BACKUP%` are one
+/// `files` file behind a single `Lazy<DbFiles>` in `LocalPackage`. Forcing the file list, which
+/// `verify` does, forces the backup list with it. So `backups()` cannot fail where
+/// `file_list()` succeeded. See
 /// `a_malformed_backup_hash_makes_the_whole_entry_unreadable_at_verify`, which pins that.
 #[derive(Clone, Debug)]
 struct Doomed {
@@ -931,8 +943,8 @@ struct Doomed {
     /// Its `install` scriptlet, if it ships one and scriptlets are turned on.
     ///
     /// `post_remove` runs after the entry has been deleted, so the bytes have to be held
-    /// somewhere regardless. Holding them from `verify` rather than from the top of the step
-    /// removes the last reason that step had to open a database.
+    /// somewhere regardless. They are held from `verify` rather than from the top of the step.
+    /// That removes the last reason for that step to open a database.
     script: Option<Vec<u8>>,
 }
 
@@ -941,8 +953,8 @@ struct Doomed {
 /// # Errors
 ///
 /// [`Error::UnreadableEntry`] if `%FILES%` or `%BACKUP%` cannot be read. Neither may be
-/// defaulted: an empty file list would delete the entry while leaving every file it owned on
-/// disk with nothing recording who put them there.
+/// defaulted. An empty file list would delete the entry. It would leave every file it owned on
+/// disk, with nothing recording who put them there.
 fn doomed(entry: &EntryName, package: &LocalPackage, want_script: bool) -> Result<Doomed> {
     Ok(Doomed {
         installed: self::installed_state(entry, package)?,
@@ -970,8 +982,8 @@ impl Transaction<Verified> {
     /// than at the first write, because a lock over the wrong database protects nothing.
     ///
     /// The transaction's records are opened here too, beside the journal and for the same
-    /// reason: an unwritable `LogFile` is worth reporting while nothing has changed yet.
-    /// Unlike the journal, a record that cannot be opened does not stop the transaction — see
+    /// reason. An unwritable `LogFile` is worth reporting while nothing has changed yet.
+    /// Unlike the journal, a record that cannot be opened does not stop the transaction. See
     /// [`crate::history`].
     ///
     /// # Errors
@@ -1042,29 +1054,29 @@ impl Transaction<Staged<'_>> {
 
     /// As [`Transaction::commit`], reporting progress through `progress` as it happens.
     ///
-    /// `progress` is a narrow, deliberate exception to "diagnostics are returned, not logged"
-    /// — see [`crate::progress`]'s documentation before treating this as license to add
-    /// another one. It fires only for [`Step::Install`]/[`Step::Remove`], not for hooks, which
-    /// already report through [`Report::hooks`]. It takes `FnMut` rather than `Fn`, because a
-    /// caller printing a durable line per step needs a mutable borrow of whatever it writes to.
+    /// `progress` is a narrow, deliberate exception to "diagnostics are returned, not logged".
+    /// Read [`crate::progress`]'s documentation before treating this as license to add another
+    /// one. It fires only for [`Step::Install`]/[`Step::Remove`], not for hooks, which already
+    /// report through [`Report::hooks`]. It takes `FnMut` rather than `Fn`. A caller printing a
+    /// durable line per step needs a mutable borrow of whatever it writes to.
     ///
     /// # Errors
     ///
     /// As [`Transaction::commit`].
     pub fn commit_with_progress(mut self, progress: &mut dyn FnMut(Event<'_>)) -> Result<Report> {
         // Taken out of the state, so the ending is written from exactly one place however
-        // `apply` returns. Scattering it over each `?` is how one exit path eventually stops
-        // writing an ending and a completed transaction reads as an interrupted one.
+        // `apply` returns. One ending per `?` is how an exit path eventually stops writing one
+        // at all. A completed transaction then reads as an interrupted one.
         let mut recorder = self.state.recorder.take();
         if let Some(recorder) = recorder.as_mut() {
             recorder.started();
         }
 
         let mut result = {
-            // Every event reaches the records and the caller alike. Driving the records from
-            // the event stream is what keeps them behind the journal: `StepFinished` is
-            // emitted only once `journal.completed` has returned, so nothing can be recorded
-            // that the journal does not already know.
+            // Every event reaches the records and the caller alike. The event stream is what
+            // keeps the records behind the journal. `StepFinished` is emitted only once
+            // `journal.completed` has returned, so nothing can be recorded that the journal
+            // does not already know.
             let mut observed = |event: Event<'_>| {
                 if let Some(recorder) = recorder.as_mut() {
                     recorder.observe(&event);
@@ -1107,8 +1119,8 @@ impl Transaction<Staged<'_>> {
         let runner = Runner::new(&self.root_path)?;
 
         // Runs before anything changes. A `PreTransaction` hook with `AbortOnFail` that fails
-        // stops the transaction here, with the system still untouched — which is the whole
-        // reason that flag is `PreTransaction`-only.
+        // stops the transaction here, with the system still untouched. That is the whole reason
+        // the flag is `PreTransaction`-only.
         let aborted = self::run_hooks(
             &runner,
             &self.dbpath,
@@ -1224,8 +1236,9 @@ impl Transaction<Staged<'_>> {
             }
         }
 
-        // `alpm-hooks(5)`: "PostTransaction hooks will not run if the transaction fails to
-        // complete for any reason." So this runs after the loop, and the `?`s above skip it.
+        // `alpm-hooks(5)` says: "PostTransaction hooks will not run if the transaction
+        // fails to complete for any reason." So this runs after the loop. The `?`s above skip
+        // it entirely.
         // `AbortOnFail` is meaningless here and is ignored, as in libalpm.
         drop(self::run_hooks(
             &runner,
@@ -1250,16 +1263,16 @@ impl Transaction<Staged<'_>> {
 /// # The hook files are read here, not once up front
 ///
 /// `_alpm_hook_run` does its own `opendir`/`readdir` of every `HookDir` (`hook.c:536`). It runs
-/// twice — before the transaction and after it (`trans.c:202` and `trans.c:238`). So the set of
-/// hook files is whatever is on disk **at the moment the phase runs**, and the two phases can
+/// twice, before the transaction and after it (`trans.c:202` and `trans.c:238`). So the set of
+/// hook files is whatever is on disk **at the moment the phase runs**. The two phases can
 /// legitimately see different sets.
 ///
-/// That is not a minor detail. Arch ships each hook in the same package as the program it
-/// runs — 31 of this machine's 46 hooks name an `Exec` their own package owns. A removal
-/// deletes the hook file together with the binary, and the `PostTransaction` pass simply never
-/// finds it. Only 8 of those 46 declare a `Depends`, so `Depends` is *not* what protects them.
-/// Collecting the hook set once before the transaction would run a hook whose file and command
-/// were both just deleted.
+/// That is not a minor detail. Arch ships each hook in the same package as the program it runs.
+/// 31 of this machine's 46 hooks name an `Exec` their own package owns. A removal deletes the
+/// hook file together with the binary, and the `PostTransaction` pass simply never finds it.
+/// Only 8 of those 46 declare a `Depends`, so `Depends` is *not* what protects them. Collecting
+/// the hook set once before the transaction would run a hook whose file and command were both
+/// just deleted.
 fn run_hooks(
     runner: &Runner,
     dbpath: &Path,
@@ -1282,7 +1295,7 @@ fn run_hooks(
     }
 
     // Re-opened per phase rather than held. A `PostTransaction` hook's `Depends` must be
-    // judged against the database as the transaction left it — exactly what
+    // judged against the database as the transaction left it. That is exactly what
     // `_alpm_hook_run_hook` reads (`hook.c:505`) at the moment it runs.
     let local = LocalDatabase::open(dbpath.join("local"))
         .map_err(|error| Error::local_db(dbpath.join("local"), error))?;
@@ -1570,9 +1583,13 @@ mod tests {
     /// through.
     ///
     /// The unit tests in `space` prove the arithmetic and `space_hardening.rs` proves the
-    /// refusal. What is left to pin is the wiring: that the builder reaches the check at all,
-    /// that the check runs against the transaction's own root rather than `/`, and that the
-    /// caller is told it started. A silent no-op would pass every other test in this crate.
+    /// refusal. What is left to pin is the wiring, in three parts:
+    ///
+    /// - the builder reaches the check at all,
+    /// - the check runs against the transaction's own root rather than `/`,
+    /// - the caller is told it started.
+    ///
+    /// A silent no-op would pass every other test in this crate.
     #[test]
     fn a_space_checked_transaction_reports_the_check_and_installs() {
         let name = "foo-1.0.0-1-x86_64.pkg.tar";
@@ -1840,16 +1857,16 @@ mod tests {
 
     /// One bad `%BACKUP%` hash makes the whole entry unreadable, file list included.
     ///
-    /// Not obvious, and worth pinning: `%FILES%` and `%BACKUP%` live in one `files` file, and
-    /// `LocalPackage` parses it **once**, behind a single `Lazy<DbFiles>`. So `backups()`
-    /// cannot fail unless `file_list()` fails too — they are the same parse — and the error a
-    /// corrupt backup hash produces names the *file list*.
+    /// Not obvious, and worth pinning. `%FILES%` and `%BACKUP%` live in one `files` file, and
+    /// `LocalPackage` parses it **once**, behind a single `Lazy<DbFiles>`. They are the same
+    /// parse, so `backups()` cannot fail unless `file_list()` fails too. The error a corrupt
+    /// backup hash produces names the *file list*.
     ///
-    /// That is why reading the backup list at `verify` rather than inside the removal step is a
-    /// structural change and not a bug fix: forcing the file list, which `verify` already did,
-    /// had always forced the backup list with it. This test is what proves that.
+    /// That is why reading the backup list at `verify` rather than inside the removal step buys
+    /// no safety. Forcing the file list, which `verify` does, forces the backup list with it.
+    /// This test is what proves that.
     ///
-    /// The rest of the assertion checks *when* the refusal arrives: `verify` returns it, so
+    /// The rest of the assertion checks *when* the refusal arrives. `verify` returns it, so
     /// `stage` is never reached and nothing has been touched.
     #[test]
     fn a_malformed_backup_hash_makes_the_whole_entry_unreadable_at_verify() {
@@ -1902,10 +1919,10 @@ mod tests {
     /// An unopenable local database keeps its cause typed, rather than stringified.
     ///
     /// An `Error::Io` carrying `io::Error::other(error.to_string())` would read as `failed to
-    /// open <path>`, which names the wrong failure: a commit engine that cannot open the
-    /// database has not failed at I/O in any way the `IoAction::Open` verb describes. It also
-    /// flattens the `piko_db::Error` underneath into an opaque string no caller can match on
-    /// at any depth.
+    /// open <path>`, which names the wrong failure. A commit engine that cannot open the
+    /// database has not failed at I/O in any way the `IoAction::Open` verb describes. Such an
+    /// error also flattens the `piko_db::Error` underneath into an opaque string, which no
+    /// caller can match on at any depth.
     ///
     /// Asserted on shape rather than wording. The downcast is to `Box<piko_db::Error>`, not to
     /// `piko_db::Error`, because `#[source]` on a boxed field yields the box. See that
@@ -1915,9 +1932,9 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let db = tempfile::tempdir().unwrap();
         // A `local` subdirectory that already holds something, but not `ALPM_DB_VERSION`.
-        // A missing marker is tolerated on an empty or absent directory — see
-        // `piko_db::local::schema_version::root_is_unpopulated` — so this needs an entry
-        // besides the marker to still count as unreadable rather than a fresh database.
+        // A missing marker is tolerated on an empty or absent directory. See
+        // `piko_db::local::schema_version::root_is_unpopulated`. So this needs an entry besides
+        // the marker, to count as unreadable rather than as a fresh database.
         let local = db.path().join("local");
         std::fs::create_dir_all(&local).unwrap();
         std::fs::write(local.join("stray-file"), b"").unwrap();
@@ -1968,8 +1985,8 @@ mod tests {
     /// A `.PKGINFO` piko cannot record fails at `verify`, not half-way through the commit.
     ///
     /// The parse must run before `install` extracts the payload. Otherwise a `packager` line
-    /// without an `<email>` fails the transaction with the package's file already in the root
-    /// and the journal already on disk. The two assertions below pin exactly that.
+    /// without an `<email>` fails the transaction too late. The package's file is already in the
+    /// root by then, and the journal already on disk. The two assertions below pin exactly that.
     #[test]
     fn an_unrecordable_pkginfo_fails_before_the_root_is_touched() {
         let name = "foo-1.0.0-1-x86_64.pkg.tar";
@@ -2028,8 +2045,8 @@ mod tests {
         assert!(!root.path().join("usr/bin/foo").exists());
     }
 
-    /// The check is wired in, and it stops the transaction at `verify` — before the lock,
-    /// before the journal, before a single byte is written.
+    /// The check is wired in, and it stops the transaction at `verify`. That is before the
+    /// lock, before the journal, and before a single byte is written.
     #[test]
     fn a_file_another_package_owns_stops_the_transaction() {
         let name = "foo-1.0.0-1-x86_64.pkg.tar";
@@ -2184,7 +2201,7 @@ mod tests {
 
     /// A per-file override in `policy_overrides` is checked instead of `verification`'s own
     /// fallback `policy`. This proves a package can be held to a stricter policy than the
-    /// transaction's default, the way one repository's `SigLevel` can differ from another's.
+    /// transaction's default. One repository's `SigLevel` can differ from another's that way.
     #[test]
     fn a_policy_override_takes_precedence_over_the_fallback() {
         let name = "foo-1.0.0-1-x86_64.pkg.tar";
@@ -2370,11 +2387,11 @@ mod tests {
 
     /// A package whose archive lists a member twice still produces a usable entry.
     ///
-    /// This covers the whole chain, because that is where the damage was: `install` claimed
-    /// the path twice, `record::files` wrote both lines, and `alpm-db` then refused the
-    /// `files` record — while the install reported **success**. The entry could never be read
-    /// again, so the package could be neither removed nor upgraded. Both now refuse an
-    /// unreadable entry rather than silently doing nothing.
+    /// The whole chain is covered, because the damage is spread across it. `install` can claim
+    /// the path twice, `record::files` then writes both lines, and `alpm-db` refuses the `files`
+    /// record. The install still reports **success**. The entry can never be read again, so the
+    /// package can be neither removed nor upgraded. Both of those refuse an unreadable entry
+    /// rather than silently doing nothing.
     ///
     /// libalpm writes the duplicate and reads it back without complaint. This is piko staying
     /// inside what its own reader accepts, not a rule pacman also enforces.
@@ -2438,10 +2455,10 @@ mod tests {
 
     /// The headline case: a **fresh** install records `%BACKUP%`.
     ///
-    /// `add.c:333`'s `if(backup)` sits outside the `notouch || needbackup` branch, so libalpm
-    /// records a hash for every backup file it extracted — including one that was simply not
-    /// on the system before. This is what `install_step`'s `Filters` are for: a default
-    /// `Filters` leaves `is_backup` always false, and then no fresh install records a hash.
+    /// `add.c:333`'s `if(backup)` sits outside the `notouch || needbackup` branch. So libalpm
+    /// records a hash for every backup file it extracted, including one that was simply not on
+    /// the system before. This is what `install_step`'s `Filters` are for. A default `Filters`
+    /// leaves `is_backup` always false, and then no fresh install records a hash.
     #[test]
     fn a_fresh_install_records_the_backup_hash() {
         let cache = tempfile::tempdir().unwrap();
@@ -2565,8 +2582,8 @@ mod tests {
                 &format!("foo-{version}-x86_64.pkg.tar"),
                 version,
                 // Declared `%BACKUP%` *as well*, which is the sharp case. Without it, the
-                // three-way rule has no original to compare against and keeps both anyway, so
-                // the test would pass even with `NoUpgrade` ignored.
+                // three-way rule has no original to compare against, and keeps both anyway.
+                // The test would then pass even with `NoUpgrade` ignored.
                 &["etc/foo.conf"],
                 &[("etc/foo.conf", version.as_bytes())],
             );
@@ -2599,10 +2616,10 @@ mod tests {
         };
 
         install("1.0.0-1");
-        // Deliberately *not* edited. `%BACKUP%` now records what 1.0.0-1 shipped, so the
-        // three-way rule would find `original == local`, conclude the user never touched it,
-        // and install the new version — which is exactly what `NoUpgrade` forbids. libalpm
-        // never gets there: `notouch` is decided first, and no hash is compared (`add.c:303`).
+        // Deliberately *not* edited. `%BACKUP%` records what 1.0.0-1 shipped. So the three-way
+        // rule would find `original == local`, conclude the user never touched it, and install
+        // the new version. That is exactly what `NoUpgrade` forbids. libalpm never gets there:
+        // `notouch` is decided first, and no hash is compared (`add.c:303`).
         install("2.0.0-1");
 
         assert_eq!(

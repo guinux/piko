@@ -275,8 +275,8 @@ pub fn gzip(bytes: &[u8]) -> Vec<u8> {
 
 /// Builds a gzip stream that inflates to `size` bytes of zeroes.
 ///
-/// Used to check that decompression is bounded: at the default limits this compresses to a
-/// few kilobytes but inflates to hundreds of megabytes.
+/// Used to check that decompression is bounded. At the default limits this compresses to a
+/// few kilobytes and inflates to hundreds of megabytes.
 #[must_use]
 pub fn gzip_bomb(size: usize) -> Vec<u8> {
     gzip(&vec![b'\n'; size])
@@ -284,8 +284,8 @@ pub fn gzip_bomb(size: usize) -> Vec<u8> {
 
 /// A minimal, well-formed `alpm-repo-descv2` body.
 ///
-/// Unlike the local `desc` format, a repository `desc` also carries the package file name,
-/// its checksum and its compressed/installed sizes — see
+/// Unlike the local `desc` format, a repository `desc` also carries the package file name, its
+/// checksum and its compressed and installed sizes. See
 /// [alpm-repo-db](https://alpm.archlinux.page/specifications/alpm-repo-db.7.html).
 pub const MINIMAL_REPO_DESC_V2: &str = "\
 %FILENAME%
@@ -335,7 +335,8 @@ usr/bin/foo
 ";
 
 /// Builds a gzip-compressed tar archive from `(path, content)` pairs, laid out the way a real
-/// `alpm-repo-db` archive is: no compression suffix on the outer file name, gzip only inside.
+/// `alpm-repo-db` archive is. The outer file name carries no compression suffix. The gzip sits
+/// inside.
 ///
 /// # Panics
 ///
@@ -358,9 +359,9 @@ pub fn gzip_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
 
 /// A temporary directory for repository archive fixtures.
 ///
-/// Unlike [`DbFixture`], this does not itself hold a database — it is a plain scratch
-/// directory that [`RepoFixture::write_archive`] writes named archive files into, since a
-/// repository database is a single file rather than a directory tree.
+/// Unlike [`DbFixture`], this does not itself hold a database. It is a plain scratch directory
+/// that [`RepoFixture::write_archive`] writes named archive files into. A repository database
+/// is a single file rather than a directory tree.
 #[derive(Debug)]
 pub struct RepoFixture {
     dir: TempDir,
@@ -421,7 +422,7 @@ impl Default for RepoFixture {
 /// *malformed* entry. That is the wrong trade for a resolver test, where every package is
 /// well-formed by construction and only its relations vary. Spelling out a fifteen-section
 /// `desc` per package would bury the one line under test. This renders both the local `desc`
-/// and the repository `desc` from the same spec instead, so a scenario cannot state a
+/// and the repository `desc` from the same spec instead. So a scenario cannot state a
 /// package's dependencies one way to the local database and another way to a repository.
 ///
 /// Everything not named here (description, URL, architecture, packager, dates, checksum)
@@ -670,8 +671,8 @@ impl Scenario {
     /// # Panics
     ///
     /// If a directory or archive cannot be written, or if either database fails to open.
-    /// Every package a scenario describes is well-formed by construction, so a failure here
-    /// is a bug in this builder, not a condition a test could meaningfully assert on.
+    /// Every package a scenario describes is well-formed by construction. So a failure here
+    /// is a defect in this builder, not a condition a test could meaningfully assert on.
     #[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
     pub fn build(self) -> BuiltScenario {
         let local_fixture = DbFixture::new();

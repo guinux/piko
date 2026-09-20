@@ -3,7 +3,7 @@
 //! Diagnostics are the one part of opening a database whose size an attacker controls without
 //! the package count growing alongside it. [`Limits::max_entries`] bounds packages and
 //! [`Limits::repo_max_packages`] bounds archive members. Neither bound applies to a directory
-//! of a million badly-named entries, or an archive of a million misshapen members: either one
+//! of a million badly-named entries, or an archive of a million misshapen members. Either one
 //! yields **zero** packages and a million diagnostics.
 //!
 //! Overflow is deliberately not an error. A database whose packages are all readable must
@@ -29,9 +29,9 @@ impl<T> Sink<T> {
 
     /// Records `diagnostic`, or counts it as dropped if the bound is already reached.
     ///
-    /// `push` takes a closure rather than a value. A caller that would need to allocate
-    /// (cloning a path, formatting a name) to build the diagnostic then does not pay for one
-    /// that is about to be discarded. That flood case is exactly what this bound exists for.
+    /// `push` takes a closure rather than a value. Building a diagnostic may need an
+    /// allocation, such as cloning a path or formatting a name. The caller does not pay for
+    /// one about to be discarded. That flood case is exactly what this bound exists for.
     pub(crate) fn push(&mut self, diagnostic: impl FnOnce() -> T) {
         if self.collected.len() >= self.max {
             self.dropped = self.dropped.saturating_add(1);

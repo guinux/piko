@@ -2,8 +2,8 @@
 //!
 //! This is deliberately tiny and deliberately not a dependency. `std::thread::scope` plus an
 //! [`AtomicUsize`] cursor is the whole mechanism. Workers borrow the input rather than owning
-//! it, so nothing here needs `'static`, an `Arc`, or a channel. A download pool is a handful of
-//! threads doing blocking I/O, the shape an async runtime is worst at paying for.
+//! it, so nothing here needs `'static`, an `Arc`, or a channel. A download pool is a handful
+//! of threads doing blocking I/O, the shape an async runtime is worst at paying for.
 //!
 //! # Why there is no `Mutex`
 //!
@@ -12,9 +12,9 @@
 //! exactly one worker" true without a lock. The results are a `Vec<OnceLock<R>>`, one cell per
 //! item, each written at most once by whichever worker claimed that index.
 //!
-//! That choice also removes the need for an `unwrap` the lint wall would refuse. An empty cell
-//! at the end can only mean its item was never claimed, which can only mean the run was
-//! cancelled before a worker reached it. The empty case has a real answer, not an
+//! That choice also removes the need for an `unwrap` the lint wall would refuse. An empty
+//! cell at the end can only mean its item was never claimed. That in turn can only mean the
+//! run was cancelled before a worker reached it. The empty case has a real answer, not an
 //! unreachable-in-theory one.
 
 use std::sync::{
@@ -38,23 +38,23 @@ pub(crate) struct Job<'a, T> {
     pub(crate) worker: usize,
 }
 
-/// Runs `task` over `items`, at most `workers` at a time, and returns one result per item, in
-/// `items` order, regardless of how the transfers actually finished.
+/// Runs `task` over `items`, at most `workers` at a time. Returns one result per item, in
+/// `items` order, whatever order the transfers actually finished in.
 ///
-/// `schedule` is the order a free worker claims items in — the caller's scheduling policy
-/// (largest-first, for downloads), expressed as indices into `items`. It decides when an item
-/// runs, never where its result lands. The returned vector is indexed by the item's original
-/// position, so a caller's reporting order is independent of its scheduling order.
+/// `schedule` is the order a free worker claims items in. It is the caller's scheduling
+/// policy, largest-first for downloads, expressed as indices into `items`. It decides when an
+/// item runs, never where its result lands. The returned vector is indexed by the item's
+/// original position. So a caller's reporting order is independent of its scheduling order.
 ///
 /// `task` receives a [`Job`]: the item, its index, and which worker claimed it. The worker
 /// index is what lets a caller spread work across mirrors without a semaphore. See
 /// [`crate::Concurrency::servers_for`].
 ///
-/// `cancel` is checked before a worker claims each item, so a cancelled run stops promptly
+/// `cancel` is checked before a worker claims each item. So a cancelled run stops promptly
 /// rather than draining the queue. Items no worker ever claimed come back as `on_cancel()`.
 ///
 /// With `workers <= 1`, nothing is spawned. Everything runs inline on the calling thread. This
-/// is the path `ParallelDownloads = 1` takes, and the reason that setting behaves exactly as a
+/// is the path `ParallelDownloads = 1` takes. It is why that setting behaves exactly as a
 /// serial downloader does.
 pub(crate) fn run<T, R>(
     items: &[T],
@@ -71,8 +71,8 @@ where
     let results: Vec<OnceLock<R>> = items.iter().map(|_| OnceLock::new()).collect();
     let cursor = AtomicUsize::new(0);
 
-    // One worker's whole life: claim the next scheduled index, run it, and repeat until the
-    // queue is empty or the run is cancelled.
+    // One worker's whole life. Claim the next scheduled index, run it, and repeat. It stops
+    // when the queue is empty or the run is cancelled.
     let drain = |worker: usize| {
         loop {
             if cancel.is_requested() {

@@ -8,43 +8,47 @@
 //!    write, and no rule explains it.
 //!
 //! Check 1 is pure set arithmetic and lives in [`filelist`]. Check 2's rules are pure and
-//! live in [`decision`]. What is left here is the part that has to touch a disk: `lstat`ing
-//! each path inside the root, and asking the local database who owns what.
+//! live in [`decision`]. What is left here is the part that has to touch a disk. It `lstat`s
+//! each path inside the root, and asks the local database who owns what.
 //!
 //! # Why this is not optional
 //!
-//! Everything else in this crate refuses to leave the installation root, refuses to follow a
-//! symlink, and refuses to put a file where a directory is. None of that helps against a
-//! package that simply ships `usr/bin/ls`. Extraction would write it, the local database
-//! would record two owners for one path, and removing either package would delete a file the
-//! other still needs. This check is the only safeguard against that outcome, which is why it
-//! runs during [`crate::Transaction::verify`] — the last state from which abandoning the
-//! transaction leaves the system untouched.
+//! Everything else in this crate refuses three things. It refuses to leave the installation
+//! root, to follow a symlink, and to put a file where a directory is. None of that helps against
+//! a
+//! package that simply ships `usr/bin/ls`. Extraction would write it. The local database would
+//! record two owners for one path. Removing either package would then delete a file the other
+//! still needs. This check is the only safeguard against that outcome. That is why it runs
+//! during [`crate::Transaction::verify`], the last state from which abandoning the transaction
+//! leaves the system untouched.
 //!
 //! # What it costs
 //!
 //! Two of the rules ask the whole local database who owns a path. That forces every installed
 //! package's `files` to be read. libalpm has the same data resident for other reasons; piko does
-//! not. The load is deferred to the first query that actually needs one (`Owners`) and then shared.
-//! A transaction whose packages ship no backup files and hit no conflicts never pays it.
+//! not. [`crate::owner::Owners`] defers the load to the first query that actually needs one, and
+//! shares it afterwards. A transaction whose packages ship no backup files and hit no conflicts
+//! never pays it.
 //!
-//! Deferring the load is not the whole cost, and the rest is easy to miss. Most of `Owners`'s
-//! accessors ask "who owns this path", which genuinely has to consider every installed package —
-//! but they run rarely: once per reported conflict, or only for a backup file. `Owners::files_of`
-//! is the opposite. It asks "what does *this named package* own". `examine` calls it once per path
-//! **per other target in the transaction**, so a linear scan of the installed set sits inside two
-//! nested loops. The check becomes quadratic in the size of the plan.
+//! Deferring the load is not the whole cost, and the rest is easy to miss. Most of that type's
+//! accessors ask "who owns this path". That genuinely has to consider every installed package.
+//! But those accessors run rarely: once per reported conflict, or only for a backup file.
+//! Its `files_of` is the opposite. It asks "what does *this named package* own". `examine`
+//! calls it once per path **per other target in the transaction**. So a linear scan of the
+//! installed set sits inside two nested loops. The check becomes quadratic in the size of the
+//! plan.
 //!
-//! Measured against this machine's database, 85 677 paths held constant while the target count
-//! varied: 1 target 5.1 s, 16 targets 7.0 s, 64 targets 13.7 s, 200 targets **32.0 s**. With
-//! `files_of` indexed by name, the same runs are 6.5 / 5.1 / 5.5 / **7.1** s. The target count
-//! nearly stops mattering, and the remaining ~5 s is the `lstat` of every path — the work the
-//! check exists to do. Both versions report the same 72 516 conflicts.
+//! Measured against this machine's database, with 85 677 paths held constant while the target
+//! count varied. 1 target 5.1 s, 16 targets 7.0 s, 64 targets 13.7 s, 200 targets **32.0 s**.
+//! With `files_of` indexed by name, the same runs are 6.5 / 5.1 / 5.5 / **7.1** s. The target
+//! count nearly stops mattering. The remaining ~5 s is the `lstat` of every path, which is the
+//! work the check exists to do. Both versions report the same 72 516 conflicts.
 //!
 //! Indexing `files_of` left one scan of the target list per path: `examine`'s "is this path
 //! changing hands between two targets" question. That question is now answered from `Handover`,
-//! built once per [`check`]. Measured on the case that exercises it hardest, targets rotated so
-//! that *every* path is new to its target and owned by another target's installed version:
+//! built once per [`check`]. The measurement below uses the case that exercises it hardest.
+//! Targets are rotated so that *every* path is new to its target, and owned by another target's
+//! installed version:
 //!
 //! | targets | paths | per-path scan | indexed |
 //! | --- | --- | --- | --- |
@@ -54,9 +58,9 @@
 //! | 200 | 85 677 | 5.75 s | 4.55 s |
 //! | 400 | 140 181 | **11.29 s** | **6.68 s** |
 //!
-//! No size is slower. That was the thing worth checking rather than assuming: the index has to
-//! be built before it can save anything, and a plan of twenty packages is the ordinary case
-//! while four hundred is `kde-applications-meta`. It costs one entry per distinct path across
+//! No size is slower. That was worth checking rather than assuming. The index has to be built
+//! before it can save anything. A plan of twenty packages is the ordinary case, while four
+//! hundred is `kde-applications-meta`. It costs one entry per distinct path across
 //! the targets' installed file lists. Every row above produces byte-identical output,
 //! `skip_remove` included (115 256 entries in the last one), checked by digest.
 
@@ -77,6 +81,7 @@ use crate::{
     },
     error::Result,
     extract::decision::Existing,
+    owner::Owners,
     rootfs::RootDir,
     scriptlet::MAX_SCRIPTLET_BYTES,
 };
@@ -97,12 +102,12 @@ pub struct Target {
     pub backups: BTreeSet<String>,
     /// The package's `.INSTALL` scriptlet, if it ships one.
     ///
-    /// Not a conflict-detection concern. It is carried here for one measurable reason: the
+    /// Not a conflict-detection concern. It is carried here for one measurable reason. The
     /// `pre_install`/`pre_upgrade` function must run **before** the package is extracted, so it
     /// cannot come from the extraction that follows. Reading it needs a full pass over an
     /// archive this function is already making. A second pass would mean decompressing every
-    /// package twice. libalpm pays that cost — `_alpm_unpack_single` re-opens the archive
-    /// (`trans.c:379`) — and piko does not have to.
+    /// package twice. libalpm pays that cost, since `_alpm_unpack_single` re-opens the archive
+    /// (`trans.c:379`). piko does not have to.
     ///
     /// `None` for a package with no scriptlet, which is most of them.
     pub install_script: Option<Vec<u8>>,
@@ -160,9 +165,9 @@ pub struct Check {
     /// Paths that must not be deleted by a removal step in this transaction.
     ///
     /// libalpm's `trans->skip_remove` (`conflict.c:591`). A path that changes owner between
-    /// two packages being upgraded together is installed by its new owner. Without this
-    /// entry, the old owner's removal then deletes it — leaving the file missing and the new
-    /// package's database entry claiming it.
+    /// two packages being upgraded together is installed by its new owner. Without this entry,
+    /// the old owner's removal then deletes it. The file goes missing while the new package's
+    /// database entry claims it.
     pub skip_remove: BTreeSet<PathBuf>,
 }
 
@@ -200,7 +205,7 @@ impl Default for WalkLimits {
 /// Which paths the user has released piko from protecting — pacman's `--overwrite`.
 ///
 /// This is a predicate rather than a pattern list, for the same reason [`crate::Filters`]
-/// holds predicates: this crate does not need an opinion about glob syntax. A test can supply
+/// holds predicates. This crate does not need an opinion about glob syntax. A test can supply
 /// an exact answer instead of a pattern that has to be right twice.
 pub struct Overwrite(Box<dyn Fn(&Path) -> bool + Send + Sync>);
 
@@ -228,104 +233,6 @@ impl Default for Overwrite {
 impl std::fmt::Debug for Overwrite {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Overwrite").finish_non_exhaustive()
-    }
-}
-
-/// The installed set, in database order, with a name index beside it.
-///
-/// The two are **not** redundant. Collapsing them into a `HashMap` alone would be a
-/// behavioural change, not a simplification: [`Owners::owner_of`] answers with the *first*
-/// package owning a path, as `_alpm_find_file_owner` does. The order a walk sees has to be the
-/// database's, not a hash's.
-#[derive(Debug)]
-struct Installed {
-    /// Every installed package and its file list, in database order.
-    packages: Vec<(String, FileList)>,
-    /// Where each name sits in `packages`.
-    by_name: std::collections::HashMap<String, usize>,
-}
-
-/// Who owns what, loaded from the local database only once something asks.
-///
-/// Deliberately not built in the constructor. Most transactions never reach a rule that needs
-/// it, and building it forces every installed package's `files` to be read.
-#[derive(Debug)]
-struct Owners<'db> {
-    local: &'db LocalDatabase,
-    loaded: Option<Installed>,
-}
-
-impl<'db> Owners<'db> {
-    const fn new(local: &'db LocalDatabase) -> Self {
-        Self { local, loaded: None }
-    }
-
-    /// The installed set, reading it on the first call.
-    fn installed(&mut self) -> &Installed {
-        let local = self.local;
-        self.loaded.get_or_insert_with(|| {
-            let packages: Vec<(String, FileList)> = local
-                .iter()
-                .map(|package| {
-                    // A package whose `files` cannot be read contributes an empty list. This is
-                    // the safe direction: it makes paths look unowned, which produces a
-                    // conflict rather than suppressing one.
-                    let files = package
-                        .file_list()
-                        .map(|paths| {
-                            FileList::new(
-                                paths.iter().map(|path| path.to_string_lossy().into_owned()),
-                            )
-                        })
-                        .unwrap_or_default();
-                    (package.name().to_string(), files)
-                })
-                .collect();
-            // First occurrence wins, so the index agrees with the ordered walk about which
-            // package a name refers to. A local database cannot hold two entries of one name.
-            // This choice only matters for staying honest about what the index means.
-            let mut by_name = std::collections::HashMap::with_capacity(packages.len());
-            for (index, (name, _)) in packages.iter().enumerate() {
-                by_name.entry(name.clone()).or_insert(index);
-            }
-            Installed { packages, by_name }
-        })
-    }
-
-    /// Every installed package and its file list, in database order.
-    fn all(&mut self) -> &[(String, FileList)] {
-        &self.installed().packages
-    }
-
-    /// The first installed package owning `path` exactly, as `_alpm_find_file_owner` does.
-    fn owner_of(&mut self, path: &str) -> Option<String> {
-        self.all().iter().find(|(_, files)| files.contains(path)).map(|(name, _)| name.clone())
-    }
-
-    /// Every installed package owning `path` exactly.
-    fn owners_of(&mut self, path: &str) -> Vec<String> {
-        self.all()
-            .iter()
-            .filter(|(_, files)| files.contains(path))
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
-
-    /// Whether any installed package owns `path` exactly.
-    fn anyone_owns(&mut self, path: &str) -> bool {
-        self.all().iter().any(|(_, files)| files.contains(path))
-    }
-
-    /// The file list of an installed package, if it is installed.
-    ///
-    /// Indexed rather than scanned. That is not premature: this is the one accessor asked per
-    /// **path and per target** — [`examine`] consults it once for every other target in the
-    /// transaction — so a linear scan would put the whole installed set inside two nested
-    /// loops. See the module's "What it costs" note for the measurement.
-    fn files_of(&mut self, name: &str) -> Option<&FileList> {
-        let installed = self.installed();
-        let index = *installed.by_name.get(name)?;
-        installed.packages.get(index).map(|(_, files)| files)
     }
 }
 
@@ -360,8 +267,8 @@ pub fn check(
 /// One target's entry, keyed by the path [`FileList::intersection`] compares on.
 ///
 /// Ordered as `(stripped path, target, spelling)`. Sorting on this tuple groups every target
-/// that ships one path together, and orders the group by target and then by spelling — the
-/// same order the nested loops this replaces produced.
+/// that ships one path together. It orders the group by target and then by spelling, which is
+/// the order the nested loops this replaces produced.
 type Shipped<'a> = (&'a str, usize, &'a str);
 
 /// Check 1: every target against every other target (`conflict.c:432`).
@@ -369,29 +276,29 @@ type Shipped<'a> = (&'a str, usize, &'a str);
 /// # Not a loop over pairs
 ///
 /// `conflict.c:432` is a double loop calling `_alpm_filelist_intersection` on each pair. That is
-/// quadratic in the number of targets *and* linear in the file lists: [`FileList::intersection`]
+/// quadratic in the number of targets *and* linear in the file lists. [`FileList::intersection`]
 /// builds a map of the whole right-hand list every time it is called. A 500-package transaction
 /// would take ~125 000 intersections, each rebuilding a map of a list it had already seen
 /// hundreds of times.
 ///
 /// A path can only collide if two targets ship it, so the work belongs to the *paths*, not to
 /// the pairs. Every entry of every target is sorted once by stripped path. A run of equal
-/// stripped paths that comes from a single target — which is almost all of them — is skipped
-/// whole. Only a genuinely shared path is expanded into pairs, and there are few.
+/// stripped paths that comes from a single target is skipped whole, and that is almost all of
+/// them. Only a genuinely shared path is expanded into pairs, and there are few.
 ///
 /// The second fast path is the one that is easy to leave out, and it would undo most of this. A
 /// shared *directory* is not a conflict, and `usr/`, `usr/bin/`, and `usr/share/` are shipped by
-/// nearly every package. Those groups hold one run per target, so expanding them into pairs
-/// anyway would put the target count straight back inside a quadratic. A group whose entries
-/// are all directories is therefore dropped in one linear scan.
+/// nearly every package. Those groups hold one run per target. Expanding them into pairs anyway
+/// would put the target count straight back inside a quadratic. A group whose entries are all
+/// directories is therefore dropped in one linear scan.
 ///
 /// The result is identical, ordering included. `found` is sorted by
 /// `(first target, second target, spelling)` before anything is reported. That matches exactly
-/// what the nested loops emitted: the outer loop ascending, the inner loop ascending, and each
-/// intersection yielding the left-hand list in its own sorted order.
+/// what the nested loops emitted. The outer loop ascends, the inner loop ascends, and each
+/// intersection yields the left-hand list in its own sorted order.
 ///
-/// Measured against real package file lists, each duplicated under a second name so that every
-/// path genuinely collides, timed with an empty root so that check 2 returns immediately:
+/// The measurement below uses real package file lists, each duplicated under a second name so
+/// that every path genuinely collides. The root is empty, so check 2 returns immediately:
 ///
 /// | targets | paths | pairwise | indexed |
 /// | --- | --- | --- | --- |
@@ -400,8 +307,8 @@ type Shipped<'a> = (&'a str, usize, &'a str);
 /// | 400 | 171 354 | 7.30 s | 983 ms |
 /// | 800 | 280 362 | **20.38 s** | **1.59 s** |
 ///
-/// The pairwise column roughly triples per doubling; the indexed one tracks the path count.
-/// Both produce the same conflicts in the same order: 115 257 of them in the last row, checked
+/// The pairwise column roughly triples per doubling. The indexed one tracks the path count.
+/// Both produce the same conflicts in the same order, 115 257 of them in the last row. Checked
 /// by digest, and pinned for the small cases by
 /// `the_indexed_check_agrees_with_the_pairwise_loop`.
 fn check_targets(targets: &[Target], overwrite: &Overwrite, into: &mut Check) {
@@ -423,17 +330,17 @@ fn check_targets(targets: &[Target], overwrite: &Overwrite, into: &mut Check) {
 
         // Two packages owning one directory is normal, and a pair is spared only when *both*
         // sides are directories. So a group that is all directories yields nothing whatever
-        // its size. That case is worth a linear scan: `usr/`, `usr/bin/`, and `usr/share/` are
+        // its size. That case is worth a linear scan. `usr/`, `usr/bin/`, and `usr/share/` are
         // shipped by nearly every package on the system, so these groups hold one run per
         // target. Expanding them into pairs anyway would put the target count back inside a
-        // quadratic, which is what this rewrite exists to remove.
+        // quadratic. That is what the sort above exists to avoid.
         if group.iter().all(|(_, _, entry)| is_directory(entry)) {
             continue;
         }
 
         // `_alpm_filelist_intersection` asks whether the *other* side holds a non-directory
-        // under this path. This is answered once per run here rather than once per pair, so a
-        // group that does contain a file cannot make the walk cubic in the number of targets.
+        // under this path. This is answered once per run here, rather than once per pair. So a
+        // group that does contain a file cannot make the walk cubic in the target count.
         let runs: Vec<(usize, &[Shipped<'_>], bool)> = group
             .chunk_by(|left, right| left.1 == right.1)
             .filter_map(|run| {
@@ -461,7 +368,7 @@ fn check_targets(targets: &[Target], overwrite: &Overwrite, into: &mut Check) {
         // `--overwrite` releases a file-against-file collision only. libalpm expresses that
         // by re-testing the path against the *other* package's list with an exact comparison
         // (`conflict.c:455`). The intersection returns the path as the first package spells
-        // it, so an exact hit means both spell it the same way, and a file-against-directory
+        // it. So an exact hit means both spell it the same way, and a file-against-directory
         // pair cannot match.
         if overwrite.matches(Path::new(path)) && second.files.contains(path) {
             continue;
@@ -474,21 +381,21 @@ fn check_targets(targets: &[Target], overwrite: &Overwrite, into: &mut Check) {
     }
 }
 
-/// Which targets' *installed* versions own one path — enough of them to answer [`examine`]'s
-/// "is this changing hands" question without walking the target list per path.
+/// Which targets' *installed* versions own one path. Enough of them to answer [`examine`]'s
+/// "is this changing hands" question, without walking the target list per path.
 ///
 /// # Two entries, and two is provably enough
 ///
-/// The question is: the first target, in target order, whose name differs from the one being
-/// examined and whose installed version owns this path. The only name that can ever be excluded
-/// is the examined target's own, so exactly two cases arise:
+/// The question asks for one target. Take the first, in target order, whose name differs from
+/// the one being examined and whose installed version owns this path. The only name that can be
+/// excluded is the examined target's own. So exactly two cases arise:
 ///
-/// - `first`'s name differs from it — `first` is the answer.
-/// - `first`'s name *is* it — then every owner between `first` and [`Self::runner_up`] shares
-///   that name by construction, so all of them are excluded too. `runner_up` (the first owner
-///   with a name different from `first`'s) is the answer.
+/// - `first`'s name differs from it. `first` is the answer.
+/// - `first`'s name *is* it. Then every owner between `first` and [`Self::runner_up`] shares
+///   that name by construction, so all of them are excluded too. `runner_up` is the answer. It
+///   is the first owner with a name different from `first`'s.
 ///
-/// A third entry could never be reached: `runner_up`'s name differs from `first`'s, which in
+/// A third entry could never be reached. `runner_up`'s name differs from `first`'s, which in
 /// that branch is the examined target's. So `runner_up` is never itself excluded.
 #[derive(Clone, Copy, Debug)]
 struct Handover {
@@ -689,9 +596,9 @@ fn resolves_to_directory(root: &RootDir, path: &Path) -> bool {
 
 /// Whether every file under `dir` belongs to a package this transaction is getting rid of.
 ///
-/// `conflict.c:613-642` states two rules in one. First its precondition: the directory must
-/// have owners, and every one of them must be either the installed version of the package
-/// being installed or a package being removed. Only then does it walk the directory
+/// `conflict.c:613-642` states two rules in one. First the precondition. The directory must
+/// have owners, and every one of them must be one of two things. Either the installed version
+/// of the package being installed, or a package being removed. Only then does it walk the
 /// (`dir_belongsto_pkgs`, `conflict.c:308`) and require every entry inside to be owned by one
 /// of them too.
 ///
@@ -758,7 +665,7 @@ fn everything_below_is_owned(
 
 /// The entries of `dir` inside `root`, as `(name, is_directory)`, or `None` if unreadable.
 ///
-/// This opens `O_NOFOLLOW | O_DIRECTORY` from the parent's descriptor, so the directory read is
+/// This opens `O_NOFOLLOW | O_DIRECTORY` from the parent's descriptor. So the directory read is
 /// the one that was resolved, not whatever the path names by the time it is opened.
 fn read_directory(root: &RootDir, dir: &str) -> Option<Vec<(String, bool)>> {
     let resolved = root.resolve_parent(Path::new(strip_dir(dir))).ok()?;
@@ -819,7 +726,7 @@ pub struct LoadedPackage {
     /// What each payload member will occupy, for the disk-space estimate.
     ///
     /// Not on [`Target`], although it comes from the same walk. A size is not a
-    /// conflict-detection concern, and [`target_from_installed`] builds a `Target` out of an
+    /// conflict-detection concern. And [`target_from_installed`] builds a `Target` out of an
     /// installed package's `%FILES%`, which records no sizes at all. This is the type that
     /// already means "the archive, read once".
     pub footprint: Vec<crate::space::MemberFootprint>,
@@ -827,8 +734,8 @@ pub struct LoadedPackage {
 
 /// Reads a package archive: its member list, its `.INSTALL`, and its `.PKGINFO`.
 ///
-/// The file list must come from the archive: the package is not installed yet, so there is no
-/// `%FILES%` to read, and the repository's `.files` database describes a build that may not be
+/// The file list must come from the archive. The package is not installed yet, so there is no
+/// `%FILES%` to read. And the repository's `.files` database describes a build that may not be
 /// the one in the cache. pacman resolves this the same way, loading the package files before
 /// checking (`sync.c`'s `load_packages` ahead of `_alpm_sync_check`).
 ///
@@ -902,10 +809,10 @@ pub fn load_package(
         alpm_pkginfo::PackageInfo::V1(v1) => (v1.pkgname.to_string(), v1.pkgver.to_string()),
         alpm_pkginfo::PackageInfo::V2(v2) => (v2.pkgname.to_string(), v2.pkgver.to_string()),
     };
-    // `%BACKUP%` paths are taken from the text rather than from the parsed `Backup` values,
-    // because they are compared against the paths the *archive* spells. A round trip through
-    // a typed path that normalises anything could make that comparison miss — the same hazard
-    // `record::desc` avoids for `%URL%`.
+    // `%BACKUP%` paths are taken from the text rather than from the parsed `Backup` values.
+    // They are compared against the paths the *archive* spells. A round trip through a typed
+    // path that normalises anything could make that comparison miss. `record::desc` avoids the
+    // same hazard for `%URL%`.
     let backups: BTreeSet<String> = raw
         .lines()
         .filter_map(|line| line.strip_prefix("backup = "))
@@ -923,15 +830,15 @@ pub fn load_package(
 /// Reads only a package archive's `.PKGINFO`, stopping as soon as it has it.
 ///
 /// [`load_package`] answers what a *transaction* needs: the member list, the scriptlet, the
-/// `%BACKUP%` lines. Planning needs none of that. It needs the name, version and relations of
-/// a package file named on the command line, so that the solver can treat it as a candidate —
-/// and it needs them before the user has confirmed anything.
+/// `%BACKUP%` lines. Planning needs none of that. It needs the name, version and relations of a
+/// package file named on the command line. The solver then treats that file as a candidate. And
+/// planning needs them before the user has confirmed anything.
 ///
 /// The archive is read a second time later, by [`load_package`] inside
-/// [`crate::Transaction::verify`]. That is deliberate: verification must read the bytes it is
-/// about to install, not trust a view taken earlier from a file that may since have changed.
-/// This one stops at `.PKGINFO`, so the duplicated cost is a few kilobytes rather than a
-/// second full decompression.
+/// [`crate::Transaction::verify`]. That second read is deliberate. Verification must read the
+/// bytes it is about to install. It must not trust a view taken earlier, from a file that may
+/// since have changed. This one stops at `.PKGINFO`, so the duplicated cost is a few kilobytes
+/// than a second full decompression.
 ///
 /// # Errors
 ///
@@ -977,9 +884,9 @@ const MAX_PKGINFO_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Builds the [`Target`] view of an already-installed package, for a removal step.
 ///
-/// [`Target::version`] is left empty. Conflict detection never reads it, and the only caller
-/// that does — the scriptlet sequence — takes the version from the database entry it is
-/// removing rather than from here.
+/// [`Target::version`] is left empty. Conflict detection never reads it. The only caller that
+/// does is the scriptlet sequence. It takes the version from the database entry it is removing,
+/// rather than from here.
 #[must_use]
 pub fn target_from_installed(name: &str, files: &[PathBuf]) -> Target {
     Target {
@@ -1083,8 +990,8 @@ mod tests {
 
     /// The per-path scan `Handover` replaces, kept as the reference.
     ///
-    /// This is the rule verbatim: the first target, in target order, whose name differs from
-    /// the one being examined and whose *installed* version owns `stripped` exactly.
+    /// The rule verbatim. It picks the first target, in target order, that meets two tests. Its
+    /// name differs from the one being examined. And its *installed* version owns `stripped`.
     fn scan_previous_owner<'a>(
         owners: &mut Owners<'_>,
         targets: &'a [Target],
@@ -1102,8 +1009,8 @@ mod tests {
         None
     }
 
-    /// The index must answer identically to the scan for **every** target and every path, not
-    /// merely for the paths a conflict is reported on: the answer feeds `changing_owner_from`,
+    /// The index must answer identically to the scan for **every** target and every path. Not
+    /// merely for the paths a conflict is reported on. The answer feeds `changing_owner_from`,
     /// which decides `skip_remove` and names a package in the resolution.
     fn assert_handovers_agree(packages: &[(&str, &[&str])], targets: &[Target], probes: &[&str]) {
         let (_keep, local) = database(packages);
@@ -1149,8 +1056,8 @@ mod tests {
         );
 
         // Three targets, two of them sharing a name. When `foo` is examined, both `foo` entries
-        // are filtered, so the answer is the third — which is exactly why `runner_up` is keyed
-        // on a differing *name* rather than simply being the second index seen.
+        // are filtered, so the answer is the third. That is exactly why `runner_up` is keyed on
+        // a differing *name*, rather than simply being the second index seen.
         assert_handovers_agree(
             &[
                 ("foo-1.0.0-1", &["usr/", "usr/bin/", "usr/bin/shared"]),
@@ -1177,7 +1084,7 @@ mod tests {
         );
 
         // Directory spellings. The lookup is exact, so an installed `usr/lib/` must not answer
-        // a query for `usr/lib` — the scan's `contains` does not, and neither may the index.
+        // a query for `usr/lib`. The scan's `contains` does not, and neither may the index.
         assert_handovers_agree(
             &[("dirs-1.0.0-1", &["usr/", "usr/lib/", "usr/lib/thing"])],
             &[target("other", &["usr/lib/thing"]), target("dirs", &["usr/lib/thing"])],
@@ -1278,11 +1185,11 @@ mod tests {
             // Two targets of one name, which the check distinguishes by position only.
             vec![target("same", &["usr/bin/tool"]), target("same", &["usr/bin/tool"])],
             // A mixed group in which one pair must *still* be spared. Two targets ship the
-            // directory and a third ships a file of the same name, so the group is not all
-            // directories and the fast path does not apply. The directory-against-directory
-            // pair inside it is still not a conflict. Without this case the both-are-
-            // directories rule could be deleted outright and every other case here would still
-            // pass, because the fast path answers them first.
+            // directory and a third ships a file of the same name. So the group is not all
+            // directories, and the fast path does not apply. The directory-against-directory
+            // pair inside it is still not a conflict. Without this case, the both-are-directories
+            // rule could be deleted outright and every other case here would still pass. The
+            // fast path answers them first.
             vec![
                 target("a", &["usr/lib/foo/", "usr/lib/foo/x"]),
                 target("b", &["usr/lib/foo/", "usr/lib/foo/y"]),
@@ -1562,8 +1469,8 @@ mod tests {
         assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
     }
 
-    /// The walk is bounded. With no budget, it must answer "not vacated" — the conservative
-    /// direction — rather than run out of budget silently in the permissive one.
+    /// The walk is bounded. With no budget, it must answer "not vacated", which is the
+    /// conservative direction. Running out of budget must not answer in the permissive one.
     #[test]
     fn an_exhausted_walk_budget_reports_a_conflict() {
         let (_keep, local) = database(&[(

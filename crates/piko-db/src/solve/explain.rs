@@ -86,10 +86,10 @@ pub enum Fact {
     /// A caller answered `ALPM_QUESTION_SELECT_PROVIDER`, so one provider satisfies a
     /// `%DEPENDS%` entry and the others no longer do.
     ///
-    /// Replaces the [`Fact::Requires`] for that entry rather than accompanying it, because the
-    /// clause itself carries the answer. Without it the explanation reads as "nothing
-    /// satisfies this dependency" while several packages plainly do — the same misreading
-    /// [`Fact::Ignored`] exists to prevent.
+    /// Replaces the [`Fact::Requires`] for that entry rather than accompanying it, because
+    /// the clause itself carries the answer. Without it the explanation reads as "nothing
+    /// satisfies this dependency" while several packages plainly do. That is the same
+    /// misreading [`Fact::Ignored`] exists to prevent.
     Chose {
         /// The package with the dependency.
         package: String,
@@ -184,8 +184,8 @@ impl fmt::Display for Derivation {
 ///
 /// At most one clause-level [`Fact`], plus a [`Fact::Ignored`] for each candidate an
 /// unsatisfiable requirement would have had. The second is attached here, where the relation
-/// is already in hand, rather than being re-derived by a caller comparing the explanation
-/// against the universe.
+/// is already in hand. Otherwise a caller re-derives it by comparing the explanation against
+/// the universe.
 fn facts_for(universe: &Universe<'_>, kind: ClauseKind) -> Vec<Fact> {
     let mut facts: Vec<Fact> = fact(universe, kind).into_iter().collect();
     let ClauseKind::Requires { dependent, dependency } = kind else { return facts };
@@ -261,10 +261,12 @@ fn relation_text(universe: &Universe<'_>, dependent: SolvableId, dependency: usi
 
 /// `name version (origin)`, the form every fact refers to a package by.
 ///
-/// The origin matters: "glibc (installed)" and "glibc (core)" are different candidates. An
+/// The origin matters. "glibc (installed)" and "glibc (core)" are different candidates. An
 /// explanation that could not tell them apart would be unreadable exactly when it matters.
-/// Public because a frontend that has to name a candidate outside an explanation — a prompt
-/// listing the providers of a dependency, say — must spell it the same way, or the two drift.
+///
+/// This is public because a frontend sometimes names a candidate outside an explanation, in a
+/// prompt listing the providers of a dependency. It must spell it the same way, or the two
+/// drift.
 #[must_use]
 pub fn describe_candidate(universe: &Universe<'_>, id: SolvableId) -> String {
     universe.get(id).map_or_else(

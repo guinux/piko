@@ -1,7 +1,7 @@
 //! Comparing an installed package's owned files against its `ALPM-MTREE` data.
 //!
-//! This is the equivalent of `pacman -Qkk`. It checks existence, type, ownership, mode,
-//! modification time, size, SHA-256 digest and symlink targets, reusing
+//! This is the equivalent of `pacman -Qkk`. It checks eight things: existence, type,
+//! ownership, mode, modification time, size, SHA-256 digest and symlink targets. It reuses
 //! `alpm_mtree::mtree::v2::Path`'s own
 //! [`equals_path`](alpm_mtree::mtree::v2::Path::equals_path) rather than re-deriving that
 //! comparison. Layered on top is pacman's own `-Qkk` policy:
@@ -30,8 +30,8 @@ use crate::{
     resolve,
 };
 
-/// The db-recorded name of a package's install scriptlet, once the `./` mtree prefix and the
-/// leading dot pacman keeps are both accounted for. See `check.c`'s special-casing of
+/// The db-recorded name of a package's install scriptlet. This accounts for the `./` mtree
+/// prefix and for the leading dot pacman keeps. See `check.c`'s special-casing of
 /// `.INSTALL`/`.CHANGELOG`, mirrored here.
 const INSTALL_MTREE_NAME: &str = ".INSTALL";
 /// As [`INSTALL_MTREE_NAME`], for the package's changelog.
@@ -48,7 +48,7 @@ pub struct FileProblem {
     pub error: PathValidationError,
     /// Whether `path` is one of the package's `%BACKUP%` entries.
     ///
-    /// A `true` here does not mean the disagreement is ignorable in general — only
+    /// A `true` here does not mean the disagreement is ignorable in general. Only
     /// [`FileProblem::is_error`] knows which [`PathValidationError`] variants a backup file is
     /// allowed to disagree on.
     pub backup: bool,
@@ -61,9 +61,9 @@ impl FileProblem {
     /// *disagreeing*. `pacman -Qkk` expects an edited config file to differ there. A failure
     /// to even compute the comparison (`CreateHashDigest`, e.g. permission denied reading a
     /// root-only backup file) is not softened. `check_file_cksum` (`check.c`) returns an
-    /// error unconditionally when it cannot calculate a checksum at all; it only softens an
-    /// actual mismatch once both sides are computed. Every other disagreement, backup file or
-    /// not, is a failure: a backup file must still be the right type, owner and mode, and
+    /// error unconditionally when it cannot calculate a checksum at all. It softens only an
+    /// actual mismatch, once both sides are computed. Every other disagreement is a failure,
+    /// backup file or not. A backup file must still be the right type, owner and mode, and
     /// must still exist.
     #[must_use]
     pub fn is_error(&self) -> bool {
@@ -110,8 +110,8 @@ impl LocalPackage {
     /// Compares every file this package owns against its `ALPM-MTREE` data — the equivalent of
     /// `pacman -Qkk`.
     ///
-    /// `Ok(None)` means this package has no `mtree` file to check against, matching `-Qkk`'s
-    /// own "no mtree file" case rather than treating it as a failure.
+    /// `Ok(None)` means this package has no `mtree` file to check against. That matches
+    /// `-Qkk`'s own "no mtree file" case, rather than treating it as a failure.
     ///
     /// `no_extract` is `NoExtract` from `pacman.conf`, matched the same way `--overwrite`
     /// patterns are ([`resolve::matches_any`]). A missing file matching one of these
@@ -214,8 +214,8 @@ impl LocalPackage {
 
         // A symlink where mtree expects a directory or a regular file must never be followed.
         // `Directory`/`File::equals_path` resolve metadata with `Path::metadata`, which
-        // follows a symlink, and a `File` match would go on to open and hash whatever the
-        // symlink points at. Reporting the type mismatch here, without ever calling
+        // follows a symlink. A `File` match would then open and hash whatever the symlink
+        // points at. Reporting the type mismatch here, without ever calling
         // `equals_path`, keeps piko from reading a file it was never asked to.
         if !matches!(entry, v2::Path::Link(_))
             && let Ok(metadata) = std::fs::symlink_metadata(&on_disk)
@@ -436,11 +436,10 @@ mod tests {
     #[test]
     fn a_backup_file_that_cannot_be_hashed_is_still_a_hard_error() {
         // pacman's own `check_file_cksum` (`check.c`) returns an error unconditionally when
-        // it cannot even calculate a checksum. It only softens an actual mismatch once both
-        // sides were computed. This was a real divergence, caught against a live system:
-        // `piko check audit` under-counted altered files by one relative to
-        // `pacman -Qkk audit`, because `CreateHashDigest` was wrongly included in the
-        // softened set for backup files.
+        // it cannot even calculate a checksum. It softens only an actual mismatch, once both
+        // sides are computed. So `CreateHashDigest` must stay out of the softened set for
+        // backup files. With it in, `piko check audit` counts one altered file fewer than
+        // `pacman -Qkk audit` does on a live system.
         let problem = FileProblem {
             path: PathBuf::from("etc/foo.conf"),
             error: PathValidationError::CreateHashDigest {

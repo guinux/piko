@@ -1,8 +1,8 @@
 //! Timestamps, in the one spelling `pacman.log` and the history store both use.
 //!
-//! `%FT%T%z` in the machine's own time zone — `2026-09-04T10:11:12+0200`. That is
-//! `_alpm_log_leader`'s format (`log.c`), and reproducing it is what lets one file hold lines
-//! from pacman and from piko without a reader having to know which wrote which.
+//! `%FT%T%z` in the machine's own time zone, spelled `2026-09-04T10:11:12+0200`. That is
+//! `_alpm_log_leader`'s format (`log.c`). Reproducing it lets one file hold lines from pacman
+//! and from piko. A reader never has to know which wrote which.
 //!
 //! Rendering is done by hand rather than through `time`'s formatting machinery, the same way
 //! `piko`'s own `human_date` does it. The format is fixed, so a format description bought at
@@ -14,15 +14,15 @@ use std::fmt::Write as _;
 ///
 /// # Why this is captured rather than read where it is needed
 ///
-/// `time` refuses to read the local offset from a process that has more than one thread: the
+/// `time` refuses to read the local offset from a process that has more than one thread. The
 /// C library's time-zone state is not thread-safe against a concurrent `setenv`, and `time`
-/// will not paper over that. piko is multi-threaded by the time a transaction runs —
-/// `EntryWrite::commit` fsyncs in parallel, and `piko-net` downloads in parallel — so a late
+/// will not paper over that. piko is multi-threaded by the time a transaction runs.
+/// `EntryWrite::commit` fsyncs in parallel, and `piko-net` downloads in parallel. So a late
 /// call returns `IndeterminateOffset` and nothing else.
 ///
 /// So the offset is read once, at the top of `main`, while the process is still single
 /// threaded, and carried from there. [`LocalOffset::UTC`] is the fallback, and it is a correct
-/// answer rather than a broken one: the offset is part of every timestamp written, so a line
+/// answer rather than a broken one. The offset is part of every timestamp written, so a line
 /// stamped `+0000` is as unambiguous as one stamped `+0200`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LocalOffset {
@@ -116,7 +116,7 @@ pub fn render(epoch: i64, offset: LocalOffset) -> String {
 /// Parses what [`render`] wrote, back to epoch seconds.
 ///
 /// Accepts the offset spelled `+0200` or `+02:00`, and a trailing `Z`. Returns `None` for
-/// anything else, including a bare epoch [`render`] fell back to — a reader that cannot date a
+/// anything else, including a bare epoch [`render`] fell back to. A reader that cannot date a
 /// line is better off saying so than guessing.
 #[must_use]
 pub fn parse(text: &str) -> Option<i64> {
@@ -131,8 +131,8 @@ pub fn parse(text: &str) -> Option<i64> {
         )
     };
 
-    // The offset is whatever follows the clock. `Z`, `+HHMM` and `+HH:MM` are all spellings a
-    // real `pacman.log` can hold, since the file outlives the tool that wrote any given line.
+    // The offset is whatever follows the clock. `Z`, `+HHMM` and `+HH:MM` are all spellings
+    // a real `pacman.log` can hold. The file outlives the tool that wrote any given line.
     let (clock, offset_seconds) = if let Some(clock) = rest.strip_suffix('Z') {
         (clock, 0_i32)
     } else {

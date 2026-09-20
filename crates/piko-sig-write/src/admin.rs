@@ -17,9 +17,9 @@ const AGENT_SOCKET: &str = "S.gpg-agent";
 
 /// The longest agent socket path GnuPG will bind, in bytes.
 ///
-/// `sockaddr_un::sun_path` is 108 bytes on Linux, and GnuPG keeps a margin for the longer
-/// names it derives from this one (`S.gpg-agent.extra`, `.browser`, `.ssh`). Measured by
-/// bisection against GnuPG 2.4: 98 binds, 99 reports "socket name … is too long".
+/// `sockaddr_un::sun_path` is 108 bytes on Linux. GnuPG keeps a margin for the longer names it
+/// derives from this one (`S.gpg-agent.extra`, `.browser`, `.ssh`). Measured by bisection
+/// against GnuPG 2.4: 98 binds, 99 reports "socket name … is too long".
 const MAX_AGENT_SOCKET_LEN: usize = 98;
 
 /// The identity piko's own local signing key is generated and found under.
@@ -52,12 +52,14 @@ pub enum OwnerTrust {
 }
 
 impl OwnerTrust {
-    /// Parses `gpg --export-ownertrust`'s numeric code (also the `-trusted` file's `LEVEL`
-    /// field): `1..=6`, confirmed empirically against GnuPG 2.4.9 by driving `--edit-key
-    /// trust` for each interactive level and reading back `--export-ownertrust`. `Unknown` and
-    /// `Undefined` are not reachable through the interactive `trust` menu (there is no menu
-    /// option for either — they are the state of a key nobody has judged), but still appear as
-    /// valid codes in an ownertrust dump, so this parser accepts all six.
+    /// Parses `gpg --export-ownertrust`'s numeric code, which is also the `-trusted` file's
+    /// `LEVEL` field. The range is `1..=6`, confirmed empirically against GnuPG 2.4.9. The
+    /// measurement drove `--edit-key trust` for each interactive level and read back
+    /// `--export-ownertrust`.
+    ///
+    /// `Unknown` and `Undefined` are not reachable through the interactive `trust` menu. There is
+    /// no menu option for either, because they are the state of a key nobody has judged. They
+    /// still appear as valid codes in an ownertrust dump, so this parser accepts all six.
     pub(crate) fn from_file_code(code: u8) -> Option<Self> {
         match code {
             1 => Some(Self::Unknown),
@@ -74,8 +76,8 @@ impl OwnerTrust {
     ///
     /// # Errors
     ///
-    /// [`Error::Gpgme`] for [`Self::Unknown`]/[`Self::Undefined`] — GnuPG's interactive trust
-    /// menu has no option that sets either; both are only ever the *absence* of a trust
+    /// [`Error::Gpgme`] for [`Self::Unknown`]/[`Self::Undefined`]. GnuPG's interactive trust
+    /// menu has no option that sets either. Both are only ever the *absence* of a trust
     /// judgement, not something `--edit-key` can be asked to produce.
     fn interactive_digit(self) -> Result<&'static str> {
         match self {
@@ -159,7 +161,7 @@ pub struct InitOutcome {
 
 /// Administers a GnuPG keyring: creates it, imports keys, and grants or revokes their trust.
 ///
-/// Holds only the path, the same design [`piko_sig::Keyring`] uses and for the same reason — a
+/// Holds only the path, the same design [`piko_sig::Keyring`] uses and for the same reason. A
 /// GPGME context is not `Sync`, so one is opened per operation rather than cached.
 #[derive(Clone, Debug)]
 pub struct KeyringAdmin {
@@ -174,16 +176,15 @@ impl KeyringAdmin {
     /// real reason to a stderr GPGME discards. That message names nothing a caller can act
     /// on.
     ///
-    /// The reason worth recovering is the keyring path itself. GnuPG binds the agent socket
-    /// in `/run/user/<uid>/gnupg` when that directory exists, and falls back to the keyring
-    /// home when it does not — inside a user namespace mapped to root, in a container, or in
-    /// any process whose runtime directory is absent. `sockaddr_un` then bounds the path.
-    /// Measured against GnuPG 2.4 on Linux: a `<home>/S.gpg-agent` of 98 bytes binds, 99
-    /// fails.
+    /// The reason worth recovering is the keyring path itself. GnuPG binds the agent socket in
+    /// `/run/user/<uid>/gnupg` when that directory exists. It falls back to the keyring home
+    /// when it does not. That happens inside a user namespace mapped to root, in a container,
+    /// and in any process whose runtime directory is absent. `sockaddr_un` then bounds the path.
+    /// Measured against GnuPG 2.4 on Linux: a `<home>/S.gpg-agent` of 98 bytes binds, 99 fails.
     ///
-    /// The check runs only after GnuPG has already refused, never before. A long keyring path
-    /// is perfectly usable whenever the standard socket directory exists, so testing the
-    /// length up front would refuse a working keyring.
+    /// The check runs only after GnuPG has already refused, never before. A long keyring path is
+    /// perfectly usable whenever the standard socket directory exists. Testing the length up
+    /// front would refuse a working keyring.
     fn agent_error(&self, action: &'static str, source: &gpgme::Error) -> Error {
         let mut message = source.to_string();
         if source.code() == gpgme::Error::NO_AGENT.code() {
@@ -201,8 +202,8 @@ impl KeyringAdmin {
         Error::Gpgme { path: self.home.clone(), action, message }
     }
 
-    /// Creates `home` (mode `0700`) if it does not exist yet, and generates piko's local master
-    /// signing key inside it if none exists yet.
+    /// Creates `home` (mode `0700`) if it does not exist yet. It then generates piko's local
+    /// master signing key inside it, if none exists yet.
     ///
     /// Idempotent: calling this again against an already-initialized keyring changes nothing and
     /// reports `InitOutcome { master_key_created: false }`.
@@ -210,10 +211,10 @@ impl KeyringAdmin {
     /// This call sets the mode only on a directory it created itself. An existing keyring keeps its
     /// current mode.
     ///
-    /// The master key is RSA-4096, certify-capable, unprotected (no passphrase — this keyring
-    /// is meant to be usable by an unattended `piko install`, exactly like pacman's own
-    /// keyring), with no expiry. It exists only to locally sign ([`Self::lsign`]) other keys;
-    /// piko never uses it to sign a document.
+    /// The master key is RSA-4096, certify-capable, and has no expiry. It carries no passphrase,
+    /// because this keyring must be usable by an unattended `piko install`, exactly like pacman's
+    /// own keyring. It exists only to locally sign ([`Self::lsign`]) other keys. piko never uses
+    /// it to sign a document.
     ///
     /// # Errors
     ///
@@ -223,9 +224,9 @@ impl KeyringAdmin {
         if create_keyring_dir(&home)? {
             set_mode(&home, KEYRING_DIR_MODE, "set the keyring directory's permissions")?;
         }
-        // Before any GPGME context opens. An existing `pubring.gpg` is what makes GnuPG use
-        // the legacy keyring format rather than creating `pubring.kbx` beside it, and
-        // `pacman-key` reads only the former.
+        // Before any GPGME context opens. An existing `pubring.gpg` is what makes GnuPG use the
+        // legacy keyring format rather than create `pubring.kbx` beside it. `pacman-key` reads
+        // only the former.
         write_layout(&home)?;
 
         let admin = Self { home };
@@ -246,9 +247,9 @@ impl KeyringAdmin {
             }
         };
 
-        // `pacman-key` runs `gpg --update-trustdb` for the same reason: `check_keyring`
-        // refuses a keyring whose `trustdb.gpg` it cannot read, and a fresh home has none
-        // until something writes trust.
+        // `pacman-key` runs `gpg --update-trustdb` for the same reason. `check_keyring` refuses
+        // a keyring whose `trustdb.gpg` it cannot read, and a fresh home has none until
+        // something writes trust.
         let trustdb = admin.home.join(TRUSTDB);
         if !trustdb.exists() {
             admin.update_trustdb()?;
@@ -296,9 +297,9 @@ impl KeyringAdmin {
                 action: "search for the master key",
                 message: source.to_string(),
             })?;
-        // `find_secret_keys` matches substrings across every user ID field, not just email —
-        // require the exact identity so an unrelated key mentioning "piko@localhost" in a
-        // comment can never be mistaken for piko's own master key.
+        // `find_secret_keys` matches substrings across every user ID field, not just email. So
+        // require the exact identity. An unrelated key mentioning "piko@localhost" in a comment
+        // can then never be mistaken for piko's own master key.
         for candidate in candidates {
             let candidate = self.readable(candidate)?;
             if candidate.user_ids().any(|uid| uid.id().ok() == Some(MASTER_KEY_USERID)) {
@@ -335,17 +336,19 @@ impl KeyringAdmin {
 
     /// Locally (non-exportably) certifies `fingerprint`'s primary user ID with piko's master key.
     ///
-    /// A no-op if it is already certified — returns `false` rather than signing again, so a caller
-    /// counting how many keys it *newly* signed (as [`Self::populate`] does) does not have to
+    /// A no-op if it is already certified. It then returns `false` rather than sign again. So a
+    /// caller counting how many keys it *newly* signed, as [`Self::populate`] does, need not
     /// re-derive "already signed" itself.
     ///
     /// Certifying only the primary user ID, not every one a key carries, is
-    /// [`gpgme_op_keysign`]'s own default with no user IDs named — measured to hold even when
-    /// every user ID is passed explicitly, so it is not merely an unset parameter. It is also
-    /// sufficient: a key's validity for verifying a signature is decided by the *best*
-    /// certification path any of its user IDs has, not by all of them at once, which is why
-    /// `piko-key verify` reports full trust for packages from a key whose secondary user IDs
-    /// were never separately signed.
+    /// [`gpgme_op_keysign`]'s own default with no user IDs named. That was measured to hold even
+    /// when every user ID is passed explicitly, so it is not merely an unset parameter.
+    ///
+    /// It is also sufficient. A key's validity for verifying a signature is decided by the *best*
+    /// certification path any of its user IDs has. It is not decided by all of them at once. That
+    /// is why
+    /// `piko-key verify` reports full trust for packages from a key whose secondary user IDs were
+    /// never separately signed.
     ///
     /// [`gpgme_op_keysign`]: https://www.gnupg.org/documentation/manuals/gpgme/Signing-Keys.html
     ///
@@ -355,9 +358,9 @@ impl KeyringAdmin {
     /// `fingerprint` is not in the keyring.
     pub fn lsign(&self, fingerprint: &str) -> Result<bool> {
         let mut context = self.context()?;
-        // GPGME does not fetch a key's certifications by default — `UserId::signatures()` is
-        // silently empty without this, which would make the idempotency check below always
-        // say "not yet signed" and pile up a duplicate local signature on every `populate`.
+        // GPGME does not fetch a key's certifications by default. `UserId::signatures()` is
+        // silently empty without this. The idempotency check below would then always say "not yet
+        // signed", and pile up a duplicate local signature on every `populate`.
         context.set_key_list_mode(gpgme::KeyListMode::LOCAL | gpgme::KeyListMode::SIGS).map_err(
             |source| Error::Gpgme {
                 path: self.home.clone(),
@@ -396,15 +399,15 @@ impl KeyringAdmin {
     /// A no-op if the key already carries `level`. It then returns `false` rather than setting it
     /// again, as [`Self::lsign`] and [`Self::disable`] do.
     ///
-    /// Each call that is not a no-op drives a whole `gpgme_op_interact` session, and
-    /// `populate` calls this once per `-trusted` line on every run. So an already-populated
-    /// keyring runs none of those sessions. The no-op is also what makes
-    /// `PopulateSummary::trust_set` count keys the call changed, rather than lines it read.
+    /// Each call that is not a no-op drives a whole `gpgme_op_interact` session. `populate` calls
+    /// this once per `-trusted` line on every run. So an already-populated keyring runs none of
+    /// those sessions. The no-op is also what makes `PopulateSummary::trust_set` count keys the
+    /// call changed, rather than lines it read.
     ///
     /// # Errors
     ///
     /// [`Error::KeyNotFound`] if `fingerprint` is not in the keyring. [`Error::Gpgme`] if `level`
-    /// is [`OwnerTrust::Unknown`] or [`OwnerTrust::Undefined`] — neither is settable through
+    /// is [`OwnerTrust::Unknown`] or [`OwnerTrust::Undefined`]. Neither is settable through
     /// GnuPG's trust menu.
     pub fn set_owner_trust(&self, fingerprint: &str, level: OwnerTrust) -> Result<bool> {
         let digit = level.interactive_digit()?;
@@ -466,8 +469,8 @@ impl KeyringAdmin {
 
     /// Deletes the public key `fingerprint`.
     ///
-    /// `allow_secret` must be `true` to also delete a matching secret key — piko's own master key
-    /// included — so it is never removed by accident.
+    /// `allow_secret` must be `true` to also delete a matching secret key. That covers piko's own
+    /// master key, so it is never removed by accident.
     ///
     /// piko decides this refusal, rather than GnuPG. GPGME rejects the same case on its own,
     /// but reports only `GPG_ERR_CONFLICT`. That message names neither the key nor the next
@@ -597,8 +600,8 @@ impl KeyringAdmin {
     /// Forces GnuPG to recompute key validity from the current trust database (`gpg
     /// --check-trustdb`'s effect).
     ///
-    /// GPGME exposes no dedicated operation for this — GnuPG's own trust model already recomputes
-    /// validity whenever keys are queried, so a full listing achieves the same thing natively,
+    /// GPGME exposes no dedicated operation for this. GnuPG's own trust model already recomputes
+    /// validity whenever keys are queried. So a full listing achieves the same thing natively,
     /// without shelling out to `gpg --check-trustdb`.
     ///
     /// # Errors
@@ -620,8 +623,8 @@ impl KeyringAdmin {
         Ok(())
     }
 
-    /// Looks up `fingerprint` (or any GnuPG-accepted key identifier), failing with
-    /// [`Error::KeyNotFound`] rather than propagating GPGME's own "ambiguous name"/"not found"
+    /// Looks up `fingerprint`, or any GnuPG-accepted key identifier. It fails with
+    /// [`Error::KeyNotFound`] rather than propagate GPGME's own "ambiguous name"/"not found"
     /// distinction, which no caller here needs.
     fn get_key(&self, context: &mut gpgme::Context, fingerprint: &str) -> Result<gpgme::Key> {
         context.get_key(fingerprint).map_err(|_| Error::KeyNotFound {
@@ -644,10 +647,10 @@ const READABLE_MODE: u32 = 0o644;
 /// The empty files `pacman-key --init` lays down, with the mode it gives each
 /// (`pacman-key.sh.in:228-232`).
 ///
-/// `pubring.gpg` carries the layout decision. GnuPG 2.1 and later create `pubring.kbx`
-/// instead, unless a `pubring.gpg` is already there. `pacman-key` tests `-r pubring.gpg` and
-/// refuses the keyring outright when it is absent, so a keyring without one is one
-/// `pacman-key` cannot read at all.
+/// `pubring.gpg` carries the layout decision. GnuPG 2.1 and later create `pubring.kbx` instead,
+/// unless a `pubring.gpg` is already there. `pacman-key` tests `-r pubring.gpg` and refuses the
+/// keyring outright when it is absent. So a keyring without one is a keyring `pacman-key` cannot
+/// read at all.
 ///
 /// `secring.gpg` is a GnuPG 1.x artifact that 2.1 and later ignore; private keys live in
 /// `private-keys-v1.d`. `pacman-key` still creates it, and an empty file mode `0600` costs
@@ -656,8 +659,8 @@ const LAYOUT_FILES: &[(&str, u32)] = &[("pubring.gpg", READABLE_MODE), ("secring
 
 /// The `gpg.conf` options `pacman-key --init` adds (`pacman-key.sh.in:238-246`).
 ///
-/// `no-self-sigs-only` is left out. `pacman-key` adds it only for GnuPG 2.2.17 and later, and
-/// an option GnuPG does not recognize makes *every* later invocation fail rather than warn.
+/// `no-self-sigs-only` is left out. `pacman-key` adds it only for GnuPG 2.2.17 and later. And an
+/// option GnuPG does not recognize makes *every* later invocation fail rather than warn.
 /// The gate costs a version parse for a keyserver option piko never reaches: `piko-key` has no
 /// `--recv-keys` or `--refresh-keys`.
 const GPG_CONF_OPTIONS: &[&str] = &[
@@ -697,10 +700,9 @@ fn write_layout(home: &Path) -> Result<()> {
 
 /// Appends every option of `options` that `path` does not already carry.
 ///
-/// This is `add_gpg_conf_option` (`pacman-key.sh.in:173`), which matches an option already
-/// present in any of three shapes: bare, commented out, or followed by a value. So a user who
-/// wrote `# no-greeting` or changed a timeout keeps their line, and a repeated `init` appends
-/// nothing.
+/// This is `add_gpg_conf_option` (`pacman-key.sh.in:173`). It matches an option already present
+/// in any of three shapes: bare, commented out, or followed by a value. So a user who wrote
+/// `# no-greeting` or changed a timeout keeps their line, and a repeated `init` appends nothing.
 fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
     let describe = |action: &'static str| {
         move |source: std::io::Error| Error::Gpgme {
@@ -746,8 +748,8 @@ fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
 /// Whether `line` already carries `option`, in any of the shapes `add_gpg_conf_option`
 /// accepts.
 ///
-/// Its regular expression is `^[[:space:]#]*<option>([[:space:]].*)*$`: any run of spaces and
-/// `#` first, then the option, then either nothing or a space and anything.
+/// Its regular expression is `^[[:space:]#]*<option>([[:space:]].*)*$`. That is any run of spaces
+/// and `#` first, then the option, then either nothing or a space and anything.
 fn carries_option(line: &str, option: &str) -> bool {
     let bare = line.trim_start_matches([' ', '\t', '#']);
     match bare.strip_prefix(option) {
@@ -766,20 +768,19 @@ fn set_mode(path: &Path, mode: u32, action: &'static str) -> Result<()> {
 
 /// Creates `home`. Returns `true` if this call created it, and `false` if it already existed.
 ///
-/// [`KeyringAdmin::init`] reads that answer before it sets [`KEYRING_DIR_MODE`]. Only a
-/// directory piko created itself gets a mode from piko; an existing keyring keeps its own.
+/// [`KeyringAdmin::init`] reads that answer before it sets [`KEYRING_DIR_MODE`]. Only a directory
+/// piko created itself gets a mode from piko. An existing keyring keeps its own.
 ///
-/// The mode is `pacman-key --init`'s `0755` (`pacman-key.sh.in:225`), not something stricter.
-/// The default `home` is `/etc/pacman.d/gnupg`, a directory piko shares with pacman rather
-/// than owns. pacman keeps `pubring.gpg` and `trustdb.gpg` world-readable on purpose, so
-/// `--list-keys` and `--verify` work for an unprivileged user, and `check_keyring`
-/// (`pacman-key.sh.in:262`) refuses the keyring when either stops being readable. A private
-/// keyring is not a stricter version of this one. It is one the rest of the system cannot
-/// use. Secret key material stays private either way: GnuPG keeps it in
-/// `private-keys-v1.d`, which it creates `0700` itself.
+/// The mode is `pacman-key --init`'s `0755` (`pacman-key.sh.in:225`), not something stricter. The
+/// default `home` is `/etc/pacman.d/gnupg`, a directory piko shares with pacman rather than owns.
+/// pacman keeps `pubring.gpg` and `trustdb.gpg` world-readable on purpose, so `--list-keys` and
+/// `--verify` work for an unprivileged user. `check_keyring` (`pacman-key.sh.in:262`) refuses the
+/// keyring when either stops being readable. A private keyring is not a stricter version of this
+/// one. It is one the rest of the system cannot use. Secret key material stays private either
+/// way, because GnuPG keeps it in `private-keys-v1.d`, which it creates `0700` itself.
 ///
-/// An existing symlink to a directory counts as existing. pacman-key tests for existence, not
-/// for a directory. Its own comment gives the reason: "someone may want to use a symlink here".
+/// An existing symlink to a directory counts as existing. pacman-key tests for existence, not for
+/// a directory. Its own comment gives the reason: "someone may want to use a symlink here".
 fn create_keyring_dir(home: &Path) -> Result<bool> {
     let describe = |source: std::io::Error| Error::Gpgme {
         path: home.to_path_buf(),
@@ -814,7 +815,7 @@ fn path_arg(path: &Path) -> std::ffi::CString {
 mod tests {
     use super::*;
 
-    /// A `KeyringAdmin` whose master key is ed25519, not `init`'s real RSA-4096 — this exercises
+    /// A `KeyringAdmin` whose master key is ed25519, not `init`'s real RSA-4096. This exercises
     /// every real GPGME operation `init`/`lsign`/`set_owner_trust`/`disable`/`delete`/
     /// `list_keys` drive, without RSA-4096's wall-clock cost. `init`'s own key generation is
     /// covered separately, `#[ignore]`d, in `tests/key_real_system.rs`.
@@ -823,8 +824,8 @@ mod tests {
     /// `piko-sig/tests/signed_database.rs` uses.
     /// `pacman-key`'s `check_keyring` (`pacman-key.sh.in:262`) refuses a keyring whose
     /// `pubring.gpg` or `trustdb.gpg` it cannot read. Without both, `archlinux-keyring`'s
-    /// `.INSTALL` scriptlet takes its `pacman-key -l` guard as a no and populates nothing, so
-    /// a new root ends up with an empty keyring and cannot verify any later package.
+    /// `.INSTALL` scriptlet takes its `pacman-key -l` guard as a no and populates nothing. A new
+    /// root then ends up with an empty keyring, and cannot verify any later package.
     #[test]
     fn init_lays_down_the_layout_pacman_key_insists_on() {
         let Some(admin) = fast_admin() else { return };
@@ -880,10 +881,9 @@ mod tests {
         assert!(after_first.contains("no-permission-warning"), "{after_first}");
     }
 
-    /// The hint fires only on `NO_AGENT`, and only when the keyring's own path is what
-    /// prevents a socket. Both halves matter: a long keyring path is fine wherever the
-    /// runtime socket directory exists, so a hint that fires on length alone would blame a
-    /// working keyring.
+    /// The hint fires only on `NO_AGENT`, and only when the keyring's own path is what prevents a
+    /// socket. Both halves matter. A long keyring path is fine wherever the runtime socket
+    /// directory exists. A hint that fired on length alone would blame a working keyring.
     #[test]
     fn a_missing_agent_names_the_socket_limit_only_when_the_path_is_the_cause() {
         let long = PathBuf::from("/").join("x".repeat(MAX_AGENT_SOCKET_LEN));
@@ -930,9 +930,9 @@ mod tests {
         Some(admin)
     }
 
-    /// A second, unrelated keyring holding one ed25519 key with no secret material in
-    /// `fast_admin`'s keyring — a "foreign" key to import, sign, and trust, standing in for a
-    /// vendor's packager key the way `archlinux.gpg`'s keys stand in for real ones.
+    /// A second, unrelated keyring holding one ed25519 key, with no secret material in
+    /// `fast_admin`'s keyring. It is a "foreign" key to import, sign, and trust. It stands in for
+    /// a vendor's packager key the way `archlinux.gpg`'s keys stand in for real ones.
     fn foreign_public_key() -> Option<(PathBuf, String)> {
         let home = tempfile::tempdir().ok()?;
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).ok()?;
@@ -957,10 +957,10 @@ mod tests {
 
     /// As [`foreign_public_key`], but with a second user ID.
     ///
-    /// Guards a narrow case: an `already_signed` check that requires *every* user ID to carry
-    /// a certification can never be satisfied, because certifying only ever covers the primary
-    /// one (measured, see [`KeyringAdmin::lsign`]'s doc comment). Every `populate` then
-    /// re-signs the same key.
+    /// Guards a narrow case. An `already_signed` check that requires *every* user ID to carry a
+    /// certification can never be satisfied. Certifying only ever covers the primary one. That is
+    /// measured; see [`KeyringAdmin::lsign`]'s doc comment. Every `populate` then re-signs the
+    /// same key.
     ///
     /// This test pins the intended behavior, but does not on its own prove it. False
     /// idempotency shows up only across separate processes, each with a fresh `gpg-agent`
@@ -1128,8 +1128,8 @@ mod tests {
     #[test]
     fn init_is_idempotent() {
         let Some(admin) = fast_admin() else { return };
-        // `init` against an already-initialized keyring (via `fast_admin`'s own ed25519 key,
-        // standing in for a real one) must find it rather than generating a second master key.
+        // `init` against an already-initialized keyring must find it, rather than generate a
+        // second master key. `fast_admin`'s own ed25519 key stands in for a real one here.
         let (_, outcome) = KeyringAdmin::init(admin.home()).unwrap();
         assert!(!outcome.master_key_created, "{outcome:?}");
     }

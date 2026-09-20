@@ -13,6 +13,7 @@ pub mod history;
 pub mod info;
 pub mod list;
 pub mod local;
+pub mod owns;
 pub mod plan;
 pub mod provider;
 pub mod refresh;
@@ -35,8 +36,8 @@ pub(crate) fn origin_label(universe: &Universe<'_>, id: SolvableId) -> String {
         Some(piko_db::solve::Origin::Repository(index)) => universe
             .repository_name(index)
             .map_or_else(|| "Repository ?".to_owned(), |name| format!("Repository {name}")),
-        // Reachable: a package file named on the command line is interned as a candidate, and
-        // can provide a dependency like any other (`UniverseOptions::files`).
+        // This is reachable. A package file named on the command line is interned as a
+        // candidate, and can provide a dependency like any other (`UniverseOptions::files`).
         Some(piko_db::solve::Origin::File(_)) => "Package file".to_owned(),
         // An installed candidate is never listed: it suppresses a provider question, and a
         // group's members are the repository side only.

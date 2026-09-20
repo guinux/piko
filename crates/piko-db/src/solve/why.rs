@@ -1,17 +1,18 @@
 //! Why an installed package is present: the shortest chain back to an explicit ancestor.
 //!
 //! `pacman -Qi` reports a "Required By" list, which answers "what would break" but not "why is
-//! this here". Following it by hand across five levels is the actual question a user has when
-//! they find a package they do not recognise. [`explain_why_installed`] walks the
+//! this here". A user who finds a package they do not recognise is asking the second question.
+//! Following "Required By" by hand across five levels is what that costs them.
+//! [`explain_why_installed`] walks the
 //! reverse-dependency graph breadth-first from the target, so the chain it returns is the
 //! shortest explanation there is.
 //!
-//! Only `%DEPENDS%` is followed, never `%OPTDEPENDS%`, matching how the rest of the planner
-//! treats them: libalpm reports optional dependencies and never resolves them. The verdict
-//! therefore agrees with `pacman -Qdtt` rather than `pacman -Qdt`, which counts an optional
-//! dependency as requiring. This was measured identical to `-Qdttq` across a real system's
+//! Only `%DEPENDS%` is followed, never `%OPTDEPENDS%`. That matches how the rest of the
+//! planner treats them, since libalpm reports optional dependencies and never resolves them.
+//! The verdict therefore agrees with `pacman -Qdtt` rather than `pacman -Qdt`, which counts an
+//! optional dependency as requiring. This measures identical to `-Qdttq` across a real system's
 //! such packages. `piko plan -R -s` sweeps by the same rule (`crate::solve::recurse_unneeded`),
-//! so the two agree with each other — which matters more than agreeing with whichever `-Qdt`
+//! so the two agree with each other. That matters more than agreeing with whichever `-Qdt`
 //! spelling a user reaches for.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -31,7 +32,7 @@ pub enum WhyResult {
     Chain(Vec<SolvableId>),
     /// No explicitly-installed package requires the target, directly or indirectly. Carries
     /// whatever installed packages directly depend on it, empty for a leaf with no dependents
-    /// at all. The two are different situations: `arrow` required only by `python-pyarrow`,
+    /// at all. The two are different situations. `arrow` required only by `python-pyarrow`,
     /// itself required by nothing, is not the same claim as "nothing requires `arrow`".
     Orphan {
         /// The target itself.
@@ -41,9 +42,9 @@ pub enum WhyResult {
     },
 }
 
-/// The reverse-dependency index: for each installed package, every installed package that
-/// directly depends on it via `%DEPENDS%`, never `%OPTDEPENDS%` — matching this module's
-/// hard-deps-only convention (see the module docs).
+/// The reverse-dependency index. For each installed package, it holds every installed package
+/// that directly depends on it via `%DEPENDS%`, never `%OPTDEPENDS%`. That matches this
+/// module's hard-deps-only convention (see the module docs).
 ///
 /// `satisfiers` is indexed, but calling it per query would still be the dominant cost. So
 /// both [`explain_why_installed`] and [`orphans`] build this once rather than sharing a cache.
@@ -55,7 +56,14 @@ fn required_by_index(universe: &Universe<'_>) -> HashMap<SolvableId, Vec<Solvabl
         let Some(depends) = solvable.installed_depends() else { continue };
         for dep in depends {
             for satisfier in universe.satisfiers(dep) {
-                required_by.entry(satisfier).or_default().push(solvable.id());
+                // A dependent is listed once, however many of its `%DEPENDS%` entries the
+                // target satisfies. A package naming both `gtk3` and `libgtk-3.so` is one
+                // dependent, not two. libalpm's `find_requiredby` (`package.c`) guards the
+                // same push with `alpm_list_find_str`.
+                let dependents = required_by.entry(satisfier).or_default();
+                if !dependents.contains(&solvable.id()) {
+                    dependents.push(solvable.id());
+                }
             }
         }
     }
@@ -112,13 +120,13 @@ pub fn explain_why_installed(universe: &Universe<'_>, target: &str) -> Option<Wh
     Some(WhyResult::Chain(chain))
 }
 
-/// Every installed package with `PackageInstallReason::Depend` that no installed package requires
-/// via `%DEPENDS%` — the batch form of [`WhyResult::Orphan`] with an empty `direct`, matching
-/// `pacman -Qdttq`.
+/// Every installed package with `PackageInstallReason::Depend` that no installed package
+/// requires via `%DEPENDS%`. This is the batch form of [`WhyResult::Orphan`] with an empty
+/// `direct`, matching `pacman -Qdttq`.
 ///
-/// See the module docs for why only hard dependencies count. A package that is only ever someone's
-/// `%OPTDEPENDS%` still counts as an orphan here, the same as [`explain_why_installed`] would
-/// report.
+/// See the module docs for why only hard dependencies count. A package that is only ever
+/// someone's `%OPTDEPENDS%` still counts as an orphan here, the same as
+/// [`explain_why_installed`] would report.
 ///
 /// Sorted by name, the same order [`crate::LocalDatabase`] iterates in.
 #[must_use]
@@ -138,8 +146,9 @@ pub fn orphans(universe: &Universe<'_>) -> Vec<SolvableId> {
     found.into_iter().map(|solvable| solvable.id()).collect()
 }
 
-/// Every installed package that directly requires a target package, split by how: `required_by` via
-/// `%DEPENDS%` (`pacman -Qi`'s "Required By"), `optional_for` via `%OPTDEPENDS%` ("Optional For").
+/// Every installed package that directly requires a target package, split by how. `required_by`
+/// holds those requiring it via `%DEPENDS%` (`pacman -Qi`'s "Required By"). `optional_for`
+/// holds those naming it in `%OPTDEPENDS%` ("Optional For").
 ///
 /// Both are empty, not an error, for a target that is not installed.
 #[derive(Clone, Debug, Default)]
@@ -152,16 +161,16 @@ pub struct Dependents {
 
 /// [`Dependents`] of `target`, among installed packages.
 ///
-/// Builds its own installed-only universe internally — the same scope
+/// Builds its own installed-only universe internally, the same scope
 /// [`explain_why_installed`]/[`orphans`] already use. So the caller needs nothing but the
 /// local database, never `Universe`/`UniverseOptions` directly.
 ///
 /// `optional_for` reuses [`Universe::satisfiers`], the same depcmp machinery `required_by`
 /// matches through, rather than a literal name comparison. An `%OPTDEPENDS%` entry carries a
 /// full [`alpm_types::PackageRelation`] just like `%DEPENDS%` does, with a description suffix
-/// stripped by the parser, and libalpm's own `find_requiredby` (`package.c`) matches both
-/// lists identically. `Universe` never resolves `%OPTDEPENDS%` on its own — the planner has
-/// no use for it — so this walks [`LocalDatabase::iter`] directly instead of going through a
+/// stripped by the parser. libalpm's own `find_requiredby` (`package.c`) matches both lists
+/// identically. `Universe` never resolves `%OPTDEPENDS%` on its own, because the planner has no
+/// use for it. So this walks [`LocalDatabase::iter`] directly instead of going through a
 /// `Solvable` accessor.
 ///
 /// # Errors
@@ -286,6 +295,19 @@ mod tests {
         let found = dependents(scenario.local(), "foo").unwrap();
         assert_eq!(as_strs(&found.required_by), ["bar"]);
         assert!(found.optional_for.is_empty());
+    }
+
+    /// A dependent that names the target twice — once by name, once by a soname it provides —
+    /// is one entry, not two.
+    #[test]
+    fn a_dependent_matching_several_depends_entries_is_listed_once() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("foo", "1.0.0-1").provides(["libfoo.so=1-64"]))
+            .installed(PackageSpec::new("bar", "1.0.0-1").depends(["foo", "libfoo.so=1-64"]))
+            .build();
+
+        let found = dependents(scenario.local(), "foo").unwrap();
+        assert_eq!(as_strs(&found.required_by), ["bar"]);
     }
 
     #[test]

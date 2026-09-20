@@ -45,8 +45,8 @@ pub const DEFAULT_ROOT_DIR: &str = "/";
 
 /// pacman's default `DBPath`.
 ///
-/// Used when neither `--dbpath` nor `pacman.conf`'s `DBPath` applies — a config that failed
-/// to read at all, not just a section that omitted the directive. Falling back to some
+/// Used when neither `--dbpath` nor `pacman.conf`'s `DBPath` applies. That means a config
+/// that failed to read at all, not just a section that omitted the directive. Falling back to some
 /// database path is a frontend decision, not an ALPM one (see `crates/piko/src/context.rs`).
 /// `pub` so that caller does not have to hardcode this string a second time.
 pub const DEFAULT_DB_PATH: &str = "/var/lib/pacman/";
@@ -193,15 +193,15 @@ impl RepositoryConfig {
     /// pacman merges the two through a mask, so a repository can relax or tighten individual
     /// bits. The parser already resolves that for a repository that set something. A repository
     /// section with no `SigLevel` directive at all keeps the parser's own
-    /// [`SigLevel::USE_DEFAULT`] sentinel bit instead (`conf.c`'s `ALPM_SIG_USE_DEFAULT`, which
-    /// this module's repo scratch state starts every repository at), not
-    /// [`SigLevel::default()`].
+    /// [`SigLevel::USE_DEFAULT`] sentinel bit instead, not [`SigLevel::default()`]. That is
+    /// `conf.c`'s `ALPM_SIG_USE_DEFAULT`, which this module's repo scratch state starts every
+    /// repository at.
     ///
     /// Test for the sentinel **bit**. `sig_level == SigLevel::default()` never matches:
     /// `SigLevel::default()` is the zero value, while `USE_DEFAULT` is bit 31. Under that test
     /// a repository that set nothing reads as `SigLevel = Never`, whatever `[options]` says.
     /// `sig_level::apply_values` clears the sentinel the moment a repository's own `SigLevel`
-    /// directive is parsed at all, which is what separates "unset" from "explicitly set".
+    /// directive is parsed at all. That is what separates "unset" from "explicitly set".
     #[must_use]
     pub fn effective_sig_level(&self, global: SigLevel) -> SigLevel {
         if self.sig_level.contains(SigLevel::USE_DEFAULT) { global } else { self.sig_level }
@@ -235,9 +235,9 @@ impl PacmanConfig {
     /// # Errors
     ///
     /// [`Error::Io`] (and friends from [`crate::fs_util`]) if `path` or a file it
-    /// `Include`s cannot be read; [`Error::ConfigDirectiveOutsideSection`],
-    /// [`Error::ConfigInvalidDirective`], [`Error::ConfigIncludeDepthExceeded`] or
-    /// [`Error::ConfigInvalidRepoName`] for a malformed file.
+    /// `Include`s cannot be read. A malformed file raises one of
+    /// [`Error::ConfigDirectiveOutsideSection`], [`Error::ConfigInvalidDirective`],
+    /// [`Error::ConfigIncludeDepthExceeded`] or [`Error::ConfigInvalidRepoName`].
     pub fn open_with(path: impl AsRef<Path>, limits: &Limits) -> Result<Self> {
         let mut parser = Parser::new(limits);
         parser.parse_file(path.as_ref(), 0)?;
@@ -331,10 +331,9 @@ struct RepoScratch {
     usage: DbUsage,
     sig_level: SigLevel,
     sig_level_mask: SigLevel,
-    /// Where the `[reponame]` header itself was seen. Error messages raised later at
-    /// `finish()` time — an invalid repo name, or a `$arch` substitution with no configured
-    /// architecture — have no single directive line of their own to point at, so they use
-    /// this instead.
+    /// Where the `[reponame]` header itself was seen. Two errors are raised later, at
+    /// `finish()` time: an invalid repo name, and a `$arch` substitution with no configured
+    /// architecture. Neither has a directive line of its own to point at, so both use this.
     declared_path: PathBuf,
     declared_line: usize,
 }
@@ -358,7 +357,7 @@ impl RepoScratch {
 }
 
 /// Which section a directive currently belongs to. `Repo` owns its in-progress scratch
-/// directly, not through an index into a side table, so applying a directive never needs to
+/// directly, not through an index into a side table. So applying a directive never needs to
 /// index a `Vec`. [`Parser::set_section`] moves it into `Parser::repos` the moment a new
 /// section header (or the end of the file) supersedes it.
 #[derive(Debug)]
@@ -1097,12 +1096,12 @@ mod tests {
         );
     }
 
-    /// The regression `RepositoryConfig::effective_sig_level` exists to fix: a repository
-    /// with no `SigLevel` directive at all must inherit the global one. Comparing the
-    /// parser's raw `RepositoryConfig::sig_level` against `SigLevel::default()` always
-    /// failed to match. `SigLevel::default()` is the zero value, not the `USE_DEFAULT`
-    /// sentinel a repository that said nothing actually carries. Every such repository
-    /// silently read as `SigLevel = Never`, regardless of what `[options]` said.
+    /// What `RepositoryConfig::effective_sig_level` exists for. A repository with no
+    /// `SigLevel` directive at all must inherit the global one. Do not read that condition by
+    /// comparing the parser's raw `RepositoryConfig::sig_level` against `SigLevel::default()`.
+    /// That comparison never matches. `SigLevel::default()` is the zero value, not the
+    /// `USE_DEFAULT` sentinel a repository that said nothing carries. So every such repository
+    /// reads as `SigLevel = Never`, whatever `[options]` says.
     #[test]
     fn a_repository_with_no_sig_level_inherits_the_global_one() {
         let dir = TempDir::new().unwrap();

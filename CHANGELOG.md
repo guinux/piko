@@ -22,6 +22,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Keyring administration through `piko-key`, pacman-key's counterpart.
 - Repository database refresh and package download, with signature verification before a
   download replaces anything on disk. Downloads run in parallel, and `SIGINT` cancels them.
+- `piko refresh --files`: each selected repository's `<repo>.files` archive is fetched beside
+  its `<repo>.db`, in the same pass. pacman splits this across `-Sy` and `-Fy`, which is what
+  lets the two describe different builds. `piko files --repo <NAME>` reads the result.
 - Transaction history, written to `pacman.log` and to `<dbpath>/piko-history`, and merged
   by `piko history`.
 - Package groups as targets: `piko install <group>` installs the group's members, and

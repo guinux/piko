@@ -24,8 +24,8 @@ fn install_reason_label(reason: PackageInstallReason) -> &'static str {
     }
 }
 
-/// Colors [`install_reason_label`]: bold for an explicit install (the state a user actually
-/// chose), dim for a dependency (a consequence of that choice, not a choice of its own).
+/// Colors [`install_reason_label`]. An explicit install is bold, being the state a user
+/// actually chose. A dependency is dim, being a consequence of that choice.
 fn styled_install_reason(reason: PackageInstallReason) -> console::StyledObject<&'static str> {
     let style = match reason {
         PackageInstallReason::Explicit => console::Style::new().bold(),
@@ -37,9 +37,9 @@ fn styled_install_reason(reason: PackageInstallReason) -> console::StyledObject<
 /// Builds `pacman -Qi`'s "Validated By" text.
 ///
 /// Mirrors `dump_pkg_full`'s validation switch rather than [`PackageValidation`]'s own
-/// `Display`, which renders the on-disk keyword (`"pgp"`, `"sha256"`, ...) instead of pacman's
-/// label (`"Signature"`, `"SHA-256 Sum"`, ...). An empty list, meaning no `%VALIDATION%`
-/// section at all, renders as `"Unknown"`, matching pacman's own fallback for a zero
+/// `Display`. That `Display` renders the on-disk keyword (`"pgp"`, `"sha256"`, ...) instead of
+/// pacman's label (`"Signature"`, `"SHA-256 Sum"`, ...). An empty list means no `%VALIDATION%`
+/// section at all. It renders as `"Unknown"`, matching pacman's own fallback for a zero
 /// validation value.
 fn validation_label(validation: &[PackageValidation]) -> String {
     if validation.is_empty() {
@@ -57,8 +57,9 @@ fn validation_label(validation: &[PackageValidation]) -> String {
     join(&labels)
 }
 
-/// Colors [`validation_label`] by trust: green once a signature is among the methods, yellow
-/// for a checksum-only validation, dim for `"Unknown"` (no `%VALIDATION%` section at all).
+/// Colors [`validation_label`] by trust. A signature among the methods is green. A
+/// checksum-only validation is yellow. `"Unknown"`, meaning no `%VALIDATION%` section, is
+/// dim.
 fn styled_validation(validation: &[PackageValidation]) -> console::StyledObject<String> {
     let text = validation_label(validation);
     let style = if text.contains("Signature") {

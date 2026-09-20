@@ -6,8 +6,8 @@
 //! it as already downloaded.
 //!
 //! Answering that question needs a look at the cache directories. piko-db has no business
-//! doing that: it only reads databases. The code that owns cache lookup
-//! (`piko_txn::CacheDirSource`, the equivalent of `_alpm_filecache_find`) lives in a crate
+//! doing that, since it only reads databases. The code that owns cache lookup is
+//! `piko_txn::CacheDirSource`, the equivalent of `_alpm_filecache_find`. It lives in a crate
 //! that depends on this one, so the dependency cannot run the other way.
 //!
 //! [`PackageCache`] is therefore a seam, not a probe. The planner stays a pure function of its
@@ -30,8 +30,8 @@ pub trait PackageCache: std::fmt::Debug {
 
 /// A cache that holds nothing: every candidate counts as a full download.
 ///
-/// The correct default for a caller with no cache to consult: a removal plan, whose steps
-/// download nothing at all, or a test that is not about download sizes.
+/// This is the correct default for a caller with no cache to consult. That is a removal plan,
+/// whose steps download nothing at all, or a test that is not about download sizes.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoCache;
 

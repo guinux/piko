@@ -53,7 +53,7 @@ const CACHE: &str = "/var/cache/pacman/pkg";
 ///
 /// This reads the raw text rather than [`piko_db::LocalPackage::backups`] on purpose. That
 /// accessor silently normalizes the two shapes this test needs to see. libalpm writes the
-/// section as a **list**, so it can hold the same path twice, and it can hold a hash that is
+/// section as a **list**, so it can hold the same path twice. It can also hold a hash that is
 /// the literal string `(null)`. That string is what C prints for the NULL
 /// `alpm_compute_md5sum` returns when it never ran. Both cases occur on this machine, and
 /// both must be visible here.
@@ -133,9 +133,9 @@ fn candidates(limit: usize) -> Option<Vec<Candidate>> {
 /// Installs `archive` into a fresh root, returning the `%BACKUP%` piko recorded.
 ///
 /// `Err` carries the reason the install could not be done here. That is not always a defect.
-/// A package may ship a directory with no owner-write bit — `bluez` ships `etc/bluetooth/` as
-/// `0555` — and pacman extracts into it only because it runs as root, which bypasses the
-/// check. This test is unprivileged, so such a package is reported and skipped, not failed.
+/// A package may ship a directory with no owner-write bit. `bluez` ships `etc/bluetooth/` as
+/// `0555`. pacman extracts into it only because it runs as root, which bypasses the check.
+/// This test is unprivileged, so such a package is reported and skipped, not failed.
 fn install(archive: &Path) -> Result<BTreeMap<String, String>, piko_txn::Error> {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("root");
@@ -269,11 +269,11 @@ fn recorded_backup_hashes_match_what_pacman_recorded() {
 
 /// A second install over the first must leave the user's edit alone.
 ///
-/// This exercises the upgrade half of the same mechanism, on a real package: edit a config
-/// file the package owns, install the same archive again, and check the edit survives, with
-/// the packaged version waiting as `.pacnew`. The archive is the same both times, so
-/// `original == packaged`, and `resolve_backup`'s second rule keeps what is on disk — the
-/// commonest real outcome.
+/// This exercises the upgrade half of the same mechanism, on a real package. It edits a
+/// config file the package owns, then installs the same archive again. The edit must survive,
+/// with the packaged version waiting as `.pacnew`. The archive is the same both
+/// times, so `original == packaged`. `resolve_backup`'s second rule then keeps what is on
+/// disk, which is the commonest real outcome.
 #[test]
 #[ignore = "requires a real pacman cache and local database"]
 fn a_real_config_file_edited_by_the_user_survives_a_reinstall() {

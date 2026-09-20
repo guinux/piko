@@ -1,9 +1,9 @@
 //! The `why` subcommand: what keeps a package installed.
 //!
 //! The graph walk itself lives in [`piko_db::solve::explain_why_installed`]. It is a pure
-//! question over the installed set, with no terminal output of its own, so any frontend gets
-//! the same answer `why` is verified against (`pacman -Qdttq`). This module only renders a
-//! [`piko_db::solve::WhyResult`].
+//! question over the installed set, with no terminal output of its own. So any frontend gets
+//! the same answer `why` is verified against, which is `pacman -Qdttq`. This module only
+//! renders a [`piko_db::solve::WhyResult`].
 
 use std::process::ExitCode;
 

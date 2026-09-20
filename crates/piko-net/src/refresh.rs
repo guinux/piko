@@ -27,14 +27,14 @@ pub enum Outcome {
     ///
     /// This comes from a `304` answer to a conditional request, not from comparing contents.
     /// Reaching it depends on the download having been stamped with the server's
-    /// `Last-Modified`, so the next request offers back the exact value the server issued.
+    /// `Last-Modified`. The next request then offers back the exact value the server issued.
     UpToDate,
 }
 
 /// Bounds and behaviour for downloading.
 ///
-/// A mirror is an untrusted party until its signature is checked, so every number here exists
-/// to stop one from deciding how long piko runs or how much disk it uses.
+/// A mirror is an untrusted party until its signature is checked. So every number here exists to
+/// stop one from deciding how long piko runs, or how much disk it uses.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Largest database that will be accepted.
@@ -88,8 +88,8 @@ struct Controls<'a> {
 /// What asking a server for a detached signature produced.
 ///
 /// The three cases are kept apart because the caller must treat them differently. An `Option`
-/// would conflate the first two: "the policy never asked" says nothing about whether the file
-/// is signed, while "the server has none" is positive evidence that it is not.
+/// would conflate the first two. "The policy never asked" says nothing about whether the file is
+/// signed. "The server has none" is positive evidence that it is not.
 #[derive(Debug)]
 enum Signature {
     /// The policy does not use a signature, so none was requested.
@@ -117,17 +117,43 @@ struct Downloaded {
 
 /// How long a connection may take to establish, separately from [`Limits::timeout`].
 ///
-/// Cancellation is observable between requests and between 64 KiB chunks, never inside a
-/// connect, so this is the longest a worker can ignore a Ctrl+C. Bounding it tightly keeps a
-/// cancellation prompt when one mirror in a batch has gone dark. The transfer itself still
-/// gets the far more generous [`Limits::timeout`].
+/// Cancellation is observable between requests and between 64 KiB chunks, never inside a connect.
+/// So this is the longest a worker can ignore a Ctrl+C. Bounding it tightly keeps a cancellation
+/// prompt when one mirror in a batch has gone dark. The transfer itself still gets the far more
+/// generous [`Limits::timeout`].
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// One repository in a batch refresh.
+/// Which of a repository's two archives a refresh asks for.
+///
+/// A repository serves both under the same `Server` list. The same `SigLevel` bits cover both.
+/// So the kind decides the file name and nothing else. One code path serves either kind: the
+/// conditional request, the detached signature, and the verify-then-rename install.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DatabaseKind {
+    /// `<repo>.db`: the package metadata every command reads.
+    Db,
+    /// `<repo>.files`: the per-package file lists, pacman's `-Fy` target.
+    Files,
+}
+
+impl DatabaseKind {
+    /// The file a repository serves for this kind, e.g. `core.files`.
+    #[must_use]
+    pub fn file_name(self, repo: &str) -> String {
+        match self {
+            Self::Db => format!("{repo}.db"),
+            Self::Files => format!("{repo}.files"),
+        }
+    }
+}
+
+/// One repository archive in a batch refresh.
 #[derive(Clone, Copy, Debug)]
 pub struct RepoRefresh<'a> {
     /// The repository's name — `core` for `core.db`.
     pub name: &'a str,
+    /// Which of the repository's archives to fetch.
+    pub kind: DatabaseKind,
     /// `Server`, tried in order from wherever this transfer's worker starts.
     pub servers: &'a [String],
     /// The repository's effective database policy.
@@ -180,17 +206,17 @@ impl Refresher {
         // this workspace's enabled features can silently disagree.
         let tls = ureq::tls::TlsConfig::builder()
             .provider(ureq::tls::TlsProvider::Rustls)
-            // The system CA store, matching what libcurl and therefore pacman use, rather
-            // than a Mozilla root bundle compiled into the binary and aging independently of
-            // it.
+            // The system CA store, matching what libcurl and therefore pacman use. The
+            // alternative is a Mozilla root bundle compiled into the binary, which then ages
+            // independently of it.
             .root_certs(ureq::tls::RootCerts::PlatformVerifier)
             .build();
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(limits.timeout))
             // Much shorter than the global one, and separate from it on purpose.
-            // Cancellation is only observable between requests and between chunks, so a
+            // Cancellation is only observable between requests and between chunks. So a
             // worker parked in DNS/connect/TLS ignores a Ctrl+C for as long as this allows,
-            // once per worker. That is why it is worth bounding tightly while the transfer
+            // once per worker. That is why it is worth bounding tightly, while the transfer
             // itself keeps the generous `timeout_global`.
             .timeout_connect(Some(CONNECT_TIMEOUT))
             // A mirror that redirects forever is a mirror that hangs the update.
@@ -201,7 +227,9 @@ impl Refresher {
         Self { agent: ureq::Agent::new_with_config(config), limits }
     }
 
-    /// Refreshes `repo`'s database into `sync_dir`, verifying before it lands.
+    /// Refreshes `<repo>.db` into `sync_dir`, verifying before it lands.
+    ///
+    /// Use [`Refresher::refresh_all`] with [`DatabaseKind::Files`] to fetch `<repo>.files`.
     ///
     /// `servers` are tried in order, as pacman tries mirrors. The first that answers wins, and
     /// a failure moves to the next rather than aborting. Every failure is collected so that
@@ -264,7 +292,7 @@ impl Refresher {
     ) -> Result<Outcome> {
         self.refresh_one(
             sync_dir,
-            RepoRefresh { name: repo, servers, policy },
+            RepoRefresh { name: repo, kind: DatabaseKind::Db, servers, policy },
             keyring,
             Concurrency::default(),
             force,
@@ -294,7 +322,7 @@ impl Refresher {
         cancel: &Cancel,
         progress: &(dyn Fn(Event) + Sync),
     ) -> Result<Outcome> {
-        let RepoRefresh { name: repo, servers, policy } = repo;
+        let RepoRefresh { name: repo, kind, servers, policy } = repo;
         if servers.is_empty() {
             return Err(Error::NoServers { repo: repo.to_owned() });
         }
@@ -304,15 +332,15 @@ impl Refresher {
             source,
         })?;
 
-        let name = format!("{repo}.db");
+        let name = kind.file_name(repo);
         let destination = sync_dir.join(&name);
 
         // A conditional request uses the local file's mtime, which `fetch` stamped with the
         // server's own `Last-Modified` when it downloaded the file. Sending back the exact
-        // value the server issued is not merely tidy: measured against mirror.thekinrar.fr, a
-        // date later than its `Last-Modified` gets a full 200 even though RFC 7232 §3.3 asks
-        // for 304, while the exact value gets 304 (3/3, at -1h/exact/+1h/+1d). Sending piko's
-        // own download time instead never saves a transfer.
+        // value the server issued is not merely tidy. Measured against mirror.thekinrar.fr, a
+        // date later than its `Last-Modified` gets a full 200, even though RFC 7232 §3.3 asks
+        // for 304. The exact value gets 304 (3/3, at -1h/exact/+1h/+1d). Sending piko's own
+        // download time instead never saves a transfer.
         let since = if force { None } else { last_modified(&destination) };
 
         let mut attempts = Vec::new();
@@ -410,9 +438,9 @@ impl Refresher {
         //
         // Treating any non-error response as a body destroys data. ureq returns 304 as `Ok`
         // with an empty body, not as `Err(StatusCode(304))`. A successful conditional request
-        // then looks like a successful download of nothing, and committing it truncates the
-        // live database to zero bytes — observed against a real mirror. Nothing downstream
-        // catches it: with no signature to contradict it, an empty file verifies fine under
+        // then looks like a successful download of nothing. Committing it truncates the live
+        // database to zero bytes, which was observed against a real mirror. Nothing downstream
+        // catches it. With no signature to contradict it, an empty file verifies fine under
         // `DatabaseOptional`.
         match response.status().as_u16() {
             200 => {}
@@ -449,8 +477,8 @@ impl Refresher {
 
         // A repository database or a package archive is a compressed tarball, so it is never
         // legitimately empty. Even an empty tarball carries a gzip header. This is defense in
-        // depth behind the status check above, kept because what it guards against was a
-        // silently truncated live database, not a visible error.
+        // depth behind the status check above. What it guards against is a silently truncated
+        // live database, not a visible error.
         if written == 0 {
             return Err(Error::EmptyDownload { file: name.to_owned() });
         }
@@ -507,11 +535,11 @@ impl Refresher {
             }
         };
         // Only 200 carries a signature, and the status must be checked rather than assumed.
-        // `http_status_as_error` turns 4xx and 5xx into `Err`, which the arms above rely on,
-        // but not 3xx: ureq returns those as `Ok` with an empty body. That is the exact shape
-        // of the bug that once truncated a live database, and this path never had the guard
-        // `fetch` gained then. Without this check, an empty file reaches GPGME, which
-        // reports "No data (gpg error 58)" and names the wrong culprit.
+        // `http_status_as_error` turns 4xx and 5xx into `Err`, which the arms above rely on.
+        // It does not turn 3xx into `Err`: ureq returns those as `Ok` with an empty body. That
+        // is the same shape `fetch` guards against above, where an empty body truncates a live
+        // database. Here, without this check, an empty file reaches GPGME, which reports "No
+        // data (gpg error 58)" and names the wrong culprit.
         let status = response.status().as_u16();
         if status != 200 {
             return Err(Error::SignatureUncheckable {
@@ -592,9 +620,9 @@ impl Refresher {
         match signature {
             Signature::Downloaded(signature) => signature.commit()?,
             // The server says there is none, and a database changes content under a fixed
-            // name, so any `.sig` still sitting there vouches for bytes that have just been
-            // replaced. Nothing in piko reads it, since piko checks a signature at download
-            // and at open, but pacman verifies at open and shares this directory, so leaving it
+            // name. So any `.sig` still sitting there vouches for bytes that have just been
+            // replaced. Nothing in piko reads it, since piko checks a signature at download and
+            // at open. But pacman verifies at open and shares this directory. Leaving the file
             // behind makes the next `pacman -Sy` reject a database piko installed correctly.
             //
             // Failure is ignored on purpose. The database is already in place and correct.
@@ -645,11 +673,11 @@ impl Refresher {
     ///
     /// `servers` are tried in order, as in [`Refresher::refresh_with_progress`]. When `policy`
     /// asks for a signature, the package's own detached `.sig` is downloaded alongside it into
-    /// `<cache_dir>/<file_name>.sig`, the path `piko_sig::Keyring::check` already looks for
-    /// beside a package it is asked to verify. Nothing is verified here: this crate only
-    /// fetches bytes. The check that matters happens later, against the policy that actually
-    /// applies to this package (which can differ per repository, unlike a database's single
-    /// `SigLevel`), by whoever calls `Keyring::check`.
+    /// `<cache_dir>/<file_name>.sig`. That is the path `piko_sig::Keyring::check` already looks
+    /// for beside a package it is asked to verify. Nothing is verified here, because this crate
+    /// only fetches bytes. The check that matters happens later, by whoever calls
+    /// `Keyring::check`. It runs against the policy that actually applies to this package, which
+    /// can differ per repository, unlike a database's single `SigLevel`.
     ///
     /// # Errors
     ///
@@ -740,10 +768,10 @@ impl Refresher {
                     ) {
                         Ok(signature) => signature,
                         Err(Error::Cancelled) => return Err(Error::Cancelled),
-                        // As in `refresh_one`. A server that served the package but could
-                        // not be asked for its signature loses both halves to the next
-                        // server, because the pair has to come from one server. `file` is
-                        // dropped uncommitted, so nothing reaches the cache.
+                        // As in `refresh_one`. The pair has to come from one server. So a
+                        // server that served the package but could not be asked for its
+                        // signature loses both halves to the next server. `file` is dropped
+                        // uncommitted, so nothing reaches the cache.
                         Err(error) => {
                             attempts.push((url, error.to_string()));
                             continue;
@@ -776,7 +804,7 @@ impl Refresher {
     /// stop the others, matching the serial loop this replaces.
     ///
     /// Nothing is reported from a worker. Results come back as data for the caller to print
-    /// once the batch has joined, which is why parallelism cannot interleave one repository's
+    /// once the batch has joined. That is why parallelism cannot interleave one repository's
     /// error into another's.
     ///
     /// `progress` is called with the repository's index into `repos`, from whichever worker
@@ -785,9 +813,10 @@ impl Refresher {
     ///
     /// # Errors
     ///
-    /// Per entry, as [`Refresher::refresh`]. A `repos` naming the same repository twice fails
-    /// every entry with [`Error::DuplicateTarget`] before any I/O, since two workers would
-    /// otherwise race for one atomic-write temporary.
+    /// Per entry, as [`Refresher::refresh`]. A `repos` naming the same *file* twice fails
+    /// every entry with [`Error::DuplicateTarget`] before any I/O. Two workers would otherwise
+    /// race for one atomic-write temporary. One repository named twice is not a duplicate:
+    /// its `.db` and its `.files` are two destinations.
     #[allow(
         clippy::too_many_arguments,
         reason = "the same concerns `refresh_with_progress` names, minus the repository (now a \
@@ -803,10 +832,15 @@ impl Refresher {
         cancel: &Cancel,
         progress: &(dyn Fn(usize, Event) + Sync),
     ) -> Vec<Result<Outcome>> {
-        if let Some(duplicate) = first_duplicate(repos.iter().map(|repo| repo.name.to_owned())) {
+        // The key is the file name, not the repository name. A `--files` batch names one
+        // repository twice, on purpose. Its `.db` and its `.files` are two destinations, so
+        // two workers cannot race for one temporary.
+        if let Some(duplicate) =
+            first_duplicate(repos.iter().map(|repo| repo.kind.file_name(repo.name)))
+        {
             return repos
                 .iter()
-                .map(|_| Err(Error::DuplicateTarget { file: format!("{duplicate}.db") }))
+                .map(|_| Err(Error::DuplicateTarget { file: duplicate.clone() }))
                 .collect();
         }
         // Input order. Unlike packages, databases carry no size to schedule on, and a
@@ -841,10 +875,10 @@ impl Refresher {
     /// [`Refresher::refresh_all`] does. Verifies nothing — see
     /// [`Refresher::fetch_package_with_progress`] for why that stays with the caller.
     ///
-    /// Largest-first is [`PackageFetch::size`]'s only job. It measured as no gain on a link
-    /// the downloads already saturate. It is kept because it costs nothing, and it is the
-    /// difference between a good and a bad schedule on a link they do not: a 3 GiB package
-    /// started last is a run that ends when it ends.
+    /// Largest-first is [`PackageFetch::size`]'s only job. It measured as no gain on a link the
+    /// downloads already saturate. It is kept because it costs nothing. On a link they do not
+    /// saturate, it decides a good schedule from a bad one. A 3 GiB package started last is a run
+    /// that ends when it ends.
     ///
     /// # Errors
     ///
@@ -938,15 +972,15 @@ fn last_modified(path: &Path) -> Option<String> {
 
 /// Formats seconds-since-epoch as an RFC 7231 IMF-fixdate.
 ///
-/// Hand-rolled rather than pulling in a date library for one format string. This is the only
-/// date piko ever renders for the wire, the format is fixed and fully specified, and the
-/// nearest well-known formatter (`Rfc2822`) emits `+0000` where HTTP wants `GMT`.
+/// Hand-rolled rather than pulling in a date library for one format string. This is the only date
+/// piko ever renders for the wire, and the format is fixed and fully specified. The nearest
+/// well-known formatter (`Rfc2822`) emits `+0000` where HTTP wants `GMT`.
 ///
 /// The input is a file mtime, so it is disk-derived and therefore attacker-influenced. It is
-/// clamped to \[1970, 9999\] before any arithmetic. This clamp lets the civil-from-days
-/// algorithm below use plain operators without risking overflow: every intermediate is then
-/// bounded by roughly 3 million, against an `i64`. A clamped date makes the conditional
-/// request wrong at worst, never unsound, and a mtime outside that range is already nonsense.
+/// clamped to \[1970, 9999\] before any arithmetic. That clamp lets the civil-from-days algorithm
+/// below use plain operators without risking overflow. Every intermediate is then bounded by
+/// roughly 3 million, against an `i64`. A clamped date makes the conditional request wrong at
+/// worst, never unsound, and a mtime outside that range is already nonsense.
 fn http_date(seconds: u64) -> String {
     const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
     const MONTHS: [&str; 12] =
@@ -1012,12 +1046,12 @@ fn parse_http_date(value: &str) -> Option<u64> {
     let minute: u64 = clock.next()?.parse().ok()?;
     let second: u64 = clock.next()?.parse().ok()?;
     // `second == 60` is a leap second. Rejected rather than accepted, because this function is
-    // documented as the inverse of `http_date`, and `http_date` cannot produce it. Accepting
-    // it would parse to the next minute and render back differently, quietly breaking the
-    // round trip the conditional request depends on. This is theoretical either way —
-    // `Last-Modified` comes from a file mtime, which is POSIX time and has no leap seconds —
-    // and the consequence of refusing is only that the file is not stamped, exactly as for
-    // any date that fails to parse.
+    // documented as the inverse of `http_date`, and `http_date` cannot produce it. Accepting it
+    // would parse to the next minute and render back differently. That quietly breaks the round
+    // trip the conditional request depends on. This is theoretical either way, because
+    // `Last-Modified` comes from a file mtime, which is POSIX time and has no leap seconds. The
+    // consequence of refusing is only that the file is not stamped, exactly as for any date that
+    // fails to parse.
     if clock.next().is_some() || hour > 23 || minute > 59 || second >= 60 {
         return None;
     }

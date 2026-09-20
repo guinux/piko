@@ -18,8 +18,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// A reference-counted [`Error`].
 ///
-/// Lazily loaded data caches its failure so a broken entry is not re-read on every access
-/// (the same idea as libalpm's sticky `INFRQ_ERROR` bit). Caching a failure means handing out
+/// Lazily loaded data caches its failure, so a broken entry is not re-read on every access.
+/// That is the same idea as libalpm's sticky `INFRQ_ERROR` bit. Caching a failure means handing out
 /// the same error repeatedly. [`Error`] cannot be [`Clone`], because [`std::io::Error`] is
 /// not. Sharing it behind an [`Arc`] resolves that and keeps the clone cheap.
 pub type SharedError = Arc<Error>;
@@ -79,7 +79,7 @@ pub enum Error {
     /// A file was larger than the configured [`Limits`](crate::Limits) allow.
     ///
     /// The read is refused rather than truncated. A truncated `files` list would look like a
-    /// package that owns fewer files than it does — worse than no answer at all.
+    /// package that owns fewer files than it does. That is worse than no answer at all.
     #[error("{} exceeds the {limit} size limit of {max} bytes", path.display())]
     LimitExceeded {
         /// The path that was too large.
@@ -165,8 +165,8 @@ pub enum Error {
     /// An installed package's `desc` could not be read while building a planning universe.
     ///
     /// Unlike a scan diagnostic, this is fatal. A transaction cannot be planned against an
-    /// installed set that cannot be read in full. An unreadable entry is indistinguishable
-    /// from an absent one at exactly the moment that difference decides whether a package is
+    /// installed set that cannot be read in full. An unreadable entry then looks exactly like
+    /// an absent one. That is the moment the difference decides whether a package is
     /// installed, upgraded, or left alone.
     #[error("cannot plan: failed to read the installed package {name}")]
     PlanLocalDescUnreadable {
@@ -329,10 +329,10 @@ pub enum Error {
 
     /// A package's file list belongs to a different build than the one it was requested for.
     ///
-    /// `<repo>.db` and `<repo>.files` are refreshed independently by pacman (`-Sy` versus
-    /// `-Fy`), so they routinely disagree about which build of a package is current. Measured
-    /// at 12 of 296 packages between `core.db` and `core.files` on the machine this was
-    /// developed against. Serving the wrong build's paths silently would be worse than
+    /// pacman refreshes `<repo>.db` and `<repo>.files` independently, through `-Sy` and `-Fy`.
+    /// So they routinely disagree about which build of a package is current. Measured at 12 of
+    /// 296 packages between `core.db` and `core.files` on the machine this was developed
+    /// against. Serving the wrong build's paths silently would be worse than
     /// refusing outright, so this is an error rather than a best-effort answer.
     #[error(
         "{name} is at {db_version} in the database but {files_version} in the .files \
@@ -343,9 +343,9 @@ pub enum Error {
         name: Name,
         /// The version recorded in the database that was opened.
         ///
-        /// Boxed, along with `files_version`. This is the largest variant of `Error` by far —
-        /// two `FullVersion`s inline pushed every `Result<_, Error>` in the crate past
-        /// clippy's `result_large_err` threshold — and this variant is rare.
+        /// Boxed, along with `files_version`. This is the largest variant of `Error` by far.
+        /// Two `FullVersion`s inline push every `Result<_, Error>` in the crate past clippy's
+        /// `result_large_err` threshold. And this variant is rare.
         db_version: Box<FullVersion>,
         /// The version found in the `.files` archive.
         files_version: Box<FullVersion>,

@@ -51,8 +51,8 @@ impl<'a> Update<'a> {
 /// counts as an update; an equal or older repository version is not reported.
 ///
 /// The comparison only ever needs each package's name and version. Both are free on
-/// [`LocalPackage`] (from the entry directory name, no `desc` read) and already eager on
-/// [`RepoPackage`], so this touches no local `desc` file at all.
+/// [`LocalPackage`], read from the entry directory name with no `desc` read. Both are already
+/// eager on [`RepoPackage`]. So this touches no local `desc` file at all.
 ///
 /// Results are sorted by name (the same order [`crate::LocalDatabase`] iterates in).
 pub(crate) fn check_updates<'a>(
@@ -72,7 +72,7 @@ pub(crate) fn check_updates<'a>(
 
 /// Every installed package whose name is not found in any of `repos` — mirrors `pacman -Qm`.
 ///
-/// Applies no `Usage` gate, for the same reason [`check_updates`] doesn't: a repository not
+/// Applies no `Usage` gate, for the same reason [`check_updates`] does not. A repository not
 /// gated for installs can still declare that a name is known to it. Unlike [`check_updates`],
 /// there is no version to prefer between repositories when a name is present in more than
 /// one. Only "known to at least one" versus "known to none" matters here.

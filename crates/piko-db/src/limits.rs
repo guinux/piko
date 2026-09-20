@@ -18,7 +18,7 @@
 //! are set well above "what looks reasonable".
 //!
 //! The repository-database defaults are sized differently. A real `extra.files` archive
-//! measured at 50 MB compressed / 581 MB inflated, so the local database's "three orders of
+//! measures 50 MB compressed and 581 MB inflated. So the local database's "three orders of
 //! magnitude" headroom rule does not transfer. Applying it here would allow multi-gigabyte
 //! archives that are not a plausible repository database. These leave a smaller, deliberate
 //! headroom instead:
@@ -48,14 +48,14 @@
 //!
 //! The kernel's mount table is host state rather than package data, and is read once per
 //! disk-space check. It is bounded anyway, because its size is not a property of this
-//! machine: a container host can publish thousands of mounts into a namespace.
+//! machine. A container host can publish thousands of mounts into a namespace.
 //!
 //! | file                        | observed                | default limit |
 //! |------------------------------|-------------------------|---------------|
 //! | `mount_table_bytes`          | 2.7 KB (29 mounts)      | 4 MiB |
 //!
 //! Diagnostics are bounded separately (`max_diagnostics`, default 4096). They are the one
-//! part of an open whose size is attacker-controlled *without* the package count growing: a
+//! part of an open whose size is attacker-controlled *without* the package count growing. A
 //! directory of a million badly-named entries yields no packages at all. So neither
 //! `max_entries` nor `repo_max_packages` bounds them.
 
@@ -177,8 +177,8 @@ pub struct Limits {
     /// package count growing with it. A directory of a million badly-named entries produces
     /// a million diagnostics and zero packages, so [`Limits::max_entries`] and
     /// [`Limits::repo_max_packages`] do not bound them. Exceeding this is deliberately *not*
-    /// an error. A database that is otherwise readable must stay readable, so the overflow is
-    /// reported as a count (`diagnostics_dropped`) rather than by failing the open.
+    /// an error. A database that is otherwise readable must stay readable. So the overflow
+    /// is reported as a count (`diagnostics_dropped`) rather than by failing the open.
     pub max_diagnostics: usize,
     /// Maximum on-disk (compressed) size in bytes of a repository database archive.
     ///
@@ -191,9 +191,10 @@ pub struct Limits {
     /// that makes a decompression bomb in a repository archive harmless. A counting reader
     /// wrapped around the decoder enforces it; see `repo::archive::BoundedReader`.
     ///
-    /// Defaults to exactly [`u32::MAX`]: the files arena indexes paths with `u32` offsets
-    /// into a single `String` (measured 538 MiB vs ~800 MiB for `Vec<PathBuf>` on `extra`),
-    /// so this is also the hard ceiling that arithmetic can address, not just a size policy.
+    /// Defaults to exactly [`u32::MAX`]. The files arena indexes paths with `u32` offsets
+    /// into a single `String` (measured 538 MiB against ~800 MiB for `Vec<PathBuf>` on
+    /// `extra`). So this is also the hard ceiling that arithmetic can address, not just a
+    /// size policy.
     pub repo_inflated_bytes: u64,
     /// Maximum size in bytes of a single member (`desc` or `files`) inside a repository
     /// archive.
@@ -201,7 +202,7 @@ pub struct Limits {
     /// Maximum number of packages a repository database archive may contain.
     ///
     /// Exceeding this is a hard error, for the same reason as [`Limits::max_entries`]. It is
-    /// detected **during** the archive walk rather than after it: the bound exists to stop
+    /// detected **during** the archive walk rather than after it. The bound exists to stop
     /// the allocation, so it must fire before every `desc` in an oversized archive is parsed.
     pub repo_max_packages: usize,
     /// Maximum size in bytes of a `pacman.conf` file, or any file it `Include`s.
@@ -218,16 +219,16 @@ pub struct Limits {
     ///
     /// One candidate per installed package plus one per package in every configured
     /// repository. This bounds the whole problem the solver is handed, not any one database.
-    /// [`Limits::repo_max_packages`] already bounds each repository on its own, but nothing
-    /// bounds their *sum* — and the sum is what a solver allocates against.
+    /// [`Limits::repo_max_packages`] already bounds each repository on its own. Nothing
+    /// bounds their *sum*, and the sum is what a solver allocates against.
     ///
-    /// Measured on the machine this was developed against: 1157 installed packages plus
-    /// 15 200 across `core` and `extra` — so the default leaves roughly two orders of
+    /// Measured on the machine this was developed against: 1157 installed packages, plus
+    /// 15 200 across `core` and `extra`. So the default leaves roughly two orders of
     /// magnitude of headroom over a large real system.
     ///
-    /// A count rather than a byte size, so like [`Limits::max_entries`] it is reported
-    /// through its own error ([`crate::Error::TooManySolvables`]) rather than through
-    /// [`Limit`], which enumerates only the size bounds.
+    /// This is a count rather than a byte size. So like [`Limits::max_entries`] it is
+    /// reported through its own error ([`crate::Error::TooManySolvables`]) rather than
+    /// through [`Limit`], which enumerates only the size bounds.
     pub solve_max_solvables: usize,
     /// Maximum number of conflicts the solver may resolve before giving up.
     ///
@@ -260,19 +261,21 @@ pub struct Limits {
     /// A pattern rewrites one command-line target into the names it selects. Without a bound,
     /// `piko install '*'` would hand the encoder every package a repository carries.
     ///
-    /// Checked while the names accumulate, not once the scan has finished, so an oversized
+    /// Checked while the names accumulate, not once the scan has finished. So an oversized
     /// pattern costs one comparison per candidate rather than a full expansion and a solve.
-    /// The refusal therefore carries no total: counting the matches is the work the bound
-    /// declines to do. Neither [`Limits::solve_max_solvables`] nor [`Limits::solve_max_clauses`]
-    /// stands in for this. The first bounds the universe rather than the request, and the
-    /// second fires only once the targets are already in hand and their reachable cone
-    /// computed.
+    /// The refusal therefore carries no total. Counting the matches is the work the bound
+    /// declines to do.
     ///
-    /// Measured on the machine this was developed against: 1243 installed packages, 15 252
-    /// across `core` and `extra`, and a largest `%GROUPS%` group of 283 members (`pro-audio`,
-    /// then `kde-applications` at 194 and `tesseract-data` at 128). So the default clears the
-    /// widest legitimate single expansion — a whole group — with room to spare, while refusing
-    /// `python-*` (2099 in the repositories) and `*` on any real system.
+    /// Neither [`Limits::solve_max_solvables`] nor [`Limits::solve_max_clauses`] stands in
+    /// for this. The first bounds the universe rather than the request. The second fires only
+    /// once the targets are in hand and their reachable cone is computed.
+    ///
+    /// Measured on the machine this was developed against: 1243 installed packages, and
+    /// 15 252 across `core` and `extra`. The largest `%GROUPS%` group holds 283 members
+    /// (`pro-audio`, then `kde-applications` at 194 and `tesseract-data` at 128). So the
+    /// default clears the widest legitimate single expansion, a whole group, with room to
+    /// spare. It still refuses `python-*` (2099 in the repositories) and `*` on any real
+    /// system.
     ///
     /// A count, so like [`Limits::solve_max_solvables`] it is reported through its own error
     /// rather than through [`Limit`], which enumerates only the size bounds.

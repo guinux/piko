@@ -2,19 +2,19 @@
 //!
 //! Nothing in the `alpm-*` crates reads a mount table, and `getmntent` is unavailable because
 //! the workspace forbids `unsafe_code`. So the table is parsed here, in the shape glibc's
-//! `getmntent` produces: whitespace-separated fields, the second of which is the mount
-//! directory, with four octal escapes.
+//! `getmntent` produces. The fields are whitespace-separated, and the second is the mount
+//! directory. Four octal escapes apply.
 //!
 //! Two properties of this module carry the whole matching rule, and both come from libalpm's
 //! `mount_point_list`/`match_mount_point` (`diskspace.c`):
 //!
-//! - The list is sorted **descending** by bytes. That is what puts every child before its
-//!   parent and `/` last, so the first match a linear scan finds is the most specific one.
+//! - The list is sorted **descending** by bytes. That puts every child before its parent, and
+//!   `/` last. So the first match a linear scan finds is the most specific one.
 //! - A prefix match is not enough. `/e` must not swallow `/etc/myconfig`, so the byte after the
 //!   prefix has to be a separator or the end of the path.
 //!
 //! Directories are compared as bytes, never as text. A mount directory is whatever the kernel
-//! reports, and a `%FILES%` entry is a `PathBuf`; neither promises UTF-8.
+//! reports, and a `%FILES%` entry is a `PathBuf`. Neither promises UTF-8.
 
 use std::{
     collections::HashSet,
@@ -50,7 +50,7 @@ impl MountTable {
     ///
     /// [`Error::MountTableUnreadable`] if neither `/etc/mtab` nor `/proc/self/mounts` can be
     /// read. libalpm raises no error code at all in this case, which leaves the caller unable
-    /// to say what went wrong; the path and the reason are named here instead.
+    /// to say what went wrong. The path and the reason are named here instead.
     pub fn load() -> Result<Self> {
         Self::load_from(Path::new(MTAB), Path::new(PROC_MOUNTS))
     }
@@ -59,9 +59,9 @@ impl MountTable {
     /// table it built rather than the one this machine is running on.
     fn load_from(primary: &Path, fallback: &Path) -> Result<Self> {
         let max = piko_db::Limits::default().get(Limit::MountTable);
-        // `/etc/mtab` is a symlink to `/proc/self/mounts` on a modern system, so the door that
-        // follows a final symlink is the one that opens either spelling. The bytes door rather
-        // than the UTF-8 one: a mount directory is not promised to decode.
+        // `/etc/mtab` is a symlink to `/proc/self/mounts` on a modern system. So the door
+        // that follows a final symlink is the one that opens either spelling. This is the
+        // bytes door rather than the UTF-8 one, since a mount directory may not decode.
         let read =
             |path: &Path| piko_db::fs_util::read_capped_following(path, Limit::MountTable, max);
         let bytes = match read(primary) {
@@ -99,7 +99,7 @@ impl MountTable {
             let Some(dir) = mount_dir(line) else { continue };
             // A bind mount, an overmount, or an autofs placeholder shadowed by the real
             // filesystem leaves two records with the same directory. libalpm keeps both, and
-            // its stable sort means the scan always answers with the first; the second stays
+            // its stable sort means the scan always answers with the first. The second stays
             // untouched and is never checked. Dropping it is the same answer for one `statvfs`
             // less.
             if seen.insert(dir.clone()) {
@@ -335,7 +335,7 @@ tmpfs /var/cache tmpfs rw 0 0
         )
         .unwrap();
         // Nothing will ever write to this FIFO. The `O_NONBLOCK` + `fstat` door is what stops
-        // the open from hanging here forever, and the test would time out if it did not.
+        // the open from hanging here forever. Without it the test would time out.
         let error = MountTable::load_from(&fifo, Path::new(PROC_MOUNTS)).unwrap_err();
         assert!(matches!(error, Error::MountTableUnreadable { .. }), "got {error:?}");
     }

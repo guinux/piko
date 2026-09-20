@@ -50,7 +50,7 @@ const FILE_MODE: u32 = 0o644;
 
 /// How much of the file's tail [`read_last`] reads by default.
 ///
-/// A block runs to a few hundred bytes, so this covers thousands of transactions while keeping
+/// A block runs to a few hundred bytes. So this covers thousands of transactions, while keeping
 /// the read bounded the way every other read in piko is.
 pub const DEFAULT_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -63,9 +63,9 @@ pub fn path(dbpath: &Path) -> PathBuf {
 /// Appends one transaction's block.
 ///
 /// The whole block is built in memory and written with a single `write_all` onto an `O_APPEND`
-/// file, so a concurrent writer cannot interleave with it. The write is followed by
-/// `sync_data`: this is the record that outlives the journal, and a history that loses the
-/// last transaction to a power cut is a history nobody can trust.
+/// file. So a concurrent writer cannot interleave with it. The write is followed by
+/// `sync_data`. This is the record that outlives the journal. A history that loses the last
+/// transaction to a power cut is a history nobody can trust.
 ///
 /// # Errors
 ///
@@ -101,8 +101,8 @@ pub fn render(entry: &Entry, offset: LocalOffset) -> String {
     block.push_str(&format!("dbpath {}\n", entry.dbpath.display()));
     if let Some(command) = &entry.command {
         // A command line is one line. A newline inside it would forge a block line, so it is
-        // flattened rather than trusted — the same reason the journal writes one intent per
-        // line and parses nothing else.
+        // flattened rather than trusted. The journal writes one intent per line and parses
+        // nothing else, for the same reason.
         block.push_str(&format!("command {}\n", self::one_line(command)));
     }
     for action in &entry.actions {
@@ -271,8 +271,8 @@ fn parse_header(rest: &str) -> Option<(String, i64)> {
 /// Applies one line of a block to the entry it belongs to.
 ///
 /// An unknown keyword is ignored, matching `journal::parse`. A history file written by a
-/// future build carries lines this one has no field for, and the transaction it describes is
-/// still worth reporting.
+/// future build carries lines this one has no field for. The transaction it describes is still
+/// worth reporting.
 fn apply(entry: &mut Entry, line: &str) {
     let (keyword, value) = line.split_once(' ').unwrap_or((line, ""));
     match keyword {
@@ -372,8 +372,8 @@ mod tests {
         assert_eq!(parse(&text), vec![entry]);
     }
 
-    /// A `command` holding a newline must not be able to forge an `end` line, or a failed
-    /// transaction could be made to read as a completed one.
+    /// A `command` holding a newline must not be able to forge an `end` line. Otherwise a
+    /// failed transaction could be made to read as a completed one.
     #[test]
     fn a_value_cannot_forge_a_block_line() {
         let entry = Entry {

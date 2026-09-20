@@ -31,16 +31,16 @@ pub enum MatchKind {
     NameContains,
     /// The package name starts with the query.
     NameStartsWith,
-    /// The query is a glob pattern, and it matches the whole of the package name, of one of
-    /// its `%PROVIDES%` names, or of one of its `%GROUPS%` entries.
+    /// The query is a glob pattern. It matches the whole of the package name, of one of its
+    /// `%PROVIDES%` names, or of one of its `%GROUPS%` entries.
     ///
-    /// Ranked above the two unanchored name tiers and below the two exact ones, which is where
-    /// its specificity sits: a glob is anchored to the whole string, unlike a prefix or a
-    /// substring, but it still names a set rather than one string. The position only shows in a
+    /// This ranks above the two unanchored name tiers and below the two exact ones. That is
+    /// where its specificity sits. A glob is anchored to the whole string, unlike a prefix or
+    /// a substring. It still names a set rather than one string. The position only shows in a
     /// search mixing a pattern with a plain term, since a pattern can score nothing else.
     ///
     /// `%DESC%` is deliberately not matched. A pattern anchored to the whole string cannot
-    /// match a sentence, and matching it unanchored would make `*` select every package there
+    /// match a sentence. Matching it unanchored would make `*` select every package there
     /// is.
     Glob,
     /// The query exactly matches the name of one of the package's `%PROVIDES%`.
@@ -70,14 +70,14 @@ impl Term {
 /// Trims `terms`, drops the blank ones, lowercases each, and compiles the ones carrying a glob
 /// metacharacter.
 ///
-/// The compile happens here, once per search. Compiling inside the per-package loop would build
-/// the same `glob::Pattern` once per (package, term) pair — about 15 000 times per term on a
-/// real `extra`. This is the same reason each side's `combined_match` hoists the package's own
-/// lowercasing out of [`best_match`].
+/// The compile happens here, once per search. Compiling inside the per-package loop would
+/// build the same `glob::Pattern` once per (package, term) pair. On a real `extra` that is
+/// about 15 000 times per term. This is the same reason each side's `combined_match` hoists the
+/// package's own lowercasing out of [`best_match`].
 ///
 /// A pattern is lowercased before it is compiled, exactly as a text term is, so `PYTHON-*`
-/// matches `python-foo`. [`Glob`] itself is case-sensitive: the target side depends on that, and
-/// normalising is this search's business rather than the matcher's.
+/// matches `python-foo`. [`Glob`] itself is case-sensitive. The target side depends on that,
+/// and normalising is this search's business rather than the matcher's.
 pub(crate) fn prepare<'q>(terms: impl IntoIterator<Item = &'q str>) -> Vec<Term> {
     terms
         .into_iter()
@@ -90,8 +90,8 @@ pub(crate) fn prepare<'q>(terms: impl IntoIterator<Item = &'q str>) -> Vec<Term>
 
 /// Whether every term in `terms` is the plain text `name`.
 ///
-/// When it is, the package's `desc` answers nothing the name has not already answered at
-/// [`MatchKind::ExactName`], so neither side builds a [`Searchable`] for it.
+/// When it is, the package's `desc` answers nothing already answered at
+/// [`MatchKind::ExactName`]. So neither side builds a [`Searchable`] for it.
 pub(crate) fn every_term_is_the_name(terms: &[Term], name: &str) -> bool {
     terms.iter().all(|term| term.is_text(name))
 }
@@ -99,7 +99,7 @@ pub(crate) fn every_term_is_the_name(terms: &[Term], name: &str) -> bool {
 /// A package's searchable `desc` text, lowercased once.
 ///
 /// One type for both databases. The two sides read their fields from different places, so each
-/// keeps its own constructor, but a second copy of the struct would be a second place for the
+/// keeps its own constructor. A second copy of the struct would be a second place for the
 /// tiers below to drift apart.
 pub(crate) struct Searchable {
     /// Every `%PROVIDES%` entry that names a package. A soname is not one, and is never
@@ -203,8 +203,8 @@ pub enum LocalOrRepo<'a> {
 /// Resolves `name` against `local` first, then `dbs` in file (priority) order.
 ///
 /// `piko files` and `piko info` both default to this rule when neither `--installed` nor
-/// `--repo` narrows the source: check what is already on the system before any repository,
-/// and among repositories prefer the one `pacman.conf` lists first. This function holds the
+/// `--repo` narrows the source. Check what is already on the system before any repository.
+/// Among repositories, prefer the one `pacman.conf` lists first. This function holds the
 /// only copy of that rule, rather than letting each call site keep its own near-identical
 /// copy. The same logic appearing at more than one call site is a sign it belongs in a shared
 /// function instead.

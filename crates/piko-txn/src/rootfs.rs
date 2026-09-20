@@ -1,17 +1,17 @@
 //! Resolves an archive path inside an installation root, without ever leaving it.
 //!
 //! This is the security core of the commit engine. A package archive is attacker-controlled
-//! wherever its files go: a repository can be compromised, a signature can be absent, and a
+//! wherever its files go. A repository can be compromised, and a signature can be absent. A
 //! `.pkg.tar.zst` handed to `piko -U` came from wherever the user found it. Two classic escapes
-//! must be closed. Checking the path as a *string* does not close either one:
+//! must be closed. Checking the path as a *string* closes neither:
 //!
 //! 1. **`..` traversal.** An entry named `../../etc/passwd` writes outside the root.
-//! 2. **Symlinked path components.** If `usr/bin` is a symlink to `/etc`, an entry named
-//!    `usr/bin/foo` writes to `/etc/foo` even though the path itself looks harmless.
+//! 2. **Symlinked path components.** Say `usr/bin` is a symlink to `/etc`. An entry named
+//!    `usr/bin/foo` then writes to `/etc/foo`, although the path itself looks harmless.
 //!
 //! Inspecting the path and then using it cannot prevent the second case. Whatever
-//! `symlink_metadata` reported a moment ago, the component can be replaced with a symlink before
-//! the write lands. That race is why this module opens each component with `openat` and
+//! `symlink_metadata` reported a moment ago, the component can be replaced with a symlink
+//! before the write lands. That race is why this module opens each component with `openat` and
 //! `O_NOFOLLOW`, and keeps the resulting descriptor. The directory a file is created in is then
 //! *the same object* that was checked, not a path that resolves to it.
 //!
@@ -160,9 +160,9 @@ impl RootDir {
     /// exactly what `openat`/`mkdirat`/`symlinkat` need. The caller does the creating; this
     /// function only guarantees *where*.
     ///
-    /// Intermediate directories are **not** created here — see [`RootDir::create_dir_all`]. A
+    /// Intermediate directories are **not** created here. See [`RootDir::create_dir_all`]. A
     /// missing one is an error. During extraction it means the archive listed a file before
-    /// the directory containing it, and inventing the directory would mean inventing its
+    /// the directory containing it. Inventing the directory would mean inventing its
     /// ownership and mode too.
     ///
     /// # Errors
@@ -235,11 +235,11 @@ impl RootDir {
     /// `O_DIRECTORY` additionally rejects a component that is not a directory.
     ///
     /// This function then establishes the *reason* with an `lstat`, not from the errno. The
-    /// two flags interact: POSIX specifies `ELOOP` for `O_NOFOLLOW` on a symlink, but Linux
+    /// two flags interact. POSIX specifies `ELOOP` for `O_NOFOLLOW` on a symlink, but Linux
     /// returns `ENOTDIR` when `O_DIRECTORY` is also set. So a symlink and a regular file are
     /// indistinguishable by errno alone. Getting the reason wrong only produces a wrong
-    /// message — the refusal itself is already correct — but "it is not a directory" pointing
-    /// at a symlink sends someone debugging in the wrong direction.
+    /// message, since the refusal itself is already correct. But "it is not a directory"
+    /// pointing at a symlink sends someone debugging in the wrong direction.
     fn descend(
         &self,
         current: &OwnedFd,

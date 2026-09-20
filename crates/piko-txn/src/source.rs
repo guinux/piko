@@ -6,8 +6,8 @@
 //! now. It may come from a cache or a fresh download.
 //!
 //! [`CacheDirSource`] is the *offline* implementation. It reads what pacman already downloaded
-//! into `CacheDir`. That is enough to build and exercise the whole engine against real
-//! packages — 1872 of them on a real system — without piko fetching anything.
+//! into `CacheDir`. That is enough to build and exercise the whole engine against real packages,
+//! without piko fetching anything. A real system holds 1872 of them.
 //! [`DownloadingSource`] is the second implementation. It wraps a [`CacheDirSource`] and, on a
 //! genuine miss, downloads the file through `piko-net` before answering.
 
@@ -116,9 +116,8 @@ pub trait PackageSource: fmt::Debug + Send + Sync {
     /// Whether `file_name` can be supplied, without reporting why not.
     ///
     /// This is the equivalent of `_alpm_filecache_exists` (`util.c:891`). It is implemented in
-    /// terms of [`PackageSource::locate`], for the same reason libalpm implements it in terms
-    /// of `_alpm_filecache_find`: two lookup paths that can disagree are a bug waiting to
-    /// happen.
+    /// terms of [`PackageSource::locate`], for the same reason libalpm implements it in terms of
+    /// `_alpm_filecache_find`. Two lookup paths that can disagree are a bug waiting to happen.
     fn contains(&self, file_name: &PackageFileName) -> bool {
         self.locate(file_name).is_ok()
     }
@@ -132,10 +131,10 @@ pub trait PackageSource: fmt::Debug + Send + Sync {
     /// # Every failure but cancellation is deliberately dropped
     ///
     /// This is an optimization, not a lookup. A file it could not fetch is still missing. The
-    /// `locate` that follows retries it and reports the same error it would report had this
-    /// method never run — same code path, same message, same position in the caller's ordered
-    /// output. Surfacing failures here would create a second place that can refuse a package,
-    /// and two such places eventually disagree.
+    /// `locate` that follows retries it, and reports the same error it would report had this
+    /// method never run. Same code path, same message, same position in the caller's ordered
+    /// output. Surfacing failures here would create a second place that can refuse a package, and
+    /// two such places eventually disagree.
     ///
     /// Cancellation is the exception. It is not a fact about one package. There is no point
     /// letting `locate` retry each file to rediscover that the user asked to stop.
@@ -230,13 +229,13 @@ impl DownloadDir {
 
 /// Chooses the cache directory a download is written into, creating it if it is absent.
 ///
-/// This transcribes `_alpm_filecache_setup` (`util.c:904`). `directories` is walked in order
-/// and the first usable entry wins: an absent one is created, while a non-directory, one this
-/// process may not write into, and one with no write bit set are all passed over.
+/// This transcribes `_alpm_filecache_setup` (`util.c:904`). `directories` is walked in order, and
+/// the first usable entry wins. An absent one is created. A non-directory is passed over, as is
+/// one this process may not write into, and one with no write bit set.
 ///
-/// The *search* list is a different question and stays complete. [`CacheDirSource`] reads
-/// every configured directory, including the ones passed over here, so a read-only cache is
-/// still read and a package already in one is never fetched again.
+/// The *search* list is a different question, and stays complete. [`CacheDirSource`] reads every
+/// configured directory, including the ones passed over here. So a read-only cache is still read,
+/// and a package already in one is never fetched again.
 ///
 /// This creates a directory, so it belongs to a caller that is about to download. Keep it out
 /// of [`CacheDirSource::new`], which `piko plan` and `piko remove` both build without ever
@@ -251,11 +250,11 @@ pub fn select_download_dir(directories: &[PathBuf]) -> Result<DownloadDir> {
 
     for directory in directories {
         // The stat follows a final symlink, as libalpm's does, and for the reason
-        // `CacheDirSource` documents: the path comes from configuration, not from an
-        // untrusted directory entry.
+        // `CacheDirSource` documents. The path comes from configuration, not from an untrusted
+        // directory entry.
         let metadata = match std::fs::metadata(directory) {
             Ok(metadata) => metadata,
-            // libalpm does not separate "absent" from "unstatable" here either: both mean
+            // libalpm does not separate "absent" from "unstatable" here either. Both mean
             // there is nothing usable yet, and creating is the only way to find out.
             Err(_) => match create_cache_dir(directory) {
                 Ok(()) => {
@@ -298,10 +297,10 @@ pub fn select_download_dir(directories: &[PathBuf]) -> Result<DownloadDir> {
 /// Creates a cache directory and every missing parent, mode `0755` before the umask.
 ///
 /// `_alpm_makepath_mode` (`util.c:111`) sets the umask to zero around the `mkdir` to land on
-/// exactly `0755`. This does not: the umask is process-global state, and piko downloads in
-/// parallel, so clearing it opens a window where a file another thread creates becomes
-/// world-accessible. A permission difference in the restrictive direction does not pay for
-/// that race.
+/// exactly `0755`. This does not. The umask is process-global state, and piko downloads in
+/// parallel. Clearing it opens a window where a file another thread creates becomes
+/// world-accessible. A permission difference in the restrictive direction does not pay for that
+/// race.
 fn create_cache_dir(directory: &Path) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -318,10 +317,10 @@ fn create_cache_dir(directory: &Path) -> std::io::Result<()> {
 /// # Symlinks are followed
 ///
 /// The stat follows a final symlink, as libalpm's does. This matches the judgment made for
-/// repository archives in `piko-db` (see `fs_util::open_following_symlinks`). The path comes
-/// from configuration, not an untrusted directory entry, and a cache directory of symlinks
-/// into shared storage is a real deployment, not an attack. What the symlink resolves to must
-/// still be a regular file.
+/// repository archives in `piko-db` (see `fs_util::open_following_symlinks`). The path comes from
+/// configuration, not an untrusted directory entry. And a cache directory of symlinks into shared
+/// storage is a real deployment, not an attack. What the symlink resolves to must still be a
+/// regular file.
 #[derive(Clone, Debug)]
 pub struct CacheDirSource {
     directories: Vec<PathBuf>,
@@ -384,10 +383,10 @@ impl PackageSource for CacheDirSource {
 
 /// The oracle [`piko_db::solve::Plan::assemble`] asks how many bytes a plan will really move.
 ///
-/// This is implemented for this source and deliberately not for [`DownloadingSource`]. The
-/// latter answers a miss by downloading it, so using it to compute a download size would
-/// download everything the size was meant to measure. Leaving the impl off turns that mistake
-/// into a compile error instead of a comment nobody reads.
+/// This is implemented for this source and deliberately not for [`DownloadingSource`]. The latter
+/// answers a miss by downloading it. Using it to compute a download size would therefore download
+/// everything the size was meant to measure. Leaving the impl off turns that mistake into a
+/// compile error instead of a comment nobody reads.
 impl piko_db::solve::PackageCache for CacheDirSource {
     fn is_cached(&self, file_name: &PackageFileName) -> bool {
         self.contains(file_name)
@@ -397,9 +396,9 @@ impl piko_db::solve::PackageCache for CacheDirSource {
 /// Opens a located package file, refusing anything that is not a regular file.
 ///
 /// The check repeats here even though [`PackageSource::locate`] already made it. The file can
-/// be replaced between the two calls — the staleness [`Location`] documents this.
-/// Re-checking on the open descriptor with `fstat`, rather than on the path, makes the answer
-/// describe the bytes actually about to be read.
+/// be replaced between the two calls, which is the staleness [`Location`] documents. The
+/// re-check runs on the open descriptor with `fstat`, rather than on the path. So the answer
+/// describes the bytes actually about to be read.
 ///
 /// # Errors
 ///
@@ -421,22 +420,21 @@ pub fn open(location: &Location) -> Result<std::fs::File> {
 
 /// Serves the package files named on the command line, and delegates everything else.
 ///
-/// A `pacman -U` target is not in any cache directory and has no repository to download from. It is
-/// addressed the same way every other package is — by [`alpm_types::PackageFileName`], built from
-/// its own `.PKGINFO` — and this source is what turns that name back into the path the user typed.
+/// A `pacman -U` target is not in any cache directory, and has no repository to download from. It
+/// is addressed the same way every other package is, by [`alpm_types::PackageFileName`] built from
+/// its own `.PKGINFO`. This source is what turns that name back into the path the user typed.
 ///
 /// # Why a wrapper rather than a step in `Transaction`
 ///
-/// Everything downstream of [`PackageSource::locate`] works on a path: signature checking,
-/// the archive walk, conflict detection, extraction. Making a file target a *source* rather
-/// than a second kind of step means none of that has to learn about it, and means a file
-/// target cannot accidentally take a shorter route through verification than a downloaded
-/// package does.
+/// Everything downstream of [`PackageSource::locate`] works on a path: signature checking, the
+/// archive walk, conflict detection, extraction. A file target is a *source* rather than a second
+/// kind of step, so none of that has to learn about it. It also means a file target cannot
+/// accidentally take a shorter route through verification than a downloaded package does.
 ///
 /// A named file wins over a cached or downloadable package of the same name. That is the same
-/// precedence [`piko_db::solve::UniverseOptions::files`] gives it when solving, and it must be
-/// the same in both places: a plan that chose the file and a source that served the cache
-/// copy would install something the user was never shown.
+/// precedence [`piko_db::solve::UniverseOptions::files`] gives it when solving. It must be the
+/// same in both places. A plan that chose the file, and a source that served the cache copy,
+/// would install something the user was never shown.
 #[derive(Debug)]
 pub struct FileSource {
     files: HashMap<String, PathBuf>,
@@ -458,7 +456,7 @@ impl PackageSource for FileSource {
             return self.inner.locate(file_name);
         };
         // Stat'ed rather than trusted. The file was read once at planning time and can have
-        // been replaced since, exactly as a cache entry can — see `Location`.
+        // been replaced since, exactly as a cache entry can. See `Location`.
         let metadata = std::fs::metadata(path)
             .map_err(|source| Error::io(path, IoAction::Metadata, source))?;
         if !metadata.is_file() {
@@ -476,9 +474,9 @@ impl PackageSource for FileSource {
 
     /// Fetches only what this source does not already hold.
     ///
-    /// A file named on the command line is never downloaded. Passing its name through would
-    /// send `DownloadingSource` looking for a repository it has no target for — harmless, but
-    /// it would report a download that is not going to happen.
+    /// A file named on the command line is never downloaded. Passing its name through would send
+    /// `DownloadingSource` looking for a repository it has no target for. That is harmless, but it
+    /// would report a download that is not going to happen.
     fn prefetch(&self, file_names: &[PackageFileName]) -> Result<()> {
         let remaining: Vec<PackageFileName> = file_names
             .iter()
@@ -495,8 +493,8 @@ impl PackageSource for FileSource {
 /// A file already on disk contributes nothing to a plan's download size.
 ///
 /// [`piko_db::solve::Solvable::download_size`] already answers `None` for a file candidate, so
-/// this is never the reason a file counts zero. It exists so that a caller which wraps its
-/// cache in a `FileSource` and passes the result as the size oracle gets a consistent answer
+/// this is never the reason a file counts zero. It exists for a caller that wraps its cache in a
+/// `FileSource` and passes the result as the size oracle. That caller gets a consistent answer
 /// either way.
 impl piko_db::solve::PackageCache for FileSource {
     fn is_cached(&self, file_name: &PackageFileName) -> bool {
@@ -531,10 +529,10 @@ pub struct DownloadTarget {
 
 /// Finds package files in the cache; downloads a miss before reporting one.
 ///
-/// This wraps a [`CacheDirSource`]. A cache hit is served exactly as before, with unchanged
-/// behavior. A miss is looked up in `targets` and, if found, downloaded through `piko-net`
-/// into the first *usable* configured cache directory ([`select_download_dir`], pacman's own
-/// convention for a download's destination). It comes back as an ordinary [`Location`].
+/// This wraps a [`CacheDirSource`]. A cache hit is served exactly as that source serves it. A
+/// miss is looked up in `targets` and, if found, downloaded through `piko-net` into the first
+/// *usable* configured cache directory. That is [`select_download_dir`], pacman's own convention
+/// for a download's destination. It comes back as an ordinary [`Location`].
 /// **Nothing is verified here** — see
 /// `piko_net::refresh::Refresher::fetch_package_with_progress`'s documentation for why that
 /// responsibility stays with whoever calls `Keyring::check` afterward.
@@ -562,12 +560,12 @@ impl fmt::Debug for DownloadingSource {
 }
 
 impl DownloadingSource {
-    /// Builds a source over `directories` (searched in order, exactly as [`CacheDirSource`]
-    /// would), downloading a miss named in `targets` into the first usable one.
+    /// Builds a source over `directories`, searched in order exactly as [`CacheDirSource`]
+    /// searches them. A miss named in `targets` is downloaded into the first usable one.
     ///
-    /// This is where [`select_download_dir`] runs, and the only place it does. The directory
-    /// it may create is created here rather than in [`CacheDirSource::new`], so a command that
-    /// only reads the cache never writes to disk.
+    /// This is where [`select_download_dir`] runs, and the only place it does. The directory it
+    /// may create is created here rather than in [`CacheDirSource::new`]. So a command that only
+    /// reads the cache never writes to disk.
     ///
     /// `progress` is called synchronously for every download event. This is the same narrow
     /// exception `piko-net` documents on [`piko_net::Event`].
@@ -602,11 +600,11 @@ impl DownloadingSource {
     /// Refuses a batch of downloads unless the chosen directory can hold it —
     /// `pacman.conf`'s `CheckSpace`, on the download side.
     ///
-    /// Off by default, as it is in libalpm. Separate from
-    /// [`crate::Transaction::check_space`] because the two weigh different things against
-    /// different filesystems: this one the compressed archives against the cache directory,
-    /// that one the extracted payload against the root. `pacman -Sw` runs this and not that,
-    /// because `download_files` sits ahead of the `DOWNLOADONLY` return.
+    /// Off by default, as it is in libalpm. Separate from [`crate::Transaction::check_space`],
+    /// because the two weigh different things against different filesystems. This one weighs the
+    /// compressed archives against the cache directory. That one weighs the extracted payload
+    /// against the root. `pacman -Sw` runs this and not that, because `download_files` sits ahead
+    /// of the `DOWNLOADONLY` return.
     #[must_use]
     pub const fn check_space(mut self, enabled: bool) -> Self {
         self.check_space = enabled;
@@ -695,8 +693,8 @@ impl PackageSource for DownloadingSource {
         }
 
         // Before the first byte is written, over exactly the files that will really be
-        // fetched: a package already in the cache never reaches `wanted`. libalpm reaches the
-        // same set through `find_dl_candidates`, and discounts a partial `.part` file on top;
+        // fetched. A package already in the cache never reaches `wanted`. libalpm reaches the
+        // same set through `find_dl_candidates`, and discounts a partial `.part` file on top.
         // piko never resumes a download, so a file that is not cached costs its whole
         // `%CSIZE%`.
         if self.check_space {
@@ -770,8 +768,8 @@ mod tests {
         assert_eq!(source.locate(&file_name()).unwrap().path(), cache_dir.path().join(PACKAGE));
     }
 
-    /// A named file that has since been deleted is reported against its own path, not as a
-    /// cache miss listing directories the user never mentioned.
+    /// A named file that has since been deleted is reported against its own path. It is not
+    /// reported as a cache miss listing directories the user never mentioned.
     #[test]
     fn a_named_file_that_vanished_is_reported_against_its_own_path() {
         let cache_dir = tempfile::tempdir().unwrap();
@@ -838,13 +836,12 @@ mod tests {
         );
     }
 
-    /// libalpm asks two questions about write access, in this order: may this process write
-    /// here (`util.c:925`), then does the directory carry any write bit at all
-    /// (`util.c:928`). The order decides which reason a `0o500` directory reports. An
-    /// ordinary process is refused by the first, while root and anything holding
-    /// `CAP_DAC_OVERRIDE` pass it and are refused by the second. Either way the directory is
-    /// passed over, which is the property that matters, so this pins the skip and accepts
-    /// the reason the running process implies.
+    /// libalpm asks two questions about write access, in this order. May this process write here
+    /// (`util.c:925`)? Then, does the directory carry any write bit at all (`util.c:928`)? The
+    /// order decides which reason a `0o500` directory reports. An ordinary process is refused by
+    /// the first. root, and anything holding `CAP_DAC_OVERRIDE`, passes it and is refused by the
+    /// second. Either way the directory is passed over, which is the property that matters. So
+    /// this pins the skip, and accepts the reason the running process implies.
     #[test]
     fn a_cache_directory_that_cannot_be_written_into_is_passed_over() {
         let locked = tempfile::tempdir().unwrap();
@@ -1187,8 +1184,8 @@ mod tests {
         assert_eq!(std::fs::read(location.path()).unwrap(), b"already cached");
     }
 
-    /// A miss with a matching download target is fetched and lands in the first configured
-    /// cache directory — pacman's own convention for where a download goes.
+    /// A miss with a matching download target is fetched, and lands in the first configured
+    /// cache directory. That is pacman's own convention for where a download goes.
     #[test]
     fn a_miss_downloads_into_the_first_cache_directory() {
         let first = tempfile::tempdir().unwrap();

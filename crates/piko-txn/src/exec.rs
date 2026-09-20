@@ -1,7 +1,7 @@
 //! Runs a command inside the installation root.
 //!
-//! Scriptlets and hooks need the same thing: start a program, make it see the transaction's
-//! root as `/`, feed it input on stdin, and collect its output. libalpm does this in
+//! Scriptlets and hooks need the same four things. Start a program, make it see the
+//! transaction's root as `/`, feed it input on stdin, and collect its output. libalpm does this in
 //! `_alpm_run_chroot` (`util.c:610`) with `fork` + `chroot` + `execv` and a `poll` loop over two
 //! socketpairs. This module does the same, without `unsafe`.
 //!
@@ -21,9 +21,9 @@
 //! and safe. The cost is one extra `fork`/`exec` per command, on the order of a millisecond
 //! against a hook that runs `locale-gen`.
 //!
-//! The helper runs even when the root is `/` and no `chroot` is needed. One path is simpler than
-//! two, and it matters here: the umask, the environment, and the stdio wiring cannot differ
-//! between the case every test exercises and the case that only appears with `--root /mnt`.
+//! The helper runs even when the root is `/` and no `chroot` is needed. One path is simpler
+//! than two, and it matters here. The umask, the environment, and the stdio wiring cannot
+//! differ between the case every test exercises and the case `--root /mnt` alone reaches.
 //!
 //! # What is *not* a sandbox
 //!
@@ -45,8 +45,8 @@ use crate::error::{Error, IoAction, Result};
 /// The hidden argument that turns a `piko` process into the exec helper.
 ///
 /// It is deliberately not a documented subcommand. It exists only for [`Runner`] to call. An
-/// unprivileged caller gains nothing from it (`chroot` needs `CAP_SYS_CHROOT`), and a privileged
-/// one gains nothing that `chroot(8)` does not already give them.
+/// unprivileged caller gains nothing from it, because `chroot` needs `CAP_SYS_CHROOT`. A
+/// privileged one gains nothing that `chroot(8)` does not already give them.
 pub const HELPER_ARG: &str = "__exec-in-root";
 
 /// The umask a scriptlet or hook runs under.
@@ -72,8 +72,8 @@ pub enum Status {
     /// It never started, and why.
     ///
     /// This is a separate variant rather than a synthetic non-zero exit code. "The hook's
-    /// `Exec` does not exist inside the root" and "the hook ran and returned 1" are different
-    /// problems for whoever has to fix them. libalpm's single `retval` conflates the two.
+    /// `Exec` does not exist inside the root" is one problem. "The hook ran and returned 1" is
+    /// another. libalpm's single `retval` conflates the two.
     NotStarted(String),
 }
 
@@ -191,8 +191,8 @@ impl Runner {
             .map_err(|source| Error::io(&self.helper, IoAction::Create, source))?;
 
         // This block is scoped so both of the parent's copies of the write end close before
-        // the read below. Leaving one open means the read never sees end-of-file, and the
-        // transaction hangs with no output — the hardest possible shape of bug to diagnose.
+        // the read below. With one left open, the read never sees end-of-file and the
+        // transaction hangs with no output. That is the hardest shape of defect to diagnose.
         let child = {
             let mut spawn = std::process::Command::new(&self.helper);
             spawn
@@ -218,9 +218,8 @@ impl Runner {
         };
         let mut child = child;
 
-        // This write runs on its own thread. A command is free to ignore its stdin, and an
-        // inline write would then block once the pipe filled while nothing drained the output
-        // side.
+        // This write runs on its own thread. A command is free to ignore its stdin. An inline
+        // write would then block once the pipe filled, with nothing draining the output side.
         let feeder = command.stdin.clone().and_then(|payload| {
             let mut handle = child.stdin.take()?;
             Some(std::thread::spawn(move || {
@@ -260,9 +259,9 @@ fn apply_environment(spawn: &mut std::process::Command) {
 ///
 /// Draining continues past the limit rather than stopping there, on purpose. A command that
 /// keeps printing after the cap would otherwise block on a full pipe and never exit. `on_line`
-/// stops being called once the cap is reached, and `kept` stops growing at the same point: both
-/// read from the same capped buffer, so live output and the final [`Outcome::output`] never
-/// disagree about where the cut is.
+/// stops being called once the cap is reached, and `kept` stops growing at the same point.
+/// Both read from the same capped buffer. So live output and the final [`Outcome::output`]
+/// never disagree about where the cut is.
 fn drain(reader: &mut std::io::PipeReader, on_line: &mut dyn FnMut(&str)) -> (Vec<String>, bool) {
     let mut kept: Vec<u8> = Vec::new();
     let mut truncated = false;
@@ -342,13 +341,13 @@ pub fn helper_main(
     // the same way.
     //
     // The `chdir("/")` that follows is *not* conditional on that same test (`util.c:683`). It
-    // runs even when the chroot itself was skipped. A scriptlet is free to use a path relative
-    // to the root instead of an absolute one — gstreamer's `post_upgrade` does exactly that,
-    // running `setcap` on `usr/lib/gstreamer-1.0/gst-ptp-helper` with no leading slash. Such a
-    // path only resolves correctly when the working directory is guaranteed to be `/`,
-    // regardless of whether `--root /` needed an actual `chroot(2)` call. Nesting the `chdir`
-    // inside the `if` leaves it running from whatever directory launched piko, which breaks
-    // any scriptlet that relies on a root-relative path when `--root` is `/`.
+    // runs even when the chroot itself was skipped. A scriptlet is free to use a path
+    // relative to the root instead of an absolute one. gstreamer's `post_upgrade` does exactly
+    // that, running `setcap` on `usr/lib/gstreamer-1.0/gst-ptp-helper` with no leading slash.
+    // Such a path resolves correctly only when the working directory is guaranteed to be `/`.
+    // Whether `--root /` needed an actual `chroot(2)` call does not enter into it. Nesting the
+    // `chdir` inside the `if` leaves it running from whatever directory launched piko. That
+    // breaks any scriptlet relying on a root-relative path when `--root` is `/`.
     let resolved = std::fs::canonicalize(root).map_err(|error| {
         format!("could not resolve the root {}: {error}", Path::new(root).display())
     })?;

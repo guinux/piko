@@ -45,7 +45,7 @@ use crate::error::{Error, IoAction, Result};
 
 /// The journal's file name, inside the database path.
 ///
-/// Placed beside `db.lck`, not inside `local/`, for the same reason: the local database scan
+/// Placed beside `db.lck`, not inside `local/`, for the same reason. The local database scan
 /// enumerates directories, so a stray file beside them is skipped without a special case.
 pub const JOURNAL_FILE: &str = "piko-journal";
 
@@ -252,8 +252,8 @@ fn parse(text: &str) -> Option<Record> {
 
 /// Writes `contents` to `path` so that `path` is never observed partially written.
 ///
-/// Uses the same sequence as `piko-db-write`'s writer, for the same reasons: `O_EXCL` on the
-/// temporary rather than `O_TRUNC`, so a planted symlink there cannot be written through.
+/// Uses the same sequence as `piko-db-write`'s writer, for the same reasons. `O_EXCL` on the
+/// temporary rather than `O_TRUNC` means a planted symlink there cannot be written through.
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     let directory = path.parent().unwrap_or(Path::new("."));
     let mut temp = path.as_os_str().to_os_string();

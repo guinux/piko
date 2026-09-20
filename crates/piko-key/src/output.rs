@@ -1,7 +1,7 @@
 //! Error reporting, the confirmation prompt, and the `emit!` writer.
 //!
-//! Duplicated from `crates/piko/src/output.rs` rather than shared: this is generic CLI
-//! plumbing with no ALPM semantics — a future GUI key-management frontend needs neither a
+//! Duplicated from `crates/piko/src/output.rs` rather than shared. This is generic CLI
+//! plumbing with no ALPM semantics. A future GUI key-management frontend needs neither a
 //! stdout macro nor a stdin prompt loop. Not worth a shared crate for the two binaries.
 
 /// Prints an error and its whole cause chain.
@@ -32,8 +32,8 @@ pub(crate) use emit;
 
 /// Prints `prompt` and waits for a yes/no answer, defaulting to `default` on an empty line.
 ///
-/// Same shape as `crates/piko`'s own `confirm` — see its doc comment for the reasoning behind
-/// treating a closed/empty stdin as a decline rather than as `default`.
+/// Same shape as `crates/piko`'s own `confirm`. See its doc comment for why a closed or empty
+/// stdin is a decline rather than `default`.
 pub fn confirm(out: &mut impl std::io::Write, prompt: &str, default: bool) -> bool {
     if write!(out, "{prompt}").and_then(|()| out.flush()).is_err() {
         return false;

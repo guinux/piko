@@ -183,8 +183,8 @@ fn every_installed_package_is_a_candidate() {
 /// The ordering property on a real transaction: every package is planned after everything it
 /// depends on that the same plan installs.
 ///
-/// This is what `_alpm_sortbydeps` exists to guarantee. The only way to check it meaningfully
-/// is against a dependency graph large enough to have depth — here, the closure of a real
+/// This is what `_alpm_sortbydeps` exists to guarantee. Checking it meaningfully needs a
+/// dependency graph large enough to have depth. Here that is the closure of a real
 /// meta-package, several hundred packages wide.
 #[test]
 #[ignore = "requires a real ALPM local database and sync databases"]
@@ -279,9 +279,9 @@ fn a_real_plan_orders_every_dependency_before_its_dependent() {
 /// still finds their files. This is `_alpm_sortbydeps(handle, rem_orig, NULL, 1)`
 /// (`trans.c:157`).
 ///
-/// The removal set is built with `-Rs` over a sample of installed packages, so the plans are
+/// The removal set is built with `-Rs` over a sample of installed packages. The plans are then
 /// deep enough for the order to mean something. A package that nothing can remove cleanly is
-/// skipped: the test measures the order of a plan, not which plans exist.
+/// skipped. The test measures the order of a plan, not which plans exist.
 #[test]
 #[ignore = "requires a real ALPM local database"]
 fn a_real_removal_plan_orders_every_dependent_before_its_dependencies() {
@@ -367,12 +367,11 @@ fn a_real_removal_plan_orders_every_dependent_before_its_dependencies() {
 
 /// A removal plan must not depend on which repositories are configured.
 ///
-/// This is not a curiosity. `piko remove` is a removal-only operation. If the answer is
-/// independent of the repository set, it need not open a sync database at all — which lets
-/// it work in a chroot with none, and saves the ~700 ms of opening `core` and `extra` before
-/// deleting some files.
+/// This is not a curiosity. `piko remove` is a removal-only operation. An answer independent
+/// of the repository set needs no sync database open at all. That lets it work in a chroot with
+/// none. It also saves the ~700 ms of opening `core` and `extra` before deleting some files.
 ///
-/// The claim rests on `Request::is_removal_only`: a request that only takes packages away
+/// The claim rests on `Request::is_removal_only`. A request that only takes packages away
 /// restricts the candidate set to what is already installed, so repository candidates are
 /// inert. That is an argument, not evidence, which is why this test exists. It covers `-R`,
 /// `-Rs`, `-Rc` and `-Rcs`, since each reaches the solver differently.
@@ -566,8 +565,8 @@ fn plan_names(universe: &Universe<'_>, plan: &piko_db::solve::Plan) -> BTreeSet<
 ///
 /// This is the acceptance gate for the whole `ALPM_QUESTION_SELECT_PROVIDER` path. `use_index
 /// = 0` is what a frontend that answers nothing gets, and it is the answer the non-interactive
-/// path takes. A restricted clause that changed a plan when answered that way would mean the
-/// restriction is stronger than the unrestricted encoding — and every result this project has
+/// path takes. Suppose a restricted clause changed a plan when answered that way. The
+/// restriction would then be stronger than the unrestricted encoding, and every result
 /// measured against `pacman -Sp` would have to be measured again.
 ///
 /// Also reports how many questions real targets raise, which is the figure the divergence
@@ -659,7 +658,7 @@ fn answering_every_question_with_the_default_leaves_the_plan_unchanged() {
 /// A member that is already installed is part of the answer, not an exclusion.
 /// `alpm_find_group_pkgs` (`sync.c:295`) reads the sync databases and never asks whether a
 /// member is installed, so `pacman -S <group>` offers to reinstall one. piko interns a local
-/// candidate and a repository candidate per name; `group_members` passes over the local one and
+/// candidate and a repository candidate per name. `group_members` passes over the local one and
 /// keeps the repository one, which leaves the same set of names. A test that only ran on a
 /// system with nothing installed could not tell the two readings apart.
 #[test]

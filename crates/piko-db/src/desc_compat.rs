@@ -1,19 +1,19 @@
 //! Forward compatibility for `%SECTION%`-shaped metadata, shared by both databases.
 //!
 //! `alpm-db` rejects a `desc` containing a `%KEY%` it does not know. libalpm instead warns
-//! and skips the block. This is precisely what lets pacman keep reading a database after a
-//! newer pacman has written a section it has never heard of. A package manager that refuses
+//! and skips the block. That is what lets pacman keep reading a database after a newer
+//! pacman has written a section it never heard of. A package manager that refuses
 //! to read its own database after a partial upgrade is not robust. piko follows libalpm by
 //! default — see [`UnknownSectionPolicy`].
 //!
 //! This module holds only the part both databases share. The local `desc` view lives in
 //! [`crate::local::desc_compat`], and the repository one in `repo::desc_compat`.
-//! `filter_unknown_sections` is deliberately reused by both rather than duplicated: the two formats
-//! have different keyword sets, but the identical section grammar.
+//! `filter_unknown_sections` is deliberately reused by both rather than duplicated. The two
+//! formats have different keyword sets, but the identical section grammar.
 //!
-//! `take_fields` is here for the same reason: `%URL%` and `%PACKAGER%` are the two sections both
-//! formats hand to a parser that can refuse a value libalpm prints verbatim, and both parsers
-//! convert every section or none.
+//! `take_fields` is here for the same reason. `%URL%` and `%PACKAGER%` are the two sections
+//! both formats hand to a parser that can refuse a value libalpm prints verbatim. And both
+//! parsers convert every section or none.
 
 use std::{borrow::Cow, str::FromStr as _};
 
@@ -47,10 +47,10 @@ pub struct UnknownSection {
 
 /// Removes sections `alpm-db` would reject, returning the filtered text.
 ///
-/// A section is a `%KEYWORD%` header line followed by value lines, terminated by a blank
-/// line or end of input — the same shape libalpm's reader assumes. `is_known` decides
-/// whether a `%KEYWORD%` is recognised. It is a parameter rather than a hardcoded lookup, so
-/// this same pre-pass serves both the local `desc` format and the repository `desc` format.
+/// A section is a `%KEYWORD%` header line followed by value lines. A blank line or end of
+/// input terminates it. That is the same shape libalpm's reader assumes. `is_known` decides
+/// whether a `%KEYWORD%` is recognised. It is a parameter rather than a hardcoded lookup. So
+/// this one pre-pass serves both the local `desc` format and the repository `desc` format.
 /// The two have different (though overlapping) keyword sets — see
 /// [`crate::repo::desc_compat`].
 ///
@@ -114,25 +114,25 @@ pub(crate) struct TakenFields {
 /// Rewrites the two `desc` sections whose value can cost the whole file, and returns them.
 ///
 /// `alpm-db` and `alpm-repo-db` convert every section or none. So one value their typed
-/// conversion refuses takes the package's name, its dependencies, and the file name an install
-/// downloads down with it. Two sections reach that conversion carrying a value libalpm copies
-/// through untouched.
+/// conversion refuses takes the whole file down with it. That includes the package's name,
+/// its dependencies, and the file name an install downloads. Two sections reach that
+/// conversion carrying a value libalpm copies through untouched.
 ///
 /// `%URL%` is converted with `alpm_types::Url`, which is `url::Url::parse` and rejects anything
 /// without an absolute scheme. Its value lines are dropped and its header kept: the section is
 /// mandatory, and accepted empty.
 ///
 /// `%PACKAGER%` is converted with `alpm_types::Packager`, which demands a `<email>`. The
-/// section is mandatory *and* rejected when empty, so it cannot be blanked the same way; the
-/// value is replaced by one that parses. Only [`UNKNOWN_PACKAGER`] is replaced. Every other
-/// value `Packager` refuses still fails the file, because it is a defect in that file rather
-/// than a documented default of the tool that wrote it.
+/// section is mandatory *and* rejected when empty, so it cannot be blanked the same way. The
+/// value is replaced by one that parses instead. Only [`UNKNOWN_PACKAGER`] is replaced. Every
+/// other value `Packager` refuses still fails the file. Such a value is a defect in that
+/// file, not a documented default of the tool that wrote it.
 ///
-/// Only the first occurrence of each section is touched, so a duplicated one still reaches the
-/// upstream parser and is still reported as one.
+/// Only the first occurrence of each section is touched. So a duplicated one still reaches
+/// the upstream parser, and is still reported as one.
 ///
-/// Returns [`Cow::Borrowed`] when there is nothing to rewrite — no `%URL%` value to drop and a
-/// `%PACKAGER%` the upstream parser takes as it stands.
+/// Returns [`Cow::Borrowed`] when there is nothing to rewrite. That means no `%URL%` value to
+/// drop, and a `%PACKAGER%` the upstream parser takes as it stands.
 pub(crate) fn take_fields(text: &str) -> (Cow<'_, str>, TakenFields) {
     let raw_url = first_value(text, "URL");
     let fields = TakenFields {
@@ -162,8 +162,8 @@ pub(crate) fn take_fields(text: &str) -> (Cow<'_, str>, TakenFields) {
             in_url = false;
             in_packager = false;
         } else if in_url {
-            // A scalar section holds one line, but drop the whole block rather than assume
-            // it: libalpm ignores the extra lines too, since they match no `%KEYWORD%`.
+            // A scalar section holds one line. Drop the whole block rather than assume it.
+            // libalpm ignores the extra lines too, since they match no `%KEYWORD%`.
             continue;
         } else if in_packager {
             if !wrote_packager {
@@ -405,8 +405,8 @@ mod tests {
 
     /// The `%PACKAGER%` value every locally built package carries when its builder set none.
     ///
-    /// `alpm_types::Packager` refuses it for want of an `<email>`, and both parsers convert
-    /// every section or none, so without the substitution this whole `desc` is unreadable.
+    /// `alpm_types::Packager` refuses it for want of an `<email>`. Both parsers convert every
+    /// section or none. So without the substitution, this whole `desc` is unreadable.
     #[test]
     fn makepkgs_default_packager_is_substituted_and_the_desc_parses() {
         let source =
@@ -456,8 +456,8 @@ mod tests {
         assert!(!taken.packager.is_unknown());
     }
 
-    /// Only the first `%PACKAGER%` is substituted, for the reason the `%URL%` case gives:
-    /// swallowing the duplicate would turn a malformed file into a silent one.
+    /// Only the first `%PACKAGER%` is substituted, for the reason the `%URL%` case gives.
+    /// Swallowing the duplicate would turn a malformed file into a silent one.
     #[test]
     fn take_fields_leaves_a_second_packager_section_alone() {
         let source =

@@ -34,8 +34,8 @@ use crate::{
 /// Bounds on what a single package may cost to read.
 ///
 /// Generous rather than tight. The purpose is that a hostile archive costs a *bounded* amount
-/// of work, not that a legitimate one is squeezed — real packages reach hundreds of megabytes
-/// inflated (`libreoffice-fresh` unpacks to roughly 700 MB), so a limit tuned to the typical
+/// of work, not that a legitimate one is squeezed. Real packages reach hundreds of megabytes
+/// inflated, and `libreoffice-fresh` unpacks to roughly 700 MB. A limit tuned to the typical
 /// case would reject them.
 #[derive(Clone, Copy, Debug)]
 pub struct PackageLimits {
@@ -64,7 +64,7 @@ impl Default for PackageLimits {
 pub enum MemberKind {
     /// A metadata member: a name beginning with `.`, such as `.PKGINFO` or `.MTREE`.
     ///
-    /// libalpm reserves the whole `.`-prefixed namespace (`add.c:266`) and extracts only
+    /// libalpm reserves the whole `.`-prefixed namespace (`add.c:266`). It extracts only
     /// `.INSTALL`, `.CHANGELOG` and `.MTREE`, into the local database entry rather than into
     /// the installation root. Everything else beginning with `.` is skipped.
     Metadata,
@@ -75,8 +75,8 @@ pub enum MemberKind {
 /// Which kind of link a member is.
 ///
 /// Keeping these apart is not pedantry. `tar` reports a target for both through
-/// `link_name()`, so conflating them creates a *symlink* where the archive asked for a hard
-/// link — and real packages contain hard links: `glibc` ships three.
+/// `link_name()`. So conflating them creates a *symlink* where the archive asked for a hard
+/// link. Real packages do contain hard links: `glibc` ships three.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinkKind {
     /// A symbolic link. The target is stored verbatim and may point anywhere.
@@ -135,8 +135,8 @@ impl Member {
 ///
 /// `on_member` is given the header and a reader over that member's contents. The reader is
 /// valid only for the duration of the call, because the underlying stream is a decompressor
-/// that cannot seek backwards — contents must be consumed then, or not at all. Not reading
-/// them is fine; `tar` skips to the next member either way.
+/// that cannot seek backwards. Contents must be consumed then, or not at all. Not reading
+/// them is fine, since `tar` skips to the next member either way.
 ///
 /// # Errors
 ///
@@ -167,7 +167,7 @@ pub enum Flow {
 /// [`walk`], for a caller that can answer its question before the archive ends.
 ///
 /// Stopping early skips the decompression of everything after the member that answered. A
-/// `.PKGINFO` sits at the front of a package makepkg built, so a reader that only wants the
+/// `.PKGINFO` sits at the front of a package makepkg built. So a reader that only wants the
 /// metadata pays for a few kilobytes rather than for the whole archive. Every bound
 /// [`walk`] enforces still applies to what was read.
 ///
@@ -314,8 +314,8 @@ fn sniff(header: &[u8]) -> Option<DecompressionSettings> {
 
 /// Tells a genuine bound violation apart from an unrelated I/O or tar-format failure.
 ///
-/// `tar` surfaces [`BoundedReader`]'s error as an opaque [`std::io::Error`], so the shared
-/// flag — set only when the limit was actually exceeded — is what distinguishes the two.
+/// `tar` surfaces [`BoundedReader`]'s error as an opaque [`std::io::Error`]. The shared flag
+/// is what distinguishes the two. It is set only when the limit was actually exceeded.
 fn classify_io_error(
     path: &Path,
     source: std::io::Error,
@@ -334,7 +334,7 @@ fn classify_io_error(
 
 /// A reader that refuses to yield more than `limit` bytes in total.
 ///
-/// A compressed archive can inflate to arbitrarily more than its own size, so without this a
+/// A compressed archive can inflate to arbitrarily more than its own size. Without this, a
 /// few kilobytes on disk can exhaust memory or fill a filesystem.
 #[derive(Debug)]
 struct BoundedReader<R> {
@@ -471,8 +471,8 @@ mod tests {
         assert_eq!(symlink.link.as_ref().map(|link| link.target.as_path()), Some(Path::new("foo")));
     }
 
-    /// `tar` reports a target for a hard link through the same `link_name()` as a symlink,
-    /// so conflating them would create a symlink where the package asked for a hard link.
+    /// `tar` reports a target for a hard link through the same `link_name()` as a symlink.
+    /// Conflating them would create a symlink where the package asked for a hard link.
     /// `glibc` really ships three of these.
     #[test]
     fn a_hard_link_is_not_mistaken_for_a_symlink() {

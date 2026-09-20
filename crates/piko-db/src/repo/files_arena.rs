@@ -1,19 +1,19 @@
 //! A compact store for every package's file list in a repository database.
 //!
 //! `RepoFilesV1` (via [`alpm_repo_db::files::RepoFilesV1`]) hands back a `Vec<PathBuf>` per
-//! package. A full `.files` archive holds millions of paths — 7 639 616 measured on the real
-//! `extra` repository, 509 MiB of path bytes. Storing one `Vec<PathBuf>` per package would
-//! cost roughly 800 MiB for that repository, once allocator overhead is counted. Concatenating
-//! every path into one `String` and indexing into it with `u32` offsets measures at 538 MiB
-//! for the same data: smaller, with far fewer allocations.
+//! package. A full `.files` archive holds millions of paths. The real `extra` repository
+//! measures 7 639 616 of them, 509 MiB of path bytes. Storing one `Vec<PathBuf>` per package
+//! would cost roughly 800 MiB for that repository, once allocator overhead is counted.
+//! Concatenating every path into one `String` and indexing into it with `u32` offsets measures
+//! 538 MiB for the same data. That is smaller, with far fewer allocations.
 //!
 //! # Why the index is keyed by name, not shared with the package list positionally
 //!
 //! `<repo>.db` and `<repo>.files` are refreshed independently by pacman (`-Sy` versus `-Fy`).
-//! They routinely describe different builds of the same package — measured at 12 of `core`'s
-//! 296 packages disagreeing on this machine, right now. A positional index would silently
-//! serve one package's file list under another package's name whenever the two archives
-//! drift, with no error at all. Keying by [`Name`] and checking the [`FullVersion`] at lookup
+//! They routinely describe different builds of the same package. On this machine, right now,
+//! 12 of `core`'s 296 packages disagree. A positional index would silently serve one package's
+//! file list under another package's name whenever the two archives drift. It would raise no
+//! error at all. Keying by [`Name`] and checking the [`FullVersion`] at lookup
 //! time turns that into [`Error::FilesVersionSkew`]. This is the whole reason this module
 //! exists in this shape, rather than as a plain `Vec<Vec<PathBuf>>`.
 
@@ -67,17 +67,17 @@ impl FilesArena {
     ///
     /// `name` can already be present: the same package name appearing twice in one `.files`
     /// archive. The spec's uniqueness guarantee rules this out, but a corrupt archive could
-    /// still contain it. In that case the existing entry is kept and [`Inserted::Duplicate`]
-    /// is returned, carrying the kept version so the caller can record a diagnostic naming
+    /// still contain it. The existing entry is then kept, and [`Inserted::Duplicate`] is
+    /// returned. It carries the kept version, so the caller can record a diagnostic naming
     /// both sides. This is a same-archive duplicate, not the cross-archive version skew
     /// [`Self::file_list`] detects.
     ///
     /// # Errors
     ///
     /// [`Error::LimitExceeded`] if appending would exceed `max_bytes`, or would need more
-    /// than [`u32::MAX`] path entries or bytes to address. The arena is left exactly as it was
-    /// before the call: a package is appended whole or not at all, so no path bytes are ever
-    /// left behind with no index entry pointing at them.
+    /// than [`u32::MAX`] path entries or bytes to address. The arena is left exactly as it
+    /// was before the call. A package is appended whole or not at all. So no path bytes are
+    /// ever left behind with no index entry pointing at them.
     pub(crate) fn insert(
         &mut self,
         archive_path: &Path,
@@ -95,9 +95,9 @@ impl FilesArena {
         for path in paths {
             if let Err(error) = self.push_path(archive_path, path, max_bytes) {
                 // Roll back the partial append. Every caller currently aborts the whole open
-                // on this error, so nothing would observe the debris — but the type's
-                // invariant is that `data` holds only bytes some index entry addresses, and
-                // an invariant that only holds because no one looks is not one.
+                // on this error, so nothing would observe the debris. But the type's
+                // invariant is that `data` holds only bytes some index entry addresses. An
+                // invariant that only holds because no one looks is not one.
                 self.truncate_to(range_start);
                 return Err(error);
             }
@@ -111,8 +111,8 @@ impl FilesArena {
     /// Discards every path from index `count` onwards, along with its bytes.
     fn truncate_to(&mut self, count: u32) {
         let count = usize::try_from(count).unwrap_or(usize::MAX);
-        // The byte offset to cut `data` at is where the first discarded path started; if
-        // nothing is being discarded, `data` is already the right length.
+        // The byte offset to cut `data` at is where the first discarded path started. When
+        // nothing is discarded, `data` is already the right length.
         let cut = self
             .starts
             .get(count)
@@ -136,8 +136,8 @@ impl FilesArena {
     ) -> Result<()> {
         // Every path here was parsed by `RepoFilesV1::from_str` out of a UTF-8 `&str`, so
         // `to_str` cannot fail in practice. `to_string_lossy` is used anyway rather than an
-        // `unwrap`: if that invariant is ever violated, degrading to replacement characters
-        // is safer than a panic or a fabricated error variant with no real source.
+        // `unwrap`. Should that invariant ever be violated, replacement characters are the
+        // safer outcome. A panic is worse, as is an error variant with no real source.
         let text = path.to_string_lossy();
 
         let start = self.byte_len_as_u32(archive_path, max_bytes)?;

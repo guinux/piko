@@ -30,7 +30,7 @@ pub const LOCK_FILE: &str = "db.lck";
 /// The lock is pure file *existence*, so it is **not** released when the process dies. A
 /// crashed piko or pacman leaves a stale `db.lck` that a human must remove, exactly as
 /// pacman's own error message instructs. This is deliberately not "improved" into an advisory
-/// `flock`. An `flock` would be invisible to pacman, and two package managers writing the same
+/// `flock`. An `flock` would be invisible to pacman. Two package managers writing the same
 /// database concurrently is far worse than a stale file.
 #[derive(Debug)]
 pub struct DbLock {
@@ -101,8 +101,8 @@ impl DbLock {
 
     /// Releases the lock, reporting a failure to remove the file.
     ///
-    /// A lock file that has already vanished counts as **success**, not an error: something
-    /// else removed it, the database is no longer locked, and that is what the caller wanted.
+    /// A lock file that has already vanished counts as **success**, not an error. Something
+    /// else removed it, so the database is no longer locked. That is what the caller wanted.
     /// libalpm reaches the same conclusion by a different route, downgrading `ENOENT` to a
     /// warning in `_alpm_handle_unlock` (`handle.c:165`).
     ///
@@ -126,8 +126,8 @@ impl Drop for DbLock {
     /// Best-effort release.
     ///
     /// A failure here cannot be reported. That is the whole reason [`DbLock::release`]
-    /// exists. Leaving the file behind is the safe direction to fail in: a stale lock stops
-    /// the next writer, while a lock wrongly believed released would let two run at once.
+    /// exists. Leaving the file behind is the safe direction to fail in. A stale lock stops
+    /// the next writer. A lock wrongly believed released would let two writers run at once.
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
@@ -161,8 +161,8 @@ mod tests {
 
     /// libalpm's `ASSERT(handle->lockfd < 0, return 0)` makes a re-lock a no-op rather than a
     /// recursive acquisition. piko has no handle to re-enter, so the equivalent statement has
-    /// two parts: the guard is not reacquirable while alive (the test above), and dropping it
-    /// makes the lock available again.
+    /// two parts. The guard is not reacquirable while alive, which the test above pins. And
+    /// dropping it makes the lock available again.
     #[test]
     fn dropping_the_guard_releases() {
         let dir = tempfile::tempdir().unwrap();

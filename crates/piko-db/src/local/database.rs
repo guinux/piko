@@ -20,8 +20,8 @@ use crate::{
 /// Something suspicious found while scanning, which did not stop the scan.
 ///
 /// Diagnostics are **returned** rather than logged. A library that writes to stderr is
-/// unusable from a TUI or a daemon, so the decision of how — and whether — to show these
-/// belongs to the caller.
+/// unusable from a TUI or a daemon. So the caller decides how to show these, and whether to
+/// show them at all.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Diagnostic {
@@ -174,15 +174,15 @@ impl LocalDatabase {
 
     /// Opens the database at `root`.
     ///
-    /// The scan mirrors libalpm's `local_db_populate`: `.` and `..` are skipped, anything
-    /// that is not a directory is skipped silently (which is what filters out
-    /// `ALPM_DB_VERSION`), and an unparseable name is reported and skipped.
+    /// The scan mirrors libalpm's `local_db_populate`. `.` and `..` are skipped. Anything
+    /// that is not a directory is skipped silently, which is what filters out
+    /// `ALPM_DB_VERSION`. An unparseable name is reported and skipped.
     ///
     /// It diverges in two deliberate ways:
     ///
     /// - A symlink to a directory is **not** followed. libalpm's `is_dir` uses a following
-    ///   `stat`, so a symlinked entry is accepted there; here it is reported and skipped,
-    ///   because it is a redirection primitive with no legitimate use in a database.
+    ///   `stat`, so a symlinked entry is accepted there. Here it is reported and skipped. It
+    ///   is a redirection primitive with no legitimate use in a database.
     /// - On a duplicate package name, the entry kept is the first in **sorted** order.
     ///   libalpm keeps the first in `readdir` order, which is filesystem-dependent and so
     ///   not reproducible.
@@ -196,9 +196,9 @@ impl LocalDatabase {
     ///   packages; nothing is written to create it, which stays `piko-db-write`'s job.
     /// - [`Error::Io`] if `root` cannot be listed.
     /// - [`Error::TooManyEntries`] if the directory holds more **packages** than
-    ///   [`Limits::max_entries`] allows. Entries that are not packages — `ALPM_DB_VERSION`,
-    ///   `db.lck`, a stray file, a badly-named directory — consume none of that budget; they
-    ///   are bounded by [`Limits::max_diagnostics`] instead, which never fails the open.
+    ///   [`Limits::max_entries`] allows. Entries that are not packages consume none of that
+    ///   budget: `ALPM_DB_VERSION`, `db.lck`, a stray file, a badly-named directory.
+    ///   [`Limits::max_diagnostics`] bounds those instead, and never fails the open.
     ///
     /// Problems with individual entries are reported through
     /// [`diagnostics`](LocalDatabase::diagnostics) and do not fail the open.
@@ -206,7 +206,7 @@ impl LocalDatabase {
         let root = root.as_ref();
 
         // Set only when the schema version file is missing for a reason that is not
-        // corruption: nothing has been written into `root` at all yet. `root` itself may
+        // corruption. Nothing has been written into `root` at all yet. `root` itself may
         // still not exist in that case, which `scan` below must not treat as an error.
         let mut bootstrapping = false;
 
@@ -230,9 +230,9 @@ impl LocalDatabase {
             Self::scan(root, options, &mut diagnostics)?
         };
 
-        // Sorting by name gives reproducible iteration and lets `get` binary-search. Ties
-        // are broken by the raw directory name so that duplicate detection, and therefore
-        // which entry wins, does not depend on readdir order.
+        // Sorting by name gives reproducible iteration and lets `get` binary-search. The raw
+        // directory name breaks ties. So duplicate detection, and therefore which entry wins,
+        // does not depend on readdir order.
         packages.sort_by(|left, right| {
             left.name()
                 .cmp(right.name())
@@ -397,17 +397,23 @@ impl LocalDatabase {
     /// A package must match **all** of `terms` (AND, not OR) to be included at all.
     /// Searching `["firefox", "browser"]` only returns packages that independently satisfy
     /// both. See [`search::MatchKind`](crate::search::MatchKind) for the six ways a single
-    /// term can match, and their relative ranking, highest first: an exact name match, an
-    /// exact match against one of its `%PROVIDES%`, a name prefix, a name substring, a
-    /// description substring, or an exact group match. Comparisons are case-insensitive.
-    /// Blank terms are dropped; if nothing is left after that, nothing matches. Each package
-    /// appears at most once, scored by the single highest
+    /// term can match. Their ranking runs highest first:
+    ///
+    /// 1. an exact name match,
+    /// 2. an exact match against one of its `%PROVIDES%`,
+    /// 3. a name prefix,
+    /// 4. a name substring,
+    /// 5. a description substring,
+    /// 6. an exact group match.
+    ///
+    /// Comparisons are case-insensitive. Blank terms are dropped. If nothing is left, nothing
+    /// matches. Each package appears at most once, scored by the single highest
     /// [`search::MatchKind`](crate::search::MatchKind) any one of its terms achieved. Results
     /// are sorted most-relevant-first, then by name to break ties deterministically.
     ///
     /// A package whose `desc` cannot be read is excluded from anything beyond an exact name
     /// match, rather than surfacing the read failure. Elsewhere in piko, a load failure must
-    /// always surface on access and never look like an empty result — this function makes a
+    /// always surface on access and never look like an empty result. This function makes a
     /// deliberate, narrow exception, scoped to this best-effort bulk search only. Calling
     /// [`LocalPackage::desc`] directly on that package still fails loudly, as always; nothing
     /// about its own caching behavior changes.
@@ -422,10 +428,10 @@ impl LocalDatabase {
     /// Checks every installed package against `repos`, returning those with a newer version
     /// available — mirrors `pacman -Qu`.
     ///
-    /// See `updates::check_updates` for the exact rules: repository priority is `repos`' own order
-    /// (piko does not parse `pacman.conf`), a package absent from every repository is skipped, and
-    /// version comparison reuses [`alpm_types::FullVersion`]'s `Ord` — the same algorithm as
-    /// libalpm's `alpm_pkg_vercmp` (`version.c`).
+    /// See `updates::check_updates` for the exact rules. Repository priority is `repos`' own
+    /// order, since piko does not parse `pacman.conf`. A package absent from every repository
+    /// is skipped. Version comparison reuses [`alpm_types::FullVersion`]'s `Ord`, the same
+    /// algorithm as libalpm's `alpm_pkg_vercmp` (`version.c`).
     #[must_use]
     pub fn check_updates<'a>(
         &'a self,
@@ -437,8 +443,8 @@ impl LocalDatabase {
     /// Every installed package whose name is not found in any of `repos` — mirrors
     /// `pacman -Qm`.
     ///
-    /// See `updates::foreign` for the exact rule: no `Usage` gate, and a name present in more than
-    /// one repository counts the same as a name present in exactly one.
+    /// See `updates::foreign` for the exact rule. There is no `Usage` gate. A name present in
+    /// more than one repository counts the same as a name present in exactly one.
     #[must_use]
     pub fn foreign<'a>(
         &'a self,
@@ -711,8 +717,8 @@ mod tests {
     }
 
     /// The bound counts packages, not directory entries. `ALPM_DB_VERSION` is always present
-    /// and always enumerated, so counting entries would reject a database holding exactly
-    /// `max_entries` packages — and whether it did would depend on readdir order.
+    /// and always enumerated. So counting entries would reject a database holding exactly
+    /// `max_entries` packages, and whether it did would depend on readdir order.
     #[test]
     fn a_database_with_exactly_max_entries_packages_opens() {
         let fixture = DbFixture::new();
@@ -749,8 +755,8 @@ mod tests {
         assert_eq!(db.diagnostics().len(), 20);
     }
 
-    /// A flood of unusable entries produces a diagnostic per entry, which `max_entries` does
-    /// not bound — that is `max_diagnostics`' job, and it must not fail the open.
+    /// A flood of unusable entries produces a diagnostic per entry. `max_entries` does not
+    /// bound those. That is `max_diagnostics`' job, and it must not fail the open.
     #[test]
     fn diagnostics_are_bounded_and_the_overflow_is_counted() {
         let fixture = DbFixture::new();

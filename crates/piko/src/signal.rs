@@ -7,38 +7,41 @@
 //!
 //! So one press stops the run at the next of those points. Before the commit, nothing is
 //! applied. Inside it, the step already running finishes and the journal names what was done.
-//! A second press is still the way out of a step that will not end, and it leaves both the
+//! A second press is still the way out of a step that will not end. It leaves both the
 //! journal and `db.lck` behind. The handler's message names no phase, because the handler
 //! covers all of them.
 //!
 //! This is not installed unconditionally at process start. `ctrlc::set_handler` cannot be
-//! un-registered, and accepts only one registration per process, so an early install would
-//! both replace Ctrl+C's instant-kill behavior everywhere in the process for the rest of the
-//! run, and rule out a later caller installing its own. That includes the `[Y/n]`
-//! confirmation prompt, which blocks on `stdin` and has nothing in flight to cancel
-//! gracefully — Ctrl+C there should kill the process on the first press, exactly as it does
-//! with no handler installed at all. Instead, a caller installs this only once it is about to
-//! do something that can download, and passes the resulting [`Handoff`] on to whatever comes
-//! after it in the same run rather than installing a second time:
+//! un-registered, and accepts only one registration per process. So an early install would do
+//! two unwanted things. It would replace Ctrl+C's instant-kill behavior everywhere in the
+//! process for the rest of the run. And it would rule out a later caller installing its own.
+//!
+//! That cost reaches the `[Y/n]` confirmation prompt, which blocks on `stdin` and has nothing
+//! in flight to cancel gracefully. Ctrl+C there should kill the process on the first press,
+//! exactly as it does with no handler installed at all.
+//!
+//! Instead, a caller installs this only once it is about to do something that can download. It
+//! then passes the resulting [`Handoff`] on to whatever comes after it in the same run, rather
+//! than installing a second time:
 //!
 //! - `Command::Refresh`'s dispatch arm (`main.rs`) installs it and passes the `Cancel` half
 //!   into `cmd::refresh::refresh`. `refresh` has no confirmation prompt, so the `PromptMode`
 //!   half goes unused there.
 //! - `main::sync`'s pre-refresh step installs it, when `update` is refreshing, and passes the
 //!   whole `Handoff` into `cmd::txn::InstallOptions::pre_cancel`. `cmd::txn::install` brackets
-//!   its confirmation prompt in `PromptMode::during_prompt`, so Ctrl+C kills the process
-//!   immediately right there even though the same handler stays installed for the refresh
-//!   that already ran and the download phase that follows if the prompt is accepted.
-//! - `cmd::txn::install` installs one before it fetches a package named by URL, because that
-//!   download necessarily precedes the plan and therefore the prompt. It then brackets the
-//!   prompt in `PromptMode::during_prompt` through the same `pre_cancel` slot, so Ctrl+C there
-//!   still kills the process on the first press.
+//!   its confirmation prompt in `PromptMode::during_prompt`. So Ctrl+C kills the process
+//!   immediately right there. The same handler stays installed for the refresh that already
+//!   ran, and for the download phase that follows an accepted prompt.
+//! - `cmd::txn::install` installs one before it fetches a package named by URL. That download
+//!   necessarily precedes the plan, and therefore the prompt. It then brackets the prompt in
+//!   `PromptMode::during_prompt` through the same `pre_cancel` slot. So Ctrl+C there still
+//!   kills the process on the first press.
 //! - Failing all of the above, `cmd::txn::install` installs its own handler right after its
-//!   confirmation gate passes — so nothing is installed yet while that prompt is up, and
-//!   Ctrl+C already kills the process by the OS's default disposition.
+//!   confirmation gate passes. Nothing is installed yet while that prompt is up, so Ctrl+C
+//!   already kills the process by the OS's default disposition.
 
-/// Whether the installed `SIGINT` handler kills the process on the very first press, instead
-/// of requesting a graceful stop that only a second press escalates.
+/// Whether the installed `SIGINT` handler kills the process on the very first press. The
+/// alternative requests a graceful stop that only a second press escalates.
 ///
 /// Cheap to [`Clone`] — every clone shares the same underlying flag.
 #[derive(Clone, Debug)]
@@ -58,8 +61,8 @@ impl PromptMode {
     }
 }
 
-/// A `SIGINT` handler already installed by an earlier step, threaded to a later one instead
-/// of installing a second — `ctrlc::set_handler` accepts only one registration per process.
+/// A `SIGINT` handler already installed by an earlier step, threaded to a later one instead of
+/// installing a second. `ctrlc::set_handler` accepts only one registration per process.
 #[derive(Clone, Debug)]
 pub(crate) struct Handoff {
     pub(crate) cancel: piko_net::Cancel,

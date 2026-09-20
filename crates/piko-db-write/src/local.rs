@@ -4,16 +4,16 @@
 //!
 //! libalpm writes an entry's metadata with a plain `fopen(path, "w")`, streams into it, and
 //! calls `fclose` without checking the result (`be_local.c:988-1108`). There is no temporary
-//! file, no `rename`, and no `fsync`. The consequences are ordinary, not exotic: a power loss
-//! or a full disk part-way through writing `desc` leaves a truncated `desc` that no longer
-//! parses. The package it describes becomes unreadable to both pacman and piko. `fclose`
-//! going unchecked means a write that failed at flush time is not even reported.
+//! file, no `rename`, and no `fsync`. The consequences are ordinary, not exotic. A power loss or
+//! a full disk part-way through writing `desc` leaves a truncated `desc` that no longer parses.
+//! The package it describes becomes unreadable to both pacman and piko. `fclose` going unchecked
+//! means a write that failed at flush time is not even reported.
 //!
-//! piko writes to a temporary sibling, `fsync`s it, `rename`s it over the target, and
-//! `fsync`s the directory. `rename(2)` within a directory is atomic, so at every instant the
-//! target is either the complete old file or the complete new one. This is the clearest
-//! improvement available over libalpm, and it costs nothing that matters — a handful of
-//! `fsync`s against a transaction that is about to unpack megabytes.
+//! piko writes to a temporary sibling, `fsync`s it, `rename`s it over the target, and `fsync`s
+//! the directory. `rename(2)` within a directory is atomic. So at every instant the target is
+//! either the complete old file or the complete new one. This is the clearest improvement
+//! available over libalpm, and it costs nothing that matters. It is a handful of `fsync`s
+//! against a transaction that is about to unpack megabytes.
 //!
 //! This does **not** make the whole transaction atomic, only each file. An interruption
 //! between writing `desc` and writing `files` still leaves an entry that is internally
@@ -61,7 +61,7 @@ const TEMP_SUFFIX: &str = ".new";
 ///
 /// Constructing one requires a [`DbLock`] **by reference**. A write cannot be attempted
 /// without holding the lock, and the lock cannot be released while a writer is alive. That is
-/// the one invariant worth spending the type system on here: libalpm enforces the same thing
+/// the one invariant worth spending the type system on here. libalpm enforces the same thing
 /// with a runtime `ASSERT` on `handle->lockfd`.
 ///
 /// # umask
@@ -69,9 +69,9 @@ const TEMP_SUFFIX: &str = ".new";
 /// libalpm calls `umask(0022)` before writing and restores it afterwards (`be_local.c:984`,
 /// `be_local.c:1113`), and `umask(0000)` around `mkdir` (`be_local.c:940`). piko does not.
 /// `umask` is process-global, so mutating it makes an unrelated thread's file creation depend
-/// on when it happened to run. Modes are set explicitly with `set_permissions` after
-/// creation instead, which produces the same `0755`/`0644` that libalpm produces, independent
-/// of the caller's umask and of what any other thread is doing.
+/// on when it happened to run. Modes are set explicitly with `set_permissions` after creation
+/// instead. That produces the same `0755`/`0644` that libalpm produces, independent of the
+/// caller's umask and of what any other thread is doing.
 #[derive(Debug)]
 pub struct LocalDbWriter<'lock> {
     /// `<dbpath>/local`.
@@ -86,7 +86,7 @@ impl<'lock> LocalDbWriter<'lock> {
     /// `ALPM_DB_VERSION` marker if they are absent.
     ///
     /// `lock` must be the lock for this same `dbpath`. Holding a lock on one database while
-    /// writing another is a bug; the check here turns it into an error instead of a corrupted
+    /// writing another is a bug. The check here turns it into an error instead of a corrupted
     /// database.
     ///
     /// Creating `ALPM_DB_VERSION` is the writer's job precisely because
@@ -142,9 +142,9 @@ impl<'lock> LocalDbWriter<'lock> {
     ///
     /// Fails if it already exists, matching `_alpm_local_db_prepare`'s bare `mkdir`
     /// (`be_local.c:941`). That is not an oversight in either implementation. An upgrade or a
-    /// reinstall removes the old entry before creating the new one (`add.c`), so an entry
-    /// that is already there means the caller has lost track of what it is doing. Silently
-    /// writing into it would merge two packages' metadata.
+    /// reinstall removes the old entry before creating the new one (`add.c`). So an entry that is
+    /// already there means the caller has lost track of what it is doing. Silently writing into
+    /// it would merge two packages' metadata.
     ///
     /// # Errors
     ///
@@ -158,18 +158,17 @@ impl<'lock> LocalDbWriter<'lock> {
     /// `entry`, with **one** `fsync` of `local/` covering all three.
     ///
     /// This is the upgrade sequence, and doing it in one call is not merely tidier. Each of
-    /// [`Self::create_entry`] and [`Self::remove_entry`] `fsync`s the root on its own, so an
-    /// upgrade paid three root `fsync`s per package where one suffices. The directory's
-    /// metadata covers every create and unlink within it, so syncing after the last one makes
-    /// all of them durable. See `docs/perf-study.md` §4.2.
+    /// [`Self::create_entry`] and [`Self::remove_entry`] `fsync`s the root on its own. Called in
+    /// sequence, they cost three root `fsync`s per package where one suffices. The directory's
+    /// metadata covers every create and unlink within it, so syncing after the last one makes all
+    /// of them durable. See `docs/perf-study.md` §4.2.
     ///
-    /// The crash window is unchanged in kind. Before the `fsync`, a crash may leave any
-    /// prefix of the three operations visible, exactly as it could between the three separate
-    /// calls. Re-running the same sequence recovers from any of them, because each removal is
-    /// conditional on the path existing.
+    /// The crash window is the same in kind as for three separate calls. Before the `fsync`, a
+    /// crash may leave any prefix of the three operations visible. Re-running the same sequence
+    /// recovers from any of them, because each removal is conditional on the path existing.
     ///
-    /// `previous` is the entry installed under this package's name at its *old* version, if
-    /// any; passing `None` is a plain install.
+    /// `previous` is the entry installed under this package's name at its *old* version, if any.
+    /// Passing `None` is a plain install.
     ///
     /// # Errors
     ///
@@ -196,9 +195,9 @@ impl<'lock> LocalDbWriter<'lock> {
     /// Begins a staged write of one entry's files, to be made durable together.
     ///
     /// This is the counterpart to calling [`Self::write_record`] and [`Self::write_raw`] in
-    /// sequence. Prefer it when an entry gets more than one file: it pays one directory
-    /// `fsync` for the whole entry instead of one per file, and overlaps the data `fsync`s.
-    /// See [`EntryWrite`] for the measurement and for what the crash-safety property becomes.
+    /// sequence. Prefer it when an entry gets more than one file. It pays one directory `fsync`
+    /// for the whole entry instead of one per file, and it overlaps the data `fsync`s. See
+    /// [`EntryWrite`] for the measurement, and for what the crash-safety property becomes.
     ///
     /// The entry directory must already exist. [`Self::create_entry`] makes it.
     pub fn entry_write(&self, entry: &EntryName) -> EntryWrite {
@@ -217,10 +216,10 @@ impl<'lock> LocalDbWriter<'lock> {
 
     /// Writes an arbitrary file into an existing entry, atomically.
     ///
-    /// This is for members that are copied verbatim rather than built: `mtree`, `install` and
-    /// `changelog`, which libalpm likewise extracts into the entry rather than into the root
-    /// (`add.c:194`). They have no `%SECTION%` structure — `mtree` is gzipped binary — so
-    /// [`Record`] does not apply, and the bytes are written as given.
+    /// This is for members that are copied verbatim rather than built. Those are `mtree`,
+    /// `install` and `changelog`, which libalpm likewise extracts into the entry rather than into
+    /// the root (`add.c:194`). They have no `%SECTION%` structure, and `mtree` is gzipped binary.
+    /// So [`Record`] does not apply, and the bytes are written as given.
     ///
     /// `modified` is the member's own modification time. Stamping it keeps the entry agreeing
     /// with the `ALPM-MTREE` data that describes it. This is the per-file counterpart of
@@ -242,12 +241,12 @@ impl<'lock> LocalDbWriter<'lock> {
 
     /// Reads a `desc` or `files` file back out of an entry.
     ///
-    /// Reading goes through [`piko_db::fs_util`] like every other read in the crate, so the
+    /// Reading goes through [`piko_db::fs_util`] like every other read in the crate. So the
     /// symlink, file-type and size protections apply to the writer's read-modify-write path too.
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if the file cannot be read, or [`Error::Read`] wrapping
+    /// [`Error::Io`] if the file cannot be read. [`Error::Read`] wrapping
     /// [`piko_db::Error::LimitExceeded`] or [`piko_db::Error::NotARegularFile`] if it is too large
     /// or is not a regular file. [`Error::Record`] if it is not a well-formed section list.
     pub fn read_record(&self, entry: &EntryName, kind: RecordKind) -> Result<Record> {
@@ -292,13 +291,13 @@ impl<'lock> LocalDbWriter<'lock> {
     /// Changes an installed package's install reason, rewriting only that section.
     ///
     /// This is `pacman -D --asdeps` / `--asexplicit`. libalpm implements it the same way:
-    /// `alpm_pkg_set_reason` re-writes the whole `desc` (`be_local.c:1196`). The difference is
-    /// that piko's rewrite is byte-identical everywhere else, because it goes through
-    /// [`Record`] rather than through a parse into typed fields and back.
+    /// `alpm_pkg_set_reason` re-writes the whole `desc` (`be_local.c:1196`). The one difference
+    /// is that piko's rewrite is byte-identical everywhere else. It goes through [`Record`]
+    /// rather than through a parse into typed fields and back.
     ///
-    /// [`PackageInstallReason::Explicit`] *removes* the section rather than writing `0`,
-    /// which is what libalpm does (`if(info->reason)` at `be_local.c:1029`) and what makes
-    /// the result match a freshly installed explicit package.
+    /// [`PackageInstallReason::Explicit`] *removes* the section rather than writing `0`. That is
+    /// what libalpm does (`if(info->reason)` at `be_local.c:1029`), and what makes the result
+    /// match a freshly installed explicit package.
     ///
     /// # Errors
     ///
@@ -324,31 +323,31 @@ impl<'lock> LocalDbWriter<'lock> {
 /// # Why this exists next to [`LocalDbWriter::write_record`]
 ///
 /// [`LocalDbWriter::write_record`] is correct per *file*, and pays for that correctness per file
-/// too: an `fsync` of the data and an `fsync` of the directory, each one a filesystem transaction
-/// commit. An entry is three or four files, so a 42-package upgrade issues 252 `fsync`s for 126
-/// files. Measured on this machine's btrfs, that is **260 ms** — comparable to the whole read side
-/// of `piko update`, and invisible in any command that only plans.
+/// too. It costs an `fsync` of the data and an `fsync` of the directory, each one a filesystem
+/// transaction commit. An entry is three or four files, so a 42-package upgrade issues 252
+/// `fsync`s for 126 files. Measured on this machine's btrfs, that is **260 ms**. It is comparable
+/// to the whole read side of `piko update`, and invisible in any command that only plans.
 ///
 /// The directory `fsync`s are the easy half. A rename becomes durable when the directory is
-/// synced, so syncing it once after the last rename makes *every* rename durable, not just
-/// the last. Three become one.
+/// synced. So syncing it once after the last rename makes *every* rename durable, not just the
+/// last. Three become one.
 ///
-/// The data `fsync`s cannot be removed, only overlapped. They are latency-bound, not
-/// CPU-bound: a thread blocked in `fsync` costs nothing but a stack. Issuing an entry's three
-/// together lets the filesystem merge them into fewer commits. That is why [`Self::commit`]
-/// uses a scoped thread per staged file rather than a loop.
+/// The data `fsync`s cannot be removed, only overlapped. They are latency-bound rather than
+/// CPU-bound, and a thread blocked in `fsync` costs nothing but a stack. Issuing an entry's three
+/// together lets the filesystem merge them into fewer commits. That is why [`Self::commit`] uses
+/// a scoped thread per staged file rather than a loop.
 ///
 /// Measured, same corpus, `docs/perf-study.md` §4.2: **260 ms → 113 ms, 2.3x.**
 ///
 /// # What this does not change
 ///
-/// The crash-safety property is the same one [`LocalDbWriter::write_record`] documents, and
-/// slightly stronger: no `rename` happens until **every** staged file's data is durable, so an
-/// interruption can no longer leave an entry with a new `desc` beside an old `files`. It is still
-/// per-entry, not per-transaction — see this module's header.
+/// The crash-safety property is the one [`LocalDbWriter::write_record`] documents, and slightly
+/// stronger. No `rename` happens until **every** staged file's data is durable. So an interruption
+/// cannot leave an entry with a new `desc` beside an old `files`. It is still per-entry, not
+/// per-transaction. See this module's header.
 ///
-/// Dropping without [`Self::commit`] removes every temporary, so a failed step leaves the
-/// entry exactly as it was.
+/// Dropping without [`Self::commit`] removes every temporary, so a failed step leaves the entry
+/// exactly as it was.
 #[derive(Debug)]
 #[must_use = "staged files are discarded unless commit() is called"]
 pub struct EntryWrite {
@@ -414,7 +413,7 @@ impl EntryWrite {
             return Err(Error::io(&temp, IoAction::Metadata, source));
         }
 
-        // `mode` on the open above is masked by the caller's umask, so it is set explicitly
+        // `mode` on the open above is masked by the caller's umask. So it is set explicitly
         // too, for the same reason `atomic_write` does it.
         if let Err(error) = set_mode(&temp, FILE_MODE) {
             drop(file);
@@ -428,8 +427,8 @@ impl EntryWrite {
 
     /// Makes every staged file durable, then publishes them all.
     ///
-    /// The order is the one [`LocalDbWriter::write_record`] documents, widened to the whole entry:
-    /// fsync every temporary, then rename every temporary, then fsync the directory once. A crash
+    /// The order is the one [`LocalDbWriter::write_record`] documents, widened to the whole entry.
+    /// Fsync every temporary, then rename every temporary, then fsync the directory once. A crash
     /// at any point leaves each destination either wholly absent, wholly the old file, or wholly
     /// the new one.
     ///
@@ -455,7 +454,7 @@ impl EntryWrite {
             }
         }
 
-        // Every rename above becomes durable with this one directory sync: the directory's
+        // Every rename above becomes durable with this one directory sync. The directory's
         // metadata covers all of them, so syncing per rename would buy nothing.
         let result = sync_directory(&self.dir);
         self.staged.clear();
@@ -465,9 +464,9 @@ impl EntryWrite {
     /// `fsync`s every staged temporary, one scoped thread each.
     ///
     /// `File::sync_all` takes `&self` and `File` is `Sync`, so the threads borrow the staged
-    /// files rather than owning them. An entry has three or four files, so this spawns three
-    /// or four threads that are immediately blocked on the kernel — the point is overlap, not
-    /// CPU parallelism.
+    /// files rather than owning them. An entry has three or four files, so this spawns three or
+    /// four threads that are immediately blocked on the kernel. The point is overlap, not CPU
+    /// parallelism.
     fn sync_all_staged(&self) -> Result<()> {
         std::thread::scope(|scope| {
             let handles: Vec<_> = self
@@ -483,7 +482,7 @@ impl EntryWrite {
                 })
                 .collect();
 
-            // Every handle is joined before the first failure is returned, so no thread is
+            // Every handle is joined before the first failure is returned. So no thread is
             // left running against a `Staged` this function is about to hand back.
             let mut first_error = None;
             for handle in handles {
@@ -564,8 +563,8 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 /// The sequence is the standard one, and every step earns its place.
 ///
 /// 1. Write to `path.new`. A crash here leaves the target untouched.
-/// 2. `fsync` it. Without this the rename can be durable while the data is not, which on a
-///    crash yields an *empty* file rather than no file.
+/// 2. `fsync` it. Without this the rename can be durable while the data is not. A crash then
+///    yields an *empty* file rather than no file.
 /// 3. `rename` over the target. This is atomic within a directory.
 /// 4. `fsync` the directory. This makes the rename itself durable.
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
@@ -574,8 +573,8 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
 
 /// [`atomic_write`], with `modified` stamped onto the file before it lands.
 ///
-/// The time is set after the write, so the write cannot move it forward again, and before the
-/// `fsync`, which makes it durable. See [`EntryWrite::raw`] for why a member copied out of an
+/// The time is set after the write, so the write cannot move it forward again. It is set before
+/// the `fsync`, which makes it durable. See [`EntryWrite::raw`] for why a member copied out of an
 /// archive needs one.
 fn atomic_write_at(path: &Path, contents: &[u8], modified: Option<SystemTime>) -> Result<()> {
     let directory = path.parent().unwrap_or(Path::new("."));
@@ -584,8 +583,8 @@ fn atomic_write_at(path: &Path, contents: &[u8], modified: Option<SystemTime>) -
     {
         let mut file = create_temp(&temp)?;
 
-        // A failed write must not leave the temporary file behind for some other code path
-        // to rename later, so each failure cleans up before returning.
+        // A failed write must not leave the temporary file behind for some other code path to
+        // rename later. So each failure cleans up before returning.
         if let Err(error) = file
             .write_all(contents)
             .and_then(|()| modified.map_or(Ok(()), |time| file.set_modified(time)))
@@ -614,16 +613,16 @@ fn atomic_write_at(path: &Path, contents: &[u8], modified: Option<SystemTime>) -
 
 /// Creates the temporary file, refusing to write through anything that is already there.
 ///
-/// The obvious spelling — `create(true).truncate(true)` — **follows a final symlink**. The
-/// destination of an atomic write is safe from that by construction, because `rename`
-/// replaces a symlink rather than resolving it. The temporary file is not: a `desc.new`
-/// planted as a symlink to `/etc/passwd` would be truncated and filled with package metadata,
-/// by a process that is typically root.
+/// The obvious spelling, `create(true).truncate(true)`, **follows a final symlink**. The
+/// destination of an atomic write is safe from that by construction, because `rename` replaces a
+/// symlink rather than resolving it. The temporary file is not safe. A `desc.new` planted as a
+/// symlink to `/etc/passwd` would be truncated and filled with package metadata. The process doing
+/// that is typically root.
 ///
-/// `create_new` is `O_CREAT | O_EXCL`, which fails on *any* existing path, including a
-/// dangling symlink. So the file this returns always did not exist a moment ago. `O_NOFOLLOW`
-/// is redundant next to `O_EXCL` and is set anyway, so the guarantee does not silently depend
-/// on which of the two flags a future edit keeps.
+/// `create_new` is `O_CREAT | O_EXCL`, which fails on *any* existing path, including a dangling
+/// symlink. So the file this returns always did not exist a moment ago. `O_NOFOLLOW` is redundant
+/// next to `O_EXCL` and is set anyway. That way the guarantee does not silently depend on which of
+/// the two flags a future edit keeps.
 ///
 /// A leftover temporary from an interrupted write must not wedge the database permanently. So
 /// exactly one retry is made after removing it, with `remove_file`, which unlinks a symlink
@@ -651,8 +650,8 @@ pub(crate) fn create_temp(temp: &Path) -> Result<File> {
 
 /// The temporary sibling an atomic write to `path` goes through.
 ///
-/// The suffix is fixed, not random. The database lock already excludes a second writer, and a
-/// predictable name means a leftover from a crashed write is recognizable as such, instead of
+/// The suffix is fixed, not random. The database lock already excludes a second writer. And a
+/// predictable name means a leftover from a crashed write is recognizable as such, rather than
 /// accumulating as unexplained litter.
 pub(crate) fn temp_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
@@ -763,9 +762,9 @@ mod tests {
         assert!(written > stamp, "a record must not inherit some other member's time");
     }
 
-    /// Dropping without committing must leave the entry exactly as it was. Otherwise a
-    /// failed step would litter the database with `.new` files, and [`create_temp`]'s one
-    /// retry would then have to clean them up on the next run.
+    /// Dropping without committing must leave the entry exactly as it was. Otherwise a failed
+    /// step would litter the database with `.new` files. [`create_temp`]'s one retry would then
+    /// have to clean them up on the next run.
     #[test]
     fn dropping_a_staged_entry_write_removes_every_temporary() {
         let harness = Harness::new();
@@ -884,8 +883,8 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&version).unwrap(), "9\n");
     }
 
-    /// Opening an existing database must not rewrite its marker, and must refuse one this
-    /// build does not implement rather than "upgrading" it in place.
+    /// Opening an existing database must not rewrite its marker. It must refuse a version this
+    /// build does not implement, rather than "upgrade" it in place.
     #[test]
     fn refuses_a_database_at_another_schema_version() {
         let harness = Harness::new();

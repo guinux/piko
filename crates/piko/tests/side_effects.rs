@@ -53,8 +53,8 @@ fn write_package(cache: &Path, version: &str, script: Option<&str>) {
 ///
 /// Only [`chrooted_scriptlets_and_hooks_really_run`] wants this. It runs piko under
 /// `unshare --user --map-root-user`, where the running user *is* uid 0 and the outer uid has
-/// no mapping at all — so an archive naming the caller's own ids would fail the `chown` with
-/// `EINVAL`. Everywhere else the reverse holds; see [`package_tar`].
+/// no mapping at all. So an archive naming the caller's own ids would fail the `chown` with
+/// `EINVAL`. Everywhere else the reverse holds. See [`package_tar`].
 fn write_package_as_root(cache: &Path, version: &str, script: Option<&str>) {
     std::fs::write(
         cache.join(format!("foo-{version}-x86_64.pkg.tar")),
@@ -84,8 +84,8 @@ fn write_package_with(
 
 /// As [`write_package_with`], for a package whose `.PKGINFO` declares `depends`.
 ///
-/// The repository `desc` a test writes is not what the installed entry carries: an install
-/// copies `.PKGINFO`, so a package whose dependency must survive into `<dbpath>/local` has to
+/// The repository `desc` a test writes is not what the installed entry carries. An install
+/// copies `.PKGINFO`. So a package whose dependency must survive into `<dbpath>/local` has to
 /// declare it here too.
 fn write_package_depending_on(cache: &Path, name: &str, version: &str, depends: &[&str]) {
     std::fs::write(
@@ -111,7 +111,7 @@ fn write_package_depending_on(cache: &Path, name: &str, version: &str, depends: 
 ///
 /// An install always extracts under `Ownership::FromArchive`, so every member is `chown`ed to
 /// the ids the archive names. A real package names `0:0`, which needs `CAP_CHOWN`. Naming the
-/// running user's own ids instead keeps the whole path reachable from an ordinary test: a
+/// running user's own ids instead keeps the whole path reachable from an ordinary test. A
 /// `chown` to one's own uid and gid needs no privilege, and Linux still runs the same
 /// `chown_common` that clears `S_ISUID`/`S_ISGID`. So the ordering these tests sit downstream
 /// of stays exercised, rather than skipped.
@@ -310,8 +310,8 @@ impl Sandbox {
     /// its own.
     ///
     /// The keyring is a throwaway empty directory. That is all an unsigned package needs to be
-    /// refused: `Policy::for_package` asks for a check, no `.sig` is beside the file, and
-    /// `piko_sig::decide` resolves zero signatures under `Required` as a rejection without ever
+    /// refused. `Policy::for_package` asks for a check, and no `.sig` is beside the file.
+    /// `piko_sig::decide` resolves zero signatures under `Required` as a rejection, without ever
     /// consulting a key. A test that needs a valid signature has to generate a key instead, as
     /// `piko-db`'s `signed_database.rs` does.
     fn require_signatures(&self) {
@@ -329,11 +329,42 @@ impl Sandbox {
         std::fs::write(self.path("pacman.conf"), patched).unwrap();
     }
 
+    /// Adds a `RootDir` directive to `[options]`, pointing at this sandbox's own root.
+    ///
+    /// Rewritten rather than appended, for the reason [`Sandbox::set_hold_pkg`] states. A
+    /// subcommand with no `--root` flag of its own reads this, the way `piko check` and
+    /// `piko owns` both do.
+    fn set_root_dir(&self) {
+        let conf = std::fs::read_to_string(self.path("pacman.conf")).unwrap();
+        let patched = conf.replace(
+            "[options]\n",
+            &format!("[options]\nRootDir = {}/\n", self.path("root").display()),
+        );
+        assert_ne!(patched, conf, "the [options] section moved; fix this helper");
+        std::fs::write(self.path("pacman.conf"), patched).unwrap();
+    }
+
+    /// Runs `piko owns` for `targets`. Reads `RootDir` from the sandbox's `pacman.conf`, so
+    /// [`Sandbox::set_root_dir`] must have run first.
+    fn run_owns(&self, targets: &[&str], extra: &[&str]) -> Output {
+        let mut command = Command::new(PIKO);
+        command
+            .arg("owns")
+            .arg("--config")
+            .arg(self.path("pacman.conf"))
+            .arg("--dbpath")
+            .arg(self.path("db"))
+            .stdin(Stdio::null())
+            .args(extra)
+            .args(targets);
+        command.output().unwrap()
+    }
+
     /// Adds a `HoldPkg` directive to `[options]`, as `/etc/pacman.conf` ships with.
     ///
-    /// Rewritten rather than appended: `[options]` is the first section in the file
-    /// [`Sandbox::build`] writes, and a line appended to the end would land inside `[test]`,
-    /// where `HoldPkg` is not a valid directive.
+    /// Rewritten rather than appended. `[options]` is the first section in the file
+    /// [`Sandbox::build`] writes. A line appended to the end would land inside `[test]`, where
+    /// `HoldPkg` is not a valid directive.
     fn set_hold_pkg(&self, names: &str) {
         let conf = std::fs::read_to_string(self.path("pacman.conf")).unwrap();
         let patched = conf.replace("[options]\n", &format!("[options]\nHoldPkg = {names}\n"));
@@ -430,10 +461,10 @@ impl Sandbox {
     /// Runs `piko update` for `targets`, with the given extra arguments. As [`Self::run_install`],
     /// non-interactive by default.
     ///
-    /// `update` now refreshes every configured repository before planning, unless
-    /// `--norefresh` is in `extra`. A sandbox built with [`Self::new`] (no `Server`) has
-    /// nowhere to refresh from, so any test exercising solve/apply logic against a
-    /// hand-written [`Self::write_repo`] fixture must pass `--norefresh`.
+    /// `update` refreshes every configured repository before planning, unless `--norefresh` is
+    /// in `extra`. A sandbox built with [`Self::new`] carries no `Server`, so it has nowhere to
+    /// refresh from. Any test exercising solve or apply logic against a hand-written
+    /// [`Self::write_repo`] fixture must therefore pass `--norefresh`.
     fn run_update(&self, targets: &[&str], extra: &[&str]) -> Output {
         let mut command = Command::new(PIKO);
         command
@@ -471,9 +502,9 @@ fn text(output: &Output) -> String {
 
 /// What piko says when a scriptlet was attempted and did not succeed.
 ///
-/// The exec helper reports its own reason and exits `ExitCode::FAILURE`, so this line reads
-/// the same whether the failure was the `chroot` or the `exec` that follows it. It is the
-/// evidence that the scriptlet was tried and its failure surfaced, rather than swallowed.
+/// The exec helper reports its own reason and exits `ExitCode::FAILURE`. So this line reads the
+/// same whether the failure was the `chroot` or the `exec` that follows it. It is the evidence
+/// that the scriptlet was tried and its failure surfaced, rather than swallowed.
 const SCRIPTLET_FAILED: &str = "post_install scriptlet exited with status 1";
 
 const SCRIPT: &str = "\
@@ -489,15 +520,15 @@ pre_remove() {
 ";
 
 /// The root is a temporary directory holding only the package's own files, so the scriptlet
-/// cannot run. It fails at one of two points, and which one depends on the privileges of
-/// whoever runs the suite: `chroot` is refused without `CAP_SYS_CHROOT`, and where it is
-/// granted the `exec` that follows finds no `/bin/sh` inside the root. Both are the same
-/// answer, and `SCRIPTLET_FAILED` is what both spell.
+/// cannot run. It fails at one of two points, and the privileges of whoever runs the suite
+/// decide which. `chroot` is refused without `CAP_SYS_CHROOT`. Where `chroot` is granted, the
+/// `exec` that follows finds no `/bin/sh` inside the root. Both are the same answer, and
+/// `SCRIPTLET_FAILED` is what both spell.
 ///
-/// That is not a gap in coverage. It is the security property, asserted directly: the command
-/// must fail closed, never fall back to running on the host. Everything below therefore checks
-/// that piko reached the point of trying, and reported honestly when it could not, rather than
-/// checking a scriptlet's side effects.
+/// That is not a gap in coverage. It is the security property, asserted directly. The command
+/// must fail closed, and never fall back to running on the host. So everything below checks
+/// that piko reached the point of trying, and reported honestly when it could not. It does not
+/// check a scriptlet's side effects.
 ///
 /// The chroot path itself is exercised by `chrooted_scriptlets_and_hooks_really_run`, which
 /// needs an unprivileged user namespace and is `#[ignore]`d.
@@ -681,13 +712,13 @@ fn a_broken_hook_file_is_reported_and_skipped() {
 ///
 /// This is the whole reason a removal on Arch does not call binaries it just deleted. Arch ships
 /// each hook in the same package as the program it runs. 31 of this machine's 46 hooks name an
-/// `Exec` their own package owns, and only 8 declare a `Depends`, so `Depends` is not what
+/// `Exec` their own package owns, and only 8 declare a `Depends`. So `Depends` is not what
 /// protects them. libalpm reads the hook directories inside `_alpm_hook_run` (`hook.c:536`),
 /// called once before the transaction and once after (`trans.c:202`, `trans.c:238`). So the
 /// `PostTransaction` pass simply never finds the file.
 ///
 /// The two halves are asserted together on purpose. Without the `PreTransaction` hook running,
-/// the absence of the `PostTransaction` one would prove nothing: a trigger that never matched
+/// the absence of the `PostTransaction` one would prove nothing. A trigger that never matched
 /// looks exactly the same.
 #[test]
 fn a_hook_the_removal_deletes_does_not_run_afterwards() {
@@ -709,7 +740,7 @@ fn a_hook_the_removal_deletes_does_not_run_afterwards() {
     );
     sandbox.write_repo(&[("foo", "1.0.0-1", &[])]);
 
-    // The hook directory is inside the root here, matching the real layout: with pacman's own
+    // The hook directory is inside the root here, matching the real layout. With pacman's own
     // root of `/`, `/usr/share/libalpm/hooks` is both a host path and a path packages write to.
     let hookdir = sandbox.path("root/hooks");
     let piko = |subcommand: &str| {
@@ -758,8 +789,8 @@ fn a_hook_the_removal_deletes_does_not_run_afterwards() {
 ///
 /// `install_step` must remove the entry installed under this name, whatever its version.
 /// Matching on name *and* version leaves `foo-1.0.0-1` and `foo-2.0.0-1` side by side after an
-/// upgrade. The reader, finding two entries for one name, then keeps the older one, and the
-/// database reports a version that is not on disk.
+/// upgrade. The reader then finds two entries for one name and keeps the older one. The database
+/// reports a version that is not on disk.
 #[test]
 fn upgrading_replaces_the_entry_rather_than_adding_one() {
     let sandbox = Sandbox::new();
@@ -784,8 +815,8 @@ fn upgrading_replaces_the_entry_rather_than_adding_one() {
 /// An upgrade must take the old version's files with it: the fake remove transaction.
 ///
 /// libalpm runs `_alpm_remove_single_package(handle, oldpkg, newpkg, 0, 0)` (`add.c:508`)
-/// before extracting. piko did not, so a package that dropped a file between versions left it
-/// on disk owned by nobody: the entry that named it had just been replaced.
+/// before extracting. Without that run, a package that drops a file between versions leaves it
+/// on disk owned by nobody. The entry that named it has just been replaced.
 ///
 /// The two halves are asserted together on purpose. Deleting the dropped file is only correct
 /// if everything both versions ship survives, holding the new content. A removal that ran after
@@ -828,8 +859,8 @@ fn upgrading_deletes_a_file_the_new_version_drops() {
     }
 }
 
-/// `piko install <name>` must resolve through the repository and pull in a dependency,
-/// recording the named target as `Explicit` and the pulled-in package as `Depend`. This is what
+/// `piko install <name>` must resolve through the repository and pull in a dependency. It
+/// records the named target as `Explicit` and the pulled-in package as `Depend`. This is what
 /// turns `install` from "extract this file" into "`piko plan` as a transaction".
 #[test]
 fn installing_by_name_pulls_in_its_dependency() {
@@ -1029,7 +1060,7 @@ fn declining_the_remove_prompt_changes_nothing() {
 /// This is the one place `--noconfirm` does not mean "assume yes". pacman's `question` returns
 /// its preset under `noconfirm` (`util.c:1737`), and the `HoldPkg` guard uses `noyes`, whose
 /// preset is 0 (`remove.c:143`). A script that removes a held package by accident is exactly
-/// what the directive exists to prevent, so the flag must not be an escape hatch from it.
+/// what the directive exists to prevent. So the flag must not be an escape hatch from it.
 #[test]
 fn holdpkg_refuses_an_unattended_removal() {
     let sandbox = Sandbox::new();
@@ -1053,10 +1084,10 @@ fn holdpkg_refuses_an_unattended_removal() {
 
 /// `HoldPkg` is a prompt, not a veto: an explicit `y` goes through.
 ///
-/// The answer is `y\ny\n` because there are two questions in a row: the guard's, then the
+/// The answer is `y\ny\n` because two questions come in a row. First the guard's, then the
 /// ordinary "Do you want to remove these packages?". Their order is asserted rather than
 /// assumed. pacman warns and asks about `HoldPkg` before displaying the target list
-/// (`remove.c:133-145`, above `display_targets`), so the warning is not buried under a plan.
+/// (`remove.c:133-145`, above `display_targets`). So the warning is not buried under a plan.
 #[test]
 fn holdpkg_asks_and_an_explicit_yes_removes_the_package() {
     let sandbox = Sandbox::new();
@@ -1083,7 +1114,7 @@ fn holdpkg_asks_and_an_explicit_yes_removes_the_package() {
 
 /// A bare Enter at the guard answers no, unlike every other prompt piko shows.
 ///
-/// The two presets are the whole difference between pacman's `yesno` and `noyes`, so a shared
+/// The two presets are the whole difference between pacman's `yesno` and `noyes`. A shared
 /// prompt helper that ignored the default would pass the accept case above and still be wrong
 /// here.
 #[test]
@@ -1148,14 +1179,14 @@ fn holdpkg_applies_to_the_nodeps_path_too() {
 /// `--downgrade` is the only thing that lets `update` move a package backwards.
 ///
 /// Without it, a repository offering an older build than the one installed is not an upgrade,
-/// and `update` has nothing to do. That is also what makes this the honest test of the flag:
-/// the same sandbox answers differently with and without it. A `--downgrade` that stopped
-/// reaching `InstallOptions::sysupgrade` would leave the second half reporting "nothing to do"
-/// instead of silently doing the right thing anyway.
+/// and `update` has nothing to do. That is also what makes this the honest test of the flag.
+/// The same sandbox answers differently with and without it. A `--downgrade` that stopped
+/// reaching `InstallOptions::sysupgrade` would leave the second half reporting "nothing to do".
+/// It would not silently do the right thing anyway.
 ///
-/// Pinned because `install` and `update` share one dispatch helper (`main::sync`), and
-/// `sysupgrade` is one of exactly two fields that tell the two subcommands apart. The other,
-/// `as_deps`, is covered by `asdeps_downgrades_the_named_target_as_well`.
+/// Pinned because `install` and `update` share one dispatch helper (`main::sync`). `sysupgrade`
+/// is one of exactly two fields that tell the two subcommands apart. The other, `as_deps`, is
+/// covered by `asdeps_downgrades_the_named_target_as_well`.
 #[test]
 fn update_downgrade_moves_a_package_backwards_and_nothing_else_does() {
     let sandbox = Sandbox::new();
@@ -1187,8 +1218,8 @@ fn update_downgrade_moves_a_package_backwards_and_nothing_else_does() {
     assert_eq!(entries, ["foo-1.0.0-1"], "--downgrade did not downgrade:\n{seen}");
 }
 
-/// A system already at the newest available version has nothing to do, and `update` must say
-/// so rather than showing an empty plan and asking about it.
+/// A system already at the newest available version has nothing to do. `update` must say so,
+/// rather than show an empty plan and ask about it.
 #[test]
 fn update_with_nothing_pending_reports_it() {
     let sandbox = Sandbox::new();
@@ -1263,9 +1294,9 @@ fn update_removes_a_conflicting_package() {
     );
 }
 
-/// `update` refreshes every configured repository before planning, `pacman -Syu`. The
-/// sandbox's `[test]` repository is never written to disk directly (no
-/// [`Sandbox::write_repo`] call); the only way `db/sync/test.db` can exist afterwards is if
+/// `update` refreshes every configured repository before planning, `pacman -Syu`. The sandbox's
+/// `[test]` repository is never written to disk directly, since nothing calls
+/// [`Sandbox::write_repo`]. So the only way `db/sync/test.db` can exist afterwards is if
 /// `update` downloaded it itself.
 #[test]
 fn update_refreshes_repositories_by_default() {
@@ -1286,7 +1317,7 @@ fn update_refreshes_repositories_by_default() {
 }
 
 /// `--norefresh` skips the pre-plan refresh entirely, `pacman -Su`. `Server` points at a port
-/// with nothing listening, so any connection attempt fails immediately; success here is direct
+/// with nothing listening, so any connection attempt fails immediately. Success here is direct
 /// proof that no attempt was made.
 #[test]
 fn update_norefresh_skips_the_database_refresh() {
@@ -1443,8 +1474,8 @@ fn installing_a_package_not_in_the_cache_downloads_it() {
     );
 }
 
-/// `--downloadonly` fetches the package into the cache and installs nothing at all: no files
-/// under `--root`, no database entry, no journal or lock touched.
+/// `--downloadonly` fetches the package into the cache and installs nothing at all. No files
+/// under `--root`, no database entry, and no journal or lock touched.
 #[test]
 fn download_only_downloads_without_installing() {
     let bytes = package_tar("foo", "1.0.0-1", None, &[]);
@@ -1475,15 +1506,15 @@ fn download_only_downloads_without_installing() {
     );
 }
 
-/// `--downloadonly` verifies what it has: an unsigned package under `SigLevel = Required` is
+/// `--downloadonly` verifies what it has. An unsigned package under `SigLevel = Required` is
 /// refused there, not left in the cache for a later install to complain about.
 ///
-/// libalpm does the same. `check_validity` (`sync.c:1275`) runs before `_alpm_sync_load`
-/// returns on `ALPM_TRANS_FLAG_DOWNLOADONLY` (`sync.c:1279`), and piko did not. This test pins
-/// that.
+/// libalpm orders it the same way. `check_validity` (`sync.c:1275`) runs before
+/// `_alpm_sync_load` returns on `ALPM_TRANS_FLAG_DOWNLOADONLY` (`sync.c:1279`). This test pins
+/// that ordering.
 ///
 /// The package is pre-cached rather than served, which checks the same thing for the same
-/// reason: `check_validity` runs over `_alpm_filecache_find`'s answer, so a file already in the
+/// reason. `check_validity` runs over `_alpm_filecache_find`'s answer, so a file already in the
 /// cache is validated exactly like one just fetched. It also keeps a single-shot HTTP fixture
 /// out of a test about signatures.
 #[test]
@@ -1509,14 +1540,14 @@ fn download_only_refuses_an_unsigned_package() {
     );
 }
 
-/// `--root /` skips the `chroot(2)` call (libalpm does the same, to run with fewer
-/// capabilities), but the working directory still has to end up at `/`. A scriptlet is free to
-/// use a path relative to the root, and gstreamer's real `post_upgrade` does exactly that,
-/// running `setcap` on `usr/lib/gstreamer-1.0/gst-ptp-helper` with no leading slash.
+/// `--root /` skips the `chroot(2)` call, as libalpm does, to run with fewer capabilities. The
+/// working directory still has to end up at `/`. A scriptlet is free to use a path relative to
+/// the root. gstreamer's real `post_upgrade` does exactly that, running `setcap` on
+/// `usr/lib/gstreamer-1.0/gst-ptp-helper` with no leading slash.
 ///
 /// No privilege is needed to exercise this. With `root == "/"` the helper never calls `chroot`
-/// at all, so this runs as an ordinary process, launched from a directory that is deliberately
-/// not `/`. It only checks what directory the command sees: it writes nothing and touches no
+/// at all. So this runs as an ordinary process, launched from a directory that is deliberately
+/// not `/`. It only checks what directory the command sees. It writes nothing, and touches no
 /// path other than `/bin/sh`.
 #[test]
 fn root_slash_skips_the_chroot_but_not_the_chdir() {
@@ -1680,8 +1711,8 @@ fn populate_shell(root: &Path) -> bool {
 // ---------------------------------------------------------------------------
 // The transaction records: `pacman.log` and `<dbpath>/piko-history`.
 //
-// Every sandbox writes a `LogFile` into its own temporary directory, so these read the same
-// two files a real run writes and never touch `/var/log/pacman.log`.
+// Every sandbox writes a `LogFile` into its own temporary directory. So these read the same two
+// files a real run writes, and never touch `/var/log/pacman.log`.
 // ---------------------------------------------------------------------------
 
 /// Runs `piko history` against a sandbox, with the given extra arguments.
@@ -1713,8 +1744,8 @@ fn the_command_line_reaches_the_log_before_anything_is_planned() {
 }
 
 /// A transaction a `PreTransaction` hook refuses has still started. It must be recorded as a
-/// failure rather than left looking like a run that never happened — that is the state the
-/// journal is deleted for, and the log is what remains to say so.
+/// failure, not left looking like a run that never happened. That is the state the journal is
+/// deleted for, and the log is what remains to say so.
 #[test]
 fn a_refused_transaction_is_recorded_as_failed() {
     let sandbox = Sandbox::new();
@@ -1751,8 +1782,8 @@ fn nothing_is_written_outside_the_configured_log() {
 }
 
 /// A `LogFile` whose directory does not exist is a warning, not a failure. libalpm raises
-/// `ALPM_ERR_BADPERMS` here; piko does not, because the history store beside the database is
-/// the record that must not be lost, and refusing would break bootstrapping a fresh root.
+/// `ALPM_ERR_BADPERMS` here, and piko does not. The history store beside the database is the
+/// record that must not be lost, and refusing would break bootstrapping a fresh root.
 #[test]
 fn an_unwritable_log_warns_and_the_transaction_still_runs() {
     let sandbox = Sandbox::new();
@@ -1826,7 +1857,7 @@ fn history_filters_by_package_and_shortens_with_quiet() {
 }
 
 /// The detail lines carry the icon and the past-tense verb `piko plan` and `piko history`
-/// share, so an install, a removal and an upgrade are told apart by shape, not only by a word.
+/// share. So an install, a removal and an upgrade are told apart by shape, not only by a word.
 #[test]
 fn history_marks_each_kind_with_its_own_icon() {
     let sandbox = Sandbox::new();
@@ -1849,8 +1880,8 @@ fn history_marks_each_kind_with_its_own_icon() {
     }
 }
 
-/// The duplication this rendering exists to remove. A transaction with one action and no
-/// recorded command line used to print that action in the header and again below it.
+/// The duplication this rendering exists to remove. Take a transaction with one action and no
+/// recorded command line. It prints that action in the header only. Nothing repeats it below.
 #[test]
 fn a_single_action_is_reported_exactly_once() {
     let sandbox = Sandbox::new();
@@ -2068,8 +2099,8 @@ fn a_removal_is_recorded_with_the_version_that_went() {
 
 // --- Glob targets ---------------------------------------------------------------------------
 //
-// A pattern is a rewrite of the target list, so what these check is that the rewrite happened,
-// that its cause was printed, and that nothing else about the transaction changed.
+// A pattern is a rewrite of the target list. So these check three things: that the rewrite
+// happened, that its cause was printed, and that nothing else about the transaction changed.
 
 /// The whole claim, end to end: `app-*` installs exactly the packages whose names it matches,
 /// and says which they were.
@@ -2169,9 +2200,9 @@ fn a_glob_remove_target_removes_every_matching_installed_package() {
     assert!(sandbox.path("db/local/other-1.0.0-1").is_dir(), "{seen}");
 }
 
-/// `HoldPkg` is the guard a glob removal needs, and it already exists: it runs over the
-/// *solved* removal set rather than the names typed, and `--noconfirm` answers no to it. This
-/// is why no second guard was added for an unattended pattern.
+/// `HoldPkg` is the guard a glob removal needs. It runs over the *solved* removal set rather
+/// than the names typed, and `--noconfirm` answers no to it. That is why an unattended pattern
+/// needs no second guard.
 #[test]
 fn a_glob_remove_target_is_still_subject_to_hold_pkg() {
     let sandbox = Sandbox::new();
@@ -2191,8 +2222,8 @@ fn a_glob_remove_target_is_still_subject_to_hold_pkg() {
     assert!(sandbox.path("db/local/app-b-1.0.0-1").is_dir(), "{seen}");
 }
 
-/// The `--nodeps` path expands too, and against package names only: it resolves a target with
-/// `LocalDatabase::get_str` alone and has never taken a group name.
+/// The `--nodeps` path expands too, and against package names only. It resolves a target with
+/// `LocalDatabase::get_str` alone, and takes no group name.
 #[test]
 fn a_glob_remove_target_works_on_the_nodeps_path() {
     let sandbox = Sandbox::new();
@@ -2208,4 +2239,66 @@ fn a_glob_remove_target_works_on_the_nodeps_path() {
     assert!(output.status.success(), "{seen}");
     assert!(!sandbox.path("db/local/app-a-1.0.0-1").exists(), "{seen}");
     assert!(!sandbox.path("db/local/app-b-1.0.0-1").exists(), "{seen}");
+}
+
+/// `piko owns` names a package piko itself installed, through the real binary.
+///
+/// The library tests cover the resolution rules. This covers the wiring: the argument parsing,
+/// the `RootDir` resolution a subcommand with no `--root` flag depends on, and the line format.
+#[test]
+fn owns_names_the_package_that_installed_a_file() {
+    let sandbox = Sandbox::new();
+    sandbox.set_root_dir();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    let seen = text(&sandbox.install("1.0.0-1", &[]));
+    assert!(sandbox.path("root/usr/bin/foo").exists(), "{seen}");
+
+    let installed = sandbox.path("root/usr/bin/foo");
+    let target = installed.to_str().unwrap();
+
+    let output = sandbox.run_owns(&[target], &[]);
+    let seen = text(&output);
+    assert!(output.status.success(), "{seen}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("{target} is owned by foo 1.0.0-1")
+    );
+
+    // `--quiet` drops the path and the version, as `pacman -Qoq` does.
+    let quiet = sandbox.run_owns(&[target], &["--quiet"]);
+    assert!(quiet.status.success(), "{}", text(&quiet));
+    assert_eq!(String::from_utf8_lossy(&quiet.stdout).trim(), "foo");
+
+    // A directory the package owns names it too, and the answer carries the trailing slash.
+    let directory = sandbox.path("root/usr/bin").to_str().unwrap().to_owned();
+    let dir_output = sandbox.run_owns(&[&directory], &["--quiet"]);
+    assert!(dir_output.status.success(), "{}", text(&dir_output));
+    assert_eq!(String::from_utf8_lossy(&dir_output.stdout).trim(), "foo");
+}
+
+/// An unowned path is reported and fails, and it does not stop the paths beside it.
+#[test]
+fn owns_continues_past_a_path_nothing_owns() {
+    let sandbox = Sandbox::new();
+    sandbox.set_root_dir();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    let seen = text(&sandbox.install("1.0.0-1", &[]));
+    assert!(sandbox.path("root/usr/bin/foo").exists(), "{seen}");
+
+    let owned = sandbox.path("root/usr/bin/foo").to_str().unwrap().to_owned();
+    let stray = sandbox.path("root/usr/bin/stray").to_str().unwrap().to_owned();
+    std::fs::write(&stray, b"").unwrap();
+
+    let output = sandbox.run_owns(&[&stray, &owned], &["--quiet"]);
+    let seen = text(&output);
+    assert!(!output.status.success(), "an unowned path must fail the run: {seen}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "foo",
+        "the owned path was still answered: {seen}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&format!("No package owns {stray}")),
+        "{seen}"
+    );
 }

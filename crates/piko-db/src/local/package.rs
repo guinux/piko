@@ -82,8 +82,8 @@ impl std::fmt::Display for Inconsistency {
 #[derive(Debug)]
 struct LoadedDesc {
     desc: DbDescFile,
-    /// `%URL%` and `%PACKAGER%`, taken out of the text before the upstream parse so a value
-    /// their typed conversion refuses cannot make the whole file unreadable. See
+    /// `%URL%` and `%PACKAGER%`, taken out of the text before the upstream parse. A value
+    /// their typed conversion refuses then cannot make the whole file unreadable. See
     /// [`crate::desc_compat::take_fields`].
     taken: TakenFields,
     inconsistencies: Vec<Inconsistency>,
@@ -93,7 +93,7 @@ struct LoadedDesc {
 ///
 /// The relation sections and `%REASON%` are here. Every other section stays as `text`, and
 /// is converted by [`LocalPackage::desc`] only if something asks for it. See [`crate::eager`]
-/// for why the full typed parse should not be the cost of every load: measured at **23.4 ms**
+/// for why the full typed parse should not be the cost of every load. It measures **23.4 ms**
 /// across this machine's 1206 installed packages, against **6.1 ms** for the relations alone.
 /// `crate::solve::Universe` reads nothing else.
 #[derive(Debug)]
@@ -281,7 +281,7 @@ impl LocalPackage {
     /// Whether this entry ships an install scriptlet (pacman's `.INSTALL`,
     /// `pacman -Qi`'s "Install Script").
     ///
-    /// A plain existence check, not a `Lazy` field like `desc`/`files`/`mtree`: there is
+    /// A plain existence check, not a `Lazy` field like `desc`/`files`/`mtree`. There is
     /// nothing to parse, so caching would only save a `stat` call.
     #[must_use]
     pub fn has_install_scriptlet(&self) -> bool {
@@ -297,10 +297,10 @@ impl LocalPackage {
     /// # Ordering
     ///
     /// The order is `alpm-db`'s, which sorts [`PathBuf`]s **component-wise**. pacman sorts
-    /// the raw strings **byte-wise**, so the two disagree wherever a directory name is a
-    /// prefix of a sibling: pacman puts `usr/share/makepkg-template/` before
-    /// `usr/share/makepkg/…`, because `-` (`0x2d`) sorts below `/` (`0x2f`), while
-    /// component-wise comparison puts `makepkg` first.
+    /// the raw strings **byte-wise**. So the two disagree wherever a directory name is a
+    /// prefix of a sibling. pacman puts `usr/share/makepkg-template/` before
+    /// `usr/share/makepkg/…`, because `-` (`0x2d`) sorts below `/` (`0x2f`). Component-wise
+    /// comparison puts `makepkg` first.
     ///
     /// The *set* is exact either way. Sort by [`Path::as_os_str`] if you need pacman's
     /// exact order.
@@ -339,8 +339,8 @@ impl LocalPackage {
 
     /// Forces every lazy field.
     ///
-    /// Useful before handing packages to a consumer that will need all of their metadata
-    /// anyway, and for verifying that a whole database is readable.
+    /// This is useful before handing packages to a consumer that needs all their metadata
+    /// anyway. It also verifies that a whole database is readable.
     ///
     /// # Errors
     ///
@@ -422,9 +422,9 @@ impl LocalPackage {
             }),
         };
 
-        // `%REASON%` is absent for an explicitly installed package, which is exactly what
-        // libalpm writes (`if(info->reason)` at `be_local.c:1029`), so the default is not a
-        // fallback for a malformed file — a malformed value is still an error.
+        // `%REASON%` is absent for an explicitly installed package. That is exactly what
+        // libalpm writes (`if(info->reason)` at `be_local.c:1029`). So the default is not a
+        // fallback for a malformed file. A malformed value is still an error.
         let mut install_reason = PackageInstallReason::Explicit;
         let mut installed_size = 0;
         let relations = crate::eager::scan(&text, crate::eager::Depends::Eager, |keyword, line| {
@@ -468,8 +468,8 @@ impl LocalPackage {
 
     /// Reads and parses `mtree`, decompressing it against a bound.
     ///
-    /// `alpm-mtree`'s own `from_file` would inflate gzip internally with no limit, so a
-    /// compression bomb planted in the database would be an unbounded allocation. piko
+    /// `alpm-mtree`'s own `from_file` would inflate gzip internally with no limit. A
+    /// compression bomb planted in the database would then be an unbounded allocation. piko
     /// therefore inflates the data itself and only ever hands the parser a plain string.
     fn read_mtree(&self) -> Result<Option<Mtree>> {
         use std::str::FromStr as _;
@@ -655,8 +655,8 @@ mod tests {
         );
     }
 
-    /// The point of the eager tier: reading what the planner needs must not run `alpm-db`'s
-    /// typed conversion of `%LICENSE%`, `%URL%`, `%PACKAGER%` and the checksum fields.
+    /// This is the point of the eager tier. Reading what the planner needs must not run
+    /// `alpm-db`'s typed conversion of `%LICENSE%`, `%URL%`, `%PACKAGER%` and the checksums.
     #[test]
     fn the_eager_tier_does_not_force_the_typed_parse() {
         let db = DbFixture::new();
@@ -676,8 +676,8 @@ mod tests {
         assert!(pkg.is_desc_loaded());
     }
 
-    /// The eager tier and the typed parse must agree about the sections they both cover, or
-    /// the split would be a silent behaviour change rather than a cost one.
+    /// The eager tier and the typed parse must agree about the sections they both cover.
+    /// Otherwise the split is a silent behaviour change rather than a cost one.
     #[test]
     fn the_eager_tier_agrees_with_the_typed_parse() {
         let db = DbFixture::new();
@@ -697,8 +697,8 @@ mod tests {
         assert_eq!(eager.installed_size(), desc.installed_size());
     }
 
-    /// `%REASON%` is absent for an explicitly installed package. That is not a parse failure
-    /// and must not be reported as one — but a value that is neither 0 nor 1 still is.
+    /// `%REASON%` is absent for an explicitly installed package. That is not a parse failure,
+    /// and must not be reported as one. A value that is neither 0 nor 1 still is.
     #[test]
     fn an_absent_reason_is_explicit_and_a_bogus_one_is_an_error() {
         let db = DbFixture::new();
@@ -740,8 +740,8 @@ mod tests {
         assert!(first.to_string().contains("desc"));
     }
 
-    /// The whole point of the `%URL%` split, end to end: pacman prints a `%URL%` `url::Url`
-    /// refuses, so piko must still be able to read the package it belongs to.
+    /// This is the whole point of the `%URL%` split, end to end. pacman prints a `%URL%`
+    /// that `url::Url` refuses. piko must still read the package it belongs to.
     #[test]
     fn an_unparsable_url_does_not_make_the_package_unreadable() {
         let db = DbFixture::new();

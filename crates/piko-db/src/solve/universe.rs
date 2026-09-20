@@ -1,15 +1,15 @@
 //! The indexed candidate set a plan is solved against.
 //!
-//! A [`Universe`] interns every package that could take part in a transaction — each
-//! installed package, and each package in each configured repository — behind a dense
-//! [`SolvableId`]. It builds the indexes dependency solving actually queries:
+//! A [`Universe`] interns every package that could take part in a transaction behind a dense
+//! [`SolvableId`]. That is each installed package, and each package in each configured
+//! repository. It builds the indexes dependency solving actually queries:
 //!
 //! - **by name**, for `_alpm_depcmp_literal` and for the "at most one package per name"
 //!   constraint;
-//! - **by `%PROVIDES%`**, keyed by name for every **alpm-sonamev1** form and for a named
+//! - **by `%PROVIDES%`**. It is keyed by name for every **alpm-sonamev1** form and for a named
 //!   relation, and by the whole rendered value for **alpm-sonamev2**. The key is only a hash
-//!   bucket — [`crate::depcmp::provides_satisfies`] still decides. But the key must be no
-//!   finer than what matching compares, which is why the named and soname grammars share one
+//!   bucket, and [`crate::depcmp::provides_satisfies`] still decides. But the key must be no
+//!   finer than what matching compares. That is why the named and soname grammars share one
 //!   index instead of getting one each;
 //! - **by `%CONFLICTS%` target**, because `_alpm_outerconflicts` (`conflict.c`) checks both
 //!   directions. A package already installed may declare the conflict against an incoming one
@@ -20,20 +20,20 @@
 //! # Why the installed set is read eagerly
 //!
 //! [`crate::LocalPackage::desc`] is lazy, so building this index forces every installed
-//! package's `desc` — 1157 file reads on the machine this was developed against, which
-//! `piko list` never performs. That cost was measured before being accepted: about **85 ms**,
-//! on top of the **671 ms** the same run already spends opening `core` and `extra`. Expanding
-//! the installed side lazily, as a cone around the targets, would save at most that 12%. It
-//! would also make every accessor here fallible and every solver step able to fail on I/O.
-//! The measurement did not justify that complexity.
+//! package's `desc`. That is 1157 file reads on the machine this was developed against, which
+//! `piko list` never performs. The cost was measured before being accepted: about **85 ms**. The
+//! same run already spends **671 ms** opening `core` and `extra`. Expanding the
+//! installed side lazily, as a cone around the targets, would save at most that 12%. It would
+//! also make every accessor here fallible, and every solver step able to fail on I/O. The
+//! measurement did not justify that complexity.
 //!
 //! An installed package whose `desc` cannot be read is therefore a hard
 //! [`Error::PlanLocalDescUnreadable`], not a diagnostic. This is the one place where piko is
 //! *stricter* than the rest of the crate. Elsewhere a broken entry costs you only that entry.
-//! But a transaction planned against an installed set that is
-//! only partly readable is a transaction planned against the wrong system. An unreadable
-//! entry is indistinguishable from an absent one at exactly the moment that difference
-//! decides whether a package is installed, upgraded, or left alone.
+//! But a transaction planned against an installed set that is only partly readable is a
+//! transaction planned against the wrong system. An unreadable entry is indistinguishable from
+//! an absent one. And that is so at exactly the moment the difference decides whether a package
+//! is installed, upgraded, or left alone.
 
 use std::collections::{HashMap, HashSet};
 
@@ -51,8 +51,8 @@ use crate::{
 /// A dense identifier for one candidate package within a [`Universe`].
 ///
 /// Only a [`Universe`] mints these, and one is meaningful only to the universe that minted
-/// it. The representation is a `u32` so the solver can pack an id and a sign into a single
-/// word without arithmetic that could overflow — see [`Universe::len`], which is bounded well
+/// it. The representation is a `u32` so the solver can pack an id and a sign into a single word.
+/// No arithmetic that could overflow is needed. See [`Universe::len`], which is bounded well
 /// below [`u32::MAX`] by
 /// [`Limits::solve_max_solvables`](crate::Limits::solve_max_solvables).
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -99,8 +99,8 @@ pub enum Origin {
 
 /// One candidate, resolved from a [`SolvableId`].
 ///
-/// Holds its `Source` by value rather than by reference. `Source` is two words and [`Copy`], so
-/// every accessor borrows the underlying package for `'a` rather than for as long as the
+/// Holds its `Source` by value rather than by reference. `Source` is two words and [`Copy`]. So
+/// every accessor borrows the underlying package for `'a`, rather than for as long as the
 /// [`Universe`] is borrowed. Without that, indexing the universe by `&'a str` keys taken from its
 /// own candidates would not typecheck.
 #[derive(Clone, Copy, Debug)]
@@ -155,8 +155,8 @@ impl<'a> Solvable<'a> {
     /// `%DEPENDS%`.
     ///
     /// The only accessor on this type that can fail, and deliberately so. A repository candidate's
-    /// `%DEPENDS%` converts on first access rather than at open — see `eager::Depends` — because
-    /// only the solvables inside `encode`'s reachable cone ever need it: 16% of the universe on
+    /// `%DEPENDS%` converts on first access rather than at open; see `eager::Depends`. Only the
+    /// solvables inside `encode`'s reachable cone ever need it, which is 16% of the universe on
     /// this machine. An installed package's `%DEPENDS%` is already in the eager tier, so this arm
     /// never fails.
     ///
@@ -179,8 +179,8 @@ impl<'a> Solvable<'a> {
     /// `None` for a repository candidate, whose `%DEPENDS%` is deferred and may fail to
     /// convert. Use [`Self::depends`] for those.
     ///
-    /// This exists so a walk that only ever visits installed packages says so in its types,
-    /// rather than handling an error it cannot produce. Three walks do this: `solve::why`'s
+    /// This exists so a walk that only ever visits installed packages says so in its types. It
+    /// then handles no error it cannot produce. Three walks do this: `solve::why`'s
     /// dependent index, and both dependency walks in
     /// [`recurse_unneeded`](crate::solve::recurse_unneeded). Their inputs are a removal plan,
     /// so they are installed by construction.
@@ -204,8 +204,8 @@ impl<'a> Solvable<'a> {
 
     /// `%REASON%`: whether the user asked for this package or it arrived as a dependency.
     ///
-    /// `None` for a repository candidate — the field exists only in a local `desc`, because
-    /// the reason is a property of *this* installation rather than of the package.
+    /// `None` for a repository candidate. The field exists only in a local `desc`, because the
+    /// reason is a property of *this* installation rather than of the package.
     #[must_use]
     pub fn install_reason(&self) -> Option<alpm_types::PackageInstallReason> {
         match self.source {
@@ -255,9 +255,9 @@ impl<'a> Solvable<'a> {
         }
     }
 
-    /// `%CSIZE%`: the download size, or `None` for an already-installed package, which has
-    /// nothing to download and whose local `desc` does not record the field
-    /// (`be_local.c`: "csize is irrelevant once installed").
+    /// `%CSIZE%`: the download size. `None` for an already-installed package, which has nothing
+    /// to download. Its local `desc` does not record the field either (`be_local.c`: "csize is
+    /// irrelevant once installed").
     #[must_use]
     pub fn download_size(&self) -> Option<u64> {
         match self.source {
@@ -319,10 +319,10 @@ impl<'a> Solvable<'a> {
 /// and the checksum fields. Measured across this machine's 1206 installed packages:
 /// **23.4 ms** for the full parse against **6.1 ms** for what is used.
 ///
-/// A repository package carries no view for the same reason. Every field this module reads —
-/// `%DEPENDS%`, `%PROVIDES%`, `%CONFLICTS%`, `%REPLACES%`, `%GROUPS%`, `%CSIZE%`, `%ISIZE%` —
-/// is already parsed on [`RepoPackage`] itself, infallibly, by the time the database opens
-/// (see [`crate::repo::RepoPackage`]'s two tiers). Holding a `RepoDescView` here would force
+/// A repository package carries no view for the same reason. This module reads `%DEPENDS%`,
+/// `%PROVIDES%`, `%CONFLICTS%`, `%REPLACES%`, `%GROUPS%`, `%CSIZE%` and `%ISIZE%`. Every one of
+/// those is already parsed on [`RepoPackage`] itself, infallibly, by the time the database opens.
+/// See [`crate::repo::RepoPackage`]'s two tiers. Holding a `RepoDescView` here would force
 /// the *deferred* parse for all ~15 000 candidates, undoing the reason that split exists.
 #[derive(Clone, Copy, Debug)]
 enum Source<'a> {
@@ -442,11 +442,12 @@ impl<'a> UniverseOptions<'a> {
 
     /// Adds package files as candidates, in the order the caller named them.
     ///
-    /// Each becomes an [`Origin::File`] candidate whose index is its position in `files`.
-    /// They are interned between the installed set and the repositories, so
-    /// [`Universe::candidates_named`] and [`Universe::satisfiers`] prefer a named file over
-    /// any repository copy of the same package — as a target, and as the provider of another
-    /// package's dependency. That is `pacman -U`'s rule: the file named is the file installed.
+    /// Each becomes an [`Origin::File`] candidate whose index is its position in `files`. They
+    /// are interned between the installed set and the repositories. So
+    /// [`Universe::candidates_named`] and [`Universe::satisfiers`] prefer a named file over any
+    /// repository copy of the same package. That holds for a target, and for the provider of
+    /// another package's dependency. It is `pacman -U`'s rule: the file named is the file
+    /// installed.
     ///
     /// `IgnorePkg` does not apply to them. It never applies to a package the user named.
     #[must_use]
@@ -461,9 +462,9 @@ impl<'a> UniverseOptions<'a> {
 pub struct Universe<'a> {
     sources: Box<[Source<'a>]>,
     repo_names: Box<[&'a RepoName]>,
-    /// Each admitted repository's `Usage`, so a caller can apply a *different* gate than the
-    /// one the universe was built with — `-Su` gates on `Upgrade` alone (`sync.c:229`) while
-    /// resolving its targets' dependencies still gates on `Install|Upgrade`.
+    /// Each admitted repository's `Usage`, so a caller can apply a *different* gate than the one
+    /// the universe was built with. `-Su` gates on `Upgrade` alone (`sync.c:229`), while resolving
+    /// its targets' dependencies still gates on `Install|Upgrade`.
     repo_usage: Box<[DbUsage]>,
     by_name: HashMap<&'a str, Vec<SolvableId>>,
     /// `%PROVIDES%` entries, keyed by [`Universe::provides_key`].
@@ -487,11 +488,11 @@ pub struct Universe<'a> {
     /// walked.
     ///
     /// Deliberately not bounded by [`Limits::max_diagnostics`](crate::Limits::max_diagnostics),
-    /// unlike a diagnostic sink. This is a subset of the candidate set
-    /// `solve_max_solvables` already counted before anything was interned, so it is bounded
-    /// by a bound that has already fired. A second bound here would truncate the sysupgrade
-    /// report rather than protect anything: an `IgnorePkg` entry wide enough to overflow a
-    /// diagnostic budget is exactly the one whose effect the user most needs told.
+    /// unlike a diagnostic sink. This is a subset of the candidate set `solve_max_solvables`
+    /// already counted before anything was interned. So it is bounded by a bound that has already
+    /// fired. A second bound here would truncate the sysupgrade report rather than protect
+    /// anything. An `IgnorePkg` entry wide enough to overflow a diagnostic budget is exactly the
+    /// one whose effect the user most needs told.
     ignored: Box<[IgnoredCandidate<'a>]>,
     /// The lists that produced `ignored`, kept so [`crate::solve::sysupgrade`] can apply the
     /// same test to an *installed* package. `check_literal` (`sync.c:93`) tests both sides,
@@ -503,8 +504,8 @@ impl<'a> Universe<'a> {
     /// Indexes `local` together with `repos`, given in `pacman.conf` order.
     ///
     /// Candidates are interned installed-set first, then any package files given through
-    /// [`UniverseOptions::files`], then repository by repository in the order given, and
-    /// within a repository in its own (name-sorted) order.
+    /// [`UniverseOptions::files`], then repository by repository in the order given. Within a
+    /// repository they follow its own name-sorted order.
     /// [`Universe::candidates_named`] returns it unchanged.
     ///
     /// # Errors
@@ -652,9 +653,9 @@ impl<'a> Universe<'a> {
 
     /// Every package-file candidate, in the order [`UniverseOptions::files`] gave them.
     ///
-    /// A file target is targeted by id, never by name. Resolving it by name would find
-    /// whichever candidate this universe prefers — the file, by construction, but only for as
-    /// long as that construction holds. An id cannot drift.
+    /// A file target is targeted by id, never by name. Resolving it by name would find whichever
+    /// candidate this universe prefers. That is the file by construction, but only for as long as
+    /// that construction holds. An id cannot drift.
     ///
     /// Nothing filters a file candidate out, so this is as long as the slice it was built
     /// from. A caller that compares the two lengths is checking the invariant rather than
@@ -688,8 +689,8 @@ impl<'a> Universe<'a> {
     /// repositories were walked.
     ///
     /// Nothing here is selectable. This is the report side of the filter
-    /// [`UniverseOptions::ignores`] applied, and the only way to tell an ignored package from
-    /// an absent one once the universe is built.
+    /// [`UniverseOptions::ignores`] applied. Once the universe is built, it is the only way to
+    /// tell an ignored package from an absent one.
     #[must_use]
     pub fn ignored(&self) -> &[IgnoredCandidate<'a>] {
         &self.ignored
@@ -697,9 +698,9 @@ impl<'a> Universe<'a> {
 
     /// The ignored candidates literally named `name`, in repository priority order.
     ///
-    /// A linear scan, deliberately: this list is the size of what `IgnorePkg` matched, not of
-    /// a repository, and it is consulted only on the path that is about to print a message.
-    /// A fifth index would cost every build to serve the rare case.
+    /// A linear scan, deliberately. This list is the size of what `IgnorePkg` matched, not of a
+    /// repository. And it is consulted only on the path that is about to print a message. A fifth
+    /// index would cost every build to serve the rare case.
     pub fn ignored_named<'s>(
         &'s self,
         name: &'s str,
@@ -709,10 +710,10 @@ impl<'a> Universe<'a> {
 
     /// The ignored candidates that would have satisfied `dep`.
     ///
-    /// The counterpart of [`Universe::satisfiers`] over what was filtered out, and the only
-    /// way to tell "no package provides this" from "the one that does is ignored" — libalpm's
+    /// The counterpart of [`Universe::satisfiers`] over what was filtered out. It is the only way
+    /// to tell "no package provides this" from "the one that does is ignored". That is libalpm's
     /// own `ALPM_ERR_PKG_IGNORED` versus `ALPM_ERR_PKG_NOT_FOUND` distinction (`deps.c:743`).
-    /// Unlike [`Universe::satisfiers`] it applies no preference order: a caller explaining a
+    /// Unlike [`Universe::satisfiers`] it applies no preference order. A caller explaining a
     /// failure wants every copy that was passed over.
     pub fn ignored_satisfiers(
         &self,
@@ -745,8 +746,8 @@ impl<'a> Universe<'a> {
     ///
     /// Needed because only the repository side of `check_literal`'s test
     /// (`alpm_pkg_should_ignore(spkg) || alpm_pkg_should_ignore(lpkg)`) can be applied while
-    /// interning. An installed package is always interned — `IgnorePkg` means "do not upgrade
-    /// it", not "pretend it is not there" — so the installed half is asked here instead.
+    /// interning. An installed package is always interned, because `IgnorePkg` means "do not
+    /// upgrade it", not "pretend it is not there". So the installed half is asked here instead.
     #[must_use]
     pub const fn ignores(&self) -> IgnoreList<'a> {
         self.ignores
@@ -772,12 +773,12 @@ impl<'a> Universe<'a> {
     ///    already-installed provider without ever building the full `providers` list.
     /// 3. **Every other provider**, in repository-then-scan order.
     ///
-    /// Real libalpm stops after step 1 when it finds anything: a literal hit `return`s before
-    /// `%PROVIDES%` is consulted at all. This function returns the providers too, so a solver
-    /// can *back out* of a literal choice that later turns out to conflict — a case where
-    /// libalpm simply fails. The literal candidates come first, so a solver that always takes
-    /// the head of this list reproduces libalpm exactly. The rest of the list is reachable
-    /// only by backtracking.
+    /// Real libalpm stops after step 1 when it finds anything. A literal hit `return`s before
+    /// `%PROVIDES%` is consulted at all. This function returns the providers too, so a solver can
+    /// *back out* of a literal choice that later turns out to conflict. libalpm simply fails in
+    /// that case. The literal candidates come first, so a solver that always takes the head of
+    /// this list reproduces libalpm exactly. The rest of the list is reachable only by
+    /// backtracking.
     #[must_use]
     pub fn satisfiers(&self, dep: &RelationOrSoname) -> Vec<SolvableId> {
         let mut found = Vec::new();
@@ -862,20 +863,20 @@ impl<'a> Universe<'a> {
     /// This is what `pacman -S <group>` expands to: the group's members as a repository
     /// offers them.
     ///
-    /// The filter drops the *installed candidate* of a name, not the name. A package carrying
-    /// the group is interned twice, once from the local database and once from the repository,
-    /// and only the repository copy may be targeted. The installed copy is already held by the
-    /// "must remain" clause, so targeting it would ask for it a second time. The repository
-    /// copy survives, so a member that is already installed is still offered here and still
-    /// reinstallable — which is what `alpm_find_group_pkgs` does, reading the sync databases
-    /// and never asking whether a member is installed.
+    /// The filter drops the *installed candidate* of a name, not the name. A package carrying the
+    /// group is interned twice, once from the local database and once from the repository. Only
+    /// the repository copy may be targeted. The installed copy is already held by the "must
+    /// remain" clause, so targeting it would ask for it a second time. The repository copy
+    /// survives, so a member that is already installed is still offered here and still
+    /// reinstallable. That is what `alpm_find_group_pkgs` does. It reads the sync databases, and
+    /// never asks whether a member is installed.
     ///
-    /// The one-per-name rule is `alpm_find_group_pkgs`'s (`sync.c:295`): its
-    /// `alpm_pkg_find(pkgs, pkg->name)` test keeps the first database to carry a member and
-    /// passes over every later one. It decides more than which build is offered. An expanded
-    /// group becomes one explicit target per member, and the at-most-one-per-name clause
-    /// forbids selecting two candidates of a single name, so a member carried by two enabled
-    /// repositories would otherwise encode a request no solver can satisfy.
+    /// The one-per-name rule is `alpm_find_group_pkgs`'s (`sync.c:295`). Its
+    /// `alpm_pkg_find(pkgs, pkg->name)` test keeps the first database to carry a member, and
+    /// passes over every later one. It decides more than which build is offered. An expanded group
+    /// becomes one explicit target per member, and the at-most-one-per-name clause forbids
+    /// selecting two candidates of a single name. A member carried by two enabled repositories
+    /// would otherwise encode a request no solver can satisfy.
     #[must_use]
     pub fn group_members(&self, name: &str) -> Vec<SolvableId> {
         let mut seen: HashSet<&str> = HashSet::new();
@@ -933,8 +934,8 @@ impl<'a> Universe<'a> {
 
     /// Every package name an install target could resolve to.
     ///
-    /// A name with no candidate beyond the installed copy is left out, because
-    /// [`crate::solve::resolve_target`] skips that copy and would find nothing for it. So this
+    /// A name with no candidate beyond the installed copy is left out.
+    /// [`crate::solve::resolve_target`] skips that copy, and would find nothing for it. So this
     /// is exactly the domain a `piko install` target is answered from.
     ///
     /// Unordered: these are a `HashMap`'s keys. A caller that shows them sorts them.
@@ -1116,7 +1117,7 @@ mod tests {
 
     /// The same precedence when the file is not the target but the provider of someone else's
     /// dependency. A plan that chose the file as a target and a repository build as a provider
-    /// would install two copies of one package.
+    /// would install one package twice.
     #[test]
     fn a_named_file_is_preferred_as_a_provider_too() {
         let scenario = Scenario::new()
@@ -1298,8 +1299,8 @@ mod tests {
         assert_eq!(held[0].package().name().as_ref(), "libfoo");
     }
 
-    /// A group target expands to its interned members; the members it lost must still be
-    /// nameable so the caller can say which ones it left out.
+    /// A group target expands to its interned members. The members it lost must still be
+    /// nameable, so the caller can say which ones it left out.
     #[test]
     fn an_ignored_group_member_is_reported_separately_from_the_members_that_remain() {
         let scenario = Scenario::new()
@@ -1390,8 +1391,8 @@ mod tests {
     }
     /// One index, read in opposite directions: installing a group takes the repositories'
     /// candidates, removing one takes the installed packages. A member that is both keeps a
-    /// repository candidate on the install side, which is what makes `piko install <group>`
-    /// offer to upgrade or reinstall it.
+    /// repository candidate on the install side. That is what makes `piko install <group>` offer
+    /// to upgrade or reinstall it.
     #[test]
     fn a_groups_installed_and_repository_members_are_read_separately() {
         let scenario = Scenario::new()
@@ -1425,10 +1426,9 @@ mod tests {
         assert!(universe.installed_group_members("not-a-group").is_empty());
     }
 
-    /// `alpm_find_group_pkgs` keeps the first database to carry a member. Two candidates of
-    /// one name can never both be selected, so a group that offered both would expand into a
-    /// request no solver can satisfy — see `a_member_carried_by_two_repositories_still_solves`
-    /// in `encode`.
+    /// `alpm_find_group_pkgs` keeps the first database to carry a member. Two candidates of one
+    /// name can never both be selected. So a group that offered both would expand into a request
+    /// no solver can satisfy. See `a_member_carried_by_two_repositories_still_solves` in `encode`.
     #[test]
     fn a_group_offers_one_candidate_per_name_in_repository_priority_order() {
         let scenario = Scenario::new()

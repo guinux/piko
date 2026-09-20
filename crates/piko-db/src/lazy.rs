@@ -6,8 +6,8 @@
 //!
 //! Caching the failure is deliberate, and matches libalpm's sticky `INFRQ_ERROR` bit: a
 //! corrupt entry is not re-read and re-parsed on every access. piko differs in what happens
-//! afterwards. libalpm's accessors swallow the error and return an empty list, so a package
-//! with an unreadable `desc` looks exactly like a package with no dependencies. For a package
+//! afterwards. libalpm's accessors swallow the error and return an empty list. A package with
+//! an unreadable `desc` then looks exactly like a package with no dependencies. For a package
 //! manager that is a dangerous lie, so [`Lazy`] hands the error back every time.
 
 use std::{fmt, sync::OnceLock};
@@ -16,9 +16,9 @@ use crate::error::{Error, SharedError};
 
 /// A value loaded at most once, on first access.
 ///
-/// `Lazy<T>` is [`Sync`] whenever `T` is. Reads after the first are a plain atomic load, so
-/// a `&LocalDatabase` can be shared across threads and its packages loaded in parallel
-/// without a lock.
+/// `Lazy<T>` is [`Sync`] whenever `T` is. Reads after the first are a plain atomic load. So a
+/// `&LocalDatabase` can be shared across threads, and its packages loaded in parallel without
+/// a lock.
 ///
 /// The error is stored as a [`SharedError`], because [`Error`] wraps [`std::io::Error`] and
 /// so cannot be [`Clone`]. An [`std::sync::Arc`] makes handing the same failure out

@@ -1,18 +1,18 @@
 //! Whether a set of signature results satisfies a `SigLevel`.
 //!
-//! A pure function over values, separate from anything that talks to GnuPG, for the same reason
-//! `piko-txn`'s extraction decision is separate from extraction itself. This is the rule that
-//! decides whether piko will install code onto a system, so it has to be readable and enumerable in
-//! tests without a keyring.
+//! A pure function over values, separate from anything that talks to GnuPG. That is the same
+//! reason `piko-txn`'s extraction decision is separate from extraction itself. This rule
+//! decides whether piko will install code onto a system. So it has to be readable, and
+//! enumerable in tests without a keyring.
 //!
 //! Transcribed from `_alpm_check_pgp_helper` (`signing.c:803`). libalpm spreads the same rule
-//! across that function (which decides) and `_alpm_process_siglist` (which explains), with the
-//! outcome carried as an `int` that is `-1` for every kind of failure.
+//! across two functions. `_alpm_check_pgp_helper` decides, and `_alpm_process_siglist`
+//! explains. The outcome travels as an `int` that is `-1` for every kind of failure.
 //!
 //! # Two things a first reading of `signing.c` gets wrong
 //!
 //! - **An expired key is not a rejection.** `ALPM_SIGSTATUS_KEY_EXPIRED` falls through into
-//!   the same branch as `ALPM_SIGSTATUS_VALID` and is judged on trust alone. The signature was
+//!   the same branch as `ALPM_SIGSTATUS_VALID`. It is judged on trust alone. The signature was
 //!   made while the key was valid. Only an expired signature (`SIG_EXPIRED`) is fatal. Given
 //!   how many Arch packager keys carry expiry dates, collapsing the two would reject a large
 //!   share of a real cache.
@@ -217,7 +217,7 @@ pub fn decide(signatures: &[SignatureOutcome], policy: Policy) -> Verdict {
     for signature in signatures {
         let fingerprint = signature.fingerprint.clone();
         match signature.status {
-            // An expired key still made a good signature at the time, so it is judged on
+            // An expired key still made a good signature at the time. So it is judged on
             // trust alone, exactly as `signing.c:830` does by falling through.
             Status::Valid | Status::KeyExpired => match signature.trust {
                 Trust::Full => {}

@@ -1,7 +1,7 @@
 //! `piko history`: what this system's transactions did.
 //!
-//! Rendering only. The merge of the two records, and every filter it applies, is
-//! [`piko_txn::history::read`] — a second frontend gets the same history without re-deriving
+//! Rendering only. The merge of the two records, and every filter it applies, lives in
+//! [`piko_txn::history::read`]. A second frontend gets the same history without re-deriving
 //! it.
 
 use std::{path::Path, process::ExitCode};
@@ -76,9 +76,9 @@ pub fn history(
         return unfinished_note(dbpath, out);
     }
 
-    // One pass over every action that will actually print, before the first line. Widths that
-    // grew block by block would make an early transaction's columns wrong once a later, wider
-    // one appeared — the rule `cmd::plan::column_widths` and `cmd::search` both follow.
+    // One pass over every action that will actually print, before the first line. Widths
+    // grown block by block would make an early transaction's columns wrong once a later,
+    // wider one appears. `cmd::plan::column_widths` and `cmd::search` both follow this rule.
     let widths = Widths::over(&records, &options);
     for (index, record) in records.iter().enumerate() {
         // A block is several lines now, so the blocks need separating. Not before the first.
@@ -123,8 +123,8 @@ impl Widths {
 /// The actions of `record` that the listing will show.
 ///
 /// `--package` names what the reader is asking about, so the detail is narrowed to it. The
-/// transaction is still reported whole — a package upgraded as part of a 400-package `-Syu`
-/// should not print the other 399 to say so, and the header's count says how big it was.
+/// transaction is still reported whole. A package upgraded as part of a 400-package `-Syu`
+/// should not print the other 399 to say so. The header's count says how big it was.
 fn shown_actions<'a>(record: &'a Record, options: &'a Options) -> impl Iterator<Item = &'a Action> {
     record.actions.iter().filter(|action| {
         options.packages.is_empty() || options.packages.iter().any(|name| name == action.name())
@@ -134,15 +134,15 @@ fn shown_actions<'a>(record: &'a Record, options: &'a Options) -> impl Iterator<
 /// Prints one transaction.
 ///
 /// Returns an [`ExitCode`] rather than nothing, following the convention
-/// [`crate::style::render_list_field`] sets: `emit!` returns from its enclosing function on a
-/// write failure, so a helper that writes has to hand that decision back to its caller.
+/// [`crate::style::render_list_field`] sets. `emit!` returns from its enclosing function on a
+/// write failure, so a helper that writes hands that decision back to its caller.
 fn print_record(
     record: &Record,
     options: &Options,
     widths: Widths,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
-    // The same spelling the log line carries, in the same time zone, so a line here can be
+    // The same spelling the log line carries, in the same time zone. So a line here can be
     // found in `pacman.log` by searching for it.
     let when = record.started.map_or_else(
         || "unknown date".to_owned(),
@@ -150,20 +150,22 @@ fn print_record(
     );
 
     // The count answers a question the detail below cannot: how big was the transaction this
-    // line came from. So it shows only when there is no full detail to count — under
-    // `--quiet`, and under `--package`, which narrows the detail to what was asked about.
+    // line came from. So it shows only when there is no full detail to count. That means
+    // under `--quiet`, and under `--package`, which narrows the detail to what was asked
+    // about.
     let hidden = options.quiet || !options.packages.is_empty();
     let count = match record.actions.len() {
         count if hidden && count > 1 => format!("  ({count} packages)"),
         _ => String::new(),
     };
-    // `--quiet` is one line per transaction, so the command line stays on it: there is no
+    // `--quiet` is one line per transaction, so the command line stays on it. There is no
     // detail below for it to compete with. Otherwise it goes on its own line, below.
     //
-    // A transaction whose records held no command line — most of pacman's — falls back to
-    // naming its single action, which is what the detail lines would have said. That is not the
-    // duplication this rendering exists to remove: under `--quiet` there are no detail lines,
-    // and a row saying only "something happened at 16:30" is worth nothing.
+    // A transaction whose records hold no command line falls back to naming its single
+    // action. Most of pacman's are such transactions, and that name is what the detail lines
+    // would have said. This is not the duplication the rendering exists to remove. Under
+    // `--quiet` there are no detail lines, and a row saying only "something happened at
+    // 16:30" is worth nothing.
     let inline = if options.quiet {
         match (&record.command, record.actions.as_slice()) {
             (Some(command), _) => format!("  {command}"),
@@ -188,8 +190,8 @@ fn print_record(
     }
 
     // Indented to where the verbs start, so it reads as a caption hanging under the header
-    // rather than as one more action. Never truncated: it is the record of what was actually
-    // typed, and a history that abbreviates that is a history that has to be double-checked.
+    // rather than as one more action. It is never truncated. It records what was actually
+    // typed, and a history that abbreviates that has to be double-checked.
     if let Some(command) = &record.command {
         emit!(out, "    {}", console::Style::new().dim().apply_to(command));
     }
@@ -198,7 +200,7 @@ fn print_record(
     for action in shown_actions(record, options) {
         let kind = kind_of(action);
         // Padded as plain text before being colored. A `StyledObject` writes its ANSI codes
-        // straight through `write!` rather than `Formatter::pad`, so an outer `{:width$}`
+        // straight through `write!` rather than `Formatter::pad`. So an outer `{:width$}`
         // around a styled value pads the escapes. Same reason as `plan.rs`.
         let prefix = kind.prefix(&format!("{:<verb_width$}", verb(action)));
         let name = action.name();
@@ -237,8 +239,8 @@ fn verb(action: &Action) -> &'static str {
 
 /// The version column: `1.0.0-1`, or `1.0.0-1 -> 1.1.0-1` where the version changed.
 ///
-/// The version the package ended at carries the kind's color, and the one it came from is
-/// dimmed — the same two-tone shape `cmd::plan` gives a `Step::Change`, so a line reads the
+/// The version the package ended at carries the kind's color. The one it came from is dimmed.
+/// This is the same two-tone shape `cmd::plan` gives a `Step::Change`. So a line reads the
 /// same whether piko is proposing the change or reporting it.
 fn versions(action: &Action, kind: ChangeKind) -> String {
     let to = kind.style().apply_to(action.version());
@@ -248,8 +250,8 @@ fn versions(action: &Action, kind: ChangeKind) -> String {
     }
 }
 
-/// The leading mark: a green check for a completed transaction, a red cross for a failed one,
-/// and a yellow mark for the two stops in between.
+/// The leading mark. A completed transaction gets a green check, and a failed one a red
+/// cross. The two stops in between get a yellow mark.
 fn outcome_mark(outcome: &Outcome) -> console::StyledObject<String> {
     match outcome {
         Outcome::Completed => console::Style::new().green().apply_to(checkmark().to_string()),
@@ -300,15 +302,15 @@ const DAY_END: i64 = 24 * 60 * 60 - 1;
 
 /// Parses `--since`/`--until`: a full timestamp, or a bare `YYYY-MM-DD` naming a whole day.
 ///
-/// **A bare date names the day, not the instant it begins.** Both bounds are inclusive, so
-/// `--since 2026-08-23` starts at that day's midnight and `--until 2026-08-23` runs to its
+/// **A bare date names the day, not the instant it begins.** Both bounds are inclusive. So
+/// `--since 2026-08-23` starts at that day's midnight, and `--until 2026-08-23` runs to its
 /// last second. Reading both ends as midnight would make `--until 2026-08-23` exclude every
-/// transaction of the 23rd, and `--since D --until D` return nothing for any day — which is
-/// the one range a reader is most likely to ask for.
+/// transaction of the 23rd. It would also make `--since D --until D` return nothing for any
+/// day. That is the one range a reader is most likely to ask for.
 ///
-/// A bare date is read in UTC rather than in the local zone. The alternative is to make a
-/// filter's meaning depend on where the machine is, for a flag whose whole job is to cut a
-/// list roughly in half.
+/// A bare date is read in UTC rather than in the local zone. The alternative makes a filter's
+/// meaning depend on where the machine is. That is too much for a flag whose whole job is to
+/// cut a list roughly in half.
 fn parse_when(text: Option<&str>, bound: Bound) -> Result<Option<i64>, String> {
     let Some(text) = text else {
         return Ok(None);
@@ -493,10 +495,10 @@ mod tests {
 
     /// The text `versions` lays out, with any styling removed.
     ///
-    /// A test harness captures `print!`, never file descriptor 1. So `console`, which decides
-    /// on color by testing whether that descriptor is a terminal, styles its output here
-    /// whenever the suite is run from one — and a styled version splits around an escape.
-    /// The subject of these two tests is the text. Which color each kind carries is
+    /// A test harness captures `print!`, never file descriptor 1. `console` decides on color
+    /// by testing whether that descriptor is a terminal. So it styles its output here
+    /// whenever the suite runs from one, and a styled version splits around an escape. The
+    /// subject of these two tests is the text. Which color each kind carries is
     /// `ChangeKind`'s to test.
     fn plain(action: &Action, kind: ChangeKind) -> String {
         console::strip_ansi_codes(&versions(action, kind)).into_owned()

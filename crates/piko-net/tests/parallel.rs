@@ -43,7 +43,7 @@ use std::{
 };
 
 use alpm_types::PackageFileName;
-use piko_net::{Cancel, Concurrency, Outcome, PackageFetch, Refresher, RepoRefresh};
+use piko_net::{Cancel, Concurrency, DatabaseKind, Outcome, PackageFetch, Refresher, RepoRefresh};
 use piko_sig::Policy;
 
 /// How long each response is held open, so overlapping transfers actually overlap.
@@ -72,12 +72,13 @@ impl Seen {
 
 /// Starts a mirror that answers every request concurrently, and returns its base URL.
 ///
-/// A `.sig` request gets a `404`. This means "the repository is simply not signed", the norm
-/// on real Arch mirrors, so these tests exercise the download path without needing a keyring.
+/// A `.sig` request gets a `404`. That means "the repository is simply not signed", the norm
+/// on real Arch mirrors. So these tests exercise the download path without needing a keyring.
 /// Anything else gets a `200` with a small body.
 ///
 /// The acceptor is detached rather than joined. It must keep serving for as long as the test
-/// needs it, and there is no fixed request count to stop after: workers decide who fetches what.
+/// needs it. There is no fixed request count to stop after, because workers decide who
+/// fetches what.
 fn mirror() -> (String, Arc<Seen>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -146,8 +147,8 @@ fn package_name(index: usize) -> PackageFileName {
     PackageFileName::from_str(&format!("pkg{index}-1.0.0-1-x86_64.pkg.tar.zst")).unwrap()
 }
 
-/// Five transfers over four mirrors: the fastest two mirrors take two workers each, so no host
-/// ever sees more than the per-host cap at once.
+/// Five transfers over four mirrors. The fastest two mirrors take two workers each. So no
+/// host ever sees more than the per-host cap at once.
 #[test]
 fn work_is_spread_so_no_mirror_sees_more_than_the_per_host_cap() {
     let mirrors: Vec<(String, Arc<Seen>)> = (0..4).map(|_| mirror()).collect();
@@ -277,7 +278,12 @@ fn repositories_refresh_concurrently_and_report_in_input_order() {
     let names = ["core", "extra", "multilib", "community"];
     let repos: Vec<RepoRefresh<'_>> = names
         .iter()
-        .map(|name| RepoRefresh { name, servers: &servers, policy: unsigned_database() })
+        .map(|name| RepoRefresh {
+            name,
+            kind: DatabaseKind::Db,
+            servers: &servers,
+            policy: unsigned_database(),
+        })
         .collect();
 
     let seen_order = Mutex::new(Vec::new());
@@ -400,7 +406,8 @@ fn a_batch_refuses_a_duplicate_rather_than_racing_for_one_temporary() {
     assert!(seen.paths().is_empty(), "the refusal must come before any I/O");
 }
 
-/// The same rule for databases, since they share the destination-derived temporary.
+/// The same rule for databases, since they share the destination-derived temporary. The
+/// duplicate is the file, so the error names `core.files` rather than the repository.
 #[test]
 fn a_repository_named_twice_is_refused_before_any_io() {
     let (url, seen) = mirror();
@@ -408,7 +415,12 @@ fn a_repository_named_twice_is_refused_before_any_io() {
     let servers = vec![url];
     let repos: Vec<RepoRefresh<'_>> = ["core", "core"]
         .iter()
-        .map(|name| RepoRefresh { name, servers: &servers, policy: unsigned_database() })
+        .map(|name| RepoRefresh {
+            name,
+            kind: DatabaseKind::Files,
+            servers: &servers,
+            policy: unsigned_database(),
+        })
         .collect();
 
     let results = Refresher::default().refresh_all(
@@ -420,10 +432,51 @@ fn a_repository_named_twice_is_refused_before_any_io() {
         &Cancel::new(),
         &|_, _| {},
     );
-    assert!(
-        results.iter().all(|result| matches!(result, Err(piko_net::Error::DuplicateTarget { .. })))
-    );
+    assert!(results.iter().all(|result| matches!(
+        result,
+        Err(piko_net::Error::DuplicateTarget { file }) if file == "core.files"
+    )));
     assert!(seen.paths().is_empty(), "the refusal must come before any I/O");
+}
+
+/// One repository's two archives are two destinations. A batch naming one repository twice,
+/// once per kind, is therefore not a duplicate. A refusal keyed on the repository name would
+/// fail every entry of a `piko refresh --files` batch before it downloaded anything.
+#[test]
+fn a_repositorys_db_and_files_are_fetched_side_by_side() {
+    let (url, seen) = mirror();
+    let sync = tempfile::tempdir().unwrap();
+    let servers = vec![url];
+
+    let repos: Vec<RepoRefresh<'_>> = [DatabaseKind::Db, DatabaseKind::Files]
+        .into_iter()
+        .map(|kind| RepoRefresh {
+            name: "core",
+            kind,
+            servers: &servers,
+            policy: unsigned_database(),
+        })
+        .collect();
+
+    let results = Refresher::default().refresh_all(
+        sync.path(),
+        &repos,
+        None,
+        Concurrency::new(2),
+        false,
+        &Cancel::new(),
+        &|_, _| {},
+    );
+    assert_eq!(results.len(), 2);
+    for result in &results {
+        assert!(matches!(result, Ok(Outcome::Updated)), "both archives must install: {result:?}");
+    }
+
+    let mut fetched: Vec<String> = seen.paths();
+    fetched.sort();
+    assert_eq!(fetched, vec!["/core.db".to_owned(), "/core.files".to_owned()]);
+    assert!(sync.path().join("core.db").is_file());
+    assert!(sync.path().join("core.files").is_file());
 }
 
 /// Progress bytes are deltas, so a sink can sum them across concurrent transfers and reach

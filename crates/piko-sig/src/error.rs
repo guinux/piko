@@ -9,8 +9,8 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 ///
 /// The distinction is the point of this type. "This package's signature is untrusted" is not
 /// an error. It is [`crate::decision::Verdict::Rejected`], an answer the caller asked for. An
-/// error here means piko could not get an answer. The two must never be conflated: treating a
-/// broken keyring as a failed signature would refuse valid packages, and treating it as a pass
+/// error here means piko could not get an answer. The two must never be conflated. Treating a
+/// broken keyring as a failed signature would refuse valid packages. Treating it as a pass
 /// would install unverified ones.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

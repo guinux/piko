@@ -116,10 +116,11 @@ fn every_installed_files_round_trips_byte_for_byte() {
 /// for byte against the original.
 ///
 /// This is the acceptance gate for the `write` module. It exercises [`EntryName::new`],
-/// [`LocalDbWriter::create_entry`], and [`LocalDbWriter::write_record`], and with them the
-/// entire temp-file/fsync/rename path, at the scale and the messiness of a real system. It
-/// then re-opens the result with piko's own scanner, to check the copy is a working database
-/// and not merely a matching pile of bytes.
+/// [`LocalDbWriter::create_entry`] and [`LocalDbWriter::write_record`]. With them it exercises
+/// the entire temp-file/fsync/rename path, at the scale and messiness of a real system.
+///
+/// It then re-opens the result with piko's own scanner. That checks the copy is a working
+/// database, and not merely a matching pile of bytes.
 #[test]
 #[ignore = "requires a real ALPM local database"]
 fn the_whole_database_survives_a_copy_through_the_writer() {
@@ -139,8 +140,8 @@ fn the_whole_database_survives_a_copy_through_the_writer() {
             continue;
         };
 
-        // This rebuilds the name from the parsed halves, rather than reusing the string, to
-        // check that the writer's own constructor agrees with the scanner.
+        // This rebuilds the name from the parsed halves rather than reusing the string. It
+        // checks that the writer's own constructor agrees with the scanner.
         let entry = EntryName::new(parsed.name(), parsed.version()).unwrap();
         assert_eq!(entry.as_str(), raw, "EntryName::new did not reproduce the directory name");
 
@@ -183,8 +184,8 @@ fn the_whole_database_survives_a_copy_through_the_writer() {
 
 /// `pacman -D --asdeps` then `--asexplicit` on a real entry must leave it byte-identical.
 ///
-/// A synthetic `desc` cannot cover this. The hazards are a `%URL%` that a URL parser would
-/// normalize and a `%GROUPS%` section that must stay on the correct side of `%REASON%`.
+/// A synthetic `desc` cannot cover this. There are two hazards. A `%URL%` that a URL parser
+/// would normalize, and a `%GROUPS%` section that must stay on the correct side of `%REASON%`.
 /// Which entries have those is a property of the real database.
 #[test]
 #[ignore = "requires a real ALPM local database"]

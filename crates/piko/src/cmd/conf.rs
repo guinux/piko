@@ -269,8 +269,8 @@ mod tests {
         }
     }
 
-    /// The eight dropped directives are names a query accepts, so a script asking for one
-    /// gets the same answer the dump gives: nothing.
+    /// The eight dropped directives are names a query accepts. So a script asking for one
+    /// gets the same answer the dump gives, which is nothing.
     #[test]
     fn a_dropped_directive_prints_nothing_and_succeeds() {
         let dir = tempfile::tempdir().unwrap();

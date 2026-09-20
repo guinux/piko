@@ -2,16 +2,18 @@
 //!
 //! # The numbers are measured, not inherited
 //!
-//! Against this repository's own mirror list and a sample drawn from a real installed set, the
-//! optimum is flat. Any value in `4..=8` is indistinguishable, below 4 loses, and above 8 buys
-//! nothing but connections on volunteer-run mirrors. `ParallelDownloads = 5` — what Arch's
-//! shipped `pacman.conf` sets — sits in the middle of that plateau. [`Concurrency::MAX_DOWNLOADS`]
-//! is therefore a safety ceiling, not a tuning knob. Past it there is measurably nothing to
-//! gain, so a `pacman.conf` asking for 4000 is answered with 16 rather than obeyed.
+//! Against this repository's own mirror list and a sample drawn from a real installed set,
+//! the optimum is flat. Any value in `4..=8` is indistinguishable. Below 4 loses. Above 8 buys
+//! nothing but connections on volunteer-run mirrors. `ParallelDownloads = 5`, what Arch's
+//! shipped `pacman.conf` sets, sits in the middle of that plateau.
 //!
-//! Two connections per mirror host measured free (1.853 s-1.866 s at five concurrent transfers,
-//! whether they were spread over one, three, or five mirrors). The cap is kept for what it buys
-//! elsewhere: netiquette towards mirrors nobody is paying for, and failover, where a slow
+//! [`Concurrency::MAX_DOWNLOADS`] is therefore a safety ceiling, not a tuning knob. Past it
+//! there is measurably nothing to gain. So a `pacman.conf` asking for 4000 is answered with 16
+//! rather than obeyed.
+//!
+//! Two connections per mirror host measure free: 1.853 s-1.866 s at five concurrent transfers,
+//! whether spread over one, three, or five mirrors. The cap is kept for what it buys elsewhere.
+//! It is netiquette towards mirrors nobody is paying for. And it is failover, where a slow
 //! mirror costs one worker rather than the whole run.
 
 /// How many transfers run at once, and how many may share one mirror host.
@@ -31,8 +33,8 @@ impl Concurrency {
     /// From `pacman.conf`'s `ParallelDownloads`, clamped into `1..=MAX_DOWNLOADS`.
     ///
     /// **The clamp lives here rather than in the parser, on purpose.** `piko conf` reproduces
-    /// `pacman-conf`, so it must echo back whatever the file said.
-    /// A value is corrected where it is used, never where it is read.
+    /// `pacman-conf`, so it echoes back whatever the file said. A value is corrected where it
+    /// is used, never where it is read.
     #[must_use]
     pub fn new(parallel_downloads: u32) -> Self {
         let downloads = usize::try_from(parallel_downloads)
@@ -67,15 +69,16 @@ impl Concurrency {
     /// one starts. Workers are grouped [`Self::per_host`] at a time, and each group starts one
     /// mirror further down.
     ///
-    /// With at least `downloads / per_host` mirrors configured, no more than [`Self::per_host`]
-    /// workers open a connection to one host while nothing is failing. With fewer mirrors — one
-    /// `Server`, or the single-entry `CacheServer` list that is the usual shape — the rotation
-    /// is a no-op and every worker lands on the same host, exactly as `pacman` does with the
-    /// same `ParallelDownloads`. The cap describes how work is spread. It is not a ceiling that
-    /// idles a worker to enforce itself.
+    /// With at least `downloads / per_host` mirrors configured, no more than
+    /// [`Self::per_host`] workers open a connection to one host while nothing is failing.
+    ///
+    /// With fewer mirrors the rotation is a no-op, and every worker lands on the same host.
+    /// That is one `Server`, or the single-entry `CacheServer` list that is the usual shape.
+    /// `pacman` behaves the same way with the same `ParallelDownloads`. The cap describes how
+    /// work is spread. It is not a ceiling that idles a worker to enforce itself.
     ///
     /// The cap softens the same way once a worker falls through to its second mirror. That is
-    /// the right direction: an abandoned mirror should not keep reserved capacity.
+    /// the right direction. An abandoned mirror should not keep reserved capacity.
     pub(crate) fn servers_for(
         self,
         servers: &[String],

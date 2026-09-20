@@ -1,8 +1,8 @@
 //! Resolves a backup file after its `.pacnew` has been written.
 //!
-//! [`fn@super::apply`] writes the packaged version to `<path>.pacnew` and stops there. This module
-//! decides what happens next: whether the user's file is replaced, kept, or left beside the new one
-//! for them to merge.
+//! [`fn@super::apply`] writes the packaged version to `<path>.pacnew` and stops there. This
+//! module decides what happens next. The user's file is replaced, kept, or left beside the new
+//! one for them to merge.
 //!
 //! The rule itself is [`super::decision::resolve_backup`], which is pure. This module only
 //! supplies its three hashes and carries out its answer.
@@ -46,9 +46,9 @@ pub struct Resolution {
     /// The hash to record in `%BACKUP%`.
     ///
     /// This is always the hash of what the *package* shipped, even when the user's file was
-    /// kept. That is what libalpm records (`add.c:335` hashes the just-extracted file), and it
-    /// has to be: the next upgrade reads it back as "what the previous package shipped", the
-    /// only baseline that can tell an edited file from an untouched one.
+    /// kept. That is what libalpm records, since `add.c:335` hashes the just-extracted file.
+    /// It has to be. The next upgrade reads it back as "what the previous package shipped".
+    /// That is the only baseline that can tell an edited file from an untouched one.
     pub recorded_hash: Option<Md5Checksum>,
     /// Whether a hash could not be computed.
     ///
@@ -141,11 +141,10 @@ pub fn resolve(
 /// The `%BACKUP%` hash of a file that had no `.pacnew` to be resolved against.
 ///
 /// [`resolve`] handles the case with three hashes to compare. This is the commoner one.
-/// Leaving it out once made `%BACKUP%` look like an upgrade-only concept: libalpm records a
-/// hash for **every** backup file it extracted, whatever cell of the matrix it landed in. The
-/// `if(backup)` at `add.c:333` sits *outside* the `notouch || needbackup` branch. So a backup
-/// file that simply was not on the system before — the whole of a fresh install — gets
-/// recorded too.
+/// `%BACKUP%` is not an upgrade-only concept. libalpm records a hash for **every** backup file
+/// it extracted, whatever cell of the matrix it landed in. The `if(backup)` at `add.c:333`
+/// sits *outside* the `notouch || needbackup` branch. So a backup file that was not on the
+/// system before gets recorded too. That covers the whole of a fresh install.
 ///
 /// `None` means the file could not be hashed. The caller reports that through
 /// [`crate::Extraction::unreadable`], exactly as [`resolve`] does.

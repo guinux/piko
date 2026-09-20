@@ -5,8 +5,8 @@
 //!
 //! A check hashes every file the package owns. So the command is dominated by reads the kernel
 //! is servicing, not by anything this process computes. Measured over 1258 packages on this
-//! machine: 67 s of wall clock, against 13 s of user and 19 s of system time. Half the run was
-//! a thread waiting for a disk.
+//! machine: 67 s of wall clock. User time is 13 s and system time 19 s. Half the run is a
+//! thread waiting for a disk.
 //!
 //! The packages are therefore checked several at a time. `LocalDatabase` and `LocalPackage` are
 //! `Send + Sync` with lock-free reads. That makes this a scheduling change, not a design one.
@@ -15,7 +15,7 @@
 //! **Nothing is printed from a worker.** A worker renders its package's verdict into buffers.
 //! The main thread writes them out afterwards, in database order. This is the rule the download
 //! pool already follows, and it keeps the output identical to the serial loop's. Two workers
-//! cannot interleave their lines, and the order does not depend on which disk read finished
+//! cannot interleave their lines. The order does not depend on which disk read finished
 //! first.
 
 use std::{
@@ -33,10 +33,10 @@ use crate::{
 
 /// Checks each named package, printing every problem found and a final summary line.
 ///
-/// A name that is not currently installed is reported to stderr, the same continue-past-a-miss
-/// convention `piko files`/`piko info` use for more than one name — but it was never actually
-/// checked, so it is not counted in the summary's "packages checked" or "with problems" totals. It
-/// still fails the command.
+/// A name that is not currently installed is reported to stderr. That is the same
+/// continue-past-a-miss convention `piko files`/`piko info` use for more than one name. Such a
+/// name was never checked, so it counts in neither of the summary's totals: "packages checked"
+/// and "with problems". It still fails the command.
 pub fn check_selected(
     db: &LocalDatabase,
     names: &[String],
@@ -98,8 +98,8 @@ struct Checked {
 
 /// How many packages to check at a time.
 ///
-/// The bound is the machine's parallelism. More threads than that would still gain on work this
-/// I/O-bound. The gain is the kernel's read-ahead, not anything measurable here, and an
+/// The bound is the machine's parallelism. More threads than that would still gain on work
+/// this I/O-bound. The gain is the kernel's read-ahead, not anything measurable here. And an
 /// unbounded count would let a large database spawn a thread per package.
 fn workers(packages: usize) -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).min(packages).max(1)
@@ -177,7 +177,7 @@ fn print_checked(steplist: &StepList, checked: &[Checked], out: &mut impl std::i
         if package.out.is_empty() && package.err.is_empty() {
             continue;
         }
-        // Write failures are ignored here, as `CommitDriver::print_line` does: the final
+        // Write failures are ignored here, as `CommitDriver::print_line` does. The final
         // summary's `emit!` call, right after this loop, is what catches a dead stdout.
         steplist.suspend(|| {
             let _ = out.write_all(&package.out);

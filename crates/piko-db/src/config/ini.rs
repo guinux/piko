@@ -1,15 +1,18 @@
 //! Line-level tokenizer for `pacman.conf`-style INI files.
 //!
-//! Mirrors `ini.c`'s `parse_ini` grammar exactly — this module only tokenizes; the directive
-//! semantics (which key means what, `Include` handling, defaults) live in
-//! [`crate::config`].
+//! Mirrors `ini.c`'s `parse_ini` grammar exactly. This module only tokenizes. The directive
+//! semantics live in [`crate::config`]: which key means what, `Include` handling, and
+//! defaults.
 //!
 //! Public because `pacman.conf` is not the only file with this grammar. An alpm **hook** file
 //! is parsed by the same `parse_ini` in libalpm (`hook.c:605`). `piko-txn` tokenizes hooks
-//! through this module instead of duplicating it. This keeps three subtle rules consistent
-//! between the two: a `#` starts a comment only at the beginning of a line, a bare key is
-//! distinct from a key with an empty value, and splitting on the *first* `=` preserves a
-//! hook's second `=` (e.g. `Exec = … Markers=needs-restart`).
+//! through this module instead of duplicating it. That keeps three subtle rules consistent
+//! between the two:
+//!
+//! - a `#` starts a comment only at the beginning of a line,
+//! - a bare key is distinct from a key with an empty value,
+//! - splitting on the *first* `=` preserves a hook's second `=`, as in
+//!   `Exec = … Markers=needs-restart`.
 
 /// One tokenized line of a config file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

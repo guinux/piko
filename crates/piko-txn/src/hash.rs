@@ -63,9 +63,9 @@ pub fn file_md5_at(dir: &impl AsFd, name: &OsStr, max: u64) -> Result<Option<Md5
     };
 
     let stat = rustix::fs::fstat(&fd).map_err(|source| io(name, IoAction::Metadata, source))?;
-    // Only a regular file has contents worth comparing. `O_NOFOLLOW` rules out a symlink here,
-    // but a FIFO or device node could still reach this point, and reading one would block or
-    // never end.
+    // Only a regular file has contents worth comparing. `O_NOFOLLOW` rules out a symlink
+    // here. A FIFO or device node could still reach this point, and reading one would block
+    // or never end.
     if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
         return Err(Error::UnusableSource {
             path: Path::new(name).to_path_buf(),

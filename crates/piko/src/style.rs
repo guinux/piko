@@ -9,11 +9,13 @@
 ///
 /// Used for a [`progress`](crate::progress) row's plain line, and for an installed package in
 /// `piko search`/`piko list`. A commit's rows print that line as soon as they have output to
-/// frame, so the glyph marks the name of an item as much as the end of it; how the item ended
-/// is reported separately. Auto-detects terminal support the way every `console` style in this
-/// CLI does, by testing file descriptor 1: piped output gets plain text with no ANSI codes. The
-/// sink a caller writes into is not consulted, so a test capturing into a `Vec<u8>` still sees
-/// the codes when the suite runs from a terminal, and strips them before asserting.
+/// frame. So the glyph marks the name of an item as much as the end of it. How the item ended
+/// is reported separately.
+///
+/// This auto-detects terminal support the way every `console` style in this CLI does, by
+/// testing file descriptor 1. Piped output gets plain text with no ANSI codes. The sink a
+/// caller writes into is not consulted. So a test capturing into a `Vec<u8>` still sees the
+/// codes when the suite runs from a terminal. Such a test strips them before asserting.
 pub(crate) fn checkmark() -> console::StyledObject<&'static str> {
     console::Style::new().green().apply_to("✓")
 }
@@ -28,8 +30,8 @@ pub(crate) fn info_label(text: &'static str) -> console::StyledObject<&'static s
     console::Style::new().dim().apply_to(text)
 }
 
-/// Dims `value` when it is `piko`'s "nothing here" placeholder (`"None"` or `"Unknown"`), so an
-/// absent field recedes instead of matching the visual weight of real data.
+/// Dims `value` when it is `piko`'s "nothing here" placeholder, `"None"` or `"Unknown"`. An
+/// absent field then recedes instead of matching the visual weight of real data.
 ///
 /// Shared for the same reason as [`info_label`]: both `info` renderers list fields that fall
 /// back to one of these two placeholders.
@@ -45,10 +47,9 @@ pub(crate) fn info_value(value: String) -> console::StyledObject<String> {
 /// Renders the `URL` field of `piko info`, in blue, or a dimmed `"None"`.
 ///
 /// `normalized` is `%URL%` as `url::Url` parsed it, `raw` the bytes the `desc` holds. The two
-/// disagree only when the value does not parse at all: piko keeps reading such a `desc`
-/// and libalpm prints the value verbatim, so reporting the field as absent would be a lie
-/// about the file's contents. Preferring the normalized form keeps the common line identical
-/// to what this CLI has always printed.
+/// disagree only when the value does not parse at all. piko keeps reading such a `desc`, and
+/// libalpm prints the value verbatim. So reporting the field as absent would be a lie about
+/// the file's contents. Preferring the normalized form keeps the common line unchanged.
 ///
 /// Shared for the same reason as [`info_label`]: both `info` renderers draw this field.
 pub(crate) fn info_url(
@@ -63,10 +64,10 @@ pub(crate) fn info_url(
 
 /// What a transaction does to one package.
 ///
-/// The icon and the color, and nothing else. The *word* stays with each command module:
-/// `piko plan` conjugates in the present ("upgrade", about to happen) and `piko history` in
-/// the past ("upgraded", already done). Sharing the glyph is what makes a plan line and a
-/// history line read alike; sharing the word would make one of them lie about its tense.
+/// The icon and the color, and nothing else. The *word* stays with each command module.
+/// `piko plan` conjugates in the present ("upgrade", about to happen). `piko history` uses the
+/// past ("upgraded", already done). Sharing the glyph is what makes a plan line and a history
+/// line read alike. Sharing the word would make one of them lie about its tense.
 ///
 /// This is the second thing in this module, after [`checkmark`], that more than one command
 /// module needs with the exact same meaning. `cmd::search`'s green ✓ and `cmd::files`'s dimmed
@@ -99,9 +100,9 @@ impl ChangeKind {
 
     /// A reinstall changes nothing, so it stays dim instead of taking its own color. A
     /// downgrade is a regression worth flagging, not just narrating, so it gets amber instead
-    /// of a neutral tone. This detects terminal support the same way [`checkmark`] does:
-    /// piped output, and every test that captures into a `Vec<u8>`, gets plain text with no
-    /// ANSI codes.
+    /// of a neutral tone. This detects terminal support the same way [`checkmark`] does.
+    /// Piped output gets plain text with no ANSI codes, as does every test that captures into
+    /// a `Vec<u8>`.
     pub(crate) fn style(self) -> console::Style {
         let style = console::Style::new();
         match self {
@@ -115,8 +116,8 @@ impl ChangeKind {
 
     /// The colored `"{icon} {word}"` a line starts with.
     ///
-    /// `word` is the caller's, already padded to its module's column width — the tense differs
-    /// between the two callers, and so does the width the longest word in each set demands.
+    /// `word` is the caller's, already padded to its module's column width. The tense differs
+    /// between the two callers. So does the width the longest word in each set demands.
     pub(crate) fn prefix(self, word: &str) -> console::StyledObject<String> {
         self.style().apply_to(format!("{} {word}", self.icon()))
     }
@@ -125,8 +126,8 @@ impl ChangeKind {
 /// Prints a `piko info` list field, wrapping `items` at `per_line` per line.
 ///
 /// A line past the first is indented to the column [`info_label`]'s value starts at, not to
-/// column zero, so a wrapped list still reads as one field rather than as loose trailing lines.
-/// An empty list prints `"None"`, dimmed via [`info_value`].
+/// column zero. A wrapped list then still reads as one field rather than as loose trailing
+/// lines. An empty list prints `"None"`, dimmed via [`info_value`].
 pub(crate) fn render_list_field<T: std::fmt::Display>(
     out: &mut impl std::io::Write,
     label: &'static str,
@@ -155,9 +156,9 @@ pub(crate) fn render_list_field<T: std::fmt::Display>(
 /// Calls [`render_list_field`] and returns from the enclosing function (which must return
 /// [`std::process::ExitCode`]) if the write failed.
 ///
-/// Both `piko info` renderers print several list fields in a row; this keeps each call site a
-/// single line instead of repeating the "check the code, return on failure" boilerplate that
-/// [`crate::output::emit`] already inlines for a single line.
+/// Both `piko info` renderers print several list fields in a row. This keeps each call site a
+/// single line. Otherwise each repeats the "check the code, return on failure" boilerplate
+/// that [`crate::output::emit`] already inlines for a single line.
 macro_rules! field_list {
     ($out:expr, $label:expr, $items:expr, $per_line:expr) => {{
         let code = $crate::style::render_list_field($out, $label, $items, $per_line);

@@ -6,17 +6,18 @@
 //!
 //! # What these exist for
 //!
-//! `fetch` learned to inspect the HTTP status after a `304` truncated a live database to zero
-//! bytes. ureq turns 4xx and 5xx into `Err` but returns 3xx as `Ok` with an empty body.
-//! `fetch_signature` never got the same guard. An empty file reached GPGME and came back as
-//! "No data (gpg error 58)", which names the wrong culprit. Nothing was destroyed, so the bug
-//! went unnoticed. The refresh simply failed for a reason the user could not act on.
+//! ureq turns 4xx and 5xx into `Err`, but returns 3xx as `Ok` with an empty body. So both
+//! `fetch` and `fetch_signature` must inspect the HTTP status themselves. On the database side,
+//! an unguarded `304` truncates a live database to zero bytes. On the signature side, an empty
+//! file reaches GPGME. It comes back as "No data (gpg error 58)", which names the wrong
+//! culprit. Nothing is destroyed there, so the refusal is quiet. The refresh simply fails for
+//! a reason the user cannot act on.
 //!
 //! The stale-signature test covers a different question. A repository database changes content
-//! under a fixed name, so a `.sig` left from an earlier refresh vouches for bytes that no
+//! under a fixed name. So a `.sig` left from an earlier refresh vouches for bytes that no
 //! longer exist. piko itself never reads that file; it checks a signature at download and at
-//! open. Pacman verifies at open too, and shares `/var/lib/pacman/sync` with piko. Leaving the
-//! stale file there makes the next `pacman -Sy` reject a database piko installed correctly.
+//! open. Pacman verifies at open too, and shares `/var/lib/pacman/sync` with piko. A stale file
+//! left there makes the next `pacman -Sy` reject a database piko installed correctly.
 
 #![allow(
     clippy::unwrap_used,
@@ -105,7 +106,7 @@ fn refresh_from(
 }
 
 /// A throwaway GnuPG home. It lets the test reach "the database is unsigned and that is
-/// allowed", since `install` insists on a keyring whenever the policy checks at all.
+/// allowed". `install` insists on a keyring whenever the policy checks at all.
 fn keyring() -> Option<(tempfile::TempDir, Keyring)> {
     let home = tempfile::tempdir().ok()?;
     std::fs::set_permissions(home.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700))
@@ -189,9 +190,9 @@ fn a_signature_from_a_previous_refresh_is_removed_when_the_server_has_none() {
 /// the next mirror.
 ///
 /// The signature has to come from the same server as the database. Otherwise a well-behaved
-/// mirror could vouch for a hostile one. That rule decides the recovery too: the next server
+/// mirror could vouch for a hostile one. That rule decides the recovery too. The next server
 /// supplies the pair. Failing the whole repository instead lets one mirror's transient `500` on
-/// a `.sig` end a refresh that four other mirrors could have served.
+/// a `.sig` end a refresh four other mirrors could have served.
 ///
 /// The second mirror's bytes are what must land. That is the assertion this test rests on. A
 /// test that kept the first mirror's database would pass on content alone.
@@ -238,9 +239,9 @@ fn a_signature_failure_on_every_mirror_fails_the_refresh() {
 }
 
 /// The other half of the same rule. It also shows why `Signature` has three cases rather than
-/// an `Option`: under `SigLevel = Never`, no signature was ever requested, so the code learned
+/// an `Option`. Under `SigLevel = Never`, no signature is ever requested, so the code learns
 /// nothing about whether the database is signed. Deleting the file here would destroy data
-/// based on a question that was never asked.
+/// over a question that was never asked.
 #[test]
 fn a_signature_is_left_alone_when_the_policy_never_asks_for_one() {
     let dir = tempfile::tempdir().unwrap();

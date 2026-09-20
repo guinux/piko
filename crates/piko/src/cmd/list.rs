@@ -2,10 +2,10 @@
 //! names, or the groups either side defines.
 //!
 //! Rendering follows the icon-column/aligned-columns/summary shape [`crate::cmd::search`]
-//! established, with one addition: `--quiet` drops all of it (color, checkmark, version
-//! column, summary) down to one bare name per line, for scripting. This is the `pacman -Qq`/
-//! `pacman -Sql` equivalent. It also never opens a package's `desc`, matching `list`'s
-//! original behavior: only the directory-name-derived name and version are read.
+//! establishes, with one addition. `--quiet` drops all of it down to one bare name per line,
+//! for scripting. No color, no checkmark, no version column, no summary. This is the
+//! `pacman -Qq`/`pacman -Sql` equivalent. It also opens no package's `desc`. Only the
+//! directory-name-derived name and version are read.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
@@ -38,12 +38,12 @@ impl Row {
 
 /// Prints every row.
 ///
-/// In quiet mode, prints just `row.name`, one per line, nothing else — which is also what
-/// `pacman -Qgq`/`-Sgq` print for a group listing. Otherwise, aligns rows into
-/// group/name/version columns computed from the widest entry in `rows`; the group column is
+/// In quiet mode, prints just `row.name`, one per line, and nothing else. That is also what
+/// `pacman -Qgq`/`-Sgq` print for a group listing. Otherwise, it aligns rows into
+/// group/name/version columns computed from the widest entry in `rows`. The group column is
 /// left out entirely unless some row carries one. `with_icon` prefixes each line with
-/// [`checkmark`], used only for installed packages, since a repository listing does not check
-/// what is installed at all. A blank line and `"{rows.len()} {summary_word}"` follow.
+/// [`checkmark`]. That serves installed packages only, since a repository listing does not
+/// check what is installed at all. A blank line and `"{rows.len()} {summary_word}"` follow.
 fn print_rows(
     rows: &[Row],
     with_icon: bool,
@@ -146,7 +146,7 @@ pub fn explicit(db: &LocalDatabase, quiet: bool, out: &mut impl std::io::Write) 
 ///
 /// Matches `pacman -Qdttq`. `%OPTDEPENDS%` never counts; see [`piko_db::solve::orphans`].
 ///
-/// Builds a [`Universe`] over the installed set alone, the same as `piko why` — no repository
+/// Builds a [`Universe`] over the installed set alone, the same as `piko why`. No repository
 /// is opened, since the question is only about what is already installed.
 pub fn orphans(local: &LocalDatabase, quiet: bool, out: &mut impl std::io::Write) -> ExitCode {
     let universe = match Universe::build(local, [], UniverseOptions::new()) {
@@ -220,8 +220,9 @@ const fn lists_members(names: &[String], with_members: bool) -> bool {
 /// `piko list -g`/`--groups`: the groups installed packages belong to, `pacman -Qg`.
 ///
 /// With `names` given, prints each named group's installed members. With none, prints every
-/// group name at least one installed package belongs to — unless `with_members` asks for each
-/// group's members as well, which is what `pacman -Qg` alone prints. A named group nothing
+/// group name at least one installed package belongs to. The exception is `with_members`,
+/// which asks for each group's members as well, and is what `pacman -Qg` alone prints. A named
+/// group nothing
 /// installed belongs to is reported to stderr, and makes the exit code a failure.
 ///
 /// Forces a `desc` read per installed package, the same caveat as [`explicit`]. A package
@@ -272,12 +273,12 @@ pub fn groups(
 
 /// `piko list -g --repos`/`--repo <NAME>`: the groups `repos` define, `pacman -Sg`.
 ///
-/// The repository counterpart of [`groups`], reading the same three forms: named groups'
-/// members, every group name, or — with `with_members` — every group and its members, which is
-/// `pacman -Sgg`. A named group no repository defines is reported to stderr, and makes the
-/// exit code a failure.
+/// The repository counterpart of [`groups`], reading the same three forms. Those are named
+/// groups' members, every group name, and, with `with_members`, every group and its members.
+/// The last is `pacman -Sgg`. A named group no repository defines is reported to stderr, and
+/// makes the exit code a failure.
 ///
-/// Nothing here can fail to parse: a repository package's `%GROUPS%` is one of the eagerly
+/// Nothing here can fail to parse. A repository package's `%GROUPS%` is one of the eagerly
 /// converted fields, so this opens no deferred `desc`.
 pub fn repo_groups<'a>(
     repos: impl IntoIterator<Item = &'a RepoDatabase>,
@@ -319,7 +320,7 @@ pub fn repo_groups<'a>(
 /// Orders a group listing by group, then by package name.
 ///
 /// pacman prints its group cache in database and scan order instead. Sorting is what makes
-/// `piko list -g` reproducible across two runs, and it is already how the group *names* come
+/// `piko list -g` reproducible across two runs. It is also already how the group *names* come
 /// out, since they are collected into a [`BTreeSet`].
 fn sort_group_rows(rows: &mut [Row]) {
     rows.sort_by(|left, right| {
@@ -341,10 +342,10 @@ mod tests {
     /// Runs a listing and returns its exit code with its lines, styling removed and columns
     /// collapsed to single spaces.
     ///
-    /// A test harness captures `print!`, never file descriptor 1, and `console` decides on
-    /// color by testing that descriptor — so a suite run from a terminal styles this output
-    /// and a piped one does not. The subject here is which rows come out, in which order,
-    /// under which group; the colors are [`crate::style`]'s to test.
+    /// A test harness captures `print!`, never file descriptor 1. `console` decides on color
+    /// by testing that descriptor. So a suite run from a terminal styles this output, and a
+    /// piped one does not. The subject here is which rows come out, in which order and under
+    /// which group. The colors are [`crate::style`]'s to test.
     fn lines(run: impl FnOnce(&mut Vec<u8>) -> ExitCode) -> (ExitCode, Vec<String>) {
         let mut out = Vec::new();
         let code = run(&mut out);

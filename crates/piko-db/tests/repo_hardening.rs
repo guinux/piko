@@ -46,16 +46,17 @@ fn entry(name: &str, version: &str) -> String {
 }
 
 /// The package-count bound exists to stop an allocation, so it must fire *during* the walk.
-/// Checking the assembled list's length after the walk would mean every `desc` in an
-/// oversized archive was already decompressed and parsed — the exact cost the bound exists
-/// to prevent. This is proven the same way as `walk_matching`'s early stop: a total inflated
-/// limit the whole archive genuinely cannot satisfy, which an aborted walk never reaches.
+/// Checking the assembled list's length after the walk would decompress and parse every `desc`
+/// in an oversized archive first. That is the exact cost the bound exists to prevent.
+///
+/// This is proven the same way as `walk_matching`'s early stop. It uses a total inflated limit
+/// the whole archive genuinely cannot satisfy, which an aborted walk never reaches.
 #[test]
 fn an_archive_with_too_many_packages_aborts_before_parsing_all_of_them() {
     let fixture = RepoFixture::new();
 
     // Ten packages, each `desc` padded so that reading all of them must exceed
-    // `repo_inflated_bytes` — but reading only the first few need not.
+    // `repo_inflated_bytes`. Reading only the first few need not.
     let descs: Vec<(String, String)> = (0..10)
         .map(|index| {
             let name = format!("pkg{index}");
@@ -257,10 +258,10 @@ fn a_targeted_file_lookup_is_also_bounded_by_the_inflated_limit() {
     );
 }
 
-/// Every `RepoPackage` a `RepoDatabase` produces shares one `Arc<FilesSource>`. A package
-/// from a *different* database must never be resolved against it — that would silently
-/// serve one repository's file list under another's name. That is exactly what keying
-/// `FilesArena` by name and version exists to prevent, one layer down.
+/// Every `RepoPackage` a `RepoDatabase` produces shares one `Arc<FilesSource>`. A package from
+/// a *different* database must never be resolved against it. Doing so would silently serve one
+/// repository's file list under another's name. That is exactly what keying `FilesArena` by
+/// name and version exists to prevent, one layer down.
 #[test]
 fn file_lists_rejects_a_package_that_did_not_come_from_this_database() {
     let fixture = RepoFixture::new();
@@ -291,10 +292,9 @@ fn file_lists_rejects_a_package_that_did_not_come_from_this_database() {
     assert!(matches!(&*err, Error::ForeignPackage { .. }), "got {err:?}");
 }
 
-/// The property the whole `FilesArena` module exists for: `.db` and `.files` are refreshed
-/// independently by pacman and routinely disagree about which build is current — measured at
-/// 12 of `core`'s 296 real packages. Serving the wrong build's paths must never happen
-/// silently.
+/// The property the whole `FilesArena` module exists for. pacman refreshes `.db` and `.files`
+/// independently, and they routinely disagree about which build is current. 12 of `core`'s 296
+/// real packages disagree. Serving the wrong build's paths must never happen silently.
 mod files_version_skew {
     use super::{RepoDatabase, RepoFixture, RepoName, RepoOpenOptions, desc_for, entry};
     use piko_db::{Error, fixture::MINIMAL_REPO_FILES};
@@ -358,8 +358,8 @@ mod files_version_skew {
     /// The expensive part — decompressing `.files` — is shared and cached (see
     /// `FilesSource::arena`, backed by `Lazy`). The skew check itself is a cheap lookup
     /// against that cached arena. It is deliberately recomputed on each call rather than
-    /// memoized, so this test checks that the reported content stays consistent, not that
-    /// the same `Arc` is handed back.
+    /// memoized. So this test checks that the reported content stays consistent, not that the
+    /// same `Arc` is handed back.
     #[test]
     fn the_skew_error_is_consistent_across_repeated_calls() {
         let fixture = RepoFixture::new();

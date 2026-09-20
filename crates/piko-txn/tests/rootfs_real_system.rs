@@ -75,9 +75,10 @@ fn every_installed_path_is_accepted() {
 /// No real package path may resolve through a symlinked directory on this system.
 ///
 /// This is the rule with a genuine chance of being wrong. `/bin`, `/lib`, `/sbin`, and
-/// `/lib64` are symlinks into `usr/` on any modern Arch install. If any package owned a path
-/// beginning with one of them, refusing to descend through a symlink would make that package
-/// impossible to extract. Measuring says none do: every package addresses `usr/` directly.
+/// `/lib64` are symlinks into `usr/` on any modern Arch install. Say a package owned a path
+/// beginning with one of them. Refusing to descend through a symlink would then make that
+/// package impossible to extract. Measuring says none do. Every package addresses `usr/`
+/// directly.
 /// That is a fact about how Arch packages are built, not a theorem, so this test checks it
 /// rather than assuming it.
 #[test]

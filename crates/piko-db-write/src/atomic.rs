@@ -6,14 +6,15 @@
 //! it replaces the live one**. This requires the file to exist on disk, under a name the verifier
 //! can check, while the destination stays untouched.
 //!
-//! [`AtomicFile`] provides this. It streams into a temporary beside the destination, exposes
-//! that path through [`AtomicFile::path`] for inspection, and renames it over the target only
-//! when [`AtomicFile::commit`] runs. Dropping it without committing removes the temporary, so
+//! [`AtomicFile`] provides this. It streams into a temporary beside the destination, and
+//! exposes that path through [`AtomicFile::path`] for inspection. It renames the temporary
+//! over the target only when [`AtomicFile::commit`] runs. Dropping it without committing
+//! removes the temporary, so
 //! a failed or rejected download leaves nothing behind.
 //!
-//! The durability sequence matches [`crate::LocalDbWriter`]'s, for the same reason: fsync the data
-//! before the rename. Otherwise a crash can make the rename durable while the contents are not,
-//! leaving an empty file where a good one used to be.
+//! The durability sequence matches [`crate::LocalDbWriter`]'s, for the same reason. It fsyncs
+//! the data before the rename. Otherwise a crash can make the rename durable while the
+//! contents are not, leaving an empty file where a good one belongs.
 
 use std::{
     fs::File,
@@ -30,12 +31,12 @@ use crate::error::{Error, IoAction, Result};
 ///
 /// The destination resists symlink games by construction: `rename` replaces a symlink rather
 /// than resolving it. The *temporary* does not get this protection for free. The obvious
-/// `create(true).truncate(true)` follows a final symlink, so a `core.db.new` planted as a
-/// symlink to `/etc/passwd` would be truncated and filled by a process that typically runs
-/// as root.
+/// `create(true).truncate(true)` follows a final symlink. A `core.db.new` planted as a symlink
+/// to `/etc/passwd` would then be truncated and filled by a process that typically runs as
+/// root.
 ///
 /// This type reuses `local`'s `create_temp`, which opens `O_CREAT | O_EXCL | O_NOFOLLOW`. When
-/// it finds something already there, it **unlinks it and retries exactly once**, using
+/// it finds something already there, it **unlinks it and retries exactly once**. It uses
 /// `remove_file`, which removes a symlink rather than resolving it. A planted temporary is
 /// discarded rather than followed, and a leftover from a crashed write does not wedge the path
 /// permanently.

@@ -1,12 +1,14 @@
 //! Version-agnostic access to a repository `desc` entry, mirroring [`crate::desc_compat`].
 //!
 //! The same two problems solved for the local database's `desc` format recur here.
-//! `alpm-repo-db` models `desc` as an enum over `alpm-repo-descv1` and `alpm-repo-descv2`
-//! (75 v1 to 15 106 v2 entries measured across the real `core` and `extra` repositories). It
-//! also derives `#[serde(deny_unknown_fields)]`, so one future `%KEY%` would make an entire
-//! repository unreadable rather than just one package. [`RepoDescView`] flattens the schema
-//! split. [`crate::desc_compat::filter_unknown_sections`] (reused, not duplicated — see its doc
-//! comment) handles the second problem the same way milestone 1 does.
+//! `alpm-repo-db` models `desc` as an enum over `alpm-repo-descv1` and `alpm-repo-descv2`.
+//! Measured across the real `core` and `extra` repositories, that is 75 v1 entries to 15 106
+//! v2 ones. It also derives `#[serde(deny_unknown_fields)]`, so one future `%KEY%` would make
+//! an entire repository unreadable rather than just one package.
+//!
+//! [`RepoDescView`] flattens the schema split.
+//! [`crate::desc_compat::filter_unknown_sections`] handles the second problem the same way the
+//! local database does. It is reused rather than duplicated; see its own doc comment.
 
 use alpm_repo_db::desc::{RepoDescFile, SectionKeyword};
 use alpm_types::{
@@ -72,9 +74,9 @@ impl<'a> RepoDescView<'a> {
 
     /// The underlying schema-tagged value, for callers that need the distinction.
     ///
-    /// Its `url` field is always `None`: `%URL%` is blanked before the upstream parser sees
+    /// Its `url` field is always `None`. `%URL%` is blanked before the upstream parser sees
     /// the text, so [`RepoDescView::url`] and [`RepoDescView::url_raw`] are the only sources
-    /// for it. Its `packager` field can likewise hold a substitute — read
+    /// for it. Its `packager` field can likewise hold a substitute. Read
     /// [`RepoDescView::packager`] and [`RepoDescView::packager_raw`] rather than it.
     #[must_use]
     pub const fn as_inner(&self) -> &'a RepoDescFile {
@@ -416,8 +418,8 @@ Foobar McFooface <foobar@mcfooface.org>
         assert_eq!(RepoDescView::new(&desc, &TakenFields::default()).name().as_ref(), "foo");
     }
 
-    /// The repository side of the `%URL%` split: a `%URL%` `url::Url` refuses must not cost
-    /// the entry its `%FILENAME%`, which is what an install downloads.
+    /// The repository side of the `%URL%` split. A `%URL%` that `url::Url` refuses must not
+    /// cost the entry its `%FILENAME%`, which is what an install downloads.
     #[test]
     fn an_unparsable_url_leaves_the_file_name_readable() {
         let text = MINIMAL_DESC_V1.replace("https://example.org/", "www.example.org");

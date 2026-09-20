@@ -91,10 +91,10 @@ impl Verdict {
     /// Whether the driver should skip the entries nested under this path.
     ///
     /// libalpm advances its loop cursor past a directory's contents in three of the six
-    /// branches (`conflict.c:542`, `:564`, `:602`), and only when the package ships the path
-    /// as a directory. In each case, the reason the directory is acceptable also covers
-    /// everything inside it. Checking those separately would report conflicts the resolution
-    /// has already answered.
+    /// branches (`conflict.c:542`, `:564`, `:602`). It does so only when the package ships
+    /// the path as a directory. In each case, the reason the directory is acceptable also
+    /// covers everything inside it. Checking those separately would report conflicts the
+    /// resolution has already answered.
     #[must_use]
     pub const fn skips_directory_contents(&self) -> bool {
         matches!(
@@ -155,8 +155,8 @@ pub struct FilesystemContext<'a> {
 
 /// Decides whether an existing path blocks the installation.
 ///
-/// The order matches libalpm's and is observable. A path can satisfy several of these rules at
-/// once, and which one is reported determines whether the driver skips ahead and whether it
+/// The order matches libalpm's and is observable. A path can satisfy several of these rules
+/// at once. Which one is reported decides whether the driver skips ahead, and whether it
 /// records a `skip_remove`. Do not reorder them to read more nicely.
 #[must_use]
 pub fn decide(context: &FilesystemContext<'_>) -> Verdict {
@@ -262,8 +262,8 @@ mod tests {
     }
 
     /// A plain file where the package wants a directory is a conflict. This is the case
-    /// libalpm's `ENOTDIR` hides from itself. Nothing owns the file, nothing removes it, and
-    /// extraction would replace it (case 4 of the extraction matrix), so it must be reported
+    /// libalpm's `ENOTDIR` hides from itself. Nothing owns the file, and nothing removes it.
+    /// Extraction would replace it, case 4 of the extraction matrix. So it must be reported
     /// here.
     #[test]
     fn a_packaged_directory_over_a_plain_file_is_a_conflict() {

@@ -1,9 +1,8 @@
 //! Reading a `.PKGINFO`, with the one compatibility shim its typed parse needs.
 //!
 //! `alpm-pkginfo` converts every field or none, exactly as the two `desc` parsers do. So the
-//! same value that costs a `desc` its every section costs a package file its every field —
-//! and here the cost is worse: a package whose `.PKGINFO` does not parse cannot be installed
-//! at all.
+//! same value that costs a `desc` its every section costs a package file its every field. The
+//! cost is worse here. A package whose `.PKGINFO` does not parse cannot be installed at all.
 //!
 //! The value is `packager`. `alpm_types::Packager` demands a `<email>`, and makepkg writes
 //! [`UNKNOWN_PACKAGER`] whenever `PACKAGER` is unset in `makepkg.conf` — which is how it
@@ -34,8 +33,8 @@ fn is_unknown_packager(line: &str) -> bool {
 /// Parses a `.PKGINFO`, accepting makepkg's default packager.
 ///
 /// Only [`UNKNOWN_PACKAGER`] is accepted. Every other value `alpm_types::Packager` refuses
-/// still fails the parse, because it is a defect in that package rather than a documented
-/// default of the tool that built it.
+/// still fails the parse. Such a value is a defect in that package, not a documented default
+/// of the tool that built it.
 ///
 /// # Errors
 ///
@@ -46,10 +45,11 @@ pub fn parse(raw: &str) -> Result<PackageInfo, alpm_pkginfo::Error> {
 
 /// Rewrites a `packager` line holding [`UNKNOWN_PACKAGER`] into one that parses.
 ///
-/// `.PKGINFO` is `key = value` per line, with `#` comments, so the value is matched against
-/// the whole of what follows `packager = ` and no other packager is touched. Every matching
-/// line is rewritten, not only the first: unlike the `desc` case, this hides nothing, because
-/// a duplicated `packager` line stays duplicated for `alpm-pkginfo` to report.
+/// `.PKGINFO` is `key = value` per line, with `#` comments. So the value is matched against
+/// the whole of what follows `packager = `, and no other packager is touched.
+///
+/// Every matching line is rewritten, not only the first. Unlike the `desc` case, this hides
+/// nothing. A duplicated `packager` line stays duplicated for `alpm-pkginfo` to report.
 ///
 /// Borrows when there is nothing to rewrite, which is every package built by someone who set
 /// the variable.

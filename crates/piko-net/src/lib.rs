@@ -104,4 +104,4 @@ pub use cancel::Cancel;
 pub use concurrency::Concurrency;
 pub use error::{Error, Result};
 pub use progress::{Event, Kind};
-pub use refresh::{Outcome, PackageFetch, Refresher, RepoRefresh, refresh};
+pub use refresh::{DatabaseKind, Outcome, PackageFetch, Refresher, RepoRefresh, refresh};

@@ -2,12 +2,12 @@
 //!
 //! [`Transaction<Staged>`](super::Transaction)'s `commit` decides *what* happens and in what
 //! order. This module does one package's worth of it. This is where the typestate ends and the
-//! work begins: everything here runs with the lock already held, the journal already written,
+//! work begins. Everything here runs with the lock already held, the journal already written,
 //! and the plan already verified. Nothing here re-checks any of that.
 //!
-//! The scriptlet ordering, the fake removal an upgrade performs before extracting anything, and
-//! what a removal does with `%BACKUP%` are all libalpm's rules. Each is cited at the call site
-//! that implements it.
+//! Three of these rules are libalpm's. They are the scriptlet ordering, the fake removal an
+//! upgrade performs before extracting, and what a removal does with `%BACKUP%`. Each is cited
+//! at the call site that implements it.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -141,8 +141,8 @@ pub(super) fn install_step(
     let writer = LocalDbWriter::new(step.dbpath, step.lock, Limits::default())?;
     // The entry being replaced is the one installed **under this name**, whatever its version.
     // Removing only an entry with the *new* name and version leaves `foo-1.0.0-1` and
-    // `foo-2.0.0-1` side by side after an upgrade, and the reader then reports the older of
-    // the two.
+    // `foo-2.0.0-1` side by side after an upgrade. The reader then reports the older of the
+    // two.
     let previous = step.package.replaces.as_ref().map(|old| &old.entry);
     writer.replace_entry(previous, entry)?;
 
@@ -150,8 +150,8 @@ pub(super) fn install_step(
     // `write_record`/`write_raw` each pay an `fsync` of the data *and* of the directory. One
     // `EntryWrite` pays one directory `fsync` for the whole entry and overlaps the data ones.
     // Measured: 260 ms -> 113 ms for a 42-package upgrade on btrfs (`docs/perf-study.md`
-    // §4.2). It also gives a stronger crash-safety property: no member of this entry becomes
-    // visible until every member's data is durable, so an interruption cannot leave a new
+    // §4.2). It also gives a stronger crash-safety property. No member of this entry becomes
+    // visible until every member's data is durable. So an interruption cannot leave a new
     // `desc` beside an old `files`.
     let mut staged = writer.entry_write(entry);
     staged.record(&record::desc(&step.package.info, &step.package.raw, &facts))?;
@@ -347,8 +347,8 @@ fn remove_files(root: &RootDir, removal: &Removal<'_>) -> (usize, Vec<PathBuf>) 
     // Reverse order, so a directory is considered only after everything inside it.
     for path in removal.files.iter().rev() {
         // Two spellings exist, and the difference is load-bearing. libalpm asks the
-        // replacement's file list about the path *with* its trailing slash (`remove.c:487`),
-        // and everything else about the path without it (`remove.c:453`).
+        // replacement's file list about the path *with* its trailing slash (`remove.c:487`).
+        // It asks everything else about the path without it (`remove.c:453`).
         let spelled = path.to_string_lossy();
         let trimmed = trim_trailing_slash(path);
         let Ok(resolved) = root.resolve_parent(&trimmed) else { continue };

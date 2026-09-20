@@ -1,22 +1,22 @@
 //! A candidate that comes from a package file rather than from a database.
 //!
 //! `pacman -U foo.pkg.tar.zst` names a package no repository carries. It must still take part
-//! in solving: its own dependencies are resolved from the configured repositories, it can
-//! satisfy another package's dependency through `%PROVIDES%`, and it conflicts and replaces
-//! like any other candidate.
+//! in solving. Its own dependencies resolve from the configured repositories. It can satisfy
+//! another package's dependency through `%PROVIDES%`. And it conflicts and replaces like any
+//! other candidate.
 //!
 //! # Why this type holds data rather than reading it
 //!
 //! `piko-db` opens databases. It does not open package archives, and this module does not
 //! change that: [`FilePackage`] is built from values a caller already has. The archive walk
 //! that produces them lives in `piko-txn`, which owns extraction, bounded archive reading,
-//! and `.PKGINFO` parsing. Pulling `alpm-pkginfo` in here to save one constructor would put a
-//! second archive door in the crate whose whole discipline is that there is one.
+//! and `.PKGINFO` parsing. This crate's whole discipline is that it has one archive door.
+//! Pulling `alpm-pkginfo` in here to save one constructor would add a second.
 //!
 //! The values themselves are `alpm-types`' own, identical to what a `desc` yields. A
 //! `.PKGINFO`'s `depend`, `provides`, `conflict`, `replaces` and `group` fields are already
-//! `Vec<RelationOrSoname>`, `Vec<PackageRelation>` and `Vec<Group>`, so nothing is converted
-//! on the way in.
+//! `Vec<RelationOrSoname>`, `Vec<PackageRelation>` and `Vec<Group>`. Nothing is converted on
+//! the way in.
 
 use alpm_types::{FullVersion, Group, Name, PackageFileName, PackageRelation, RelationOrSoname};
 
@@ -26,10 +26,9 @@ use crate::eager::Relations;
 /// One package file offered to [`Universe::build`](crate::solve::Universe::build) as a
 /// candidate.
 ///
-/// Name and version come from an [`EntryName`], the same source of truth every other
-/// candidate uses. A package file's `.PKGINFO` is metadata, and metadata is advisory
-/// everywhere else in piko; routing it through `EntryName` keeps one identity rule rather
-/// than two.
+/// Name and version come from an [`EntryName`], the same source of truth every other candidate
+/// uses. A package file's `.PKGINFO` is metadata, and metadata is advisory everywhere else in
+/// piko. Routing it through `EntryName` keeps one identity rule rather than two.
 #[derive(Debug)]
 pub struct FilePackage {
     entry: EntryName,
@@ -42,9 +41,9 @@ impl FilePackage {
     /// Builds a candidate from the fields a `.PKGINFO` carries.
     ///
     /// `installed_size` is the `.PKGINFO` `size` field, which is `%ISIZE%` under another
-    /// name. There is no compressed size: the file is already on disk, so a plan built from
-    /// this candidate has nothing to download for it (see
-    /// [`Solvable::download_size`](crate::solve::Solvable::download_size)).
+    /// name. There is no compressed size. The file is already on disk, so a plan built from
+    /// this candidate has nothing to download for it. See
+    /// [`Solvable::download_size`](crate::solve::Solvable::download_size).
     #[must_use]
     #[allow(
         clippy::too_many_arguments,

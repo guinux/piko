@@ -1,8 +1,8 @@
 //! The `piko-key` command line interface: pacman-key's role for piko.
 //!
-//! Bootstrapping and administering a keyring is a distinct concern from verifying against one
-//! — see `piko-sig-write`'s crate doc for why that split runs one way, and why every real
-//! operation here happens through GPGME rather than a `gpg` subprocess.
+//! Bootstrapping and administering a keyring is a distinct concern from verifying against
+//! one. See `piko-sig-write`'s crate doc for why that split runs one way. It also says why
+//! every real operation here happens through GPGME rather than a `gpg` subprocess.
 
 mod cli;
 mod commands;
@@ -52,12 +52,14 @@ fn run(cli: &Cli, out: &mut impl std::io::Write) -> ExitCode {
     }
 }
 
-/// Resolves the effective GnuPG home: `--gpgdir` if given, else `GPGDir` from the parsed
-/// `--config`, else pacman's own default with a warning if the config cannot be read.
+/// Resolves the effective GnuPG home, in three steps. It takes `--gpgdir` if given. Otherwise
+/// it takes `GPGDir` from the parsed `--config`. Failing that it takes pacman's own default,
+/// with a warning if the config cannot be read.
 ///
-/// The same fallback chain `crates/piko/src/context.rs`'s `signing_policy` already implements
-/// — read directly here rather than shared, since it is six lines and this is only the second
-/// call site; worth factoring into `piko_db::config` if a third binary ever needs it.
+/// `crates/piko/src/context.rs`'s `signing_policy` already implements the same fallback chain.
+/// It is written out here rather than shared, since it is six lines and this is only the
+/// second call site. A third binary needing it would make it worth factoring into
+/// `piko_db::config`.
 fn resolve_gpgdir(cli: &Cli) -> PathBuf {
     if let Some(gpgdir) = &cli.gpgdir {
         return gpgdir.clone();

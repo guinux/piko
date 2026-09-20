@@ -9,9 +9,9 @@
 //! - **Quotes are word-internal, not word-forming.** `a"b c"d` is the single word `ab cd`, not
 //!   three words. The scan looks for the next unquoted whitespace. A quoted run is stepped
 //!   over as part of whatever word it sits in.
-//! - **Both `'` and `"` quote, identically.** There is no shell-style "single quotes are
-//!   literal, double quotes expand" distinction, because nothing is expanded at all: no
-//!   variables, no globs, no tilde. A hook that wants any of those runs a shell — every
+//! - **Both `'` and `"` quote, identically.** Nothing is expanded at all, so there is no
+//!   shell-style "single quotes are literal, double quotes expand" distinction. No
+//!   variables, no globs, no tilde. A hook that wants any of those runs a shell. Every
 //!   `Exec = /bin/sh -c '…'` on a real system does exactly that.
 //! - **Inside a quoted run, `\` escapes only that run's quote character.** Everywhere else a
 //!   backslash is an ordinary character. `C:\path` needs no doubling.
@@ -41,7 +41,7 @@ pub enum SplitError {
 /// # Errors
 ///
 /// [`SplitError`] if a quote is left open, or if the value contains no word. libalpm treats a
-/// missing `Exec` and an unusable one the same way: it refuses the hook file rather than
+/// missing `Exec` and an unusable one the same way. It refuses the hook file rather than
 /// running something it had to guess at.
 pub fn split(value: &str) -> Result<Vec<OsString>, SplitError> {
     let characters: Vec<char> = value.chars().collect();

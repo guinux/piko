@@ -1,9 +1,9 @@
 //! Security properties of the database reader, exercised through the public API.
 //!
-//! These test the security claims: bounded reads, no symlink traversal,
-//! no blocking on a non-regular file, and a bounded entry count. They are written against a
-//! real filesystem rather than unit-tested internals, because the properties are about what
-//! actually happens when the process opens a hostile path.
+//! These test four security claims: bounded reads, no symlink traversal, no blocking on a
+//! non-regular file, and a bounded entry count. They run against a real filesystem rather
+//! than unit-tested internals. The properties are about what actually happens when the
+//! process opens a hostile path.
 
 #![allow(
     clippy::unwrap_used,
@@ -280,7 +280,7 @@ fn a_flood_of_unusable_entries_is_bounded_without_failing_the_open() {
 }
 
 /// `max_entries` counts packages, not directory entries. A database at exactly the limit must
-/// open however many non-package entries sit beside it — `ALPM_DB_VERSION` always does — and
+/// open however many non-package entries sit beside it, and `ALPM_DB_VERSION` always does. It
 /// must not depend on the order the filesystem happens to enumerate them in.
 #[test]
 fn non_package_entries_never_consume_the_package_budget() {

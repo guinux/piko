@@ -1,10 +1,10 @@
 //! Error types for the commit engine.
 //!
 //! This is deliberately a separate enum from [`piko_db::Error`], not an extension of it. The
-//! two crates fail in different ways for different reasons: a reader fails to *understand*
-//! something, a commit engine fails to *change* something. A caller that wants to distinguish
-//! "the database is corrupt" from "the cache is missing a package" should not have to match on
-//! variants of one type to do it.
+//! two crates fail in different ways for different reasons. A reader fails to *understand*
+//! something. A commit engine fails to *change* something. A caller must be able to tell "the
+//! database is corrupt" from "the cache is missing a package". Matching on variants of one
+//! type should not be what it takes.
 
 use std::{fmt, path::PathBuf};
 
@@ -92,8 +92,8 @@ pub enum Error {
     ///
     /// The message names every directory that was searched, and every candidate that was
     /// found but rejected. "package not found in cache" without those details turns into a
-    /// support thread. A cache entry that is a dangling symlink, or a directory with the right
-    /// name, looks exactly like an absent file to the user.
+    /// support thread. To the user, a cache entry that is a dangling symlink looks exactly
+    /// like an absent file. So does a directory with the right name.
     #[error(
         "{file_name} is not available from any configured source (searched {}{})",
         searched.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
@@ -169,8 +169,8 @@ pub enum Error {
     /// An archive member cannot be extracted, and the transaction must stop.
     ///
     /// Currently this is only the "a directory is in the way of a file" case. libalpm also
-    /// treats that as fatal (`add.c:290`) rather than removing the directory: it may hold
-    /// files belonging to another package, or to nobody.
+    /// treats that as fatal (`add.c:290`) rather than removing the directory. That directory
+    /// may hold files belonging to another package, or to nobody.
     #[error("cannot extract {}: {reason:?}", path.display())]
     ExtractionRefused {
         /// The member's path as the archive spells it.
@@ -207,9 +207,10 @@ pub enum Error {
     /// The entry is there and readable, and its *contents* do not parse.
     ///
     /// Removal must fail loudly here rather than proceeding on what it managed to read. A
-    /// package's `files` is the only record of what it owns. An unreadable one means the
-    /// removal would delete nothing, report success, and drop the database entry — orphaning
-    /// every file the package installed, with nothing left to say who owned them. That is
+    /// package's `files` is the only record of what it owns. With an unreadable one, the
+    /// removal would delete nothing, report success, and drop the database entry. That
+    /// orphans every file the package installed, with nothing left to say who owned them.
+    /// That is
     /// principle 3 ("cached failures, not cached emptiness") applied where it matters most.
     #[error("the installed entry {entry} cannot be read: {reason}")]
     UnreadableEntry {
@@ -263,9 +264,9 @@ pub enum Error {
 
     /// A package's signature does not satisfy the configured `SigLevel`.
     ///
-    /// The package is intact as far as piko knows; what failed is the *policy*. This is
+    /// The package is intact as far as piko knows. What failed is the *policy*. This is
     /// distinct from [`Error::SignatureUncheckable`] because the two call for opposite
-    /// responses: this one means do not install the package, that one means fix the keyring.
+    /// responses. This one means do not install the package. That one means fix the keyring.
     #[error("{}: {reason}", package.display())]
     SignatureRejected {
         /// The package file that was refused.
@@ -295,12 +296,12 @@ pub enum Error {
     /// The local database could not be opened.
     ///
     /// This is boxed, and that is not incidental. `piko_db::Error` is 104 bytes against this
-    /// enum's 112 (both measured), so nesting it inline would make every other variant pay for
+    /// enum's 112, both measured. Nesting it inline would make every other variant pay for
     /// this one. That is the trade [`Error::InvalidEntryName`] documents avoiding by
-    /// stringifying. A box costs one pointer and keeps the error whole and typed. Stringifying
-    /// with `to_string()` instead would flatten it into an `Error::Io` carrying an opaque
-    /// string, unrecoverable at any depth by a caller that wanted to know *which* `piko_db`
-    /// failure it was.
+    /// stringifying. A box costs one pointer and keeps the error whole and typed.
+    /// Stringifying with `to_string()` would flatten it into an `Error::Io` carrying an
+    /// opaque string. A caller wanting to know *which* `piko_db` failure it was could not
+    /// recover that at any depth.
     ///
     /// This uses `Box` rather than the `Arc` [`Error::RepositoryPackageUnreadable`] uses. That
     /// one comes out of a `piko_db` lazy loader, which caches its failure behind an `Arc` and
@@ -348,8 +349,8 @@ pub enum Error {
     /// The kernel's mount table cannot be read, or describes a different system.
     ///
     /// Only the disk-space check needs it, so this is reachable only under `CheckSpace`.
-    /// libalpm returns a bare `-1` here without setting an error code at all, which leaves its
-    /// caller reporting "unexpected error"; the path and the reason are named instead.
+    /// libalpm returns a bare `-1` here without setting an error code at all. That leaves its
+    /// caller reporting "unexpected error". piko names the path and the reason instead.
     #[error("the mount table at {} cannot be used: {reason}", path.display())]
     MountTableUnreadable {
         /// The file that was read, or the path that could not be placed on any filesystem.
@@ -417,8 +418,8 @@ pub enum Error {
     /// A plan named a package whose name and version cannot form a valid entry name.
     ///
     /// The reason is stringified rather than carrying [`piko_db::EntryNameError`] itself. This
-    /// is the same trade [`Error::SignatureRejected`] makes, and for the same reason: nesting
-    /// it would make every variant of this enum pay for that one's size.
+    /// is the same trade [`Error::SignatureRejected`] makes, and for the same reason.
+    /// Nesting it would make every variant of this enum pay for that one's size.
     #[error("{name} has no usable entry name: {reason}")]
     InvalidEntryName {
         /// The package name.
@@ -430,8 +431,9 @@ pub enum Error {
     /// A package file was built for an architecture this machine is not configured to run.
     ///
     /// libalpm's `check_arch` (`trans.c:69`), which applies to every package a transaction
-    /// adds. It has nothing to say about a repository package — a `Server` URL names the
-    /// architecture it serves — so piko raises it only for a file named on the command line.
+    /// adds. It has nothing to say about a repository package, because a `Server` URL names
+    /// the architecture it serves. So piko raises it only for a file named on the command
+    /// line.
     #[error(
         "not built for {}: {}",
         configured.join(" or "),
@@ -447,8 +449,8 @@ pub enum Error {
     /// Two command-line targets name the same package.
     ///
     /// `ALPM_ERR_TRANS_DUP_TARGET` (`add.c:49`) and `ALPM_ERR_TRANS_DUP_FILENAME`
-    /// (`sync.c:470`), which are one question for a file target: its package name and its
-    /// file name are the same string.
+    /// (`sync.c:470`) are one question for a file target. Its package name and its file name
+    /// are the same string.
     #[error(
         "{package} is named twice: {} and {}",
         first.display(),
@@ -489,6 +491,13 @@ pub enum Error {
         #[source]
         source: piko_sig::Error,
     },
+
+    /// An owner query was given an empty path.
+    ///
+    /// The one way [`crate::owner::Owners::query`] can fail. Every other outcome, including a
+    /// path outside the installation root, is an answer that names no owner.
+    #[error("an owner query needs a path, and was given an empty string")]
+    EmptyOwnerTarget,
 }
 
 impl Error {

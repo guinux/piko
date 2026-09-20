@@ -1,12 +1,13 @@
 //! Error types for the local database writer.
 //!
 //! This is a separate enum from [`piko_db::Error`], for the same reason `piko-txn` keeps its
-//! own: a reader fails to *understand* something, a writer fails to *change* something. A
-//! caller distinguishing "the database is corrupt" from "another package manager holds the
-//! lock" should not have to match on variants of one type to do it.
+//! own. A reader fails to *understand* something. A writer fails to *change* something. A
+//! caller must be able to tell "the database is corrupt" from "another package manager holds
+//! the lock". Matching on variants of one type should not be what it takes.
 //!
-//! Reads performed on the way to a write — validating `ALPM_DB_VERSION`, loading a `desc` to
-//! rewrite one section of it — go through `piko-db` and arrive here as [`Error::Read`].
+//! Some reads happen on the way to a write: validating `ALPM_DB_VERSION`, or loading a `desc`
+//! to rewrite one section of it. Those go through `piko-db` and arrive here as
+//! [`Error::Read`].
 
 use std::{fmt, path::PathBuf};
 
@@ -90,7 +91,7 @@ pub enum Error {
 
     /// A writer was handed a lock belonging to a different database path.
     ///
-    /// This is checked rather than assumed because the failure it prevents is silent: the
+    /// This is checked rather than assumed, because the failure it prevents is silent. The
     /// write would succeed against an unlocked database, while a lock is dutifully held over
     /// an unrelated one.
     #[error("the lock at {} does not belong to the database at {}", lock.display(), dbpath.display())]
@@ -103,7 +104,7 @@ pub enum Error {
 
     /// A `desc` or `files` file is not a well-formed list of `%SECTION%` blocks.
     ///
-    /// Only the writer produces this. The reader is deliberately more permissive: it tolerates
+    /// Only the writer produces this. The reader is deliberately more permissive. It tolerates
     /// sections it does not recognize, so a database written by a newer pacman stays readable.
     /// A *rewrite* cannot be permissive, because anything it fails to represent is something
     /// it would drop on the way back out.

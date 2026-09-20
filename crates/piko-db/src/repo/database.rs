@@ -31,10 +31,10 @@ pub type FileListEntry = (Name, std::result::Result<Vec<PathBuf>, SharedError>);
 
 /// Which repository database variant was opened.
 ///
-/// Per [alpm-repo-db], _default_ carries only `desc` entries. _Default with files_ carries
-/// `desc` **and** `files`. The [`RepoDatabase`] variant follows from what the archive
-/// actually contains, never from the file name — the archive is the only thing that cannot
-/// be wrong about its own contents.
+/// Per [alpm-repo-db], _default_ carries only `desc` entries. _Default with files_ carries `desc`
+/// **and** `files`. The [`RepoDatabase`] variant follows from what the archive actually contains,
+/// never from the file name. The archive is the only thing that cannot be wrong about its own
+/// contents.
 ///
 /// [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,8 +48,8 @@ pub enum Variant {
 
 /// Something suspicious found while reading a repository archive, which did not stop the open.
 ///
-/// Mirrors [`crate::Diagnostic`] for the same reason: it is returned, never logged, so the caller
-/// decides how — and whether — to present it.
+/// Mirrors [`crate::Diagnostic`] for the same reason. It is returned, never logged, so the caller
+/// decides how to present it, and whether to.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RepoDiagnostic {
@@ -92,9 +92,9 @@ pub enum RepoDiagnostic {
         /// The underlying parse failure.
         ///
         /// A [`super::DescFieldError`], not an `alpm_repo_db::Error`. The full typed parse is
-        /// deferred to [`super::RepoPackage::desc`], so the only `desc` failure that can still
-        /// drop a package at open time is one in a field read eagerly. A failure in a deferred
-        /// section surfaces as [`Error::RepoDescUnparsable`] on access instead.
+        /// deferred to [`super::RepoPackage::desc`]. So the only `desc` failure that can still drop
+        /// a package at open time is one in a field read eagerly. A failure in a deferred section
+        /// surfaces as [`Error::RepoDescUnparsable`] on access instead.
         source: crate::eager::DescFieldError,
     },
     /// A `files` member could not be parsed.
@@ -118,8 +118,8 @@ pub enum RepoDiagnostic {
     /// Two entry directories in this archive claim the same package name.
     ///
     /// Only the first, in scan order, is kept. This mirrors
-    /// [`crate::Diagnostic::DuplicateEntry`], except the order here is the archive's own
-    /// member order — a tar stream cannot be sorted before it is fully read.
+    /// [`crate::Diagnostic::DuplicateEntry`], with one difference. The order here is the archive's
+    /// own member order, because a tar stream cannot be sorted before it is fully read.
     DuplicatePackage {
         /// The package name claimed twice.
         name: Name,
@@ -204,11 +204,11 @@ impl RepoOpenOptions {
 
 /// An open repository (sync) database.
 ///
-/// Opening decompresses and walks the archive **once**, parsing every `desc` on the way
-/// through. A gzip-over-tar stream allows no random access, so enumerating packages at all
-/// already costs a full decompression, and parsing each `desc` while already there costs
-/// little more. File lists are the exception. See [`RepoPackage::file_list`] for why they
-/// are loaded lazily and shared, rather than eagerly like `desc`.
+/// Opening decompresses and walks the archive **once**, parsing every `desc` on the way through. A
+/// gzip-over-tar stream allows no random access. So enumerating packages at all already costs a
+/// full decompression, and parsing each `desc` while already there costs little more. File lists
+/// are the exception. See [`RepoPackage::file_list`] for why they are loaded lazily and shared,
+/// rather than eagerly like `desc`.
 ///
 /// The package set is immutable and the type is `Send + Sync`, so a `&RepoDatabase` may be
 /// shared freely across threads.
@@ -231,13 +231,13 @@ pub struct RepoDatabase {
 impl RepoDatabase {
     /// Opens an explicit `.db` or `.files` archive with default [`RepoOpenOptions`].
     ///
-    /// The repository name is derived from the file name itself (`core.db` → `core`). Every
-    /// real repository archive is named exactly `<repo>.db` or `<repo>.files`; the name never
-    /// comes from the archive's own contents, which carry no repository name at all.
+    /// The repository name is derived from the file name itself (`core.db` → `core`). Every real
+    /// repository archive is named exactly `<repo>.db` or `<repo>.files`. The name never comes from
+    /// the archive's own contents, which carry no repository name at all.
     ///
-    /// The [`Variant`] **is** taken from the archive's own contents — see [`Variant`]. If
-    /// `path` is a `.db` archive and a sibling `<repo>.files` sits next to it, that sibling is
-    /// wired up for deferred loading, exactly as [`RepoDatabase::open_repo`] does. So opening
+    /// The [`Variant`] **is** taken from the archive's own contents; see [`Variant`]. Say `path` is
+    /// a `.db` archive and a sibling `<repo>.files` sits next to it. That sibling is then wired up
+    /// for deferred loading, exactly as [`RepoDatabase::open_repo`] does. So opening
     /// `/var/lib/pacman/sync/core.db` directly gets the same lazy file-list behavior as
     /// opening it through a directory and repository name. Only its *presence* is checked at
     /// open time — one stat, not a read. Its contents are read on the first
@@ -277,15 +277,15 @@ impl RepoDatabase {
     ///
     /// If `<repo>.db` exists, this opens it and defers file lists to a sibling
     /// `<repo>.files`. That sibling loads only when [`RepoPackage::file_list`] is actually
-    /// called, and the load is shared across every package. If `<repo>.db` does not exist,
-    /// this falls back to `<repo>.files`, whose single archive already carries both `desc`
-    /// and `files`, so everything is populated in that one pass.
+    /// called, and the load is shared across every package. If `<repo>.db` does not exist, this
+    /// falls back to `<repo>.files`. That single archive already carries both `desc` and `files`, so
+    /// everything is populated in that one pass.
     ///
     /// # Errors
     ///
-    /// As [`RepoDatabase::open_with`], plus — if neither `<repo>.db` nor `<repo>.files`
-    /// exists — that same "file not found" error naming `<repo>.db`, since that is the name
-    /// the caller actually asked to open; `<repo>.files` is only ever an internal fallback.
+    /// As [`RepoDatabase::open_with`]. If neither `<repo>.db` nor `<repo>.files` exists, that same
+    /// "file not found" error names `<repo>.db`. That is the name the caller actually asked to open,
+    /// and `<repo>.files` is only ever an internal fallback.
     pub fn open_repo(dir: impl AsRef<Path>, repo: &RepoName) -> Result<Self> {
         Self::open_repo_with(dir, repo, RepoOpenOptions::new())
     }
@@ -316,10 +316,10 @@ impl RepoDatabase {
         }
 
         // `.db` itself does not exist. Some repositories publish only the combined `.files`
-        // archive, so try that before giving up. If `.files` is missing too, report the
-        // `.db` error rather than this one. `.db` is the name every caller actually asked
-        // for; blaming `.files` (an internal fallback the caller never requested) made a
-        // plain "no such repository" read as if piko needed a file list just to search.
+        // archive, so try that before giving up. If `.files` is missing too, report the `.db`
+        // error rather than this one. `.db` is the name every caller actually asked for.
+        // `.files` is an internal fallback the caller never requested. Blaming it makes a plain
+        // "no such repository" read as if piko needed a file list just to search.
         match Self::open_with(&files_path, options) {
             Ok(database) => Ok(database),
             Err(Error::Io { action: IoAction::Open, source: files_source, .. })
@@ -331,12 +331,12 @@ impl RepoDatabase {
         }
     }
 
-    /// Walks `path` once, building the package list and — if the archive turns out to carry
-    /// `files` members — the shared file-list arena in the same pass.
+    /// Walks `path` once, building the package list. If the archive turns out to carry `files`
+    /// members, it builds the shared file-list arena in the same pass.
     ///
-    /// `deferred_files_path` is the sibling `<repo>.files` to wire up for a lazy load. It is
-    /// only ever set by [`RepoDatabase::open_repo_with`], and only takes effect if `path`
-    /// itself carried no `files` members — that is, it was a plain `.db` archive.
+    /// `deferred_files_path` is the sibling `<repo>.files` to wire up for a lazy load. Only
+    /// [`RepoDatabase::open_repo_with`] ever sets it. It takes effect only if `path` itself carried
+    /// no `files` members, which means it was a plain `.db` archive.
     fn build(
         path: &Path,
         repo: RepoName,
@@ -347,8 +347,8 @@ impl RepoDatabase {
         let mut arena = FilesArena::new();
         let mut saw_files_member = false;
         // Shared, not `&mut`, because `on_item` and `on_skip` are two separate closures that
-        // both need to push diagnostics. They cannot both hold a `&mut Sink` at once, but
-        // they can both hold a `&RefCell<Sink<_>>` and borrow it mutably only for the push.
+        // both need to push diagnostics. They cannot both hold a `&mut Sink` at once. They can
+        // both hold a `&RefCell<Sink<_>>`, and borrow it mutably only for the push.
         let diagnostics = RefCell::new(Sink::new(&options.limits));
 
         archive::walk(
@@ -480,28 +480,28 @@ impl RepoDatabase {
     /// Returns the file list for each of `packages`, touching as little of the `.files`
     /// archive as the requested set allows.
     ///
-    /// Unlike calling [`RepoPackage::file_list`] on every package in a loop, this does not
-    /// force-load or cache the shared file-list arena for the *whole* repository. It
-    /// performs, or reuses, a walk scoped to exactly `packages`. Prefer it when only a
-    /// handful of a large repository's packages are actually needed — resolving a dependency
-    /// set, for example, rather than listing everything.
+    /// Calling [`RepoPackage::file_list`] on every package in a loop force-loads and caches the
+    /// shared file-list arena for the *whole* repository. This does not. It performs, or
+    /// reuses, a walk scoped to exactly `packages`. Prefer it when only a handful of a large
+    /// repository's packages are actually needed. Resolving a dependency set is that case, rather
+    /// than listing everything.
     ///
-    /// The result preserves `packages`' order, including repeats, if `packages` names the
-    /// same one twice. Each package's own entry can independently be
-    /// [`Error::FilesUnavailable`], [`Error::FilesMissingForPackage`], or
-    /// [`Error::FilesVersionSkew`] — the same errors [`RepoPackage::file_list`] returns, for
-    /// the same reasons — or [`Error::ForeignPackage`], if the package passed in was not
-    /// produced by *this* database and so does not share its `.files` archive at all.
+    /// The result preserves `packages`' order, including repeats, if `packages` names the same one
+    /// twice. Each package's own entry can independently be [`Error::FilesUnavailable`],
+    /// [`Error::FilesMissingForPackage`] or [`Error::FilesVersionSkew`]. Those are the same errors
+    /// [`RepoPackage::file_list`] returns, for the same reasons. It can also be
+    /// [`Error::ForeignPackage`]. That means the package passed in was not produced by *this*
+    /// database, and so does not share its `.files` archive at all.
     #[must_use]
     pub fn file_lists<'a>(
         &self,
         packages: impl IntoIterator<Item = &'a RepoPackage>,
     ) -> Vec<FileListEntry> {
-        // Every `RepoPackage` this database produced shares the identical `Arc` below —
-        // built once in `build` and cloned into each one. A package that does not share it
-        // came from a different `RepoDatabase` (or a different `open` of the same archive),
-        // and must never be resolved against this one's arena. Doing so would silently
-        // cross two repositories' file lists — the same class of mistake the `.db`/`.files`
+        // Every `RepoPackage` this database produced shares the identical `Arc` below. It is
+        // built once in `build` and cloned into each one. A package that does not share it came
+        // from a different `RepoDatabase`, or a different `open` of the same archive. It must
+        // never be resolved against this one's arena. Doing so would silently cross two
+        // repositories' file lists. That is the same class of mistake the `.db`/`.files`
         // version-skew check catches one layer down, before any archive is even touched.
         let (ours, foreign): (Vec<_>, Vec<_>) = packages
             .into_iter()
@@ -531,9 +531,10 @@ impl RepoDatabase {
     ///
     /// A package must match **all** of `terms` (AND, not OR) to be included at all. Searching
     /// `["firefox", "browser"]` only returns packages that independently satisfy both. See
-    /// [`crate::MatchKind`] for the six ways a single term can match, and their relative ranking,
-    /// highest first: an exact name match, an exact match against one of its `%PROVIDES%`, a name
-    /// prefix, a name substring, a description substring, or an exact group match. Comparisons are
+    /// [`crate::MatchKind`] for the six ways a single term can match, and their relative ranking.
+    /// Highest first: an exact name match, then an exact match against one of its `%PROVIDES%`.
+    /// Then a name prefix, a name substring, a description substring, and an exact group match.
+    /// Comparisons are
     /// case-insensitive. Blank terms are dropped; if nothing is left after that, nothing matches.
     /// Each package appears at most once, scored by the single highest [`crate::MatchKind`] any one
     /// of its terms achieved. Results are sorted most-relevant-first, then by name to break ties
@@ -604,7 +605,7 @@ fn handle_item(
 
             // Only the fields every package needs are converted here. The rest stay as text
             // and are parsed on first access to `RepoPackage::desc`. That split accounts for
-            // 67% of this open's cost on a real repository — see `super::eager` for the
+            // 67% of this open's cost on a real repository. See `super::eager` for the
             // measurement, and for why deferring *everything* would not have worked.
             match super::eager::parse(&filtered) {
                 Ok(eager) => {
@@ -674,11 +675,11 @@ fn sibling_files_path(path: &Path) -> Option<PathBuf> {
 
 /// Derives a repository name from an archive path's file name.
 ///
-/// Every real repository archive is named exactly `<repo>.db` or `<repo>.files`. This was
-/// confirmed against `/var/lib/pacman/sync` on the machine this was developed against, where
-/// the files are plain names with no further suffix, compression included. It is therefore
-/// how [`RepoDatabase::open`] learns the repository name without a redundant parameter, since
-/// the archive's own contents carry no such name.
+/// Every real repository archive is named exactly `<repo>.db` or `<repo>.files`. This was confirmed
+/// against `/var/lib/pacman/sync` on the machine this was developed against. There the files are
+/// plain names with no further suffix, compression included. It is therefore how
+/// [`RepoDatabase::open`] learns the repository name without a redundant parameter, since the
+/// archive's own contents carry no such name.
 fn repo_name_from_path(path: &Path) -> Result<RepoName> {
     let file_name = path
         .file_name()
@@ -776,8 +777,8 @@ mod tests {
         fixture.write_gzip_archive(file_name, &refs)
     }
 
-    /// The bound must stop the allocation, which means firing during the walk rather than
-    /// after it — otherwise every `desc` in an oversized archive is parsed before the error.
+    /// The bound must stop the allocation, which means firing during the walk rather than after
+    /// it. Otherwise every `desc` in an oversized archive is parsed before the error.
     #[test]
     fn refuses_an_archive_with_too_many_packages() {
         let fixture = RepoFixture::new();
@@ -887,10 +888,10 @@ mod tests {
         assert_eq!(db.diagnostics_dropped(), 0);
     }
 
-    /// When a configured repository name matches neither archive — a typo, or a repository
-    /// that was never synced — the error must name `<repo>.db`, the name the caller actually
-    /// asked for. `<repo>.files` is only ever tried as an internal fallback, and naming it
-    /// instead would make a missing repository look like a file-list-specific failure.
+    /// A configured repository name can match neither archive, through a typo or a repository that
+    /// was never synced. The error must then name `<repo>.db`, the name the caller actually asked
+    /// for. `<repo>.files` is only ever tried as an internal fallback. Naming it instead would make
+    /// a missing repository look like a file-list-specific failure.
     #[test]
     fn a_wholly_absent_repository_is_blamed_on_db_not_files() {
         let fixture = RepoFixture::new();

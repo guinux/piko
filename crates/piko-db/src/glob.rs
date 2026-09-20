@@ -8,14 +8,14 @@
 //! 2. **Does this *list* of patterns select this string?** [`crate::resolve::matches_any`],
 //!    which is libalpm's `_alpm_fnmatch_patterns` (`util.c:1528`): a backwards scan where a
 //!    leading `!` de-selects.
-//! 3. **Does `HoldPkg` name this package?** `cmd::removal::is_held`, in the `piko` crate,
-//!    which is pacman's bare `fnmatch` inside a forward `alpm_list_find` (`remove.c:33`), with
-//!    no inversion at all.
+//! 3. **Does `HoldPkg` name this package?** `cmd::removal::is_held`, in the `piko` crate. It
+//!    is pacman's bare `fnmatch` inside a forward `alpm_list_find` (`remove.c:33`), with no
+//!    inversion at all.
 //!
 //! Rules 2 and 3 disagree, on purpose, and both call rule 1 for their innermost test. The scan
-//! direction and the `!` sigil are a property of a *list*; whether one pattern covers one
-//! string is not. Keeping the innermost test here means the two list rules can differ in
-//! exactly the way they are meant to, and in no other way.
+//! direction and the `!` sigil are a property of a *list*. Whether one pattern covers one
+//! string is not. Keeping the innermost test here lets the two list rules differ in exactly
+//! the way they are meant to. They can differ in no other way.
 
 /// The three characters that make a string a glob pattern rather than a name.
 ///
@@ -28,18 +28,19 @@ const METACHARACTERS: [char; 3] = ['*', '?', '['];
 /// # Reading a metacharacter as a pattern takes no working spelling away
 ///
 /// A package name admits `[A-Za-z0-9_@+.-]`, with `-` and `.` barred from the first position
-/// (`alpm_types::Name`). So none of `*`, `?` and `[` can appear in a package name or in a group
-/// name, which are the two things a target is expanded against.
+/// (`alpm_types::Name`). So none of `*`, `?` and `[` can appear in a package name or a group
+/// name. Those are the two things a target is expanded against.
 ///
-/// Two `RelationOrSoname` spellings do admit one, both in a **version** position: a version
-/// comparison such as `foo>=1*`, and a `SonameV2`'s soname version such as `lib:libfoo.so.*`.
+/// Two `RelationOrSoname` spellings do admit one, both in a **version** position. They are a
+/// version comparison such as `foo>=1*`, and a `SonameV2`'s soname version such as
+/// `lib:libfoo.so.*`.
 /// Neither can resolve to a package, because no package declares a version or a soname carrying
 /// a glob character. So no target that would have resolved is taken over by this reading. The
 /// version comparison is refused outright rather than expanded, since its two readings really
 /// are ambiguous; the soname simply matches no name.
 ///
-/// Unit tests pin both halves. This is what makes the reading safe rather than merely
-/// convenient, so an `alpm-types` release that widened the name grammar has to break here.
+/// Unit tests pin both halves. That is what makes the reading safe rather than merely
+/// convenient. An `alpm-types` release widening the name grammar has to break here.
 #[must_use]
 pub fn is_pattern(target: &str) -> bool {
     target.contains(METACHARACTERS)
@@ -47,12 +48,12 @@ pub fn is_pattern(target: &str) -> bool {
 
 /// Whether `pattern` matches the whole of `text`.
 ///
-/// The rule, written once. A leading `!` is an ordinary character here: inversion belongs to a
+/// The rule, written once. A leading `!` is an ordinary character here. Inversion belongs to a
 /// list of patterns, and the two callers that read a list apply it themselves.
 ///
-/// A malformed pattern — an unbalanced `[`, say — falls back to an exact string comparison
-/// rather than matching everything or being reported as a parse error. `fnmatch` has no notion
-/// of an invalid pattern to propagate, and a pattern that is really a plain name is by far the
+/// A malformed pattern, an unbalanced `[` say, falls back to an exact string comparison. It
+/// neither matches everything nor is reported as a parse error. `fnmatch` has no notion of an
+/// invalid pattern to propagate. And a pattern that is really a plain name is by far the
 /// common case in `pacman.conf`.
 #[must_use]
 pub fn matches(pattern: &str, text: &str) -> bool {
@@ -61,10 +62,10 @@ pub fn matches(pattern: &str, text: &str) -> bool {
 
 /// [`matches()`], with the compile hoisted out of a loop.
 ///
-/// `Glob::new(p).matches(t)` and `matches(p, t)` always agree; a unit test pins that too. This
-/// form exists because a target pattern is compared against every package name a
-/// [`crate::solve::Universe`] holds, and a search term against every package in a repository —
-/// about 15 000 on a real `extra`. Compiling per comparison would build the same
+/// `Glob::new(p).matches(t)` and `matches(p, t)` always agree, and a unit test pins that too.
+/// This form exists because a target pattern is compared against every package name a
+/// [`crate::solve::Universe`] holds. A search term is compared against every package in a
+/// repository, about 15 000 on a real `extra`. Compiling per comparison would build the same
 /// `glob::Pattern` once per package.
 ///
 /// Matching is case-sensitive. A caller that wants otherwise lowercases both the pattern and
@@ -131,8 +132,8 @@ mod tests {
 
     /// The two spellings that *do* admit a metacharacter, both in a version position. They
     /// parse, so this records where the name-grammar argument stops. Neither resolves to a
-    /// package, which is why reading them as patterns steals nothing: a version comparison is
-    /// refused when it carries a metacharacter, and a soname matches no package name.
+    /// package, which is why reading them as patterns steals nothing. A version comparison is
+    /// refused when it carries a metacharacter. A soname matches no package name.
     #[test]
     fn a_metacharacter_survives_only_in_a_version_position() {
         for target in ["foo>=1*", "foo=1.*", "lib:libfoo.so.*"] {

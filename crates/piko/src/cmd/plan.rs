@@ -65,9 +65,9 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
             );
         }
         TargetResolutionFailure::Pattern(failure) => report_expansion_failure(failure),
-        // Not the same failure as `NotFound`, and saying so is the whole point: the name is
-        // right, `pacman.conf` says not to touch it. pacman asks whether to install it anyway;
-        // piko does not, so the message has to name the directive that has to change instead.
+        // This is not the same failure as `NotFound`, and saying so is the whole point. The
+        // name is right. `pacman.conf` says not to touch it. pacman asks whether to install it
+        // anyway. piko does not, so the message names the directive that has to change.
         TargetResolutionFailure::Ignored { target, candidates } => {
             // A pattern names a set, a literal names one thing. "satisfying" reads as the
             // dependency relation, which is the wrong relation for a glob.
@@ -170,8 +170,8 @@ pub(crate) fn report_expansion_failure(failure: &ExpansionFailure) {
                  version"
             );
         }
-        // Raised by the expansion, converted to `TargetResolutionFailure::Ignored` before it
-        // reaches a frontend, so that a pattern and a literal report an ignored target alike.
+        // The expansion raises this. It converts to `TargetResolutionFailure::Ignored` before
+        // it reaches a frontend, so a pattern and a literal report an ignored target alike.
         ExpansionFailure::AllIgnored { pattern, .. } => {
             eprintln!("Error: every package matching {pattern} is ignored");
         }
@@ -182,8 +182,8 @@ pub(crate) fn report_expansion_failure(failure: &ExpansionFailure) {
 /// one of the packages involved.
 ///
 /// The three wordings are libalpm's own (`sync.c:96`, `sync.c:106`, `sync.c:156`). Without
-/// them a held-back package is indistinguishable from one the repositories have not moved on
-/// from, which is the state a user consults `pacman.conf` to explain.
+/// them, a held-back package looks like one the repositories have not moved on from. That is
+/// the state a user consults `pacman.conf` to explain.
 pub(crate) fn print_ignored_upgrades(universe: &Universe<'_>, ignored: &[IgnoredUpgrade]) {
     for entry in ignored {
         let Some(installed) = universe.get(entry.installed) else { continue };
@@ -198,11 +198,12 @@ pub(crate) fn print_ignored_upgrades(universe: &Universe<'_>, ignored: &[Ignored
 
 /// Prints one "ignoring package …" warning, in the terms libalpm prints it.
 ///
-/// The single place any of the three wordings is written. `piko update` reaches it through
-/// [`print_ignored_upgrades`], and `piko check-updates` reaches it with the same pair read
-/// straight off an `Update` — a package held back is the same event whichever command noticed
-/// it, so the two must not describe it in two ways. Taking plain name/version pairs rather
-/// than a [`Universe`] is what lets the second caller in: `check-updates` builds no universe.
+/// This is the single place any of the three wordings is written. `piko update` reaches it
+/// through [`print_ignored_upgrades`]. `piko check-updates` reaches it with the same pair,
+/// read straight off an `Update`. A package held back is the same event whichever command
+/// noticed it, so the two must not describe it in two ways. Taking plain name/version pairs
+/// rather than a [`Universe`] is what lets the second caller in. `check-updates` builds no
+/// universe.
 pub(crate) fn print_ignored_change(
     installed: (&str, &str),
     available: (&str, &str),
@@ -232,9 +233,8 @@ pub(crate) fn print_ignored_change(
 /// obvious from the message above it.
 ///
 /// `IgnorePkg = gedit` covering `gedit` explains itself, and pacman prints nothing more. A
-/// glob or a group does not: `IgnorePkg = linux*` holding back `linux-firmware` is otherwise
-/// a decision with no visible cause, and the user has to guess which of several entries to
-/// edit.
+/// glob or a group does not. `IgnorePkg = linux*` holding back `linux-firmware` is otherwise
+/// a decision with no visible cause. The user then has to guess which entry to edit.
 fn ignore_detail(name: &str, reason: &piko_db::resolve::IgnoreReason) -> Option<String> {
     match reason {
         piko_db::resolve::IgnoreReason::Package { pattern } if pattern == name => None,
@@ -244,9 +244,10 @@ fn ignore_detail(name: &str, reason: &piko_db::resolve::IgnoreReason) -> Option<
 
 /// Reports why a request had no solution, re-solving once to recover the unsatisfiable core.
 ///
-/// The failure carries the encoding rather than the core itself, so recovering it costs one
-/// more (fast — the problem is already compiled) solve. Shared with `cmd::txn::install`, which
-/// fails the same way `piko plan` does when the targets it was given have no valid plan.
+/// The failure carries the encoding rather than the core itself, so recovering the core costs
+/// one more solve. That solve is fast, because the problem is already compiled. This is shared
+/// with `cmd::txn::install`, which fails the same way `piko plan` does when its targets have
+/// no valid plan.
 pub(crate) fn report_unsatisfiable(universe: &Universe<'_>, encoded: Encoded, limits: &Limits) {
     eprintln!("Error: the requested transaction has no solution");
     for fact in encoded.explain(universe, limits) {
@@ -322,7 +323,7 @@ fn print_broken_dependencies(universe: &Universe<'_>, built: &Plan, reach: Reach
 
 /// Quotes one of `package`'s `%DEPENDS%` entries, the way the solver named it.
 ///
-/// A requirement travels as a `(package, index)` pair rather than as rendered text, so every
+/// A requirement travels as a `(package, index)` pair rather than as rendered text. So every
 /// report that quotes one resolves it here: divergences, broken dependencies, and the
 /// provider question in `cmd::provider`. `?` stands in for an entry that cannot be read,
 /// which is the same `%DEPENDS%` failure `PlanDiagnostic::DependsUnreadable` reports.
@@ -341,8 +342,8 @@ pub(crate) fn relation_of(
 /// Reports the requirements where the solver did not take libalpm's first choice.
 ///
 /// This is not a failure. Both situations that produce a divergence still leave pacman able to
-/// plan the transaction. pacman simply plans a different one, of the same size or larger, and
-/// its answer depends on the order targets were named — this one does not. It is not a case
+/// plan the transaction. pacman simply plans a different one, of the same size or larger. Its
+/// answer depends on the order targets were named, and this one does not. It is not a case
 /// pacman would have failed on.
 fn print_divergences(universe: &Universe<'_>, built: &Plan) {
     let Fidelity::Diverged { requirements } = built.fidelity() else { return };
@@ -429,9 +430,9 @@ fn read_file_targets(
 /// prevent the two commands from disagreeing.
 ///
 /// A target naming a package **file** is read and planned exactly as `piko install` reads it,
-/// so this previews a `pacman -U` too. A target naming a **URL** is refused instead: previewing
-/// it would mean downloading it, and a command whose whole purpose is to change nothing must
-/// not reach the network.
+/// so this previews a `pacman -U` too. A target naming a **URL** is refused instead.
+/// Previewing it would mean downloading it, and a command whose whole purpose is to change
+/// nothing must not reach the network.
 #[allow(
     clippy::too_many_arguments,
     reason = "each parameter names one concern the caller must decide, the same justification \
@@ -449,8 +450,8 @@ pub fn plan(
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let limits = Limits::default();
-    // Not in `-R` mode: a removal names installed packages, so every target there is a name
-    // and a path-shaped one is a mistake to report as "not installed" rather than to open.
+    // Not in `-R` mode. A removal names installed packages, so every target there is a name.
+    // A path-shaped one is a mistake to report as "not installed" rather than to open.
     let (names, files) = if matches!(mode, Mode::Remove { .. }) {
         (targets.to_vec(), Vec::new())
     } else {
@@ -474,7 +475,7 @@ pub fn plan(
     };
 
     // `plan_removal` is also `piko remove`'s planner, so it lives in one place in
-    // `piko_db::solve` — see there for why that sharing matters, not just for tidiness.
+    // `piko_db::solve`. See there for why that sharing matters, beyond tidiness.
     // `HoldPkg` has no libalpm equivalent, so it stays a CLI concern. See `cmd::removal`.
     if let Mode::Remove { recursive, cascade, hold_pkg } = mode {
         let options = RemovalOptions { recursive, cascade };
@@ -485,8 +486,8 @@ pub fn plan(
                 return ExitCode::FAILURE;
             }
         };
-        // Before the outcome either way: a refusal names packages the user may never have
-        // typed, and the pattern that pulled them in is what explains the list.
+        // This prints before the outcome either way. A refusal names packages the user may
+        // never have typed, and the pattern that pulled them in explains the list.
         print_expansions(&removal.expansions);
         return match removal.outcome {
             Ok(built) => {
@@ -528,8 +529,8 @@ pub fn plan(
     // A group target is taken whole here. The reason is the one that answers a provider
     // question with its default below: a preview never asks.
     crate::cmd::group::report_defaults(&universe, &resolution.groups);
-    // Targeted by id, for the reason `cmd::txn::install` gives: a name would find whichever
-    // candidate the universe prefers rather than the file that was named.
+    // Targeted by id, for the reason `cmd::txn::install` gives. A name finds whichever
+    // candidate the universe prefers, rather than the file that was named.
     let file_ids = universe.file_candidates();
     if file_ids.len() != files.len() {
         eprintln!("Internal error: the universe lost a package file candidate");
@@ -560,7 +561,7 @@ pub fn plan(
 
     // A preview never asks. Blocking on stdin would make `--names` unusable in a pipe, and
     // `pacman.c` forces `noconfirm` for its own `--print` runs. Stating the assumption keeps
-    // the plan honest: it is one of several valid plans, and `piko install` is where the
+    // the plan honest. It is one of several valid plans, and `piko install` is where the
     // choice is actually made. On stderr, so `--names` stays diffable against `pacman -Sp`.
     crate::cmd::provider::report_defaults(
         &universe,
@@ -637,12 +638,13 @@ fn prefix(kind: ChangeKind) -> console::StyledObject<String> {
 
 /// Which block of the listing a line belongs to, and in which order the blocks print.
 ///
-/// This is the listing's own order, not [`ChangeKind`]'s declaration order: a reinstall
-/// changes nothing on disk and leads, the two version changes stay neighbors, an install
-/// follows, and a removal — the one irreversible kind — comes last. [`Tally::counted`] reads
-/// the same ranking, so the summary line and the listing cannot be read in two different
-/// orders. `piko history` keeps [`ChangeKind`]'s own order; it reports one transaction at a
-/// time and has no blocks to sort.
+/// This is the listing's own order, not [`ChangeKind`]'s declaration order. A reinstall
+/// changes nothing on disk, so it leads. The two version changes stay neighbors. An install
+/// follows. A removal comes last, as the one irreversible kind. [`Tally::counted`] reads the
+/// same ranking, so the summary line and the listing cannot be read in two different orders.
+///
+/// `piko history` keeps [`ChangeKind`]'s own order. It reports one transaction at a time, and
+/// has no blocks to sort.
 const fn group_rank(kind: ChangeKind) -> u8 {
     match kind {
         ChangeKind::Reinstall => 0,
@@ -691,7 +693,7 @@ impl Tally {
     }
 }
 
-/// A step's package name and the version(s) that matter for it: its own version for
+/// A step's package name and the version(s) that matter for it. That is its own version for
 /// [`Step::Install`]/[`Step::Remove`], or the installed version it replaces for
 /// [`Step::Change`]. Returns `<unknown>`/empty if `id` is not in `universe`. That case is
 /// unreachable in practice — the plan was built from it — but `Universe::get` is fallible, so
@@ -705,12 +707,14 @@ fn render_id(universe: &Universe<'_>, id: SolvableId) -> (String, String) {
 
 /// One line of the [`Format::Full`] listing, rendered before anything is ordered or printed.
 ///
-/// `version` is the package's own version for a [`Step::Install`]/[`Step::Remove`], and the
-/// installed version being replaced for a [`Step::Change`], whose new version is `new_version`.
+/// `version` is the package's own version for a [`Step::Install`]/[`Step::Remove`]. For a
+/// [`Step::Change`] it is the installed version being replaced, whose new version is
+/// `new_version`.
+///
 /// Materializing the whole listing is what lets it be grouped by [`group_rank`] and sorted by
-/// name, without disturbing [`Plan::steps`] — that slice is the commit engine's execution
-/// order, and removals-first / dependencies-before-dependents is a correctness invariant there
-/// rather than a presentation choice.
+/// name, without disturbing [`Plan::steps`]. That slice is the commit engine's execution
+/// order. There, removals-first and dependencies-before-dependents is a correctness
+/// invariant rather than a presentation choice.
 #[derive(Debug)]
 struct Row {
     kind: ChangeKind,
@@ -745,8 +749,8 @@ fn rows(universe: &Universe<'_>, built: &Plan) -> Vec<Row> {
 /// Orders `rows` the way the listing prints them: by [`group_rank`], then by name inside each
 /// block.
 ///
-/// A long transaction is read one kind at a time — "what is being removed?" is a different
-/// question from "what is being upgraded?" — and a name is what a reader looks a package up by.
+/// A long transaction is read one kind at a time. "What is being removed?" is a different
+/// question from "what is being upgraded?". And a name is what a reader looks a package up by.
 /// The sort is stable, so anything the two keys tie on keeps [`Plan::steps`] order.
 fn order_rows(rows: &mut [Row]) {
     rows.sort_by(|a, b| {
@@ -776,7 +780,7 @@ fn column_widths(rows: &[Row]) -> (usize, usize) {
 /// [`render`] there would print them twice.
 ///
 /// [`Format::Full`] groups the listing by kind (see [`order_rows`]). [`Format::Names`] prints
-/// [`Plan::steps`] order untouched: it is the oracle for `pacman -Sp --print-format '%n'` and
+/// [`Plan::steps`] order untouched. It is the oracle for `pacman -Sp --print-format '%n'` and
 /// `pacman -R --print`, both of which print the transaction in the order it runs.
 pub(crate) fn print_steps(
     universe: &Universe<'_>,

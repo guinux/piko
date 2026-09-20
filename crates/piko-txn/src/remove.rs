@@ -1,8 +1,8 @@
 //! Decides what to do with a single file when a package is removed.
 //!
-//! This mirrors [`crate::extract::decision`], and is pure for the same reason: libalpm decides
-//! this inline in `unlink_file` (`remove.c:441`) while also doing the unlinking, so the rules
-//! and their application cannot be reviewed apart. Here they are values instead.
+//! This mirrors [`crate::extract::decision`], and is pure for the same reason. libalpm decides
+//! this inline in `unlink_file` (`remove.c:441`), while also doing the unlinking. The rules and
+//! their application cannot be reviewed apart there. Here they are values instead.
 //!
 //! The rules matter more than their size suggests. A removal that gets one wrong deletes
 //! configuration the user edited, with no copy anywhere.
@@ -22,8 +22,8 @@ pub enum RemovalSkipReason {
     SkipRemove,
     /// A replacement package ships this same path as one of its backup files.
     ///
-    /// Removing it would throw away the user's edits a moment before the new package's version
-    /// is laid down beside them as a `.pacnew`.
+    /// Removing it would throw away the user's edits. The new package's version lands beside
+    /// them as a `.pacnew` a moment later.
     ReplacementKeepsIt,
     /// A replacement package ships this same directory.
     ///
@@ -133,7 +133,7 @@ pub fn decide_removal(context: &RemovalContext<'_>) -> RemovalDisposition {
 /// The renames that make room for a new `<path>.pacsave`, in the order they must happen.
 ///
 /// Each pair is `(from_suffix, to_suffix)`, applied to the file's path. The order is
-/// descending, so no rename ever overwrites a file a later one still needs:
+/// descending, so no rename ever overwrites a file a later one still needs. That gives
 /// `.pacsave.2` → `.pacsave.3`, then `.pacsave.1` → `.pacsave.2`, then `.pacsave` →
 /// `.pacsave.1`. Transcribed from `shift_pacsave` (`remove.c:347`).
 ///
@@ -142,14 +142,15 @@ pub fn decide_removal(context: &RemovalContext<'_>) -> RemovalDisposition {
 ///
 /// # Only what exists is renamed
 ///
-/// libalpm takes the *highest* `N`, then loops down through every integer, renaming
-/// `.pacsave.{i-1}` to `.pacsave.{i}` whether or not the source is there, ignoring the
+/// libalpm takes the *highest* `N`, then loops down through every integer. It renames
+/// `.pacsave.{i-1}` to `.pacsave.{i}` whether or not the source is there, and ignores the
 /// failures. It does that because `log_max` is all it kept. This function is handed the whole
 /// set instead, so it renames only the files that actually exist.
 ///
-/// The outcome is identical: the renames libalpm issues for absent files do nothing. But the
-/// work here is bounded by how many `.pacsave` files there *are*, not by the largest number
-/// one of them is *named after*. That difference is not cosmetic. `N` is parsed out of a
+/// The outcome is identical, since the renames libalpm issues for absent files do nothing. But
+/// the work here is bounded by how many `.pacsave` files there *are*. It is not bounded by the
+/// largest number one of them is *named after*. That difference is not cosmetic. `N` is parsed
+/// out of a
 /// filename, so it is attacker-influenced. A single `foo.pacsave.4000000000` sitting in `/etc`
 /// costs libalpm four billion `rename` syscalls.
 #[must_use]
@@ -231,8 +232,8 @@ mod tests {
         assert!(matches!(decide_removal(&ctx), RemovalDisposition::Skip(_)));
     }
 
-    /// An upgrade's fake removal keeps a directory the new version also ships, rather than
-    /// removing it and having extraction put it straight back.
+    /// An upgrade's fake removal keeps a directory the new version also ships. Removing it
+    /// would only have extraction put it straight back.
     #[test]
     fn a_directory_the_replacement_ships_is_kept() {
         let mut ctx = context(Existing::Directory);
@@ -253,8 +254,8 @@ mod tests {
         assert_eq!(decide_removal(&ctx), RemovalDisposition::Unlink);
     }
 
-    /// An unmodified config file has nothing worth preserving, so it is deleted rather than
-    /// littering the system with a `.pacsave` identical to what was shipped.
+    /// An unmodified config file has nothing worth preserving, so it is deleted. A `.pacsave`
+    /// identical to what was shipped would only litter the system.
     #[test]
     fn an_unmodified_backup_file_is_unlinked() {
         let mut ctx = context(Existing::Other);

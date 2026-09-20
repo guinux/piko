@@ -132,8 +132,8 @@ fn both_desc_schema_versions_are_present_and_readable() {
     assert!(v1 > 0 && v2 > 0, "expected both schema versions across core and extra");
 }
 
-/// The headline property: opening `core.db` reads no file list at all. `is_files_loaded`
-/// stays false immediately after `open`, proving the 19.7 MB `core.files` (581 MB for
+/// The headline property. Opening `core.db` reads no file list at all. `is_files_loaded`
+/// stays false immediately after `open`. That proves the 19.7 MB `core.files` (581 MB for
 /// `extra.files`) was not decompressed just to open the smaller archive.
 ///
 /// `RepoDatabase::open` also auto-discovers the real sibling `core.files` sitting next to
@@ -156,7 +156,7 @@ fn opening_db_only_touches_files_only_on_first_use() {
 }
 
 /// `open_repo` wires up the deferred `.files` source. The arena must still be untouched
-/// immediately after opening, and load only on the first `file_list()` call — for every
+/// immediately after opening. It must load only on the first `file_list()` call, for every
 /// package, since the arena is shared.
 #[test]
 #[ignore = "requires a real ALPM sync database"]
@@ -179,8 +179,8 @@ fn open_repo_defers_files_until_first_use() {
 }
 
 /// The `.db`/`.files` skew this whole design exists to catch, checked against whatever the
-/// live system's drift actually is right now. 12 of `core`'s 296 packages were skewed while
-/// planning this milestone, so some skew on a real system is the expected case, not a bug.
+/// live system's drift actually is right now. 12 of `core`'s 296 packages are skewed on this
+/// machine. Some skew on a real system is therefore the expected case, not a defect.
 #[test]
 #[ignore = "requires a real ALPM sync database"]
 fn live_db_files_skew_is_handled_without_ever_serving_the_wrong_build() {
@@ -248,10 +248,10 @@ fn the_whole_repository_loads_from_several_threads() {
 
 /// `core` and `extra` on the machine this was developed against carry no overlapping package
 /// names (checked via `comm -12 <(pacman -Sl core | ...) <(pacman -Sl extra | ...)`, empty).
-/// So this cannot exercise the priority tie-break; that is covered by fixtures in
-/// `resolve::tests`. What it does prove against real data: a name that only exists in `core`
-/// resolves to `core` when both are offered, under real `pacman.conf`'s default (`Usage`
-/// unset, i.e. `DbUsage::ALL`) configuration.
+/// So this cannot exercise the priority tie-break. Fixtures in `resolve::tests` cover that.
+/// What it does prove against real data is narrower. A name that only exists in `core`
+/// resolves to `core` when both are offered. That holds under real `pacman.conf`'s default
+/// configuration, with `Usage` unset, meaning `DbUsage::ALL`.
 #[test]
 #[ignore = "requires a real ALPM sync database"]
 fn resolves_a_real_package_to_the_repository_that_actually_carries_it() {
@@ -260,10 +260,9 @@ fn resolves_a_real_package_to_the_repository_that_actually_carries_it() {
 
     let known = core.iter().next().unwrap_or_else(|| panic!("core.db is empty"));
     if extra.get(known.name()).is_some() {
-        // core/extra were disjoint when this was written, but Arch has been merging
-        // packages from extra into core. If that reaches this test's `known` package,
-        // there is nothing left to prove here — the tie-break case is already covered
-        // by fixtures in `resolve::tests`.
+        // core and extra are disjoint on this machine, and Arch keeps merging packages from
+        // extra into core. Once that reaches this test's `known` package, there is nothing
+        // left to prove here. Fixtures in `resolve::tests` already cover the tie-break case.
         eprintln!("skipping: {} exists in both core and extra on this machine", known.name());
         return;
     }
@@ -306,12 +305,12 @@ fn a_version_constraint_is_honored_against_a_real_package() {
     );
 }
 
-/// A soname `%PROVIDES%` entry, if this machine's `core`/`extra` happen to carry one, must
-/// resolve via its own exact string — proof against real data, not just fixtures. This test
-/// skips rather than asserting a fact about this machine's repositories that piko does not
-/// control: neither `core` nor `extra` carried a soname `%PROVIDES%` entry while this was
-/// written (Arch's `autodeps` soname feature, from pacman 6.1, was not yet in wide use on
-/// this mirror).
+/// A soname `%PROVIDES%` entry must resolve via its own exact string, if this machine's
+/// `core`/`extra` happen to carry one. That is proof against real data, not just fixtures.
+///
+/// This test skips rather than asserting a fact about repositories piko does not control.
+/// Neither `core` nor `extra` carries a soname `%PROVIDES%` entry on this mirror. Arch's
+/// `autodeps` soname feature, from pacman 6.1, is not yet in wide use there.
 #[test]
 #[ignore = "requires a real ALPM sync database"]
 fn a_real_soname_provide_resolves_by_its_own_exact_string() {
@@ -384,7 +383,7 @@ fn every_package_is_findable_by_name() {
 }
 
 /// The repository half of `real_system.rs`'s `%URL%` test, and the one that matters for a
-/// transaction: `%FILENAME%` lives behind the same parse, so a `%URL%` that refuses to
+/// transaction. `%FILENAME%` lives behind the same parse. So a `%URL%` that refuses to
 /// normalize would otherwise make a package impossible to download.
 #[test]
 #[ignore = "requires a real ALPM sync database"]

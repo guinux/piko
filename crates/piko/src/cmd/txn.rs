@@ -2,8 +2,8 @@
 //!
 //! # `--root`
 //!
-//! With no `--root`, the effective root falls back to `RootDir` from the parsed pacman.conf —
-//! see `crate::context::resolve_root_dir`, the same resolution `piko check` already used.
+//! With no `--root`, the effective root falls back to `RootDir` from the parsed pacman.conf.
+//! See `crate::context::resolve_root_dir`, the same resolution `piko check` uses.
 //! `--root /` (or an omitted `--root` whose `pacman.conf` names `/`) targets the running
 //! system.
 
@@ -35,9 +35,10 @@ use crate::output::{emit, report as report_error};
 
 /// Writes one frontend line to the transaction log, warning if it cannot be written.
 ///
-/// The counterpart of pacman's `[PACMAN]` lines: what the user ran, and the two markers a
-/// refresh and a sysupgrade put in the log before any transaction starts. A log that cannot
-/// be written is a warning here for the same reason it is one inside a transaction — the
+/// The counterpart of pacman's `[PACMAN]` lines. It records what the user ran. It also records
+/// the two markers a refresh and a sysupgrade put in the log before any transaction starts. A log
+/// that
+/// cannot be written is a warning here, for the same reason it is one inside a transaction. The
 /// command the user asked for still runs. See [`piko_txn::history`].
 pub fn note(recording: &piko_txn::Recording, message: &str) {
     if let Err(problem) = piko_txn::history::note(recording, message) {
@@ -96,8 +97,8 @@ pub struct InstallOptions {
     pub check_space: bool,
     /// A `SIGINT` handler already installed by an earlier step (`update`'s pre-refresh),
     /// reused instead of installing a second one. `ctrlc::set_handler` accepts exactly one
-    /// registration per process; a second call would panic. `None` when nothing installed
-    /// one yet — `install` installs its own, either when it fetches a package URL or, failing
+    /// registration per process, and a second call would panic. `None` when nothing installed
+    /// one yet. `install` installs its own, either when it fetches a package URL or, failing
     /// that, once its confirmation prompt has been answered.
     pub pre_cancel: Option<crate::signal::Handoff>,
 }
@@ -132,8 +133,8 @@ pub struct Catalog<'a> {
     pub repos: &'a [(DbUsage, RepoDatabase)],
     /// `pacman.conf`'s `IgnorePkg`/`IgnoreGroup`.
     pub ignores: IgnoreList<'a>,
-    /// The parsed configuration for every repository in [`Catalog::repos`] — servers, cache
-    /// servers, and `SigLevel` — for resolving where a missing package can be downloaded from.
+    /// The parsed configuration for every repository in [`Catalog::repos`]: servers, cache
+    /// servers, and `SigLevel`. It resolves where a missing package can be downloaded from.
     pub configs: &'a [RepositoryConfig],
 }
 
@@ -145,13 +146,13 @@ pub struct Catalog<'a> {
 /// string first, a `%GROUPS%` member expansion second. The whole transitive closure of
 /// dependencies, conflicts, and replacements is planned through the same solver before anything
 /// is committed. What that plan reports is what `run` applies. `piko install foo` is `piko
-/// plan foo` turned into a transaction — the same relationship `piko remove` already has with
-/// `piko plan -R` (see [`crate::cmd::removal`]) and `piko update` has with `piko plan -u`.
+/// plan foo` turned into a transaction. `piko remove` stands in the same relationship to
+/// `piko plan -R` (see [`crate::cmd::removal`]), and `piko update` to `piko plan -u`.
 ///
-/// A target that names a package **file** — a path, or a URL — is `pacman -U`. It is read
-/// before the plan is solved, joins the universe as a candidate the repositories do not carry,
-/// and wins over any repository package of the same name. Its dependencies are still resolved
-/// from the repositories, exactly as pacman's `-U` hands off to `_alpm_sync_prepare`. See
+/// A target that names a package **file**, as a path or a URL, is `pacman -U`. It is read before
+/// the plan is solved. It joins the universe as a candidate the repositories do not carry, and
+/// wins over any repository package of the same name. Its dependencies are still resolved from
+/// the repositories, exactly as pacman's `-U` hands off to `_alpm_sync_prepare`. See
 /// [`piko_txn::classify`] for how a target is told apart from a name.
 ///
 /// A package already in a cache directory is used as-is. A missing one is downloaded from its
@@ -179,10 +180,10 @@ pub fn install(
         }
     };
 
-    // Targets that name a file are read before anything else is planned, because the plan
-    // cannot be solved without them: they are candidates no repository carries. A URL is
-    // fetched here too, which is why this precedes the confirmation prompt — the same order
-    // `alpm_fetch_pkgurl` runs in, ahead of `trans_init` (`upgrade.c`).
+    // Targets that name a file are read before anything else is planned. The plan cannot be
+    // solved without them, since they are candidates no repository carries. A URL is fetched
+    // here too, which is why this precedes the confirmation prompt. `alpm_fetch_pkgurl` runs in
+    // the same order, ahead of `trans_init` (`upgrade.c`).
     let mut pre_cancel = options.pre_cancel.take();
     let prepared =
         match prepare_file_targets(targets, &cache, &catalog, &options, &mut pre_cancel, out) {
@@ -254,9 +255,9 @@ pub fn install(
         steplist.suspend(|| crate::cmd::plan::print_ignored_targets(&resolution.ignored));
     }
 
-    // Each file candidate is targeted by its id, not by a name. Resolving it by name would
-    // find whichever candidate the universe prefers, which is the file only by construction —
-    // and would silently install a repository package the day that construction changed.
+    // Each file candidate is targeted by its id, not by a name. Resolving it by name would find
+    // whichever candidate the universe prefers, which is the file only by construction. It would
+    // then silently install a repository package the day that construction changed.
     let file_ids = universe.file_candidates();
     if file_ids.len() != prepared.files.len() {
         crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
@@ -285,11 +286,11 @@ pub fn install(
         }
     }
 
-    // Ask, answer, solve again. An answered requirement is encoded with one satisfier, so it
-    // is never raised a second time, and the set of requirements the cone can raise does not
-    // depend on the answers — the loop therefore adds at least one answer per round and runs
-    // out of questions. Two rounds is the common case: a chosen provider brings its own
-    // dependencies, which may be ambiguous in turn.
+    // Ask, answer, solve again. An answered requirement is encoded with one satisfier, so it is
+    // never raised a second time. And the set of requirements the cone can raise does not depend
+    // on the answers. So the loop adds at least one answer per round, and runs out of questions.
+    // Two rounds is the common case, because a chosen provider brings its own dependencies,
+    // which may be ambiguous in turn.
     let mut answered: std::collections::HashMap<String, SolvableId> =
         std::collections::HashMap::new();
     let planned = loop {
@@ -381,8 +382,9 @@ pub fn install(
     // A handler may already be installed: by `update`'s pre-refresh step (`main::sync`), or by
     // `prepare_file_targets` for a package URL it had to fetch. Both happened before this
     // prompt, which is why there is one `pre_cancel` and one branch. Bracketing the prompt in
-    // `during_prompt` still kills the process on the first Ctrl+C here, exactly as when no
-    // handler exists yet (the `None` branch) — nothing at the prompt needs a graceful stop.
+    // `during_prompt` still kills the process on the first Ctrl+C here. That is exactly what
+    // happens when no handler exists yet (the `None` branch). Nothing at the prompt needs a
+    // graceful stop.
     let answered = match &pre_cancel {
         Some(handoff) => handoff.mode.during_prompt(|| proceed(out, options.noconfirm, prompt)),
         None => proceed(out, options.noconfirm, prompt),
@@ -391,10 +393,10 @@ pub fn install(
         return ExitCode::SUCCESS;
     }
 
-    // Only from here on can *this* step reach the network. See `crate::signal` for why a
-    // handler is not installed earlier than it has to be: it would make Ctrl+C at the prompt
+    // Only from here on can *this* step reach the network. See `crate::signal` for why a handler
+    // is not installed earlier than it has to be. An earlier one would make Ctrl+C at the prompt
     // above require two presses. `pre_cancel` carries whatever registration an earlier step
-    // made — a pre-refresh, or a package URL fetch — so this does not install a second, which
+    // made, a pre-refresh or a package URL fetch. So this does not install a second one, which
     // `ctrlc::set_handler` would refuse.
     let cancel = match pre_cancel {
         Some(handoff) => handoff.cancel,
@@ -432,8 +434,8 @@ pub fn install(
         }
     };
 
-    // No row at all when nothing needs downloading: a removal-only plan, or one whose every
-    // candidate is already in a cache directory, since `Plan::assemble` was given `cache`
+    // No row at all when nothing needs downloading. That is a removal-only plan, or one whose
+    // every candidate is already in a cache directory, since `Plan::assemble` was given `cache`
     // above.
     let rig = crate::progress::download_rig(&steplist, built.download_size());
     let source = match DownloadingSource::new(
@@ -503,8 +505,8 @@ struct PreparedTargets {
 impl PreparedTargets {
     /// The solver's view of each named file, in the order they were given.
     ///
-    /// `Universe` borrows these for as long as it lives, so they are collected once by the
-    /// caller and kept alongside it rather than rebuilt.
+    /// `Universe` borrows these for as long as it lives. So the caller collects them once and
+    /// keeps them alongside it, rather than rebuild them.
     fn candidates(&self) -> Vec<&piko_db::solve::FilePackage> {
         self.files.iter().map(FileTarget::candidate).collect()
     }
@@ -524,13 +526,13 @@ impl PreparedTargets {
 ///
 /// A package file is a candidate the repositories do not carry. Nothing can be solved until
 /// its `.PKGINFO` has been read, and a URL cannot be read until it has been fetched. pacman
-/// has the same ordering for the same reason: `pacman_upgrade` calls `alpm_fetch_pkgurl` and
+/// has the same ordering for the same reason. `pacman_upgrade` calls `alpm_fetch_pkgurl` and
 /// then `alpm_pkg_load` for every target, all before `trans_init`.
 ///
 /// So a `piko install <url>` downloads before it asks. `cancel` is threaded out through
-/// `pre_cancel` rather than kept here, so that the confirmation prompt later brackets itself
-/// in `PromptMode::during_prompt` — without that, Ctrl+C at the prompt would ask a finished
-/// download to stop instead of killing the process. See `crate::signal`.
+/// `pre_cancel` rather than kept here. That lets the confirmation prompt later bracket itself in
+/// `PromptMode::during_prompt`. Without that, Ctrl+C at the prompt would ask a finished download
+/// to stop instead of killing the process. See `crate::signal`.
 ///
 /// # Errors
 ///
@@ -559,7 +561,7 @@ fn prepare_file_targets(
     warn_about_ambiguous_targets(&classified, catalog);
 
     // Only now, and only because a URL has to be fetched before the prompt. A plain
-    // `piko install ./foo.pkg.tar.zst` reads a local file and installs no handler here, so
+    // `piko install ./foo.pkg.tar.zst` reads a local file and installs no handler here. So
     // Ctrl+C at its prompt still kills the process by the OS's default disposition.
     let has_url = classified.iter().any(|kind| matches!(kind, TargetKind::Url(_)));
     if has_url && pre_cancel.is_none() {
@@ -620,8 +622,8 @@ fn fetch_package_url(
     out: &mut impl std::io::Write,
 ) -> Result<PathBuf, ExitCode> {
     // A `Cancel` that no handler will ever request, for the path where no URL forced one to be
-    // installed. It cannot happen — `prepare_file_targets` installs a handler before it calls
-    // this — and constructing one is cheaper than making the caller prove it.
+    // installed. It cannot happen, because `prepare_file_targets` installs a handler before it
+    // calls this. Constructing one is cheaper than making the caller prove it.
     let cancel =
         pre_cancel.as_ref().map_or_else(piko_net::Cancel::new, |handoff| handoff.cancel.clone());
 
@@ -641,11 +643,11 @@ fn fetch_package_url(
 
 /// Names a target that could have been read as a package name as well as a path.
 ///
-/// `piko_txn::classify`'s rule 3 resolves the ambiguity by existence on disk, which is right
-/// far more often than not — but silently. This says so, and only when the other reading is
-/// real: a repository that actually carries a package of that literal name. A file whose name
-/// no repository knows is not ambiguous at all, and warning about it would be noise on every
-/// ordinary `piko install foo-1.0-1-x86_64.pkg.tar.zst`.
+/// `piko_txn::classify`'s rule 3 resolves the ambiguity by existence on disk. That is right far
+/// more often than not, but it is silent. This says so, and only when the other reading is real.
+/// The other reading is real when a repository actually carries a package of that literal name.
+/// A file whose name no repository knows is not ambiguous at all. Warning about it would be
+/// noise on every ordinary `piko install foo-1.0-1-x86_64.pkg.tar.zst`.
 fn warn_about_ambiguous_targets(classified: &[TargetKind], catalog: &Catalog<'_>) {
     for spelled in classified.iter().filter_map(TargetKind::ambiguous_name) {
         if catalog.repos.iter().any(|(_, repository)| repository.get_str(spelled).is_some()) {
@@ -664,8 +666,8 @@ fn warn_about_ambiguous_targets(classified: &[TargetKind], catalog: &Catalog<'_>
 /// and a configured `CacheDir` silently ignored is exactly the mistake worth naming. Both
 /// facts are absent in the ordinary case, so a normal run prints nothing.
 ///
-/// Written through `StepList::suspend`, because the download rows are already live by the
-/// time this runs and a bare `eprintln!` would be overdrawn mid-line.
+/// Written through `StepList::suspend`. The download rows are already live by the time this
+/// runs, and a bare `eprintln!` would be overdrawn mid-line.
 fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::DownloadDir) {
     if dir.rejected().is_empty() && !dir.created() {
         return;
@@ -683,8 +685,8 @@ fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::Dow
 /// Names what the disk-space estimate could not measure.
 ///
 /// Each of these means part of the estimate is missing. A transaction that passed may have
-/// passed on incomplete arithmetic: a path on a filesystem nothing could stat is a path
-/// charged to nobody. libalpm logs the same facts as warnings. Silence is the ordinary case.
+/// passed on incomplete arithmetic. A path on a filesystem nothing could stat is a path charged
+/// to nobody. libalpm logs the same facts as warnings. Silence is the ordinary case.
 ///
 /// Written through `StepList::suspend` for the reason [`report_download_dir`] is.
 fn report_space_problems(
@@ -771,7 +773,7 @@ fn emit_line(out: &mut impl std::io::Write, line: &str) -> Result<(), ExitCode> 
 /// Prints `prompt` and waits for a yes/no answer, matching pacman's own default-yes prompt.
 ///
 /// A thin name for [`crate::output::confirm`] with pacman's `yesno` preset. This lets the
-/// transaction prompts read as what they are, and keeps the `HoldPkg` guard's `noyes` preset
+/// transaction prompts read as what they are. It also keeps the `HoldPkg` guard's `noyes` preset
 /// visible as the exception it is.
 fn confirm(out: &mut impl std::io::Write, prompt: &str) -> bool {
     crate::output::confirm(out, prompt, true)
@@ -782,11 +784,11 @@ fn confirm(out: &mut impl std::io::Write, prompt: &str) -> bool {
 ///
 /// [`crate::output::confirm`] flushes `out` before it writes the prompt. That flush ordinarily
 /// guarantees the plan already printed there is visible before anything past this point runs.
-/// `--noconfirm` skips calling it entirely, and skips that flush along with it. Without the
-/// explicit flush here, the plan was left sitting in `out`'s buffer, invisible once downloading
-/// or installing started printing to a different stream (`indicatif`'s rows are on stderr). The
-/// plan's own last line appeared only once that other stream flushed `out` for an unrelated
-/// reason.
+/// `--noconfirm` skips calling it entirely, and skips that flush along with it. So the explicit
+/// flush here is what `--noconfirm` relies on. Without it the plan sits in `out`'s buffer,
+/// invisible once downloading or installing prints to a different stream. `indicatif`'s rows are
+/// on stderr. The plan's own last line would then appear only once that other stream flushed
+/// `out` for an unrelated reason.
 fn proceed(out: &mut impl std::io::Write, noconfirm: bool, prompt: &str) -> bool {
     if noconfirm {
         let _ = out.flush();
@@ -808,9 +810,9 @@ pub struct RemoveOptions {
     pub nodeps: bool,
     /// `pacman.conf`'s `NoExtract` and `NoUpgrade`.
     ///
-    /// A removal writes nothing, so only `NoUpgrade` bites. It does: `should_skip_file`
-    /// (`remove.c:592`) consults it before deleting, so a file the user told piko never to
-    /// touch is not one a removal may take away either.
+    /// A removal writes nothing, so only `NoUpgrade` bites. And it does bite. `should_skip_file`
+    /// (`remove.c:592`) consults it before deleting. So a file the user told piko never to touch
+    /// is not one a removal may take away either.
     pub patterns: piko_txn::Patterns,
     /// `pacman.conf`'s `HoldPkg`: names whose removal must be confirmed separately, and which
     /// `noconfirm` refuses rather than accepts — see [`crate::cmd::removal::hold_pkg_allows`].
@@ -821,8 +823,8 @@ pub struct RemoveOptions {
 
 /// Removes installed packages from a root, and whatever the removal implies.
 ///
-/// The set of packages is decided by the same planner `piko plan -R` prints, so what that
-/// command shows is what this command does — see [`crate::cmd::removal`].
+/// The set of packages is decided by the same planner `piko plan -R` prints. So what that
+/// command shows is what this command does. See [`crate::cmd::removal`].
 pub fn remove(
     root: &Path,
     dbpath: &Path,
@@ -872,7 +874,7 @@ pub fn remove(
     let settings = Settings {
         scriptlets: side_effects.scriptlets,
         hook_dirs: side_effects.hook_dirs.clone(),
-        // `NoUpgrade` is not install-only: `should_skip_file` (`remove.c:592`) consults it
+        // `NoUpgrade` is not install-only. `should_skip_file` (`remove.c:592`) consults it
         // before deleting, so a file the user told piko never to touch survives a removal.
         patterns: options.patterns,
         recording: side_effects.recording.clone(),
@@ -902,9 +904,8 @@ fn named_only(
     out: &mut impl std::io::Write,
 ) -> Result<Vec<EntryName>, ExitCode> {
     // A pattern is rewritten into installed names before anything is looked up. Groups are
-    // deliberately left out here: this path resolves a target with `LocalDatabase::get_str`
-    // alone and has never accepted a group name, so a pattern must not become the one spelling
-    // that does.
+    // deliberately left out here. This path resolves a target with `LocalDatabase::get_str`
+    // alone, and accepts no group name. So a pattern must not become the one spelling that does.
     let (entries, expansions) =
         match piko_db::solve::expand_installed_names(local, entries, &piko_db::Limits::default()) {
             Ok(expanded) => expanded,
@@ -934,7 +935,7 @@ fn named_only(
 
     // `HoldPkg` is checked here too. pacman's guard sits in `pacman_remove`, above everything
     // the flags select, so `-Rdd` is no more exempt from it than `-Rcs` is. The names are the
-    // ones the database holds, not the ones typed, since a target may have been given as a
+    // ones the database holds, not the ones typed. A target may have been given as a
     // `%PROVIDES%`-style string that is not the package's own name.
     if !crate::cmd::removal::hold_pkg_allows(&names, &options.hold_pkg, options.noconfirm, out) {
         return Err(ExitCode::FAILURE);
@@ -953,9 +954,9 @@ fn named_only(
 
 /// Plans the removal, printing what it will take away before it takes it.
 ///
-/// The universe is built from the local database alone. A removal-only request never selects
-/// a repository candidate, and requiring a sync database would make this fail in a chroot
-/// that has none. That equivalence is checked against the real database, not assumed. See
+/// The universe is built from the local database alone. A removal-only request never selects a
+/// repository candidate. Requiring a sync database would also make this fail in a chroot that has
+/// none. That equivalence is checked against the real database, not assumed. See
 /// [`crate::cmd::removal`].
 fn planned(
     steplist: &crate::progress::StepList,
@@ -995,8 +996,8 @@ fn planned(
     };
     crate::progress::settle_row(steplist, out, resolving, "Resolving dependencies");
 
-    // Before the outcome either way: a refusal names packages the user may never have typed,
-    // and the pattern that pulled them in is what explains the list.
+    // Before the outcome either way. A refusal names packages the user may never have typed, and
+    // the pattern that pulled them in is what explains the list.
     crate::cmd::plan::print_expansions(&removal.expansions);
     let plan = match removal.outcome {
         Ok(plan) => plan,
@@ -1137,9 +1138,9 @@ fn run(
         return ExitCode::SUCCESS;
     }
 
-    // A journal already there means a previous run did not finish. Refusing is the safe
-    // answer: piko cannot know what state the system is in, and layering another
-    // transaction on top would make it harder to work out later.
+    // A journal already there means a previous run did not finish. Refusing is the safe answer.
+    // piko cannot know what state the system is in. Layering another transaction on top would
+    // make that state harder to work out later.
     match journal::read(dbpath) {
         Ok(Some(_)) => {
             progress.clear_downloads();
@@ -1257,13 +1258,13 @@ fn run(
 ///
 /// Their output text itself is not here. `CommitDriver` already streamed it live, line by
 /// line, through [`piko_txn::progress::Event`] as each scriptlet/hook ran (see
-/// `crate::progress`). This function only covers what settles once the final [`piko_txn::Report`]
-/// is in hand: truncation, failure, a hook file that did not parse, or a hook skipped for an
-/// unsatisfied `Depends`.
+/// `crate::progress`). This function only covers what settles once the final
+/// [`piko_txn::Report`] is in hand. That is truncation, failure, a hook file that did not parse,
+/// or a hook skipped for an unsatisfied `Depends`.
 ///
-/// Failures are printed but do not change the exit code, because they do not change the
-/// outcome. libalpm discards a scriptlet's status entirely, and a hook only stops a
-/// transaction through `AbortOnFail`, which arrives as an error, not through here.
+/// Failures are printed but do not change the exit code, because they do not change the outcome.
+/// libalpm discards a scriptlet's status entirely. And a hook only stops a transaction through
+/// `AbortOnFail`, which arrives as an error rather than through here.
 fn report_side_effects(report: &piko_txn::Report) {
     for run in &report.scriptlets {
         if run.outcome.truncated {
@@ -1282,7 +1283,7 @@ fn report_side_effects(report: &piko_txn::Report) {
     // A broken hook file is a warning, not an error, matching libalpm for the
     // `PostTransaction` case. It diverges for `PreTransaction`, where libalpm refuses the whole
     // run (`hook.c:625`). A file that did not parse has no `When`, so there is no phase to
-    // attribute it to, and piko reports and continues either way.
+    // attribute it to. piko reports and continues either way.
     //
     // Printed after the run, not before it, because the hook files are read once per phase
     // inside the transaction. That is the same reason every other hook diagnostic here is late.

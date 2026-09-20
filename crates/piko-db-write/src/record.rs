@@ -130,9 +130,9 @@ impl Section {
 /// Why a `desc` or `files` file could not be represented for rewriting.
 ///
 /// Both variants mean the file is not in the shape `_alpm_local_db_write` produces. The
-/// writer refuses rather than guessing. The alternative would write back a file that
-/// silently dropped whatever it did not understand, which is the exact failure this module
-/// exists to avoid.
+/// writer refuses rather than guessing. The alternative writes back a file that silently
+/// dropped whatever it did not understand. That is the exact failure this module exists to
+/// avoid.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RecordError {
@@ -268,15 +268,15 @@ impl Record {
     /// Sets `keyword` to `values`, replacing the section in place if it already exists.
     ///
     /// An empty `values` removes the section rather than writing an empty one. libalpm never
-    /// emits an empty section: every writer of a list guards on the list being non-empty
-    /// (`write_deps` returns early on `NULL`), and every writer of a scalar guards on the
-    /// value being present.
+    /// emits an empty section. Every writer of a list guards on the list being non-empty, and
+    /// `write_deps` returns early on `NULL`. Every writer of a scalar guards on the value
+    /// being present.
     ///
     /// A section not already present is inserted at its position in [`RecordKind::order`],
     /// not appended. The point of this type is that a rewritten file is indistinguishable
-    /// from one pacman wrote. A keyword absent from that table — a section from a newer
-    /// pacman, which the reader deliberately tolerates — goes last, since there is nothing
-    /// better to infer.
+    /// from one pacman wrote. A keyword absent from that table goes last, since there is
+    /// nothing better to infer. That covers a section from a newer pacman, which the reader
+    /// deliberately tolerates.
     pub fn set(&mut self, keyword: &str, values: Vec<String>) {
         if values.is_empty() {
             self.remove(keyword);
@@ -323,7 +323,7 @@ impl Record {
 /// Extracts `KEYWORD` from a `%KEYWORD%` header line, if the line is one.
 ///
 /// This deliberately follows the same rule as [`piko_db::desc_compat`]'s reader-side
-/// splitter: a header is `%`, then a non-empty keyword containing no further `%`, then `%`.
+/// splitter. A header is `%`, then a non-empty keyword containing no further `%`, then `%`.
 fn section_keyword(line: &str) -> Option<&str> {
     let inner = line.strip_prefix('%')?.strip_suffix('%')?;
     (!inner.is_empty() && !inner.contains('%')).then_some(inner)

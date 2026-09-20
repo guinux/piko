@@ -15,7 +15,8 @@
 //! order**. [`crate::solve::Universe::satisfiers`] already returns candidates in the order
 //! `resolvedep` would rank them. The solver's decision heuristic takes the first unassigned
 //! literal, so a run that never backtracks selects exactly what libalpm selects.
-//! Second, every clause carries a [`ClauseKind`] that records why it exists. This is what
+//!
+//! Second, every clause carries a [`ClauseKind`] that records why it exists. That is what
 //! turns an unsatisfiable core back into a sentence a user can act on.
 //!
 //! `%OPTDEPENDS%` are never encoded. libalpm reports them and never resolves them, and a
@@ -81,9 +82,10 @@ impl Lit {
 /// reported.
 ///
 /// libalpm's equivalent is a heterogeneous `void **data` out-param, discriminated by the
-/// error code: `alpm_depmissing_t`, `alpm_conflict_t`, or a bare string, depending on which
-/// failure occurred. The clause records its own provenance, so the explanation comes from
-/// the same structure the solver used, not from something reconstructed afterward.
+/// error code. Depending on which failure occurred it holds an `alpm_depmissing_t`, an
+/// `alpm_conflict_t`, or a bare string. Here the clause records its own provenance. So the
+/// explanation comes from the same structure the solver used, not from something
+/// reconstructed afterward.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClauseKind {
     /// `dependent` lists a `%DEPENDS%` entry, and the clause's literals are its satisfiers.
@@ -100,7 +102,7 @@ pub enum ClauseKind {
     ///
     /// Distinct from [`Self::Requires`] so an explanation can say *why* the other providers
     /// are gone. Without it, a transaction made impossible by the answer reports that nothing
-    /// satisfies the dependency, which sends the reader looking for a package that is in fact
+    /// satisfies the dependency. That sends the reader looking for a package which is in fact
     /// right there.
     Chosen {
         /// The package whose `%DEPENDS%` produced this clause.
@@ -273,8 +275,8 @@ impl Problem {
 
     /// Adds `¬a ∨ ¬b` for every pair in `group` — "at most one of these".
     ///
-    /// Quadratic in the group size. This is fine: a group is the candidates that share one
-    /// package name — three or four in practice, bounded by the number of configured
+    /// Quadratic in the group size, which is fine. A group is the candidates sharing one
+    /// package name. That is three or four in practice, bounded by the number of configured
     /// repositories plus one.
     pub fn add_at_most_one(&mut self, group: &[SolvableId]) {
         for (offset, first) in group.iter().enumerate() {

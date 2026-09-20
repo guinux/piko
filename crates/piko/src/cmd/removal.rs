@@ -1,7 +1,7 @@
 //! `HoldPkg`, the one part of removal planning that stays CLI-only.
 //!
 //! The planning algorithm itself is implemented in [`piko_db::solve`]
-//! (`RemovalOptions`/`RemovalFailure`/`plan_removal`/`removal_names`), so any frontend gets the
+//! (`RemovalOptions`/`RemovalFailure`/`plan_removal`/`removal_names`). So any frontend gets the
 //! same plan `piko plan -R` is diffed against, not just this CLI. What is left here is
 //! genuinely frontend-only.
 
@@ -18,14 +18,13 @@ use piko_db::solve::RemovalFailure;
 /// with no sigil handling at all.
 ///
 /// The difference is reachable. `HoldPkg = !foo` holds a package literally named `!foo` under
-/// pacman's rule, and holds nothing under libalpm's. That is an odd thing to write, but the
-/// direction it fails in is the dangerous one: `matches_any` would decide a held package is
-/// not held. This repo has already shipped one bug from assuming those two rules were
-/// interchangeable.
+/// pacman's rule, and holds nothing under libalpm's. That is an odd thing to write. But the
+/// direction it fails in is the dangerous one. `matches_any` would decide a held package is
+/// not held. Treating the two rules as interchangeable is therefore unsafe.
 ///
 /// Only the scan differs. Whether one pattern covers one name is `piko_db::glob::matches`,
-/// which `matches_any` calls too — so the two rules differ in the way they are meant to, and
-/// in no other way. That shared rule carries the fallback to an exact-string comparison for a
+/// which `matches_any` calls too. So the two rules differ in the way they are meant to, and in
+/// no other way. That shared rule carries the fallback to an exact-string comparison for a
 /// malformed glob.
 fn is_held(name: &str, hold_pkg: &[String]) -> bool {
     hold_pkg.iter().any(|pattern| piko_db::glob::matches(pattern, name))
@@ -33,30 +32,30 @@ fn is_held(name: &str, hold_pkg: &[String]) -> bool {
 
 /// pacman's `HoldPkg` guard: whether a removal of `names` may go ahead.
 ///
-/// Transcribed from `pacman_remove` (`remove.c:133-145`), which warns once per held package
-/// and then asks a single `noyes` question, a prompt whose default is no.
+/// Transcribed from `pacman_remove` (`remove.c:133-145`). That function warns once per held
+/// package, then asks a single `noyes` question, a prompt whose default is no.
 ///
 /// 1. It is a prompt, not a hard error. A held package can be removed; the user just has to
 ///    say so. Making it an error would put piko on the wrong side of a decision pacman leaves
 ///    to the person running it.
 /// 2. `noconfirm` refuses rather than accepts. pacman's `question` returns the preset when
 ///    `config->noconfirm` is set (`util.c:1737`), and `noyes`'s preset is 0. The flag that
-///    means "assume yes" everywhere else means "assume no" here, so an unattended `piko remove
-///    --noconfirm` does not take away a held package. piko prints why, instead of echoing
-///    pacman's prompt with no answer after it: exiting non-zero without explaining is worse
-///    than a line of output.
-/// 3. It runs before the plan is displayed, so the warnings are not buried under a step list
-///    the user is about to be told they cannot have.
+///    means "assume yes" everywhere else means "assume no" here. So an unattended
+///    `piko remove --noconfirm` does not take away a held package. piko prints why, rather
+///    than echoing pacman's prompt with no answer after it. Exiting non-zero without
+///    explaining is worse than a line of output.
+/// 3. It runs before the plan is displayed. The warnings are then not buried under a step
+///    list the user is about to be told they cannot have.
 ///
 /// piko keeps the per-package warnings that pacman's `--print` path drops. That is not a
-/// behavioral divergence: pacman loses them to `config->logmask &= ~ALPM_LOG_WARNING`
-/// (`pacman.c:1300`), a blanket mute of every warning under `--print`, not a decision about
-/// this one. Naming the held package is what makes the refusal actionable.
+/// behavioral divergence. pacman loses them to `config->logmask &= ~ALPM_LOG_WARNING`
+/// (`pacman.c:1300`), a blanket mute of every warning under `--print`. It is not a decision
+/// about this one. Naming the held package is what makes the refusal actionable.
 ///
 /// Returns `true` to continue. A refusal is [`ExitCode::FAILURE`] at every call site, unlike an
 /// ordinary declined prompt, which piko exits `0` for. The `noconfirm` path reaches this
-/// refusal with nobody having declined anything, and reporting success for a removal that did
-/// not happen is how a script concludes the package is gone. pacman returns 1 for both.
+/// refusal with nobody having declined anything. Reporting success for a removal that did not
+/// happen is how a script concludes the package is gone. pacman returns 1 for both.
 ///
 /// [`ExitCode::FAILURE`]: std::process::ExitCode::FAILURE
 pub fn hold_pkg_allows(
@@ -166,7 +165,7 @@ mod tests {
         assert!(is_held("pacman", &held));
     }
 
-    /// Same fallback `matches_any` takes, and for the same reason: `fnmatch` has no invalid
+    /// Same fallback `matches_any` takes, and for the same reason. `fnmatch` has no invalid
     /// pattern to report, so an unbalanced bracket must not swallow every name.
     #[test]
     fn a_malformed_pattern_falls_back_to_an_exact_comparison() {

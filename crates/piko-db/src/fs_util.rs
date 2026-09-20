@@ -2,8 +2,8 @@
 //!
 //! Every byte this crate reads off disk passes through `read_capped`. The hardening lives in one
 //! place, so it can be reviewed on its own. The `MetadataFile` convenience constructors from
-//! `alpm-common` (`from_file`) are deliberately never used: they call `read_to_string` on a path
-//! with no bound and no file-type check.
+//! `alpm-common` (`from_file`) are deliberately never used. They call `read_to_string` on a
+//! path with no bound and no file-type check.
 //!
 //! Three properties are enforced here:
 //!
@@ -65,10 +65,10 @@ pub(crate) fn ensure_regular_file(file: &File, path: &Path) -> Result<std::fs::M
 /// Unlike [`open_no_follow`], this **does** follow a symlink. It exists for repository
 /// archives. The path is a single file the caller names explicitly (e.g. `core.db`), not one
 /// of many enumerated directory entries. The [alpm-repo-db] spec itself documents
-/// `repo.db -> repo.db.tar.gz` as the normal server-side layout, so refusing to follow it
-/// would break the documented access path for no security benefit. The `O_NONBLOCK` plus
-/// `fstat` check still applies: a FIFO or device node named like an archive still cannot hang
-/// the process or be read as if it were one.
+/// `repo.db -> repo.db.tar.gz` as the normal server-side layout. Refusing to follow it would
+/// break the documented access path for no security benefit. The `O_NONBLOCK` plus `fstat`
+/// check still applies. A FIFO or device node named like an archive still cannot hang the
+/// process, or be read as if it were one.
 ///
 /// [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
 pub(crate) fn open_following_symlinks(path: &Path) -> Result<File> {
@@ -128,10 +128,10 @@ pub fn read_capped_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
 /// Reads `path` in full and decodes it as UTF-8, **following a final symlink**.
 ///
 /// Exposes the `open_following_symlinks` door for alpm `.hook` files. `alpm-hooks(5)` documents
-/// disabling a hook by shadowing it with a symlink to `/dev/null`. Refusing to follow that symlink
-/// would break the feature instead of protecting anything: a hook directory is host configuration
-/// named by `pacman.conf`, not a package-controlled entry directory, and the file is one of an
-/// enumerated set whose whole population is trusted the same way.
+/// disabling a hook by shadowing it with a symlink to `/dev/null`. Refusing to follow that
+/// symlink would break the feature instead of protecting anything. A hook directory is host
+/// configuration named by `pacman.conf`, not a package-controlled entry directory. And the file
+/// is one of an enumerated set whose whole population is trusted the same way.
 ///
 /// The rest of the door is unchanged: `O_NONBLOCK`, an `fstat` that refuses anything but a
 /// regular file, and a bounded read. A FIFO planted in a hook directory still cannot hang the
@@ -150,14 +150,14 @@ pub fn read_capped_utf8_following(path: &Path, limit: Limit, max: u64) -> Result
 /// Reads `path` in full as bytes, **following a final symlink**.
 ///
 /// The bytes counterpart of [`read_capped_utf8_following`], for a file whose contents are
-/// paths rather than text. The kernel's mount table is the case: `/etc/mtab` is a symlink to
+/// paths rather than text. The kernel's mount table is that case. `/etc/mtab` is a symlink to
 /// `/proc/self/mounts`, and a mount directory is a byte string the filesystem never promised
 /// would decode as UTF-8. Refusing the whole table over one such directory would disable the
 /// disk-space check on the system that needs it.
 ///
 /// The rest of the door is unchanged: `O_NONBLOCK`, an `fstat` that refuses anything but a
-/// regular file, and a bounded read. A procfs file reports a size of zero, which only means
-/// the read starts with no capacity hint; the bound still applies to what actually arrives.
+/// regular file, and a bounded read. A procfs file reports a size of zero. That only means the
+/// read starts with no capacity hint. The bound still applies to what actually arrives.
 ///
 /// # Errors
 ///

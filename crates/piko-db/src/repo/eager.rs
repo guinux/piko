@@ -190,9 +190,8 @@ ancientfoo
         );
     }
 
-    /// States the behaviour change deferring `%DEPENDS%` buys, as a test: the open no longer
-    /// rejects the entry, and the same error arrives from the same parser when the section is
-    /// actually read.
+    /// Pins what deferring `%DEPENDS%` buys. The open accepts the entry. The same error then
+    /// arrives from the same parser when the section is read.
     #[test]
     fn a_malformed_depends_is_reported_when_read_rather_than_at_open() {
         let text = DESC.replace("bash>=5.0", "bash>=");
@@ -207,8 +206,8 @@ ancientfoo
         );
     }
 
-    /// Sections this module does not read must cost nothing and must not be mistaken for one
-    /// it does, including a `%DESC%` whose free text could look like anything.
+    /// Sections this module does not read must cost nothing. They must not be mistaken for
+    /// one it does, including a `%DESC%` whose free text could look like anything.
     #[test]
     fn deferred_sections_are_ignored_entirely() {
         let text = format!("{DESC}\n%DESC%\nglibc\nbash>=5.0\n\n%URL%\nnot a url at all\n");

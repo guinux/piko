@@ -8,9 +8,9 @@
 //! the file — this layer is read-only. Fabricating a version marker for a database of
 //! unknown actual layout would paper over corruption instead of reporting it.
 //!
-//! A missing file is still tolerated, not by this module but by [`super::database`], when
-//! [`root_is_unpopulated`] says the directory is empty or absent — the same "nothing to
-//! misread" boundary libalpm's own bootstrap uses. Creating the file on disk stays
+//! A missing file is still tolerated, not by this module but by [`super::database`]. That
+//! happens when [`root_is_unpopulated`] says the directory is empty or absent. It is the same
+//! "nothing to misread" boundary libalpm's own bootstrap uses. Creating the file on disk stays
 //! `piko-db-write`'s job, the first time something actually gets written.
 
 use std::path::Path;
@@ -100,12 +100,13 @@ fn parse(contents: &str) -> std::result::Result<u32, SchemaVersionError> {
 /// Whether `root` is a database nobody has written into yet: it does not exist, or it exists
 /// and is completely empty.
 ///
-/// [`check`] cannot decide this on its own — telling "not yet created" from "corrupted" needs
-/// a directory listing, which the success path has no reason to do. This mirrors libalpm's own
-/// `local_db_validate` (`be_local.c:466`): its `readdir` loop bootstraps a fresh
-/// `ALPM_DB_VERSION` only when the directory holds nothing else, and refuses otherwise. Any
-/// entry at all — even one unrelated to the database format, like a stray file left by another
-/// tool — disqualifies it there, and does here too.
+/// [`check`] cannot decide this on its own. Telling "not yet created" from "corrupted" needs
+/// a directory listing, which the success path has no reason to do.
+///
+/// This mirrors libalpm's own `local_db_validate` (`be_local.c:466`). Its `readdir` loop
+/// bootstraps a fresh `ALPM_DB_VERSION` only when the directory holds nothing else, and
+/// refuses otherwise. Any entry at all disqualifies it there, and does here too. That includes
+/// one unrelated to the database format, such as a stray file left by another tool.
 ///
 /// # Errors
 ///

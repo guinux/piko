@@ -43,9 +43,9 @@ fn main() -> ExitCode {
         return code;
     }
 
-    // Read here, before anything spawns a thread. `time` refuses to read the local UTC offset
-    // from a multi-threaded process, and piko is multi-threaded by the time a transaction runs
-    // — see `piko_txn::LocalOffset`. Every timestamp piko writes is rendered in this value.
+    // Read here, before anything spawns a thread. `time` refuses to read the local UTC
+    // offset from a multi-threaded process, and piko is multi-threaded by the time a
+    // transaction runs. See `piko_txn::LocalOffset`. Every timestamp piko writes uses this.
     let offset = piko_txn::LocalOffset::capture();
     let cli = Cli::parse();
 
@@ -182,6 +182,10 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 cmd::files::files_installed_then_repos(&local, &dbs, packages, *quiet, &mut out)
             }
         },
+        Command::Owns { paths, quiet } => {
+            let root = resolve_root_dir(cli, &config);
+            cmd::owns::owns(&open_local_db(cli, &config)?, &root, paths, *quiet, &mut out)
+        }
         Command::Info { packages, installed, repo } => match repo {
             Some(name) => {
                 let repo = parse_repo_arg(name)?;
@@ -228,9 +232,8 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 };
                 // `--repo` names one specific repository to search. That alone makes the
                 // search repos-only, even without `--repos`. Being installed has nothing to
-                // do with any one repository, so a merged search would otherwise show an
-                // `[Installed]` package the same way regardless of which repository `--repo`
-                // named.
+                // do with any one repository. A merged search would otherwise show an
+                // `[Installed]` package the same way, whichever repository `--repo` named.
                 if *repos || repo.is_some() {
                     cmd::search::repos_only(&dbs, terms, *quiet, &mut out)
                 } else {
@@ -427,7 +430,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 &mut out,
             )
         }
-        Command::Refresh { repos, force } => {
+        Command::Refresh { repos, force, files } => {
             let record = recording(cli, &config, &resolve_dbpath(cli, &config), offset);
             cmd::txn::note(
                 &record,
@@ -440,6 +443,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 &resolve_dbpath(cli, &config),
                 repos,
                 *force,
+                *files,
                 &cancel,
             )
         }
@@ -487,16 +491,16 @@ const fn reason_policy(as_deps: bool, as_explicit: bool) -> piko_txn::ReasonPoli
 /// The arguments `piko install` and `piko update` pass to [`sync`].
 ///
 /// The two subcommands differ in exactly four fields. `install` honors `--asdeps` and
-/// `--asexplicit`, and never refreshes; `update` overrides no install reason, always runs a
+/// `--asexplicit`, and never refreshes. `update` overrides no install reason, always runs a
 /// sysupgrade pass, refreshes by default, and can force that refresh. Every other flag
 /// matches in name, meaning, and default. This struct gathers them so [`sync`] keeps a
 /// readable signature, the same idiom
 /// `cmd::txn::InstallOptions` and `cmd::txn::Catalog` use one layer down.
 ///
 /// `cli.rs` keeps two separate sets of clap fields on purpose. The flags match, but the help
-/// text does not: `install` documents each flag in full, and `update` restates it in one
+/// text does not. `install` documents each flag in full, and `update` restates it in one
 /// line. That difference keeps `piko update --help` readable. That duplication is
-/// documentation; this struct's duplication was not.
+/// documentation. The duplication this struct removes is not.
 #[derive(Debug)]
 struct SyncArgs<'a> {
     /// `--root`, already resolved to a `RootDir` fallback if omitted.
@@ -535,11 +539,11 @@ struct SyncArgs<'a> {
 /// configuration, then makes the one call that plans and commits.
 ///
 /// `piko update` is `piko install` with a sysupgrade pass and no `--asdeps`. One function
-/// serves both for that reason. The two dispatch arms were byte-identical over 55 lines apart
-/// from those two fields. That match is the same tell that moved `Request::with_sysupgrade`
-/// into a library crate: `piko plan -u` and `piko update` built that request byte-identically
-/// at two call sites. Two call sites quietly agreeing on the same block belongs in a library
-/// crate, not duplicated in the CLI.
+/// serves both for that reason. Written separately, the two dispatch arms are byte-identical
+/// over 55 lines apart from those two fields. That match is the same tell that put
+/// `Request::with_sysupgrade` in a library crate. `piko plan -u` and `piko update` build that
+/// request byte-identically at two call sites. Two call sites quietly agreeing on the same
+/// block belongs in a library crate, not duplicated in the CLI.
 ///
 /// Nothing here decides anything a second frontend would have to reimplement. The plan, the
 /// verification policy, and the download set all belong to `piko_txn::plan` and
@@ -548,9 +552,9 @@ struct SyncArgs<'a> {
 ///
 /// `update`'s pre-refresh step lives here too, since it decides what `open_all_repos` below
 /// reads rather than what `cmd::txn::install` does with it. Only this path installs the
-/// `SIGINT` handler ahead of the confirmation prompt, threading the same `Cancel` into
-/// `InstallOptions::pre_cancel` so the refresh and the transaction that follows share one
-/// registration — `ctrlc::set_handler` refuses a second caller. See `crate::signal` for the
+/// `SIGINT` handler ahead of the confirmation prompt. It threads the same `Cancel` into
+/// `InstallOptions::pre_cancel`, so the refresh and the transaction that follows share one
+/// registration. `ctrlc::set_handler` refuses a second caller. See `crate::signal` for the
 /// Ctrl+C trade-off this makes at the confirmation prompt.
 fn sync(
     cli: &Cli,
@@ -571,7 +575,7 @@ fn sync(
     let pre_cancel = if args.refresh {
         cmd::txn::note(&record, "synchronizing package lists");
         let (cancel, mode) = crate::signal::install_cancel_handler();
-        let code = cmd::refresh::refresh(parsed, &dbpath, &[], args.force, &cancel);
+        let code = cmd::refresh::refresh(parsed, &dbpath, &[], args.force, false, &cancel);
         if code != ExitCode::SUCCESS {
             return Ok(code);
         }

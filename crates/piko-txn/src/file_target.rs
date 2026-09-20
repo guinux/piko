@@ -1,14 +1,14 @@
 //! Package files named on the command line: reading them, checking them, fetching them.
 //!
-//! This is the library half of `pacman -U`. A package file is a candidate the solver has never
-//! seen, addressed by a path rather than by a repository, and governed by its own `SigLevel`
-//! directive. Each of those three is decided here, once, so that any frontend gets the same
+//! This is the library half of `pacman -U`. A package file is a candidate the solver has
+//! never seen. A path addresses it rather than a repository, and its own `SigLevel` directive
+//! governs it. Each of those three is decided here, once, so any frontend gets the same
 //! answers.
 //!
-//! What is *not* here: the solving, which is `piko_db::solve`'s, and the verification, which
-//! happens in [`crate::Transaction::verify`] exactly as it does for a repository package. A
-//! file target is checked in the same place, by the same code, under a different policy —
-//! not on a path of its own.
+//! Two things are *not* here. The solving belongs to `piko_db::solve`. The verification
+//! happens in [`crate::Transaction::verify`], exactly as it does for a repository package. A
+//! file target is checked in the same place, by the same code, under a different policy. It
+//! takes no path of its own.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,9 +42,9 @@ impl FileTarget {
 
     /// The name this package is addressed by inside a transaction.
     ///
-    /// Built from the `.PKGINFO`, not from the file's own name. The two usually agree, and
-    /// when they do not it is the metadata that describes the archive — a file renamed on
-    /// disk is still the package it was built as. Nothing downloads this name; it is the key
+    /// Built from the `.PKGINFO`, not from the file's own name. The two usually agree. When
+    /// they do not, the metadata is what describes the archive. A file renamed on disk is
+    /// still the package it was built as. Nothing downloads this name. It is the key
     /// [`crate::source::FileSource`] maps back to [`FileTarget::path`].
     #[must_use]
     pub const fn file_name(&self) -> &PackageFileName {
@@ -77,8 +77,8 @@ impl FileTarget {
 ///
 /// # Errors
 ///
-/// [`Error::UnusableSource`] if the archive has no usable `.PKGINFO`, or if its name and
-/// version do not form an entry name piko's own reader would accept.
+/// [`Error::UnusableSource`] covers two cases. The archive has no usable `.PKGINFO`, or its
+/// name and version do not form an entry name piko's own reader would accept.
 pub fn load(path: &Path, policy: Policy, limits: &PackageLimits) -> Result<FileTarget> {
     let (info, _raw) = crate::conflict::load_pkginfo(path, limits)?;
     let fields = Fields::of(&info);
@@ -153,7 +153,7 @@ impl<'a> Fields<'a> {
 /// The compression a file's own name declares, for [`PackageFileName`].
 ///
 /// Best effort, and deliberately so. This affects only the string a package is addressed by
-/// inside the transaction; the archive itself is decompressed by sniffing its magic bytes
+/// inside the transaction. The archive itself is decompressed by sniffing its magic bytes
 /// (`extract::archive::sniff_file`), never by trusting an extension. An unrecognised name
 /// yields an uncompressed-looking key, which still round-trips.
 fn compression_of(path: &Path) -> Option<CompressionAlgorithmFileExtension> {
@@ -200,8 +200,8 @@ pub fn check_architecture(targets: &[FileTarget], configured: &[Architecture]) -
 /// `alpm_add_pkg` (`add.c:49`) refuses a duplicate name with `ALPM_ERR_TRANS_DUP_TARGET`, and
 /// `_alpm_sync_prepare` (`sync.c:470`) refuses a duplicate file name with
 /// `ALPM_ERR_TRANS_DUP_FILENAME`. Both reduce to one question here, because a file target's
-/// name *is* its `PackageFileName`: two files that render the same key would have to be the
-/// same package, and [`crate::source::FileSource`] could only serve one of them.
+/// name *is* its `PackageFileName`. Two files that render the same key would have to be the
+/// same package, and [`crate::source::FileSource`] could serve only one of them.
 ///
 /// # Errors
 ///
@@ -223,23 +223,25 @@ pub fn check_duplicates(targets: &[FileTarget]) -> Result<()> {
 
 /// Fetches a package named by URL, and returns where it landed.
 ///
-/// This is `alpm_fetch_pkgurl` (`dload.c:1324`), including its cache rule: a copy already in a
-/// cache directory is used, unless `policy` asks for a signature and no `.sig` sits beside it
-/// — in which case the hit is discarded and the file is fetched again, so that the signature
-/// arrives with it.
+/// This is `alpm_fetch_pkgurl` (`dload.c:1324`), including its cache rule. A copy already in
+/// a cache directory is used. The exception is a `policy` asking for a signature with no
+/// `.sig` beside the copy. The hit is then discarded and the file is fetched again, so the
+/// signature arrives with it.
 ///
-/// The URL is split at its last `/` into a server and a file name, and handed to the same
+/// The URL is split at its last `/` into a server and a file name. That pair goes to the same
 /// `piko-net` download every repository package uses. That is what makes the `.sig` fetch, the
 /// size bound, the atomic write and the cancellation check identical on both paths. It also
 /// means the last component must be a name `alpm_types::PackageFileName` accepts.
 ///
 /// # Where the file lands
 ///
-/// [`crate::select_download_dir`] runs here, which is the second place it runs — the other being
-/// `DownloadingSource::new`. It has to: this download happens before a plan exists, so there is no
-/// transaction source yet to borrow one from. It runs *after* the URL is parsed and after the cache
-/// is asked, so a malformed URL is reported as a malformed URL rather than as a cache problem, and
-/// a URL already in the cache needs no writable directory at all.
+/// [`crate::select_download_dir`] runs here, the second place it runs. The other is
+/// `DownloadingSource::new`. It has to run here, because this download happens before a plan
+/// exists. There is no transaction source yet to borrow one from.
+///
+/// It runs *after* the URL is parsed and after the cache is asked. So a malformed URL is
+/// reported as a malformed URL rather than as a cache problem. And a URL already in the cache
+/// needs no writable directory at all.
 ///
 /// Nothing is verified here. The file joins the transaction as an ordinary file target and is
 /// checked in [`crate::Transaction::verify`], under `policy`.
@@ -361,7 +363,7 @@ mod tests {
     }
 
     /// The addressing name is rebuilt from the metadata, not taken from the file. A renamed
-    /// archive is still the package it was built as, and `FileSource` maps that name back to
+    /// archive is still the package it was built as. `FileSource` maps that name back to
     /// wherever the file actually is.
     #[test]
     fn the_addressing_name_comes_from_the_metadata_not_the_file_name() {
@@ -457,8 +459,8 @@ mod tests {
         );
 
         // A signature is wanted and none is beside it, so the hit is discarded and the fetch
-        // is attempted — against a host that does not resolve, which is how this test knows
-        // the hit was rejected without needing a server.
+        // is attempted. The host does not resolve. That is how this test knows the hit was
+        // rejected, without needing a server.
         let checked = Policy { check: true, ..policy() };
         assert!(fetch_url(&url, &cache, checked, &cancel, &|_| {}).is_err());
 

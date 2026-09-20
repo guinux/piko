@@ -1,9 +1,10 @@
 //! Errors from administering a keyring.
 //!
 //! A separate enum from [`piko_sig::Error`], for the same reason `piko-db-write` keeps its
-//! own: a verifier fails to *understand* something, an administrator fails to *change*
-//! something. A caller distinguishing "the keyring is unreadable" from "that key is not in the
-//! keyring" should not have to match on variants of one type built for a different job.
+//! own. A verifier fails to *understand* something. An administrator fails to *change*
+//! something. A caller must be able to tell "the keyring is unreadable" from "that key is not
+//! in the keyring". Matching on variants of one type built for a different job should not be
+//! what it takes.
 
 use std::path::PathBuf;
 
@@ -82,7 +83,7 @@ pub enum Error {
 impl From<piko_sig::Error> for Error {
     /// [`piko_sig::open_context`] is the one function this crate calls into `piko-sig` for.
     /// Its only failure mode is [`piko_sig::Error::KeyringUnusable`], so the conversion is
-    /// total in practice; a future verification-only variant reaching here becomes
+    /// total in practice. A future verification-only variant reaching here becomes
     /// [`Error::Gpgme`] rather than losing the message.
     fn from(source: piko_sig::Error) -> Self {
         match source {

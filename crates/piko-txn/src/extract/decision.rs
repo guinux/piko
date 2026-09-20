@@ -3,12 +3,13 @@
 //! libalpm makes these decisions inline in `extract_single_file` (`add.c:191`), interleaved
 //! with the extraction itself. The outcome lives in local `int` flags (`notouch`,
 //! `needbackup`, `isnewfile`) and reaches the user through callbacks fired mid-loop. That is
-//! why the rules are hard to review: the matrix in the comment at `add.c:232` is authored
+//! why the rules are hard to review. The matrix in the comment at `add.c:232` is authored
 //! carefully, then implemented across sixty lines that also do I/O.
 //!
 //! Here the decisions are pure functions returning values. Tests can enumerate every cell of
-//! the matrix and every ordering of the three hashes, without a filesystem, an archive, or a
-//! package. The code that acts on them stays small enough to review on its own. This is the
+//! the matrix and every ordering of the three hashes. They need no filesystem, no archive and
+//! no package. The code that acts on them stays small enough to review on its own. This is
+//! the
 //! same split that makes `piko_db::solve::Plan` a value rather than a callback tape.
 
 /// What the archive says an entry is.
@@ -27,7 +28,7 @@ pub enum EntryKind {
 ///
 /// This comes from an `lstat`, matching libalpm's `llstat` (`add.c:247`). So a symlink *to* a
 /// directory is [`Existing::Other`], not [`Existing::Directory`]. That distinction is
-/// load-bearing: it is what makes replacing a symlink with a real file an ordinary overwrite
+/// load-bearing. It is what makes replacing a symlink with a real file an ordinary overwrite,
 /// rather than the refused "file replacing directory" case.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Existing {
@@ -128,8 +129,8 @@ pub struct EntryContext<'a> {
 /// | **file/node** | 3 overwrite, or back up | 4 overwrite |
 /// | **directory** | 5 refuse | 6 skip |
 ///
-/// The order of the checks matters and is libalpm's: `NoExtract` wins over everything, then
-/// the matrix, and only in case 3 do `NoUpgrade` and the backup rules apply.
+/// The order of the checks matters, and it is libalpm's. `NoExtract` wins over everything,
+/// then the matrix. Only in case 3 do `NoUpgrade` and the backup rules apply.
 #[must_use]
 pub fn decide(context: &EntryContext<'_>) -> Disposition {
     // The archive is not authoritative about what the package contains; the file list is.
@@ -144,7 +145,7 @@ pub fn decide(context: &EntryContext<'_>) -> Disposition {
         // Cases 1 and 2: nothing is there, so nothing needs deciding.
         (Existing::Absent, _) => Disposition::Extract,
         // Case 6: the directory is already there. Its mode may differ from the package's.
-        // libalpm warns about that and does not correct it; that is a diagnostic for the
+        // libalpm warns about that and does not correct it. That is a diagnostic for the
         // caller, not a decision, so it is not modelled here.
         (Existing::Directory, EntryKind::Directory) => {
             Disposition::Skip(SkipReason::DirectoryExists)
@@ -202,13 +203,17 @@ pub enum BackupAction {
 /// - `packaged` — what the new package ships;
 /// - `original` — what the *old* package shipped, recorded in its `%BACKUP%`.
 ///
-/// The comparisons answer, in order: is the user already running what we are about to
-/// install; has the file not changed between the two packages; has the user left it
-/// untouched. Only when all three miss is the decision handed to the user as a `.pacnew`.
+/// The comparisons answer three questions, in order:
+///
+/// 1. Is the user already running what is about to be installed?
+/// 2. Did the file stay the same between the two packages?
+/// 3. Did the user leave it untouched?
+///
+/// Only when all three miss is the decision handed to the user as a `.pacnew`.
 ///
 /// `original` is `None` for a file that became a backup file only in the new package. The
-/// middle two questions are then unanswerable, and anything other than an exact match with
-/// what is already installed must become a `.pacnew`. Piko cannot tell an edited file from an
+/// middle two questions are then unanswerable. Anything other than an exact match with what
+/// is already installed must become a `.pacnew`. piko cannot tell an edited file from an
 /// unedited one without a baseline, and guessing wrong overwrites the user's work.
 #[must_use]
 pub fn resolve_backup(
@@ -226,7 +231,7 @@ pub fn resolve_backup(
         return BackupAction::InstallNew;
     }
     if original.is_some() && original == packaged {
-        // The file did not change between the two packages, so whatever is on disk is either
+        // The file did not change between the two packages. So what is on disk is either
         // the user's edit or the same thing. Either way, leave it.
         return BackupAction::KeepExisting { remove_pacnew: pacnew_is_new };
     }
@@ -355,8 +360,8 @@ mod tests {
         );
     }
 
-    /// "allow adding backup files retroactively": the new package declares it a backup file
-    /// and the old one did not, so there is no original to compare against.
+    /// This is libalpm's "allow adding backup files retroactively". The new package declares
+    /// it a backup file and the old one did not, so there is no original to compare against.
     #[test]
     fn a_newly_declared_backup_file_has_no_original() {
         let mut ctx = context(EntryKind::Other, Existing::Other);
@@ -421,8 +426,8 @@ mod tests {
         );
     }
 
-    /// Without an original, an edited file is indistinguishable from an unedited one, so the
-    /// only safe answers are "identical" or "let the user decide".
+    /// Without an original, an edited file looks exactly like an unedited one. So the only
+    /// safe answers are "identical" or "let the user decide".
     #[test]
     fn backup_without_an_original_only_installs_on_an_exact_match() {
         assert_eq!(
@@ -448,10 +453,10 @@ mod tests {
         assert_eq!(resolve_backup(Some("local"), None, None, true), BackupAction::KeepBoth);
     }
 
-    /// The ordering of the three comparisons is libalpm's, and it is observable: when the
-    /// local file matches both the package and the original, the first rule wins and the
-    /// file is installed rather than left alone. The outcomes agree on the bytes, so this
-    /// pins the behaviour rather than the reasoning.
+    /// The ordering of the three comparisons is libalpm's, and it is observable. When the
+    /// local file matches both the package and the original, the first rule wins. The file is
+    /// then installed rather than left alone. The outcomes agree on the bytes, so this pins
+    /// the behaviour rather than the reasoning.
     #[test]
     fn the_comparison_order_matches_libalpm_when_all_three_agree() {
         assert_eq!(

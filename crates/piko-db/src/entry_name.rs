@@ -98,13 +98,13 @@ pub struct EntryName {
 impl EntryName {
     /// Parses a directory name.
     ///
-    /// The split point is the **second-from-last** `-`. This is unambiguous: an
+    /// The split point is the **second-from-last** `-`. This is unambiguous. An
     /// **alpm-package-version** may not contain `-` in its `pkgver`, and its `pkgrel` is
     /// numeric. Any dashes before those last two belong to the package name. An epoch needs
     /// no special handling, since it is attached to the `pkgver` by `:`.
     ///
     /// This is the same rule as libalpm's `_alpm_splitname`, which scans backwards for two
-    /// `-`. It differs in two ways: it never reads past the start of the string, and it
+    /// `-`. It differs in two ways. It never reads past the start of the string. And it
     /// validates both halves through `alpm-types` instead of accepting arbitrary bytes.
     ///
     /// # Errors

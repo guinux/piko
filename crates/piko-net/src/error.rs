@@ -12,8 +12,8 @@ pub enum Error {
     /// Every configured server failed.
     ///
     /// Carries what each server said. A single "could not download core.db" turns into a
-    /// support thread: one mirror 404s, another times out, a third serves HTML from a captive
-    /// portal, and the user needs to see which.
+    /// support thread. One mirror 404s, another times out, a third serves HTML from a captive
+    /// portal. The user needs to see which.
     #[error(
         "could not download {file} from any of {} server(s):\n  {}",
         attempts.len(),
@@ -36,7 +36,7 @@ pub enum Error {
     /// A batch was asked to fetch the same file twice.
     ///
     /// Refused rather than deduplicated. `<destination>.new` is derived from the destination
-    /// alone, so two transfers to one destination would race to write the same atomic-write
+    /// alone. So two transfers to one destination would race to write the same atomic-write
     /// temporary from two threads.
     /// Silently collapsing the duplicate would hide a caller bug that only shows up as a
     /// corrupted download under load.
@@ -48,8 +48,8 @@ pub enum Error {
 
     /// The download exceeded the size bound.
     ///
-    /// A mirror is not trusted to be honest about how much it will send, so the bound is
-    /// enforced against what actually arrives rather than against `Content-Length`.
+    /// A mirror is not trusted to be honest about how much it will send. So the bound is
+    /// enforced against what actually arrives, not against `Content-Length`.
     #[error("{file} exceeds the {max} byte download limit")]
     TooLarge {
         /// The file being downloaded.
@@ -84,7 +84,7 @@ pub enum Error {
     /// The downloaded database could not be checked at all.
     ///
     /// Kept separate from [`Error::SignatureRejected`] for the same reason `piko-txn` keeps
-    /// them separate: one means distrust the mirror, the other means fix the keyring.
+    /// them separate. One means distrust the mirror. The other means fix the keyring.
     #[error("cannot check the signature of the downloaded {file}: {reason}")]
     SignatureUncheckable {
         /// The file that could not be checked.
@@ -111,8 +111,8 @@ pub enum Error {
 
     /// A [`crate::Cancel`] was requested while a download was in progress.
     ///
-    /// Raised from inside the streaming loop, the same place as [`Error::TooLarge`], as soon
-    /// as the request is noticed rather than only between whole files. The temporary being
+    /// Raised from inside the streaming loop, the same place as [`Error::TooLarge`]. It fires
+    /// as soon as the request is noticed, not only between whole files. The temporary being
     /// written stays uncommitted and is removed on drop. Nothing changed on disk.
     #[error("the download was cancelled")]
     Cancelled,
@@ -148,8 +148,8 @@ mod tests {
         assert!(message.contains("timed out"), "{message}");
     }
 
-    /// A rejection has to say the system was left alone, or the user's next move is to panic
-    /// about a half-updated database that does not exist.
+    /// A rejection has to say the system was left alone. Otherwise the user's next move is to
+    /// panic about a half-updated database that does not exist.
     #[test]
     fn a_rejection_says_the_existing_database_is_intact() {
         let error = Error::SignatureRejected {

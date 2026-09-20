@@ -9,10 +9,10 @@
 //! That looks like a missing check. It is the opposite. `alpm-hooks(5)` documents disabling a
 //! hook by shadowing it with a symlink to `/dev/null` in a higher-priority directory. The
 //! symlink parses as an empty file, yielding a hook with no triggers, no `Exec`, and no `When`.
-//! `_alpm_hook_validate` returns success for exactly that case — "allow triggerless hooks as a
-//! way of creating dummy hooks that can be used to mask lower priority hooks" — and the result
-//! never matches any transaction while still occupying its name. Rejecting it would turn every
-//! disabled hook into a parse error.
+//! `_alpm_hook_validate` returns success for exactly that case. Its comment reads: "allow
+//! triggerless hooks as a way of creating dummy hooks that can be used to mask lower priority
+//! hooks". The result never matches any transaction, while still occupying its name. Rejecting
+//! it would turn every disabled hook into a parse error.
 
 use std::ffi::OsString;
 
@@ -109,8 +109,8 @@ pub struct Hook {
 impl Hook {
     /// Whether this hook can ever run.
     ///
-    /// This is false for a masking hook: one whose only job is to occupy a name so a lower
-    /// priority directory's hook of the same name does not load.
+    /// This is false for a masking hook. Such a hook's only job is to occupy a name. A lower
+    /// priority directory's hook of the same name then does not load.
     #[must_use]
     pub fn is_active(&self) -> bool {
         !self.triggers.is_empty() && self.when.is_some() && !self.exec.is_empty()
@@ -131,9 +131,13 @@ pub struct ParseError {
 ///
 /// # Errors
 ///
-/// [`ParseError`] for anything `_alpm_hook_parse_cb` or `_alpm_hook_validate` would refuse: an
-/// unknown section or option, an unrecognised value, a trigger missing any of its three
-/// required parts, or a hook with triggers but no `Exec`/`When`.
+/// [`ParseError`] for anything `_alpm_hook_parse_cb` or `_alpm_hook_validate` would refuse.
+/// That covers four cases:
+///
+/// - an unknown section or option,
+/// - an unrecognised value,
+/// - a trigger missing any of its three required parts,
+/// - a hook with triggers but no `Exec`/`When`.
 pub fn parse(name: &str, text: &str) -> Result<Hook, ParseError> {
     let mut hook = Hook {
         name: name.to_owned(),

@@ -130,8 +130,8 @@ fn built_desc_matches_what_pacman_recorded() {
             let ours = built.get(key);
             let theirs = theirs.get(key);
             // 169 of this machine's 1157 entries have no `%XDATA%`, even though their
-            // package's `.PKGINFO` does. Sampling twelve of them confirmed this. It is
-            // historical drift in the database, not something piko should reproduce: a
+            // package's `.PKGINFO` does. Sampling twelve of them confirms this. It is
+            // historical drift in the database, not something piko should reproduce. A
             // current pacman writes the section, and 988 entries here have it. So the
             // section is compared where pacman recorded one, and skipped where it did not.
             if key == "XDATA" && theirs.is_none() {

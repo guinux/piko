@@ -1,9 +1,9 @@
 //! Exercises the one operation the hermetic unit tests deliberately avoid: generating a real
 //! RSA-4096 master key, the way `piko-key init` actually does it.
 //!
-//! `#[ignore]`d for the same reason `piko-db/tests/real_system.rs` is — real cost, real
-//! environment dependency (a functioning `gpg-agent`), not something every `cargo test` run
-//! should pay for. Run explicitly with `cargo test --workspace -- --ignored`.
+//! `#[ignore]`d for the same reason `piko-db/tests/real_system.rs` is. It has a real cost and
+//! a real environment dependency, a functioning `gpg-agent`. Every `cargo test` run should not
+//! pay for that. Run it explicitly with `cargo test --workspace -- --ignored`.
 
 #![allow(
     clippy::unwrap_used,

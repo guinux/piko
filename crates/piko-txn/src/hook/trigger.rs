@@ -1,7 +1,7 @@
 //! Whether a transaction sets a hook off, and with which targets.
 //!
-//! This is a pure function over a [`Summary`] of what the transaction will do — no filesystem,
-//! no database, no process. That is what makes `_alpm_hook_trigger_match_pkg` and
+//! This is a pure function over a [`Summary`] of what the transaction will do. It touches no
+//! filesystem, no database and no process. That is what makes `_alpm_hook_trigger_match_pkg` and
 //! `_alpm_hook_trigger_match_file` (`hook.c:359` and `:254`) reviewable side by side. It is the
 //! same split `extract::decision` and `conflict::decision` already use.
 //!
@@ -14,7 +14,7 @@
 //!
 //! So for a `Package` trigger, upgrade means "something was installed under this name before".
 //! For a `Path` trigger it means "this path is in both the set being written and the set being
-//! taken away". It is computed as a set intersection, with no reference to versions or to which
+//! taken away". A set intersection computes it, with no reference to versions or to which
 //! package owned it.
 
 use std::collections::BTreeSet;
@@ -90,12 +90,12 @@ impl Matches {
 /// Whether `hook` fires for `summary`, and the sorted targets it matched.
 ///
 /// The target list is empty unless the hook sets `NeedsTargets`. libalpm only accumulates it
-/// in that case; collecting it regardless would mean walking every file list of every package
+/// in that case. Collecting it regardless would mean walking every file list of every package,
 /// for every hook that could not use the result.
 ///
-/// A hook fires if *any* of its triggers does. One part is easy to shortcut wrongly: when
-/// `NeedsTargets` is set, every trigger must still be evaluated after one has already matched,
-/// because their target lists are joined (`hook.c:423`).
+/// A hook fires if *any* of its triggers does. One part is easy to shortcut wrongly. When
+/// `NeedsTargets` is set, every trigger must still be evaluated after one has already matched.
+/// Their target lists are joined (`hook.c:423`).
 #[must_use]
 pub fn triggered(hook: &Hook, summary: &Summary) -> Option<Vec<String>> {
     let mut fired = false;
@@ -159,7 +159,8 @@ fn match_packages(trigger: &Trigger, summary: &Summary) -> Matches {
 /// The three lists are built first, and the intersection is taken afterward, rather than
 /// deciding per file. A path counts as an upgrade only by being in *both* halves. The two
 /// halves come from different packages often enough that a file-by-file shortcut would be
-/// wrong (`alpm-hooks(5)`: "even if the file changes ownership from one package to another").
+/// wrong. `alpm-hooks(5)` says so: "even if the file changes ownership from one package to
+/// another".
 fn match_paths(trigger: &Trigger, summary: &Summary) -> Matches {
     let mut install: BTreeSet<String> = BTreeSet::new();
     let mut remove: BTreeSet<String> = BTreeSet::new();
@@ -345,7 +346,7 @@ Exec = /bin/true
         assert!(triggered(&hook(&upgrade_only), &summary).is_some());
     }
 
-    /// The intersection is over paths, not over packages: a file moving between two packages
+    /// The intersection is over paths, not over packages. A file moving between two packages
     /// in one transaction is an upgrade of that path.
     #[test]
     fn a_path_changing_owner_is_an_upgrade() {

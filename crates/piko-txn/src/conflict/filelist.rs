@@ -12,8 +12,8 @@
 //! - **ignoring a trailing slash** (`_alpm_filelist_pathcmp`) — used only by
 //!   `_alpm_filelist_intersection`.
 //!
-//! The second comparison is what lets the intersection see that one package ships
-//! `usr/lib/foo` as a file while another ships `usr/lib/foo/` as a directory. That is a real
+//! One package can ship `usr/lib/foo` as a file while another ships `usr/lib/foo/` as a
+//! directory. The second comparison is what lets the intersection see that. It is a real
 //! conflict, and an exact comparison would miss it entirely. Everywhere else the exact
 //! comparison is the right one, because the question there is "does this package own
 //! precisely this entry".
@@ -24,8 +24,8 @@ use std::collections::HashMap;
 
 /// A package's file list, sorted, as `%FILES%` and a package archive both spell it.
 ///
-/// Directories carry a trailing `/`; files do not. That convention comes from the archive and
-/// pacman preserves it into the database, so it is what both sides of a comparison see.
+/// Directories carry a trailing `/`, and files do not. That convention comes from the archive.
+/// pacman preserves it into the database, so both sides of a comparison see it.
 #[derive(Clone, Debug, Default)]
 pub struct FileList {
     /// Sorted by bytes, matching `_alpm_filelist_sort`.
@@ -34,7 +34,7 @@ pub struct FileList {
 
 /// A path with one trailing `/` removed, which is how [`pathcmp`] compares.
 ///
-/// Exactly one slash, not all of them: `_alpm_filelist_pathcmp` advances a single character
+/// Exactly one slash, not all of them. `_alpm_filelist_pathcmp` advances a single character
 /// past the end of the shorter string, so `a` equals `a/` but not `a//`. Real archives never
 /// spell a doubled slash, so this detail only matters for staying honest about what is
 /// transcribed.
@@ -86,9 +86,9 @@ impl FileList {
 
     /// Whether the list holds exactly `path`, trailing slash and all.
     ///
-    /// This uses the exact comparison, matching `alpm_filelist_contains`. A caller asking "is
-    /// `etc/foo` one of this package's files" must not get a yes from an entry `etc/foo/`,
-    /// which is a different object.
+    /// This uses the exact comparison, matching `alpm_filelist_contains`. A caller asks "is
+    /// `etc/foo` one of this package's files". An entry `etc/foo/` must not answer yes. It is
+    /// a different object.
     #[must_use]
     pub fn contains(&self, path: &str) -> bool {
         self.entries.binary_search_by(|entry| (**entry).cmp(path)).is_ok()
@@ -96,8 +96,8 @@ impl FileList {
 
     /// Entries of `self` that are not in `other`, compared exactly, in sorted order.
     ///
-    /// This is `_alpm_filelist_difference`. It reduces an upgrade to the paths that are new,
-    /// which is why the comparison must be exact: a path present in both versions is not new.
+    /// This is `_alpm_filelist_difference`. It reduces an upgrade to the paths that are new.
+    /// That is why the comparison must be exact. A path present in both versions is not new.
     ///
     /// The result stays sorted, and the caller depends on that. The filesystem check walks it
     /// relying on a directory's contents following the directory itself.
@@ -182,8 +182,8 @@ mod tests {
         assert_eq!(new.difference(&old), ["usr/bin/a", "usr/bin/c"]);
     }
 
-    /// `difference` uses exact comparison. An upgrade that turns a file into a directory must
-    /// report the directory as new, because it is a different object on disk.
+    /// `difference` uses exact comparison. An upgrade that turns a file into a directory
+    /// must report the directory as new. It is a different object on disk.
     #[test]
     fn difference_treats_a_file_and_a_directory_of_one_name_as_distinct() {
         let new = list(&["usr/lib/foo/"]);
@@ -240,14 +240,14 @@ mod tests {
 
     /// The reason `intersection` is not a merge.
     ///
-    /// The lists are sorted by bytes, where `usr/lib/foo` < `usr/lib/foo!` < `usr/lib/foo/`
-    /// (`!` is 0x21, `/` is 0x2f, and the terminator sorts before both). The merge compares
+    /// The lists are sorted by bytes, where `usr/lib/foo` < `usr/lib/foo!` < `usr/lib/foo/`.
+    /// `!` is 0x21, `/` is 0x2f, and the terminator sorts before both. The merge compares
     /// with `pathcmp`, which calls the first and the third equal. Meeting `usr/lib/foo!` in
     /// between advances the left cursor past `usr/lib/foo`, so the file-against-directory
     /// conflict is never reported.
     ///
-    /// This test asserts both halves — that libalpm misses the conflict and that piko does
-    /// not — so it fails if either behavior changes.
+    /// This test asserts both halves: that libalpm misses the conflict, and that piko does
+    /// not. So it fails if either behavior changes.
     #[test]
     fn the_libalpm_merge_can_step_past_a_conflict() {
         let a = list(&["usr/lib/foo"]);

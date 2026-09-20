@@ -80,9 +80,9 @@ pub fn repo(
 /// Checks installed packages first. For any name not installed, checks `dbs`, the configured
 /// repositories, in file (priority) order.
 ///
-/// `dbs` need not hold every configured repository. The caller only opens as many as are
-/// needed to resolve whichever names [`piko_db::LocalDatabase::get_str`] did not already find,
-/// via [`crate::context::open_repos_for_packages`], the same as
+/// `dbs` need not hold every configured repository. The caller opens only as many as are
+/// needed to resolve whichever names [`piko_db::LocalDatabase::get_str`] did not already find.
+/// That goes through [`crate::context::open_repos_for_packages`], the same as
 /// [`crate::cmd::files::files_installed_then_repos`].
 pub fn installed_then_repos(
     local: &LocalDatabase,

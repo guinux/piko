@@ -102,6 +102,7 @@ pub mod history;
 pub mod hook;
 pub mod install;
 pub mod journal;
+pub mod owner;
 pub mod pkginfo;
 pub mod plan;
 pub mod progress;

@@ -6,8 +6,8 @@
 //! settles which. piko has one `install` command that accepts all three, so the decision moves
 //! from the mode to the argument.
 //!
-//! That decision is a policy, not a formatting detail: it picks which `SigLevel` directive
-//! governs the package (`SigLevel`, `LocalFileSigLevel`, or `RemoteFileSigLevel`). A second
+//! That decision is a policy, not a formatting detail. It picks which `SigLevel` directive
+//! governs the package: `SigLevel`, `LocalFileSigLevel`, or `RemoteFileSigLevel`. A second
 //! frontend that classified targets differently would verify packages differently. So it lives
 //! here rather than in the CLI.
 //!
@@ -17,17 +17,17 @@
 //!
 //! 1. Contains `://` — a URL. This is pacman's own test (`upgrade.c` splits its targets on
 //!    `strstr(i->data, "://")`), kept literally so the two agree on every string.
-//! 2. Contains `/` — a path. Unambiguous: `alpm_types::Name` admits only
+//! 2. Contains `/` — a path. This is unambiguous. `alpm_types::Name` admits only
 //!    `[[:alnum:]+_.@-]`, so no package name can contain a separator.
 //! 3. Ends with a package-file suffix **and** names an existing regular file — a path.
 //! 4. Anything else — a name.
 //!
 //! Rule 3 is the only one that can be wrong, and it is where pacman's mode would have
 //! answered. `.` is a legal character in a package name, so `foo.pkg.tar.zst` is a name a
-//! repository could really carry. Existence on disk decides, because a user who has that file
-//! in the working directory almost certainly means it — and because the other reading stays
-//! reachable by spelling the name differently, while a file has no second spelling that avoids
-//! rule 3. A caller that can see both readings should say so; see
+//! repository could really carry. Existence on disk decides, for two reasons. A user who has
+//! that file in the working directory almost certainly means it. And the name reading stays
+//! reachable by spelling the name differently, while a file has no second spelling that
+//! avoids rule 3. A caller that can see both readings should say so. See
 //! [`TargetKind::ambiguous_name`].
 
 use std::path::{Path, PathBuf};
@@ -46,17 +46,17 @@ pub enum TargetKind {
 /// The file-name suffixes a package archive can carry.
 ///
 /// `alpm-package` names these, and `alpm_types::PackageFileName` parses exactly this set.
-/// Sniffing the file's magic bytes instead would be a stronger test of what the file *is*,
-/// and a worse test of what the user *meant*: this classifies an argument, and an argument
-/// that does not look like a package should be read as a name even when some file of that
-/// name happens to be a valid archive.
+/// Sniffing the file's magic bytes instead would test what the file *is*. That is a worse test
+/// of what the user *meant*. This classifies an argument. An argument that does not look like a
+/// package should be read as a name. Some file of that name may happen to be a valid archive,
+/// and that changes nothing.
 const PACKAGE_SUFFIXES: [&str; 5] =
     [".pkg.tar", ".pkg.tar.gz", ".pkg.tar.bz2", ".pkg.tar.xz", ".pkg.tar.zst"];
 
 /// Classifies one command-line target. See the module documentation for the rule.
 ///
-/// Rule 3 stats the target as written, so a bare file name is looked for in the working
-/// directory — the directory the user typed it in.
+/// Rule 3 stats the target as written. So a bare file name is looked for in the working
+/// directory, which is the directory the user typed it in.
 #[must_use]
 pub fn classify(target: &str) -> TargetKind {
     classify_with(target, is_regular_file)
@@ -64,8 +64,8 @@ pub fn classify(target: &str) -> TargetKind {
 
 /// [`classify`], with rule 3's filesystem probe supplied by the caller.
 ///
-/// Split out so the rule can be tested without a working directory to move into, which two
-/// tests running at once could not share.
+/// Split out so the rule can be tested without a working directory to move into. Two tests
+/// running at once could not share one.
 fn classify_with(target: &str, exists: impl Fn(&Path) -> bool) -> TargetKind {
     if target.contains("://") {
         return TargetKind::Url(target.to_owned());
@@ -82,10 +82,10 @@ fn classify_with(target: &str, exists: impl Fn(&Path) -> bool) -> TargetKind {
 impl TargetKind {
     /// The name this target would have been read as, had rule 3 not fired.
     ///
-    /// `Some` only for the one ambiguous case: a bare argument that both names an existing
-    /// package file and is a syntactically valid package name. A caller that can check its
-    /// repositories for that name is the only one able to tell a real collision from a
-    /// coincidence, so this reports the possibility rather than resolving it.
+    /// `Some` only for the one ambiguous case. That is a bare argument which both names an
+    /// existing package file and is a syntactically valid package name. Only a caller that
+    /// can check its repositories for that name can tell a real collision from a coincidence.
+    /// So this reports the possibility rather than resolving it.
     #[must_use]
     pub fn ambiguous_name(&self) -> Option<&str> {
         let Self::File(path) = self else {
@@ -133,14 +133,14 @@ mod tests {
             TargetKind::Url("https://host/foo-1.0-1-x86_64.pkg.tar.zst".to_owned())
         );
         // Every scheme, not only http. libalpm hands the string to libcurl, which supports
-        // more than piko does; classifying it as a URL is what lets piko refuse it by name.
+        // more than piko does. Classifying it as a URL is what lets piko refuse it by name.
         assert!(matches!(classify("file:///tmp/foo.pkg.tar.zst"), TargetKind::Url(_)));
     }
 
     #[test]
     fn a_separator_makes_it_a_path_even_when_nothing_is_there() {
-        // No existence check: a path that does not exist must be reported as a missing file,
-        // not resolved as a package name that happens not to exist either.
+        // No existence check. A path that does not exist must be reported as a missing file.
+        // It must not resolve as a package name that happens not to exist either.
         assert_eq!(
             classify("./nowhere/foo.pkg.tar.zst"),
             TargetKind::File(PathBuf::from("./nowhere/foo.pkg.tar.zst"))

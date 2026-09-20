@@ -1,7 +1,7 @@
 //! Error reporting and the value renderers every subcommand's output is built from.
 //!
-//! Nothing here reads the database; these turn values that are already in hand into the exact
-//! bytes pacman would have printed, which is what makes `piko list`/`piko files`/`piko conf`
+//! Nothing here reads the database. These turn values that are already in hand into the exact
+//! bytes pacman would have printed. That is what makes `piko list`/`piko files`/`piko conf`
 //! diffable against `pacman -Q`/`pacman -Ql`/`pacman-conf`.
 
 use piko_db::config::{CleanMethod, DbUsage, SigLevel};
@@ -15,9 +15,9 @@ pub fn report(error: &dyn std::error::Error) {
 
 /// [`report`], into a writer rather than straight to stderr.
 ///
-/// For a caller that produces its diagnostics somewhere it must not print from: off the main
-/// thread, or behind a live progress row. It renders here and prints later, so one error's
-/// cause chain stays whole and two cannot interleave.
+/// This serves a caller that produces its diagnostics somewhere it must not print from. That
+/// means off the main thread, or behind a live progress row. It renders here and prints later,
+/// so one error's cause chain stays whole and two cannot interleave.
 ///
 /// Write failures are dropped. This is the reporting path; a caller whose stderr is gone has
 /// nowhere left to say so.
@@ -60,9 +60,9 @@ pub(crate) use emit;
 
 /// Prints `prompt` and waits for a yes/no answer, defaulting to `default` on an empty line.
 ///
-/// This is pacman's `question` (`util.c:1705`), whose two wrappers differ by exactly this
-/// parameter: `yesno` passes a preset of 1, `noyes` a preset of 0. piko needs both. The
-/// transaction prompts are `yesno`; the `HoldPkg` guard is `noyes` (see
+/// This is pacman's `question` (`util.c:1705`). Its two wrappers differ by exactly this
+/// parameter. `yesno` passes a preset of 1, `noyes` a preset of 0. piko needs both. The
+/// transaction prompts are `yesno`. The `HoldPkg` guard is `noyes` (see
 /// [`crate::cmd::removal::hold_pkg_allows`]). The default is a parameter here rather than two
 /// near-identical functions.
 ///
@@ -73,8 +73,8 @@ pub(crate) use emit;
 /// run should refuse to proceed, not silently proceed because nobody was there to answer.
 /// pacman ends `question` the same way, with a bare `return 0` after the read.
 ///
-/// `out` is flushed before the prompt is written to it, so the plan already printed there is
-/// guaranteed to be visible first, even though `out` may be a buffered writer.
+/// `out` is flushed before the prompt is written to it. So the plan already printed there is
+/// visible first, even though `out` may be a buffered writer.
 pub fn confirm(out: &mut impl std::io::Write, prompt: &str, default: bool) -> bool {
     if write!(out, "{prompt}").and_then(|()| out.flush()).is_err() {
         return false;
@@ -93,24 +93,25 @@ pub fn confirm(out: &mut impl std::io::Write, prompt: &str, default: bool) -> bo
 /// Prints `prompt` and waits for a 1-based choice among `count`, returning a 0-based index.
 ///
 /// This is pacman's numbered-question reader, the one `ALPM_QUESTION_SELECT_PROVIDER` is put
-/// through. The list is numbered from 1 as pacman prints it; the answer comes back as an index
-/// into the list the caller rendered. `default` is what an absent answer takes, which callers
-/// set to 0 — libalpm's own `use_index = 0`, the first candidate in repository priority order.
+/// through. The list is numbered from 1 as pacman prints it. The answer comes back as an
+/// index into the list the caller rendered. `default` is what an absent answer takes. Callers
+/// set it to 0, libalpm's own `use_index = 0`, the first candidate in repository priority
+/// order.
 ///
 /// An empty line answers `default`. **A closed or empty stdin answers `default` too**, and
 /// that is the one place this differs from [`confirm`], which declines. The two questions
-/// differ in what an absent answer can mean: a confirmation has a "do nothing" answer and an
-/// unattended run should take it, while this one has none. Something must satisfy the
-/// dependency, every candidate on the list yields a valid plan, and the whole plan is still
-/// printed and confirmed afterwards. Refusing here would turn an unattended run into a failure
-/// over a question whose default is exactly what a system that configured nothing already got.
+/// differ in what an absent answer can mean. A confirmation has a "do nothing" answer, and an
+/// unattended run should take it. This one has none. Something must satisfy the dependency,
+/// and every candidate on the list yields a valid plan. The whole plan is still printed and
+/// confirmed afterwards. Refusing here would fail an unattended run over a question whose
+/// default is exactly what a system that configured nothing already got.
 ///
 /// An unparseable or out-of-range answer says so and asks again, as pacman does. That loop
 /// ends on its own: a closed stdin returns `default` rather than looping, so only someone
 /// typing can keep it going.
 ///
-/// `out` is flushed before the prompt is written to it, so the list already printed there is
-/// visible first even when `out` is buffered.
+/// `out` is flushed before the prompt is written to it. So the list already printed there is
+/// visible first, even when `out` is buffered.
 pub fn select(out: &mut impl std::io::Write, prompt: &str, count: usize, default: usize) -> usize {
     if count == 0 {
         return default;
@@ -224,16 +225,15 @@ enum Selection {
     Invalid,
 }
 
-/// Reads one answered line. Split out from [`select`] so the decision is testable without a
-/// terminal; [`select`] itself is only the loop and the I/O around this.
+/// Reads one answered line. This is split out from [`select`] so the decision is testable
+/// without a terminal. [`select`] itself is only the loop and the I/O around this.
 fn parse_selection(line: &str, count: usize) -> Selection {
     let answer = line.trim();
     if answer.is_empty() {
         return Selection::Empty;
     }
-    // Parsed as `usize`, so a negative answer is rejected by the parse rather than by the
-    // range test below — and an answer larger than `usize` is rejected too, instead of
-    // wrapping into range.
+    // Parsed as `usize`, so the parse rejects a negative answer rather than the range test
+    // below. An answer larger than `usize` is rejected too, instead of wrapping into range.
     match answer.parse::<usize>() {
         Ok(number) if (1..=count).contains(&number) => {
             Selection::Answered(number.saturating_sub(1))
@@ -344,14 +344,14 @@ pub fn human_size(bytes: u64) -> String {
 /// Renders a Unix timestamp as a date and time in `offset`, e.g.
 /// `"Mon 09 Dec 2024 10:40:42 +0100"`.
 ///
-/// `offset` is the machine's own UTC offset, captured at the top of `main` — see
+/// `offset` is the machine's own UTC offset, captured at the top of `main`. See
 /// [`piko_txn::LocalOffset`] for why it is read there and carried, rather than read here.
 /// pacman renders the same two fields through `localtime` (`package.c`), so this prints the
 /// wall clock a `pacman -Qi` on the same machine prints.
 ///
 /// The zone is spelled as a numeric offset rather than an abbreviation. An abbreviation needs
-/// a time-zone database piko does not carry, and it is ambiguous on top of that: `CST` names
-/// three different zones. A numeric offset never is.
+/// a time-zone database piko does not carry. It is ambiguous on top of that, since `CST`
+/// names three different zones. A numeric offset never is.
 pub fn human_date(timestamp: i64, offset: piko_txn::LocalOffset) -> String {
     let Ok(instant) = time::OffsetDateTime::from_unix_timestamp(timestamp) else {
         return format!("{timestamp} (timestamp out of range)");
@@ -570,8 +570,8 @@ mod tests {
         assert_eq!(human_date(1_778_057_192, LocalOffset::UTC), "Wed 06 May 2026 08:46:32 +0000");
     }
 
-    /// The same instant as the test above, read in Paris summer time: two hours later on the
-    /// clock, and the same second on the wire.
+    /// The same instant as the test above, read in Paris summer time. That is two hours later
+    /// on the clock, and the same second on the wire.
     #[test]
     fn human_date_shifts_the_clock_into_the_offset() {
         assert_eq!(

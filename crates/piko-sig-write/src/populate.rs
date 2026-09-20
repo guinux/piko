@@ -1,12 +1,13 @@
 //! `populate`: importing a vendor's keyring and granting it trust in one step.
 //!
 //! Reads the same three files pacman-key's own `--populate` reads from
-//! `/usr/share/pacman/keyrings` (shipped by the `archlinux-keyring` package): `<name>.gpg`
-//! (the key material), `<name>-trusted` (which fingerprints to certify and how much to trust
-//! them), and `<name>-revoked` (which fingerprints to disable). piko invents no format of its
-//! own here — these three files, and their `FINGERPRINT:LEVEL:` / bare-fingerprint layouts,
-//! are GnuPG's own `--export-ownertrust` dump format and a plain fingerprint list,
-//! respectively. No upstream crate parses either, so the two line parsers below are hand-rolled.
+//! `/usr/share/pacman/keyrings`, shipped by the `archlinux-keyring` package. `<name>.gpg` holds
+//! the key material. `<name>-trusted` says which fingerprints to certify, and how much to trust
+//! them. `<name>-revoked` says which fingerprints to disable.
+//!
+//! piko invents no format of its own here. The `FINGERPRINT:LEVEL:` layout is GnuPG's own
+//! `--export-ownertrust` dump format, and the bare-fingerprint layout is a plain fingerprint
+//! list. No upstream crate parses either, so the two line parsers below are hand-rolled.
 
 use std::path::Path;
 
@@ -77,7 +78,8 @@ impl KeyringAdmin {
     /// Imports `<keyrings_dir>/<name>.gpg`, then locally signs and trusts every fingerprint
     /// `<name>-trusted` lists, then disables every fingerprint `<name>-revoked` lists.
     ///
-    /// Either side file being absent is not an error — plenty of real keyrings ship no revocations.
+    /// Either side file being absent is not an error. Plenty of real keyrings ship no
+    /// revocations.
     ///
     /// Both loops treat a failure the same way. A fingerprint the keyring does not hold becomes
     /// a [`SkippedLine`]. A side file may outlive a key a later keyring update pruned from
@@ -87,17 +89,18 @@ impl KeyringAdmin {
     /// # Errors
     ///
     /// [`Error::PopulateFile`] if `<name>.gpg` itself is missing or unreadable.
-    /// [`Error::NoMasterKey`] if [`KeyringAdmin::init`] was never run — checked up front, before
-    /// anything is imported, so a populate that cannot finish does not leave a half-trusted
-    /// keyring. Any other [`Error`] a keyring operation raises, per the rule above.
+    /// [`Error::NoMasterKey`] if [`KeyringAdmin::init`] was never run. That is checked up
+    /// front, before anything is imported, so a populate that cannot finish does not leave a
+    /// half-trusted keyring. Any other [`Error`] a keyring operation raises, per the rule
+    /// above.
     pub fn populate(&self, keyrings_dir: &Path, name: &str) -> Result<PopulateSummary> {
         let gpg_path = keyrings_dir.join(format!("{name}.gpg"));
         if !gpg_path.is_file() {
             return Err(Error::PopulateFile { path: gpg_path, reason: "not a file".to_owned() });
         }
-        // Resolved up front and discarded: proves a master key exists before anything is
-        // imported, matching `lsign`'s own check but failing before the import step rather
-        // than partway through the trusted-file loop.
+        // Resolved up front and discarded. This proves a master key exists before anything
+        // is imported. It matches `lsign`'s own check, but fails before the import step
+        // rather than partway through the trusted-file loop.
         self.require_master_key()?;
 
         let mut summary =
@@ -179,8 +182,8 @@ impl KeyringAdmin {
         Ok(Some((lsigned, trust_set)))
     }
 
-    /// Checks a master key exists, discarding it — [`Self::master_key`] under a name that
-    /// reads plainly at the one call site that doesn't need the key itself.
+    /// Checks a master key exists, discarding it. This is [`Self::master_key`] under a name
+    /// that reads plainly at the one call site not needing the key itself.
     fn require_master_key(&self) -> Result<()> {
         let mut context = self.context()?;
         self.master_key(&mut context).map(drop)
@@ -306,9 +309,10 @@ mod tests {
     use super::*;
     use crate::admin::MASTER_KEY_USERID;
 
-    /// Builds a keyring with an ed25519 master key (fast, unlike `init`'s real RSA-4096), a
-    /// second "vendor" ed25519 key exported to `<keyrings_dir>/<name>.gpg`, and matching
-    /// `-trusted`/`-revoked` files — everything one `populate(keyrings_dir, name)` call reads.
+    /// Builds a keyring holding everything one `populate(keyrings_dir, name)` call reads. That
+    /// is an ed25519 master key, fast unlike `init`'s real RSA-4096. Beside it sit a second
+    /// "vendor" ed25519 key exported to `<keyrings_dir>/<name>.gpg`, and matching
+    /// `-trusted`/`-revoked` files.
     /// `None` if GnuPG cannot be reached here, the same graceful skip used throughout this
     /// crate's tests.
     fn populate_fixture(name: &str) -> Option<(KeyringAdmin, tempfile::TempDir, String)> {

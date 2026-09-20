@@ -1,8 +1,8 @@
 //! Turning command line arguments into opened databases.
 //!
-//! Everything a subcommand needs before it can print anything: which `pacman.conf` applies,
-//! which database path it names, and how to open a local or repository database with the
-//! options the global flags requested — printing each scan diagnostic exactly once.
+//! Everything a subcommand needs before it can print anything. Which `pacman.conf` applies, which
+//! database path it names, and how to open a local or repository database. Databases open with the
+//! options the global flags requested. Each scan diagnostic is printed exactly once.
 
 use std::path::{Path, PathBuf};
 
@@ -24,9 +24,9 @@ const SYNC_DB_DIR: &str = "sync";
 
 /// The parsed `pacman.conf`, read at most once per run.
 ///
-/// Several subcommands need both the database path (which comes from `DBPath` unless
-/// `--dbpath` overrides it) and the repository list from the same file. Parsing on first use
-/// and caching here keeps that to one read. Parsing per call site would re-read the file and
+/// Several subcommands need two things from the same file: the database path and the repository
+/// list. The database path comes from `DBPath` unless `--dbpath` overrides it. Parsing on first
+/// use and caching here keeps that to one read. Parsing per call site would re-read the file and
 /// every file it `Include`s, and would print each parse diagnostic once per call.
 ///
 /// `Err` is cached too, for the same reason [`piko_db::Lazy`] caches one. A config that could
@@ -72,8 +72,8 @@ impl ConfigCache {
 /// root and still reads the host cache, which is what pacman does.
 ///
 /// A package source needs at least one directory. An empty list would report every package
-/// missing with an error naming nowhere it looked, so a failure falls back rather than
-/// producing one.
+/// missing, with an error naming nowhere it looked. So a failure falls back rather than produce
+/// one.
 pub fn cache_dirs(config: &ConfigCache, cli: &Cli) -> Vec<PathBuf> {
     let mut dirs = cli.cache_dir.clone();
 
@@ -143,9 +143,9 @@ pub fn signing_policy(cli: &Cli, config: &ConfigCache) -> SigningPolicy {
 
 /// The directories hooks are read from, in increasing priority.
 ///
-/// `--hookdir` replaces the whole list, matching pacman. Otherwise it is the system directory
-/// followed by every configured `HookDir`, so a file in `/etc/pacman.d/hooks` overrides the
-/// system copy of the same name.
+/// `--hookdir` replaces the whole list, matching pacman. Otherwise the list is the system
+/// directory followed by every configured `HookDir`. So a file in `/etc/pacman.d/hooks` overrides
+/// the system copy of the same name.
 ///
 /// The system directory is resolved inside `root`; a configured `HookDir` is a host path.
 /// libalpm draws that same line. `alpm_initialize` builds its own default by joining the root
@@ -186,8 +186,8 @@ fn join_root(root: &Path, path: &Path) -> PathBuf {
 /// The `NoExtract` and `NoUpgrade` patterns from the parsed `pacman.conf`.
 ///
 /// Empty when the config cannot be read, which treats no path specially. That is the unsafe
-/// direction for `NoUpgrade`: a config file the user protected would be overwritten. It is the
-/// same fallback every other directive here uses, and a config piko cannot read has already
+/// direction for `NoUpgrade`, because a config file the user protected would be overwritten. It is
+/// the same fallback every other directive here uses. And a config piko cannot read has already
 /// produced a warning from [`resolve_dbpath`].
 pub fn path_patterns(cli: &Cli, config: &ConfigCache) -> piko_txn::Patterns {
     let Ok(parsed) = config.get(cli) else {
@@ -201,12 +201,12 @@ pub fn path_patterns(cli: &Cli, config: &ConfigCache) -> piko_txn::Patterns {
 
 /// `pacman.conf`'s `HoldPkg` list — the packages a removal must ask about before taking away.
 ///
-/// Empty when the config cannot be read, which holds nothing. That is the permissive
-/// direction, and it is the same fallback [`path_patterns`] takes for `NoUpgrade`, for the
-/// same reason: a config piko cannot read has already produced a warning from
-/// [`resolve_dbpath`], and every directive going quiet together is easier to reason about than
-/// one of them going strict. `HoldPkg` is also a guard over a prompt rather than over data, so
-/// the cost of it being absent is one question not asked, not a file destroyed.
+/// Empty when the config cannot be read, which holds nothing. That is the permissive direction. It
+/// is the same fallback [`path_patterns`] takes for `NoUpgrade`, and for the same reason. A config
+/// piko cannot read has already produced a warning from [`resolve_dbpath`]. And every directive
+/// going quiet together is easier to reason about than one of them going strict. `HoldPkg` is also
+/// a guard over a prompt rather than over data. So the cost of it being absent is one question not
+/// asked, not a file destroyed.
 pub fn hold_pkg(cli: &Cli, config: &ConfigCache) -> Vec<String> {
     config.get(cli).map(|parsed| parsed.options.hold_pkg.clone()).unwrap_or_default()
 }
@@ -214,9 +214,9 @@ pub fn hold_pkg(cli: &Cli, config: &ConfigCache) -> Vec<String> {
 /// Resolves `IgnorePkg` and `IgnoreGroup`, as the two lists
 /// [`piko_db::resolve::IgnoreList::new`] pairs.
 ///
-/// The same lenient fallback [`hold_pkg`] takes, for the same reason: a config piko cannot
-/// read has already warned through [`resolve_dbpath`], and two empty lists ignore nothing —
-/// which is what an absent `IgnorePkg` directive means anyway.
+/// The same lenient fallback [`hold_pkg`] takes, and for the same reason. A config piko cannot
+/// read has already warned through [`resolve_dbpath`]. And two empty lists ignore nothing, which
+/// is what an absent `IgnorePkg` directive means anyway.
 pub fn ignore_lists(cli: &Cli, config: &ConfigCache) -> (Vec<String>, Vec<String>) {
     config
         .get(cli)
@@ -227,7 +227,7 @@ pub fn ignore_lists(cli: &Cli, config: &ConfigCache) -> (Vec<String>, Vec<String
 /// Resolves the effective installation root: `RootDir` from the parsed pacman.conf, else the
 /// hardcoded default with a warning if that cannot be read.
 ///
-/// Used both by `check` (which has no `--root` flag at all) and by `install`/`update`/`remove`
+/// Used by `check`, which has no `--root` flag at all. Also used by `install`/`update`/`remove`
 /// when `--root` is omitted, the same way [`resolve_dbpath`] resolves `DBPath`.
 pub fn resolve_root_dir(cli: &Cli, config: &ConfigCache) -> PathBuf {
     match config.get(cli) {
@@ -243,9 +243,9 @@ pub fn resolve_root_dir(cli: &Cli, config: &ConfigCache) -> PathBuf {
     }
 }
 
-/// Resolves the effective database root: `--dbpath` if given, else `DBPath` from the parsed
-/// pacman.conf (`--config`, default `/etc/pacman.conf`), else the hardcoded default with a
-/// warning if that cannot be read either.
+/// Resolves the effective database root, in three steps. `--dbpath` if given, else `DBPath` from
+/// the parsed pacman.conf, else the hardcoded default with a warning if that cannot be read
+/// either. `--config` names the file, and defaults to `/etc/pacman.conf`.
 pub fn resolve_dbpath(cli: &Cli, config: &ConfigCache) -> PathBuf {
     if let Some(dbpath) = &cli.dbpath {
         return dbpath.clone();
@@ -264,12 +264,11 @@ pub fn resolve_dbpath(cli: &Cli, config: &ConfigCache) -> PathBuf {
     }
 }
 
-/// Resolves the effective transaction log: `--logfile` if given, else `LogFile` from the
-/// parsed pacman.conf, else the hardcoded default with a warning if that cannot be read.
+/// Resolves the effective transaction log, in three steps. `--logfile` if given, else `LogFile`
+/// from the parsed pacman.conf, else the hardcoded default with a warning.
 ///
-/// The same three-step resolution [`resolve_dbpath`] uses, and for the same reason: a
-/// transaction should still be recorded when the config is unreadable, rather than silently
-/// recorded nowhere.
+/// The same three-step resolution [`resolve_dbpath`] uses, and for the same reason. A transaction
+/// should still be recorded when the config is unreadable, rather than silently recorded nowhere.
 pub fn resolve_log_file(cli: &Cli, config: &ConfigCache) -> PathBuf {
     if let Some(log_file) = &cli.log_file {
         return log_file.clone();
@@ -288,7 +287,7 @@ pub fn resolve_log_file(cli: &Cli, config: &ConfigCache) -> PathBuf {
     }
 }
 
-/// Builds the transaction record for this invocation: the shared `LogFile` and the history
+/// Builds the transaction record for this invocation. That is the shared `LogFile` and the history
 /// store beside `dbpath`, stamped with the command line that asked for it.
 ///
 /// `offset` must be the value captured at the top of `main`. See [`piko_txn::LocalOffset`] for
@@ -306,8 +305,8 @@ pub fn recording(
 /// This invocation's command line, as one line.
 ///
 /// pacman's frontend records the same thing, reassembled the same way. An argument holding
-/// whitespace is quoted so the line can be read back as the command it was, which matters for
-/// a package file path — the one argument that routinely contains a space.
+/// whitespace is quoted, so the line can be read back as the command it was. That matters for a
+/// package file path, the one argument that routinely contains a space.
 fn command_line() -> String {
     std::env::args_os()
         .map(|argument| {
@@ -320,13 +319,14 @@ fn command_line() -> String {
 
 /// Opens the local database with the options `cli` requested, printing scan diagnostics.
 ///
-/// Diagnostics are warnings: the database opened, and the packages it did find are usable.
-/// The caller decides what to do about the rest.
+/// Diagnostics are warnings. The database opened, and the packages it did find are usable. The
+/// caller decides what to do about the rest.
 ///
 /// # Errors
 ///
-/// Whatever [`LocalDatabase::open_with`] refuses on: an unreadable or missing `<dbpath>/local`,
-/// a schema version this build does not understand, or a limit tripped while scanning.
+/// Whatever [`LocalDatabase::open_with`] refuses on. That is an unreadable or missing
+/// `<dbpath>/local`, a schema version this build does not understand, or a limit tripped while
+/// scanning.
 pub fn open_local_db(cli: &Cli, config: &ConfigCache) -> Result<LocalDatabase, piko_db::Error> {
     let root = resolve_dbpath(cli, config).join(LOCAL_DB_DIR);
 
@@ -349,8 +349,8 @@ fn print_repo_diagnostics(db: &RepoDatabase) {
 ///
 /// # Errors
 ///
-/// Whatever [`RepoDatabase::open_with`] refuses on: an unreadable archive, one that is not a
-/// regular file, a member that does not parse, or a limit tripped while walking it.
+/// Whatever [`RepoDatabase::open_with`] refuses on. An unreadable archive, or one that is not a
+/// regular file. A member that does not parse. A limit tripped while walking it.
 pub fn open_repo_db(path: &Path) -> Result<RepoDatabase, piko_db::Error> {
     let db = RepoDatabase::open_with(path, RepoOpenOptions::new())?;
     print_repo_diagnostics(&db);
@@ -359,9 +359,8 @@ pub fn open_repo_db(path: &Path) -> Result<RepoDatabase, piko_db::Error> {
 
 /// Parses a `--repo` repository-name argument (`list`, `repo-files`, `search`).
 ///
-/// Returns the failure rather than printing it, so the caller propagates it with `?` like
-/// every other failure in the dispatch: [`crate::output::report`] renders it at the top, and
-/// the message is unchanged from when this printed it itself.
+/// Returns the failure rather than printing it. The caller then propagates it with `?`, like every
+/// other failure in the dispatch. [`crate::output::report`] renders it at the top.
 ///
 /// # Errors
 ///
@@ -376,8 +375,7 @@ pub fn parse_repo_arg(repo: &str) -> Result<RepoName, Error> {
 /// configured in pacman.conf rather than an explicit archive path.
 ///
 /// The archive's signature is checked against the repository's effective `SigLevel` before the
-/// database is handed back, so no caller can use an unverified one — see
-/// [`verify_repo_archive`].
+/// database is handed back. So no caller can use an unverified one. See [`verify_repo_archive`].
 ///
 /// # Errors
 ///
@@ -428,8 +426,7 @@ pub fn open_repo_by_name(
 /// About 20 ms per `piko` run, measured on `piko plan --names plasma-meta` (412 ms without
 /// the check, 433 ms with it, interleaved medians of nine runs each). Almost all of it is
 /// one-time GPGME initialization. See [`piko_sig::verify_database`], which does the actual
-/// open-and-check and owns that measurement now that the CLI no longer composes the three
-/// calls itself.
+/// open-and-check and owns that measurement.
 ///
 /// # What stays CLI-side
 ///
@@ -470,9 +467,8 @@ fn verify_repo_archive(
     };
     // Through `RepositoryConfig::effective_sig_level`, never by reading `sig_level` directly.
     // A repository that declares no `SigLevel` of its own keeps the parser's `USE_DEFAULT`
-    // sentinel (bit 31) rather than the global value, so using the raw field would read a
-    // sentinel as though it were a policy. This function must share the rule rather than
-    // restate it.
+    // sentinel (bit 31) rather than the global value. Using the raw field would read a sentinel
+    // as though it were a policy. This function must share the rule rather than restate it.
     let level = parsed
         .repositories
         .iter()
@@ -482,12 +478,11 @@ fn verify_repo_archive(
         });
 
     match piko_sig::verify_database(archive, &parsed.options.gpg_dir, level) {
-        // An unverifiable archive is not a bad archive. Both stop the read, and the two
-        // errors keep them apart so the user knows whether to fix a keyring or a mirror.
-        // `piko_sig::Error`'s own message says which: a keyring that could not be opened
-        // names the keyring directory, a check that could not run names the archive. It is
-        // kept as a `source` rather than stringified, so `output::report` prints it in the
-        // chain.
+        // An unverifiable archive is not a bad archive. Both stop the read. The two errors keep
+        // them apart, so the user knows whether to fix a keyring or a mirror.
+        // `piko_sig::Error`'s own message says which. A keyring that could not be opened names
+        // the keyring directory; a check that could not run names the archive. It is kept as a
+        // `source` rather than stringified, so `output::report` prints it in the chain.
         Err(source) => Err(Error::SignatureUncheckable { archive: archive.to_path_buf(), source }),
         Ok(piko_sig::Verdict::Rejected(rejection)) => {
             Err(Error::SignatureRejected { archive: archive.to_path_buf(), rejection })
@@ -500,20 +495,19 @@ fn verify_repo_archive(
 /// fails to open with a warning.
 ///
 /// Used where every configured repository's own results are wanted regardless of what any other
-/// repository holds. A lookup that stops at the first match instead wants
-/// [`open_repos_for_packages`], which does not pay to open a repository once the search it exists
-/// for is already satisfied.
+/// repository holds. A lookup that stops at the first match wants [`open_repos_for_packages`]
+/// instead. That one does not pay to open a repository once the search it exists for is satisfied.
 ///
-/// Carries each repository's `Usage` alongside it. It is needed by
+/// Carries each repository's `Usage` alongside it. Three callers gate on it:
 /// [`resolve`](piko_db::resolve), [`Universe::build`](piko_db::solve::Universe::build), and
-/// `piko plan`/`piko install`/`piko update`, which gate on it, and is harmless to the callers
-/// that do not (`repo-search`'s `--repo`-less form, `check-updates`), which simply discard
-/// their half of the pair. Bundling `Usage` here rather than returning the bare
-/// `RepoDatabase`s lets one function serve every subcommand that needs "every configured
-/// repository, opened and verified", instead of each maintaining its own loop.
+/// `piko plan`/`piko install`/`piko update`. Two callers do not gate on it: `repo-search`'s
+/// `--repo`-less form and `check-updates`. Both simply discard their half of the pair. Bundling
+/// `Usage` here beats returning the bare `RepoDatabase`s. One function then serves every subcommand
+/// that needs "every configured repository, opened and verified". Each would otherwise maintain its
+/// own loop.
 ///
-/// A repository that fails to open is warned about and skipped, so this fails only when there
-/// is no configuration to read at all.
+/// A repository that fails to open is warned about and skipped. So this fails only when there is
+/// no configuration to read at all.
 ///
 /// # Errors
 ///
@@ -537,22 +531,20 @@ pub fn open_all_repos(
     Ok(opened)
 }
 
-/// Opens repositories configured in `pacman.conf` one at a time, in file (priority) order,
-/// stopping as soon as every name in `packages` has been found in one of the repositories
-/// opened so far — so a request that `core` alone already satisfies never forces `extra` open
-/// at all.
+/// Opens repositories configured in `pacman.conf` one at a time, in file (priority) order. It stops
+/// as soon as every name in `packages` has been found in one of the repositories opened so far. So a
+/// request that `core` alone already satisfies never forces `extra` open at all.
 ///
-/// `info`'s default (no `--installed`, no `--repo`) form used [`open_all_repos`] originally,
-/// but that opens (and fully parses `desc` for) every configured repository up front regardless
-/// of where the package(s) actually turn up — measured at eleven seconds against this
-/// machine's real `extra` alone for a single name. A literal name lookup can stop the moment
-/// it is satisfied, the same way piko-db's own `.files` archive walk stops decompressing once
-/// every wanted name has been seen; this is that same idea one layer up, across repositories
-/// rather than within one archive.
+/// [`open_all_repos`] is the wrong tool for a literal name lookup, and `info`'s default form
+/// (no `--installed`, no `--repo`) is one. It opens every configured repository up front, and
+/// fully parses each `desc`, wherever the package turns up. Measured at eleven seconds against
+/// this machine's real `extra` alone, for a single name. A literal name lookup can instead stop
+/// the moment it is satisfied. piko-db's own `.files` archive walk does the same thing one
+/// layer down. It stops decompressing once every wanted name has been seen.
 ///
-/// Returns every repository actually opened, not just the ones that matched: the caller still
-/// looks each name up itself (`repo-files`' batching needs to know which repository each
-/// match came from), this only limits how many repositories get opened in the first place.
+/// Returns every repository actually opened, not just the ones that matched. The caller still looks
+/// each name up itself, because `repo-files`' batching needs to know which repository each match
+/// came from. This only limits how many repositories get opened in the first place.
 ///
 /// A repository that fails to open is warned about and skipped, as in [`open_all_repos`].
 ///
@@ -589,9 +581,9 @@ pub fn open_repos_for_packages(
 
 /// The parsed pacman.conf, or a failure the caller reports as its own error.
 ///
-/// Unlike [`resolve_dbpath`], a subcommand that is *about* the configuration (`conf`,
-/// `resolve`, a `check-updates` with no explicit archives) cannot fall back to a default —
-/// there is nothing to fall back to — so this turns the cached failure into an error.
+/// Unlike [`resolve_dbpath`], a subcommand that is *about* the configuration cannot fall back to a
+/// default. There is nothing to fall back to. So this turns the cached failure into an error. Those
+/// subcommands are `conf`, `resolve`, and a `check-updates` with no explicit archives.
 ///
 /// # Errors
 ///
@@ -732,9 +724,9 @@ mod tests {
         assert_eq!(dirs, vec![PathBuf::from("/only/this/")]);
     }
 
-    /// The flag must not need a readable config. A caller installing into a new root names
-    /// both `--config` and `--cachedir`, and an unreadable config must not turn that into
-    /// the host cache directory alone.
+    /// The flag must not need a readable config. A caller installing into a new root names both
+    /// `--config` and `--cachedir`. An unreadable config must not turn that into the host cache
+    /// directory alone.
     #[test]
     fn cachedir_applies_even_when_the_config_cannot_be_read() {
         let dir = tempfile::tempdir().unwrap();

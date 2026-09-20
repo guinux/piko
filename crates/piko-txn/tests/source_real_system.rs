@@ -62,10 +62,10 @@ fn cached_package_files(dirs: &[PathBuf]) -> Vec<(PackageFileName, PathBuf)> {
 
 /// The lookup must find every package that is genuinely there.
 ///
-/// This tests two claims at once, and both are worth having: `PackageFileName`'s parse and
-/// `Display` round-trip across every real filename, and `CacheDirSource` derives the same
-/// path the file actually has. A mismatch in either direction shows up as a package the
-/// engine believes it must download, while a perfectly good copy sits on disk.
+/// This tests two claims at once, and both are worth having. `PackageFileName`'s parse and
+/// `Display` round-trip across every real filename. And `CacheDirSource` derives the same path
+/// the file actually has. A mismatch in either direction shows up the same way. The engine
+/// believes it must download a package, while a perfectly good copy sits on disk.
 #[test]
 #[ignore = "requires a real pacman cache"]
 fn every_cached_package_is_locatable() {
@@ -123,8 +123,8 @@ fn an_absent_package_is_not_located() {
 ///
 /// This is informational, not a hard threshold. How much is cached depends on when the user
 /// last ran `pacman -Sc`, which is not something to assert. It runs as a test because the
-/// number is the honest answer to "can the commit engine be developed offline against real
-/// packages", and it stays checked as the engine grows.
+/// number answers "can the commit engine be developed offline against real packages". As a
+/// test it stays checked while the engine grows.
 #[test]
 #[ignore = "requires a real pacman cache and local database"]
 fn reports_how_much_of_the_installed_system_is_cached() {

@@ -166,12 +166,11 @@ fn inverted_targets_in_real_hooks_exclude_what_they_name() {
             continue;
         }
 
-        // Both probes must match the **positive** pattern, or the inverted one is never
-        // consulted and the test proves nothing. Two earlier versions of this test got that
-        // wrong. One built both probes from the inverted pattern: neither matched, so the hook
-        // never fired and every assertion was skipped. The other dropped the trailing slash the
-        // real patterns end with, so the deeper probe matched nothing either. Both versions
-        // passed against a deliberately reintroduced bug — that is how the errors were found.
+        // Both probes must match the **positive** pattern. Otherwise the inverted one is never
+        // consulted, and the test proves nothing. Two ways to get that wrong pass against a
+        // deliberately reintroduced bug. First: build either probe from the inverted pattern.
+        // Neither matches, so the hook never fires. Second: drop the trailing slash the real
+        // patterns end with. The deeper probe then matches nothing.
         //
         // `usr/lib/modules/*/` uses `fnmatch`'s `*`, which crosses `/` and matches any depth.
         // So the included probe is one segment deep, and the excluded probe is the same path

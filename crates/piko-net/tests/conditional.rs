@@ -165,8 +165,8 @@ fn an_empty_body_is_refused_rather_than_installed() {
     refresh(sync, &url).unwrap();
     let error = refresh(sync, &url).unwrap_err();
 
-    // Reported through `AllServersFailed`, because an empty body from one mirror is a reason
-    // to try the next rather than to abort — the same fallthrough any other failure gets.
+    // Reported through `AllServersFailed`. An empty body from one mirror is a reason to try
+    // the next rather than to abort. Any other failure gets the same fallthrough.
     assert!(
         error.to_string().contains("was empty"),
         "an empty body was not reported as such: {error}"
@@ -179,8 +179,8 @@ fn an_empty_body_is_refused_rather_than_installed() {
     drop(server.join());
 }
 
-/// The server's timestamp is what lands on the file, not the moment of download — which is
-/// what makes the next conditional request send a value the server recognises.
+/// The server's timestamp is what lands on the file, not the moment of download. That is what
+/// makes the next conditional request send a value the server recognises.
 #[test]
 fn the_download_carries_the_servers_last_modified() {
     let dir = tempfile::tempdir().unwrap();
@@ -190,9 +190,9 @@ fn the_download_carries_the_servers_last_modified() {
 
     let mtime = std::fs::metadata(dir.path().join("core.db")).unwrap().modified().unwrap();
     let seconds = mtime.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    // Tue, 18 Aug 2026 18:18:06 GMT, per `date -u -d '...' +%s`. The first constant written
-    // here was wrong and the implementation was right, which is why it is now sourced from
-    // the reference tool rather than from arithmetic done by hand.
+    // Tue, 18 Aug 2026 18:18:06 GMT, per `date -u -d '...' +%s`. The constant comes from the
+    // reference tool rather than from arithmetic done by hand. Hand arithmetic here fails the
+    // test against a correct implementation.
     assert_eq!(seconds, 1_787_077_086);
     drop(server.join());
 }
@@ -210,7 +210,7 @@ fn an_unexpected_status_is_not_installed() {
     drop(server.join());
 }
 
-/// `force` skips the conditional request entirely, so a stamped local file never turns the
+/// `force` skips the conditional request entirely. So a stamped local file never turns the
 /// second request into one the server could answer 304.
 #[test]
 fn force_bypasses_the_conditional_request() {

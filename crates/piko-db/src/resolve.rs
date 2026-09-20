@@ -2,94 +2,98 @@
 //! repository order (priority) and each repository's `Usage` directive.
 //!
 //! [`SyncRepos::find_literal_satisfier`] mirrors the *literal name* step of libalpm's
-//! `resolvedep` (`deps.c`): walk configured repositories in file order — which **is**
-//! priority — skipping any whose `Usage` lacks `Install` and `Upgrade`
-//! (`db->usage & (ALPM_DB_USAGE_INSTALL|ALPM_DB_USAGE_UPGRADE)`), and return the first exact
-//! name match. This is the "a name can legitimately exist in both `core` and `extra`" case —
-//! the order-and-gate piece of dependency resolution that stands on its own, ahead of the rest.
+//! `resolvedep` (`deps.c`). It walks configured repositories in file order, which **is**
+//! priority. It skips any whose `Usage` lacks `Install` and `Upgrade`
+//! (`db->usage & (ALPM_DB_USAGE_INSTALL|ALPM_DB_USAGE_UPGRADE)`). It returns the first exact
+//! name match. This is the "a name can legitimately exist in both `core` and `extra`" case. It
+//! is the order-and-gate piece of dependency resolution, which stands on its own ahead of the
+//! rest.
 //!
 //! [`IgnoreList`] additionally applies `pacman.conf`'s `IgnorePkg`/`IgnoreGroup`, matching
-//! `alpm_pkg_should_ignore` (`package.c`): a literal match whose name or whose group is
-//! ignored is treated as if that repository did not carry it at all, and resolution falls
-//! through to the next repository in priority order — the same as libalpm's non-interactive
-//! path through `resolvedep` (`prompt == 0`: warn and `continue`, rather than asking
-//! `ALPM_QUESTION_INSTALL_IGNOREPKG`). piko never asks that question: an ignored package is
+//! `alpm_pkg_should_ignore` (`package.c`). A literal match whose name or whose group is ignored
+//! is treated as if that repository did not carry it at all. Resolution then falls through to
+//! the next repository in priority order. That is libalpm's non-interactive path through
+//! `resolvedep`, where `prompt == 0` means warn and `continue` rather than asking
+//! `ALPM_QUESTION_INSTALL_IGNOREPKG`. piko never asks that question. An ignored package is
 //! reported and left alone, never installed.
 //!
 //! Nothing is logged here, since `piko-db` never calls a logging macro. The reason travels as a
-//! return value instead: [`IgnoreList::reason`] answers *which* list covered a package and
-//! which pattern matched, and [`SyncRepos::ignored_satisfiers`] answers what an empty
-//! [`SyncRepos::find_satisfiers`] threw away. Without them an ignored match and a genuinely
-//! absent one are indistinguishable, and a caller reporting "not found in any configured
-//! repository" for an ignored package states something false.
+//! return value instead. [`IgnoreList::reason`] answers *which* list covered a package and which
+//! pattern matched. [`SyncRepos::ignored_satisfiers`] answers what an empty
+//! [`SyncRepos::find_satisfiers`] threw away. Without them, an ignored match and a genuinely
+//! absent one are indistinguishable. A caller reporting "not found in any configured repository"
+//! for an ignored package then states something false.
 //!
 //! [`SyncRepos::find_literal_satisfier`] also honors a version constraint, if `dep` carries one
-//! (`foo>=1.0`, `foo=1.2.3-1`, ...) — this is `_alpm_depcmp_literal`'s other half in `deps.c`:
+//! (`foo>=1.0`, `foo=1.2.3-1`, ...). This is `_alpm_depcmp_literal`'s other half in `deps.c`:
 //! name equality *and* `dep_vercmp(pkg->version, dep->mod, dep->version)`. Nothing here
-//! reimplements comparison or parsing: `PackageRelation`'s `FromStr` impl already splits
-//! a dependency string into `name`/`version_requirement` (a bare name yields `None`, matching
-//! `ALPM_DEP_MOD_ANY`'s "any version satisfies"), and
-//! [`alpm_types::VersionRequirement::is_satisfied_by`] already evaluates the operator — including
-//! `dep_vercmp`'s own `parseEVR`-derived rule that a constraint with no `pkgrel` is satisfied by
-//! any `pkgrel` of a matching `pkgver`. The only piece piko supplies is converting
-//! [`crate::repo::RepoPackage::version`]'s [`alpm_types::FullVersion`] (mandatory `pkgrel`) to the
-//! [`alpm_types::Version`] (optional `pkgrel`) `VersionRequirement` compares against — a lossless
-//! `From` conversion the crate already provides. A version mismatch is treated exactly like an
-//! [`IgnoreList`] mismatch: that repository's match is skipped and resolution falls through to
-//! the next repository in priority order, the same as `resolvedep`'s per-db loop does when
-//! `_alpm_depcmp_literal` returns false.
+//! reimplements comparison or parsing. `PackageRelation`'s `FromStr` impl already splits a
+//! dependency string into `name`/`version_requirement`, where a bare name yields `None`,
+//! matching `ALPM_DEP_MOD_ANY`'s "any version satisfies".
+//! [`alpm_types::VersionRequirement::is_satisfied_by`] already evaluates the operator. That
+//! includes `dep_vercmp`'s own `parseEVR`-derived rule: a constraint with no `pkgrel` is
+//! satisfied by any `pkgrel` of a matching `pkgver`. The only piece piko supplies is one
+//! conversion:
+//! [`crate::repo::RepoPackage::version`]'s [`alpm_types::FullVersion`] (mandatory `pkgrel`)
+//! becomes the [`alpm_types::Version`] (optional `pkgrel`) `VersionRequirement` compares
+//! against. That is a lossless `From` conversion the crate already provides. A version mismatch
+//! is treated exactly like an [`IgnoreList`] mismatch. That repository's match is skipped, and
+//! resolution falls through to the next repository in priority order. `resolvedep`'s per-db loop
+//! does the same when `_alpm_depcmp_literal` returns false.
 //!
-//! [`SyncRepos::find_satisfiers`] implements the rest of `resolvedep`'s two-step control flow —
-//! including its `%PROVIDES%` step, covering both a soname (`lib:libfoo.so.1`, `libfoo.so=1-64`,
-//! ...) and a plain named relation (`provides = python` satisfying a dependency on `python3`) —
-//! and returns every match rather than picking one. Real libalpm collects a `providers` list and
-//! asks `ALPM_QUESTION_SELECT_PROVIDER` when there is more than one. This module asks nothing:
-//! it returns the whole list and leaves the choice to the caller. The planner is where that
-//! choice is actually made — [`crate::solve::ambiguities`] returns the question as data and
-//! [`crate::solve::Request::choose_provider`] answers it, so that a library still prompts
-//! nobody. Two steps, in this exact order, mirroring `resolvedep` (`deps.c`) field-for-field:
+//! [`SyncRepos::find_satisfiers`] implements the rest of `resolvedep`'s two-step control flow.
+//! That includes its `%PROVIDES%` step. That step covers a soname (`lib:libfoo.so.1`,
+//! `libfoo.so=1-64`, ...) as well as a plain named relation (`provides = python` satisfying a
+//! dependency on `python3`). It returns every match rather than picking one. Real libalpm
+//! collects a `providers` list and asks `ALPM_QUESTION_SELECT_PROVIDER` when there is more than
+//! one. This module asks nothing. It returns the whole list and leaves the choice to the caller.
+//! The planner is where that choice is made. [`crate::solve::ambiguities`] returns the question
+//! as data, and [`crate::solve::Request::choose_provider`] answers it, so that a library still
+//! prompts nobody. Two steps, in this exact order, mirroring `resolvedep` (`deps.c`)
+//! field-for-field:
 //!
-//! 1. **Literal match first, and only.** If [`SyncRepos::find_literal_satisfier`] finds a match, that
-//!    single package *is* the result — step 2 is not even attempted. This is where "a package
-//!    automatically provides its own name and version" comes from: self-satisfaction is
-//!    `_alpm_depcmp_literal`, not something a package needs to list in its own `%PROVIDES%`, and
-//!    real libalpm's step 1 `return`s immediately on a literal hit before ever looking at
+//! 1. **Literal match first, and only.** If [`SyncRepos::find_literal_satisfier`] finds a match,
+//!    that single package *is* the result. Step 2 is not even attempted. This is where "a
+//!    package automatically provides its own name and version" comes from. Self-satisfaction is
+//!    `_alpm_depcmp_literal`, not something a package needs to list in its own `%PROVIDES%`.
+//!    Real libalpm's step 1 `return`s immediately on a literal hit, before ever looking at
 //!    `%PROVIDES%`. Only the earliest-priority repository's literal match is ever considered
 //!    here, same as [`SyncRepos::find_literal_satisfier`] alone.
 //! 2. **`%PROVIDES%` scan, only if step 1 found nothing usable** (absent everywhere, or every
 //!    occurrence was `IgnorePkg`'d or version-mismatched). Unlike step 1, this does not stop at
-//!    the first repository: every `Usage`-gated, non-ignored package across *every* configured
-//!    repository whose `%PROVIDES%` satisfies `dep` is collected, in repository-then-scan order
-//!    — real libalpm's `providers` list, gathered across all `dbs` rather than truncated at the
-//!    first hit. A package literally named `dep`'s name is skipped here even when its version
-//!    did not satisfy step 1, matching `resolvedep`'s own `pkg->name_hash != dep->name_hash`
-//!    guard — a same-named-but-wrong-version package cannot reappear as its own "provider". For
-//!    a soname target this step is the *only* one that ever runs (a soname is never a package's
-//!    own name), and a `%PROVIDES%` entry counts only if it is
-//!    [`alpm_types::RelationOrSoname`]'s derived structural equality with `dep` — the
-//!    **alpm-soname** "exact match" rule, no compatible-range notion to evaluate. For a plain
-//!    name/version target, a `%PROVIDES%` entry only counts if it is itself an exact-version
-//!    provide (`foo=1.2.3`, i.e. `VersionComparison::Equal`) whenever `dep` carries a version
-//!    constraint — `_alpm_depcmp_provides` (`deps.c`) never lets an unversioned (or non-`=`)
-//!    provide satisfy a versioned dependency, matched here field-for-field.
+//!    the first repository. Every `Usage`-gated, non-ignored package across *every* configured
+//!    repository whose `%PROVIDES%` satisfies `dep` is collected, in repository-then-scan order.
+//!    That is real libalpm's `providers` list, gathered across all `dbs` rather than truncated
+//!    at the first hit. A package literally named `dep`'s name is skipped here even when its
+//!    version did not satisfy step 1. That matches `resolvedep`'s own
+//!    `pkg->name_hash != dep->name_hash` guard: a same-named-but-wrong-version package cannot
+//!    reappear as its own "provider". For a soname target this step is the *only* one that ever
+//!    runs, since a soname is never a package's own name. A `%PROVIDES%` entry then counts only
+//!    if it is [`alpm_types::RelationOrSoname`]'s derived structural equality with `dep`. That
+//!    is the **alpm-soname** "exact match" rule, with no compatible-range notion to evaluate.
+//!    For a plain name/version target, a `%PROVIDES%` entry only counts if it is itself an
+//!    exact-version provide (`foo=1.2.3`, i.e. `VersionComparison::Equal`) whenever `dep`
+//!    carries a version constraint. `_alpm_depcmp_provides` (`deps.c`) never lets an unversioned
+//!    provide satisfy a versioned dependency, nor a non-`=` one. That is matched here
+//!    field-for-field.
 //!
-//! This intentionally does **not** use the `alpm-soname` crate: that crate *extracts* soname
+//! This intentionally does **not** use the `alpm-soname` crate. That crate *extracts* soname
 //! data from ELF files (`SONAME`/`NEEDED` fields) to *produce* `%DEPENDS%`/`%PROVIDES%` entries
-//! at package-build time (`makepkg`'s `autodeps`); piko is a database reader that only ever
-//! *consumes* those entries once a repository has already recorded them as text, so there is no
-//! ELF file to scan and nothing for `alpm-soname` to do here.
+//! at package-build time (`makepkg`'s `autodeps`). piko is a database reader. It only ever
+//! *consumes* those entries once a repository has recorded them as text. So there is no ELF file
+//! to scan, and nothing for `alpm-soname` to do here.
 //!
-//! What this module itself does **not** do — conflict/replacement handling, the
-//! already-installed-provider short-circuit real libalpm's `resolvedep` applies before
-//! prompting, and the provider question itself — now lives in [`crate::solve`] instead
-//! (`solve::solve_with_removals`/`solve::sysupgrade`, `solve::universe`'s installed-providers
-//! pass, and `solve::ambiguities`), reached through `piko plan`/`piko install`/`piko update`.
+//! Three things this module does **not** do live in [`crate::solve`] instead. They are
+//! conflict/replacement handling, the already-installed-provider short-circuit real libalpm's
+//! `resolvedep` applies before prompting, and the provider question itself. Those are
+//! `solve::solve_with_removals`/`solve::sysupgrade`, `solve::universe`'s installed-providers
+//! pass, and `solve::ambiguities`, reached through `piko plan`/`piko install`/`piko update`.
 //! This module remains the single-query API neither concept belongs in.
-//! Other libalpm call sites gate on a
-//! different `Usage` mask entirely
-//! — `alpm_sync_get_new_version` (`-Qu`, [`crate::LocalDatabase::check_updates`] here) applies no
-//! gate at all, and sync.c's `-Su` target collection gates on `Upgrade` alone — so this module
-//! intentionally does not become a shared primitive for those; each caller's gate is a distinct
+//!
+//! Other libalpm call sites gate on a different `Usage` mask entirely.
+//! `alpm_sync_get_new_version` (`-Qu`, [`crate::LocalDatabase::check_updates`] here) applies no
+//! gate at all, and sync.c's `-Su` target collection gates on `Upgrade` alone. So this module
+//! intentionally does not become a shared primitive for those. Each caller's gate is a distinct
 //! policy, not a variation to parameterize away.
 
 use alpm_types::{PackageRelation, RelationOrSoname};
@@ -103,19 +107,19 @@ use crate::{
 /// The first installed package that satisfies `dep`, if any — `alpm_find_satisfier` (`deps.c`)
 /// over the local database.
 ///
-/// The repository-side functions below answer "what could I install"; this answers "what is
-/// already here", which is a different question with a different caller. libalpm's hook engine
-/// asks it for every `Depends` line of every triggered hook (`hook.c:507`), and it is the only
-/// place in piko that needs it.
+/// The repository-side functions below answer "what could I install". This answers "what is
+/// already here", a different question with a different caller. libalpm's hook engine asks it
+/// for every `Depends` line of every triggered hook (`hook.c:507`). That is the only place in
+/// piko that needs it.
 ///
 /// # A package with an unreadable `desc` is an error, not a package that provides nothing
 ///
 /// Name and version come from the directory name and are always available, so the *literal*
-/// half of `_alpm_depcmp` can always be evaluated. `%PROVIDES%` cannot: it needs `desc`. Rather
-/// than treat an unreadable entry as one with no `%PROVIDES%` — which would silently answer
-/// "not satisfied" for a dependency that is in fact met — the failure is returned. This is the
-/// crate's lazy-loading rule (see [`crate::lazy`]) applied to a question where getting it wrong
-/// means skipping a hook the system needed.
+/// half of `_alpm_depcmp` can always be evaluated. `%PROVIDES%` cannot, since it needs `desc`.
+/// The failure is returned rather than treated as an entry with no `%PROVIDES%`. That treatment
+/// would silently answer "not satisfied" for a dependency that is in fact met. This is the
+/// crate's lazy-loading rule (see [`crate::lazy`]), applied to a question with a sharp cost.
+/// Getting it wrong means skipping a hook the system needed.
 ///
 /// The read is the **eager** tier, [`crate::LocalPackage::eager`], never the full typed parse.
 /// `%PROVIDES%` is the only field this needs. The eager tier is the tier that holds it.
@@ -182,11 +186,11 @@ impl<'a> Resolved<'a> {
 }
 
 /// `pacman.conf`'s `IgnorePkg`/`IgnoreGroup` lists, each entry a shell-glob pattern matched the
-/// same way `alpm_pkg_should_ignore` does (`_alpm_fnmatch`, `package.c`): a package is ignored
-/// if its own name matches any `IgnorePkg` pattern, or if any of its `%GROUPS%` matches any
-/// `IgnoreGroup` pattern.
+/// same way `alpm_pkg_should_ignore` does (`_alpm_fnmatch`, `package.c`). A package is ignored if
+/// its own name matches any `IgnorePkg` pattern. It is also ignored if any of its `%GROUPS%`
+/// matches any `IgnoreGroup` pattern.
 ///
-/// The default (`IgnoreList::default()`, two empty lists) ignores nothing — the same as an
+/// The default (`IgnoreList::default()`, two empty lists) ignores nothing. That is the same as an
 /// absent `IgnorePkg`/`IgnoreGroup` directive.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IgnoreList<'a> {
@@ -205,10 +209,10 @@ impl<'a> IgnoreList<'a> {
     /// Why a package with this name and these `%GROUPS%` is ignored, or `None` if it is not.
     ///
     /// The whole of `alpm_pkg_should_ignore` lives here, and every other question about
-    /// ignoring is asked through it. It takes a name and a group list rather than a package
-    /// so that an *installed* package can be judged by the same rule: `check_literal`
-    /// (`sync.c:93`) tests both the repository candidate and the installed one, and the two
-    /// can carry different `%GROUPS%`.
+    /// ignoring is asked through it. It takes a name and a group list rather than a package. An
+    /// *installed* package is then judged by the same rule. `check_literal` (`sync.c:93`)
+    /// tests both the repository candidate and the installed one, and the two can carry
+    /// different `%GROUPS%`.
     ///
     /// `IgnorePkg` is tested before `IgnoreGroup`, matching libalpm's own order, so a package
     /// covered by both reports the name match.
@@ -233,9 +237,9 @@ impl<'a> IgnoreList<'a> {
 
     /// Whether `package` is covered by either list.
     ///
-    /// Crate-visible because [`crate::solve::Universe`] applies the same filter when it
-    /// interns repository candidates, and two copies of `alpm_pkg_should_ignore` would be
-    /// two chances to disagree.
+    /// Crate-visible because [`crate::solve::Universe`] applies the same filter when it interns
+    /// repository candidates. Two copies of `alpm_pkg_should_ignore` would be two chances to
+    /// disagree.
     pub(crate) fn ignores(&self, package: &RepoPackage) -> bool {
         self.reason_for(package).is_some()
     }
@@ -243,12 +247,12 @@ impl<'a> IgnoreList<'a> {
 
 /// Which of `pacman.conf`'s two lists covered a package, and the pattern that did it.
 ///
-/// libalpm has no equivalent: `alpm_pkg_should_ignore` returns an `int`, and each of its five
+/// libalpm has no equivalent. `alpm_pkg_should_ignore` returns an `int`, and each of its five
 /// call sites supplies the context from what it already knows. piko's callers are further from
-/// the test — [`crate::solve::Universe`] applies it while interning candidates, and the
-/// message is printed much later — so the reason travels with the package instead of being
-/// reconstructed. Naming the pattern matters when the entry is a glob: `IgnorePkg = linux*`
-/// covering `linux-firmware` is otherwise a surprise with no visible cause.
+/// the test. [`crate::solve::Universe`] applies it while interning candidates, and the message is
+/// printed much later. So the reason travels with the package instead of being reconstructed.
+/// Naming the pattern matters when the entry is a glob. `IgnorePkg = linux*` covering
+/// `linux-firmware` is otherwise a surprise with no visible cause.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IgnoreReason {
     /// The package's own name matched an `IgnorePkg` pattern.
@@ -296,24 +300,24 @@ impl std::fmt::Display for IgnoreReason {
 ///
 /// - A pattern beginning with `!` **de-selects** what it matches. A leading literal `!` or `\`
 ///   is escaped by a `\`, which is stripped.
-/// - The scan runs from the **last** pattern to the first and stops at the first one that
+/// - The scan runs from the **last** pattern to the first. It stops at the first one that
 ///   matches, so a later entry overrides an earlier one. `pacman.conf(5)` states it directly:
 ///   "Subsequent matches will override previous ones."
 ///
-/// The two only matter together. With no `!` anywhere, forward-`any` and this agree, which is
-/// why the difference went unnoticed while the only callers were `IgnorePkg`/`IgnoreGroup`.
-/// It stops being invisible with hook triggers: the "this directory but nothing inside it"
-/// idiom is two patterns, the second inverted, and it is what
-/// `/usr/share/libalpm/hooks/gtk-update-icon-cache.hook` and `60-depmod.hook` are both built
-/// out of on a real Arch system.
+/// The two only matter together. With no `!` anywhere, forward-`any` and this agree. So a list
+/// that carries no inversion hides the difference entirely, which covers most
+/// `IgnorePkg`/`IgnoreGroup` lists. Hook triggers make it visible. The "this directory but
+/// nothing inside it" idiom is two patterns, the second inverted. It is what
+/// `/usr/share/libalpm/hooks/gtk-update-icon-cache.hook` and `60-depmod.hook` are both built out
+/// of on a real Arch system.
 ///
 /// Only the scan is here. Whether one pattern covers one string is [`crate::glob::matches`],
-/// which every pattern rule in the crate shares — including its fallback to an exact-string
+/// which every pattern rule in the crate shares. That includes its fallback to an exact-string
 /// match for a malformed glob.
 ///
 /// Public because `--overwrite`, `NoExtract`, `NoUpgrade` and a hook's `Target` are the same
-/// `fnmatch` against a path rather than a package name, and libalpm uses the one function for
-/// all of them. A second copy would be a second chance for these rules to drift.
+/// `fnmatch` against a path, rather than against a package name. libalpm uses the one function
+/// for all of them. A second copy would be a second chance for these rules to drift.
 #[must_use]
 pub fn matches_any(patterns: &[String], text: &str) -> bool {
     matching_pattern(patterns, text).is_some()
@@ -322,8 +326,8 @@ pub fn matches_any(patterns: &[String], text: &str) -> bool {
 /// The pattern [`matches_any`] selected `text` with, or `None` when nothing selects it.
 ///
 /// The whole backwards-with-inversion scan lives here, and [`matches_any`] is a `is_some()`
-/// over it: two copies of `_alpm_fnmatch_patterns` would be two chances to disagree, and the
-/// `!` rule is exactly the part that is easy to get subtly wrong.
+/// over it. Two copies of `_alpm_fnmatch_patterns` would be two chances to disagree. The `!`
+/// rule is exactly the part that is easy to get subtly wrong.
 ///
 /// The pattern returned is always a selecting one. A scan that stops on an inverted pattern
 /// answers `None`, since that entry de-selects `text` rather than choosing it. The `!` or `\`
@@ -332,7 +336,7 @@ pub fn matches_any(patterns: &[String], text: &str) -> bool {
 pub fn matching_pattern<'p>(patterns: &'p [String], text: &str) -> Option<&'p str> {
     for pattern in patterns.iter().rev() {
         let inverted = pattern.starts_with('!');
-        // `_alpm_fnmatch_patterns` strips one leading character for either sigil: `!` because
+        // `_alpm_fnmatch_patterns` strips one leading character for either sigil. `!` because
         // it was consumed as the inversion marker, `\` because it escapes a literal one.
         let bare = if inverted || pattern.starts_with('\\') {
             pattern.get(1..).unwrap_or_default()
@@ -371,9 +375,10 @@ impl<'a> SyncRepos<'a> {
         self
     }
 
-    /// Finds `dep`'s highest-priority literal match: the first repository, in file order, whose
-    /// `Usage` includes `Install` or `Upgrade` and that carries a package named exactly `dep.name`,
-    /// satisfying `dep.version_requirement` (if any), and not ignored per [`Self::with_ignores`].
+    /// Finds `dep`'s highest-priority literal match. That is the first repository, in file
+    /// order, whose `Usage` includes `Install` or `Upgrade` and that carries a matching package.
+    /// A matching package is named exactly `dep.name`, satisfies `dep.version_requirement` (if
+    /// any), and is not ignored per [`Self::with_ignores`].
     ///
     /// See the module doc for the libalpm step this mirrors and what it excludes.
     #[must_use]
@@ -385,7 +390,7 @@ impl<'a> SyncRepos<'a> {
             })
             .find_map(|repo| {
                 let package = repo.database.get(&dep.name)?;
-                // The name matched by construction, so only the version half is left; see
+                // The name matched by construction, so only the version half is left. See
                 // `depcmp` for the `_alpm_depcmp_literal` rule both callers share.
                 let satisfies = depcmp::version_satisfies(package.version(), dep);
                 if !satisfies || self.ignores.ignores(package) {
@@ -395,10 +400,10 @@ impl<'a> SyncRepos<'a> {
             })
     }
 
-    /// Finds every package satisfying `dep`: [`Self::find_literal_satisfier`] first, and if that
-    /// finds nothing usable, every package across every repository whose `%PROVIDES%` satisfies
-    /// `dep` — real libalpm's `ALPM_QUESTION_SELECT_PROVIDER` list, with nothing asked about it
-    /// here.
+    /// Finds every package satisfying `dep`. [`Self::find_literal_satisfier`] runs first. If that
+    /// finds nothing usable, this collects every package across every repository whose
+    /// `%PROVIDES%` satisfies `dep`. That is real libalpm's `ALPM_QUESTION_SELECT_PROVIDER` list,
+    /// with nothing asked about it here.
     ///
     /// A planner narrows that list from an answer instead ([`crate::solve::ambiguities`]). See the
     /// module doc for the exact two-step control flow this mirrors. Empty when nothing satisfies
@@ -442,15 +447,15 @@ impl<'a> SyncRepos<'a> {
     /// it, paired with the reason it was covered.
     ///
     /// This exists only to explain an empty [`Self::find_satisfiers`]. Nothing in resolution
-    /// calls it, and it never turns an ignored package into a usable one: piko reports an
-    /// ignored package and leaves it alone, where pacman asks
-    /// `ALPM_QUESTION_INSTALL_IGNOREPKG` and may install it anyway.
+    /// calls it, and it never turns an ignored package into a usable one. piko reports an ignored
+    /// package and leaves it alone, where pacman asks `ALPM_QUESTION_INSTALL_IGNOREPKG` and may
+    /// install it anyway.
     ///
     /// Unlike [`Self::find_literal_satisfier`], this does not stop at the highest-priority
     /// repository. A caller explaining "nothing came back" wants every copy that was passed
-    /// over, not the one that would have won. The version constraint still applies: a
-    /// repository copy that is both ignored *and* too old did not fail because it was
-    /// ignored, and reporting it would name the wrong cause.
+    /// over, not the one that would have won. The version constraint still applies. A repository
+    /// copy that is both ignored *and* too old did not fail because it was ignored. Reporting it
+    /// would name the wrong cause.
     #[must_use]
     pub fn ignored_satisfiers(&self, dep: &RelationOrSoname) -> Vec<(Resolved<'a>, IgnoreReason)> {
         self.repos
@@ -473,12 +478,12 @@ impl<'a> SyncRepos<'a> {
 
 /// Whether `package` satisfies `dep` at all, by its own name and version or by `%PROVIDES%`.
 ///
-/// `_alpm_depcmp`'s two halves in one call, without any of `resolvedep`'s policy: no `Usage`
-/// gate, no `IgnoreList`, no repository priority, and no exclusion of a literally-named
-/// package from the `%PROVIDES%` step. It answers "could this package have been the answer",
-/// which is the question both [`SyncRepos::ignored_satisfiers`] and
-/// [`crate::solve::Universe::ignored_satisfiers`] ask about a package that was already
-/// filtered out. Two copies of it would be two chances to name the wrong cause.
+/// `_alpm_depcmp`'s two halves in one call, without any of `resolvedep`'s policy. No `Usage`
+/// gate, no `IgnoreList`, no repository priority, and no exclusion of a literally-named package
+/// from the `%PROVIDES%` step. It answers "could this package have been the answer". That is the
+/// question both [`SyncRepos::ignored_satisfiers`] and
+/// [`crate::solve::Universe::ignored_satisfiers`] ask about a package that was already filtered
+/// out. Two copies of it would be two chances to name the wrong cause.
 pub(crate) fn satisfies(package: &RepoPackage, dep: &RelationOrSoname) -> bool {
     match dep {
         RelationOrSoname::Relation(relation) if relation.name == *package.name() => {
@@ -488,10 +493,10 @@ pub(crate) fn satisfies(package: &RepoPackage, dep: &RelationOrSoname) -> bool {
     }
 }
 
-/// Whether `package`'s own name is `dep`'s name — the case `resolvedep`'s `%PROVIDES%` step
-/// explicitly excludes (`pkg->name_hash != dep->name_hash` in `deps.c`), since self-satisfaction
-/// is entirely the literal step's job. Never true for a soname `dep`: a soname is not a package
-/// name.
+/// Whether `package`'s own name is `dep`'s name. This is the case `resolvedep`'s `%PROVIDES%`
+/// step explicitly excludes (`pkg->name_hash != dep->name_hash` in `deps.c`), since
+/// self-satisfaction is entirely the literal step's job. Never true for a soname `dep`, because a
+/// soname is not a package name.
 fn is_literally_named(dep: &RelationOrSoname, package: &RepoPackage) -> bool {
     matches!(dep, RelationOrSoname::Relation(relation) if relation.name == *package.name())
 }
@@ -509,8 +514,8 @@ mod tests {
 
     /// Every repository in `scenario`, gated on `Usage = All`.
     ///
-    /// [`Scenario`] deliberately carries no `Usage`: that is a `pacman.conf` policy, not a
-    /// property of the packages, and the tests that exercise the gate set it per repository
+    /// [`Scenario`] deliberately carries no `Usage`. That is a `pacman.conf` policy, not a
+    /// property of the packages. The tests that exercise the gate set it per repository
     /// themselves.
     fn sync_repos(scenario: &BuiltScenario) -> SyncRepos<'_> {
         SyncRepos::new(scenario.repos().iter().map(|db| SyncRepo::new(DbUsage::ALL, db)))
@@ -695,8 +700,8 @@ Foobar McFooface <foobar@mcfooface.org>
 
     #[test]
     fn a_package_matching_ignore_pkg_is_skipped_in_every_repo_that_carries_it() {
-        // Unlike Usage, IgnorePkg matches by name alone — it is global, not per repository, so
-        // a name ignored once is ignored everywhere it appears, not just the earliest listing.
+        // Unlike Usage, IgnorePkg matches by name alone. It is global, not per repository. So a
+        // name ignored once is ignored everywhere it appears, not just in the earliest listing.
         let fixture = RepoFixture::new();
         let core = repo_db(&fixture, "core.db", &[("foo", "1.0.0-1")]);
         let extra = repo_db(&fixture, "extra.db", &[("foo", "2.0.0-1")]);
@@ -775,7 +780,7 @@ Foobar McFooface <foobar@mcfooface.org>
         }
 
         /// A leading literal `!` or `\` is escaped with a backslash, which is stripped before
-        /// matching — otherwise a path really called `!odd` could not be named at all.
+        /// matching. Otherwise a path really called `!odd` could not be named at all.
         #[test]
         fn a_backslash_escapes_a_literal_leading_sigil() {
             assert!(matches_any(&patterns(&[r"\!odd"]), "!odd"));
@@ -824,7 +829,7 @@ Foobar McFooface <foobar@mcfooface.org>
     }
 
     /// `IgnorePkg` is tested before `IgnoreGroup`, so a package covered by both reports the
-    /// name — the reason that names one package rather than a whole group.
+    /// name. That is the reason that names one package rather than a whole group.
     #[test]
     fn a_reason_names_the_list_and_the_pattern_that_matched() {
         let packages = vec!["linux*".to_owned()];
@@ -850,8 +855,8 @@ Foobar McFooface <foobar@mcfooface.org>
         assert_eq!(ignores.reason("bash", &["core".to_owned()]), None);
     }
 
-    /// An ignored match and an absent one must be tellable apart: `find_satisfiers` answers
-    /// the same empty result for both, so the reason has to come from somewhere else.
+    /// An ignored match and an absent one must be tellable apart. `find_satisfiers` answers the
+    /// same empty result for both, so the reason has to come from somewhere else.
     #[test]
     fn an_ignored_match_is_reported_rather_than_only_dropped() {
         let scenario = Scenario::new().repo("core", [PackageSpec::new("gedit", "46.2-1")]).build();
@@ -1146,10 +1151,10 @@ Foobar McFooface <foobar@mcfooface.org>
     #[test]
     fn a_literally_named_package_is_excluded_from_its_own_provides_scan() {
         let fixture = RepoFixture::new();
-        // "foo" is 1.0.0-1, which fails a `>=2.0.0` constraint, but explicitly (and unusually)
-        // lists a newer self-provide that would satisfy the same constraint if it were
-        // considered — it must not be, matching resolvedep's `pkg->name_hash != dep->name_hash`
-        // guard.
+        // "foo" is 1.0.0-1, which fails a `>=2.0.0` constraint. It also lists a newer
+        // self-provide, explicitly and unusually. That provide would satisfy the same constraint
+        // if it were considered. It must not be, matching resolvedep's
+        // `pkg->name_hash != dep->name_hash` guard.
         let core = repo_db_with_provides(&fixture, "core.db", "foo", "1.0.0-1", &["foo=3.0.0"]);
         let repos = SyncRepos::new([SyncRepo::new(DbUsage::ALL, &core)]);
 
@@ -1227,8 +1232,8 @@ Foobar McFooface <foobar@mcfooface.org>
 
     #[test]
     fn a_sonamev1_request_does_not_match_an_otherwise_equivalent_sonamev2_provide() {
-        // Same shared object and version, but a different `alpm-soname` format on each side —
-        // the literal `RelationOrSoname` equality this relies on treats them as distinct.
+        // Same shared object and version, but a different `alpm-soname` format on each side.
+        // The literal `RelationOrSoname` equality this relies on treats them as distinct.
         let fixture = RepoFixture::new();
         let core = repo_db_with_provides(
             &fixture,

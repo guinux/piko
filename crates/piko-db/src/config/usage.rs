@@ -37,9 +37,9 @@ impl DbUsage {
 }
 
 /// Applies a space-separated list of `Usage` keywords (`Sync`, `Search`, `Install`,
-/// `Upgrade`, `All`) on top of `*usage`. Translates `process_usage`, including its behavior
-/// of applying every valid keyword even when one of them was invalid, rather than
-/// discarding the whole call as [`super::sig_level::apply_values`] does.
+/// `Upgrade`, `All`) on top of `*usage`. Translates `process_usage`. That includes applying
+/// every valid keyword even when one of them is invalid, rather than discarding the whole
+/// call as [`super::sig_level::apply_values`] does.
 pub(crate) fn apply_values(
     usage: &mut DbUsage,
     values: &str,

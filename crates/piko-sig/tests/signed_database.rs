@@ -40,8 +40,8 @@ use piko_sig::{Keyring, Policy, Rejection, Verdict, signature_path};
 
 /// A GnuPG home with one generated, ultimately-trusted key.
 ///
-/// Ultimate trust is what a locally generated key gets by default. This is what makes the
-/// `TrustedOnly` half of the policy meaningful here: the signature is not merely valid, it is
+/// Ultimate trust is what a locally generated key gets by default. That is what makes the
+/// `TrustedOnly` half of the policy meaningful here. The signature is not merely valid. It is
 /// valid *and trusted*. That pair is what `decide` looks at.
 struct Signer {
     home: tempfile::TempDir,
@@ -146,8 +146,8 @@ fn a_tampered_database_is_rejected() {
 }
 
 /// A database signed by a key the keyring has never seen. This is not the same as an invalid
-/// signature and must not be reported as one. It is what a rotated repository key looks like,
-/// and the message decides whether the user imports a key or suspects an attack.
+/// signature, and must not be reported as one. It is what a rotated repository key looks like.
+/// The message decides whether the user imports a key or suspects an attack.
 #[test]
 fn a_database_signed_by_an_unknown_key_is_rejected_as_unknown() {
     let Some(signer) = Signer::new() else { return };

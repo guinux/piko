@@ -17,18 +17,18 @@ use crate::output::emit;
 ///
 /// Mirrors `pacman -Qu`: `name old -> new`, one per line, in the order
 /// [`LocalDatabase::check_updates`] returns (sorted by name). Old and new versions align into
-/// a column across the whole listing, computed in one pass before anything prints — the same
-/// two-pass shape `cmd::plan::column_widths`/`print_steps` uses.
+/// a column across the whole listing, computed in one pass before anything prints. That is the
+/// same two-pass shape `cmd::plan::column_widths`/`print_steps` uses.
 ///
-/// There is no icon column here, unlike `crate::style::ChangeKind` or `cmd::search`'s checkmark:
-/// both exist to tell rows of different kinds apart, and every row here is the same kind (an
-/// upgrade). The new version is still colored blue, the same tone
-/// `crate::style::ChangeKind::Upgrade` uses, so an upgrade reads the same way in `piko plan` and
-/// `piko check-updates` — echoed by value, not by shared code. The old version is dimmed,
-/// matching `cmd::plan`'s treatment of a `Step::Change`'s `from` version.
+/// There is no icon column here, unlike `crate::style::ChangeKind` or `cmd::search`'s
+/// checkmark. Both of those exist to tell rows of different kinds apart, and every row here is
+/// the same kind, an upgrade. The new version is still colored blue, the same tone
+/// `crate::style::ChangeKind::Upgrade` uses. So an upgrade reads the same way in `piko plan`
+/// and `piko check-updates`, echoed by value rather than by shared code. The old version is
+/// dimmed, matching `cmd::plan`'s treatment of a `Step::Change`'s `from` version.
 ///
-/// In `--quiet` mode, prints just each installed package's name, one per line — no color, no
-/// version, no arrow, no summary — matching `cmd::list`/`cmd::search`'s `--quiet` convention.
+/// In `--quiet` mode, prints just each installed package's name, one per line. No color, no
+/// version, no arrow, no summary, matching `cmd::list`/`cmd::search`'s `--quiet` convention.
 ///
 /// # `IgnorePkg`/`IgnoreGroup` rows are withheld, and warned about
 ///
@@ -37,11 +37,12 @@ use crate::output::emit;
 /// `[ignored]`. piko withholds it from the listing and warns about it on stderr instead.
 ///
 /// The reason is what the list is for. `piko check-updates` answers "what will change if I
-/// upgrade", and an ignored package will not change — listing it puts the row a user is about
-/// to act on beside a row that is already decided. Nothing is hidden, only moved off the list
-/// of things that are going to happen: stdout stays the machine-readable answer, and the
-/// warning goes where every other diagnostic goes, which is also what keeps `--quiet` a clean
-/// list of names.
+/// upgrade", and an ignored package will not change. Listing it puts the row a user is about
+/// to act on beside a row that is already decided.
+///
+/// Nothing is hidden, only moved off the list of things that are going to happen. stdout stays
+/// the machine-readable answer. The warning goes where every other diagnostic goes, which is
+/// also what keeps `--quiet` a clean list of names.
 ///
 /// The warning is `cmd::plan::print_ignored_change`, the same line `piko update` prints for
 /// the same package. Only [`IgnoredChange::Upgrade`] is reachable from here, since
@@ -126,9 +127,9 @@ pub fn resolve_and_print(
     let matches = repos.find_satisfiers(&dep);
 
     if matches.is_empty() {
-        // Nothing came back. Which of the two reasons it was decides what the user has to fix,
-        // so the message has to tell them apart: `IgnorePkg` covering the name is not the name
-        // being wrong.
+        // Nothing came back. Which of the two reasons applies decides what the user has to
+        // fix, so the message has to tell them apart. `IgnorePkg` covering the name is not
+        // the name being wrong.
         let ignored = repos.ignored_satisfiers(&dep);
         if ignored.is_empty() {
             eprintln!(

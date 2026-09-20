@@ -2,8 +2,8 @@
 //! each incoming package can be downloaded from, and under what signature policy.
 //!
 //! `piko install foo` is `piko plan foo` turned into a transaction. This module is that
-//! translation. It lives here rather than in a frontend, so any caller building a transaction
-//! on top of `piko-db`'s solver gets it once, checked, instead of re-deriving
+//! translation. It lives here rather than in a frontend. So any caller building a transaction
+//! on top of `piko-db`'s solver gets it once, checked. Nobody re-derives
 //! `_alpm_sync_prepare`'s install-reason rule or the repository/`SigLevel` lookup by hand.
 
 use std::{collections::HashMap, path::Path};
@@ -83,9 +83,9 @@ pub fn install_steps(
 ///
 /// [`ReasonPolicy::AsResolved`] records `Explicit` for a package named on the command line.
 /// That is `_alpm_sync_prepare`'s rule (`sync.c`), the same one
-/// `piko_db::solve::Plan::assemble` applies for a fresh install. An upgrade of a package that
-/// was already installed is not renamed by the plan itself — `solve::Step::Change` carries no
-/// reason of its own — so it keeps whatever reason it already had, rather than falling to
+/// `piko_db::solve::Plan::assemble` applies for a fresh install. The plan itself does not
+/// rename an upgrade of an already-installed package, because `solve::Step::Change` carries
+/// no reason of its own. So it keeps whatever reason it already had, rather than falling to
 /// `Depend`. Only a package with no previous install (a fresh dependency) defaults to
 /// `Depend`.
 ///
@@ -108,8 +108,8 @@ fn reason_for(
 /// The name a candidate's package file is addressed by.
 ///
 /// For a repository candidate that is `%FILENAME%`, the name it is cached and downloaded
-/// under. For a package file named on the command line there is no `desc` to ask, so the name
-/// is rebuilt from the file's own `.PKGINFO` — the same rendering
+/// under. For a package file named on the command line there is no `desc` to ask. The name is
+/// rebuilt from the file's own `.PKGINFO` instead. That is the same rendering
 /// [`crate::file_target::load`] produced, so [`crate::source::FileSource`] finds the path
 /// again.
 fn file_name_of(universe: &Universe<'_>, id: SolvableId) -> Result<PackageFileName> {
@@ -145,9 +145,9 @@ fn entry_name_of(universe: &Universe<'_>, id: SolvableId) -> Result<EntryName> {
 ///
 /// This is built from the same plan [`install_steps`] turns into commit-engine steps. Each
 /// `Step::Install`'s originating repository is resolved through `Origin`/
-/// [`Universe::repository_name`], then matched by name against `repos` — not by index, because
-/// `Universe`'s repository index counts only the repositories that actually opened, while
-/// `repos` may be longer. Matching prefers `CacheServer` over `Server`, as pacman.conf(5)
+/// [`Universe::repository_name`], then matched by name against `repos`. It is not matched by
+/// index. `Universe`'s repository index counts only the repositories that actually opened,
+/// while `repos` may be longer. Matching prefers `CacheServer` over `Server`, as pacman.conf(5)
 /// documents. A candidate whose repository or `desc` cannot be resolved is skipped here.
 /// [`install_steps`]'s own `file_name_of` already reports that failure for the same candidate.
 ///
@@ -206,14 +206,15 @@ pub fn download_targets(
     targets
 }
 
-/// Builds the verification policy from `pacman.conf`'s `GPGDir`, the fallback `SigLevel`, and
-/// each candidate's own repository policy, plus the per-file overrides `Transaction` should
-/// apply instead of the fallback wherever one is known.
+/// Builds the verification policy from three inputs: `pacman.conf`'s `GPGDir`, the fallback
+/// `SigLevel`, and each candidate's own repository policy. It also returns the per-file
+/// overrides `Transaction` should apply instead of the fallback wherever one is known.
 ///
 /// A keyring is opened when *any* of the fallback, a repository's policy, or a file target's
-/// policy asks for checking — never only the fallback. A global `SigLevel = Never` with one repository
-/// overriding to `PackageRequired` must still verify that repository's packages, so looking at
-/// the fallback alone would silently skip it. A policy that asks for nothing anywhere needs no
+/// policy asks for checking. It is never decided by the fallback alone. A global
+/// `SigLevel = Never` with one repository overriding to `PackageRequired` must still verify
+/// that repository's packages. Looking at the fallback alone would silently skip it. A policy
+/// that asks for nothing anywhere needs no
 /// keyring at all, so a system without one still works. But the moment anything *does* ask, an
 /// unusable keyring is an error rather than a silent pass. Failing open here would make every
 /// package install unverified the day the keyring broke.
@@ -230,9 +231,9 @@ pub fn verification_from(
     let fallback = Policy::for_package(fallback_sig_level);
     let mut policy_overrides: HashMap<String, Policy> =
         package_targets.iter().map(|(name, target)| (name.clone(), target.policy)).collect();
-    // After the repository policies, and deliberately: a file named on the command line is
-    // governed by `LocalFileSigLevel`/`RemoteFileSigLevel` even when a repository happens to
-    // carry a package of the same name, because it is not that package.
+    // After the repository policies, and deliberately so. A file named on the command line
+    // is governed by `LocalFileSigLevel`/`RemoteFileSigLevel`. That holds even when a
+    // repository carries a package of the same name, because it is not that package.
     for target in file_targets {
         policy_overrides.insert(target.file_name().to_string(), target.policy());
     }
@@ -265,27 +266,27 @@ pub struct DownloadOnlyOutcome {
 /// This is pacman's `-Sw`.
 ///
 /// Each [`PackageSource::locate`] call already downloads a miss and verifies nothing changed
-/// about a hit. So this is the same lookup a transaction's `verify` step would make, without
-/// the journal, the lock, or the `Transaction` that would follow it.
+/// about a hit. So this is the same lookup a transaction's `verify` step would make. It skips
+/// the journal, the lock, and the `Transaction` that would follow it.
 ///
 /// The signature is checked here too, through the same [`crate::transaction::check_signature`]
 /// `Transaction::verify` uses, and under the same per-repository policy. libalpm does this:
 /// `check_validity` (`sync.c:1275`) runs *before* `_alpm_sync_load` returns on
 /// `ALPM_TRANS_FLAG_DOWNLOADONLY` (`sync.c:1279`), so `pacman -Sw` refuses a package it would
-/// refuse to install. Leaving the check out fills a cache with bytes nothing has vouched for,
-/// and defers the complaint to an install that might happen on another day.
+/// refuse to install. Leaving the check out fills a cache with bytes nothing has vouched for.
+/// It also defers the complaint to an install that might happen on another day.
 ///
 /// The one thing not transcribed is libalpm's *phase* order. It downloads every package and
 /// then validates them all. This function checks each one as it arrives, matching
-/// `Transaction::verify`'s own loop, which locates and checks step by step. Piko failing fast
-/// the same way in both of its paths is worth more than reproducing the order in which pacman
-/// reports the same refusal.
+/// `Transaction::verify`'s own loop, which locates and checks step by step. piko fails fast
+/// the same way in both of its paths. That is worth more than reproducing the order in which
+/// pacman reports the same refusal.
 ///
 /// `on_outcome` is called once per package, in `steps` order, immediately after it is located
 /// and checked, before the next one is attempted. This lets a caller report progress as it
 /// happens rather than only once every package has been handled. `cache` is asked *before*
 /// each lookup so a caller can tell the two cases apart. Asking after `prefetch` has filled
-/// the cache reports every hit as a download, which makes each run look like it re-fetched
+/// the cache reports every hit as a download. Each run then looks like it re-fetched
 /// everything it already had.
 ///
 /// # Errors
@@ -308,9 +309,9 @@ pub fn download_only(
         })
         .collect();
     // This is asked *before* anything is fetched. `prefetch` fills the cache, so a `contains`
-    // call inside the loop below would answer "yes" for every package. That would report a run
-    // that downloaded the whole transaction as one that downloaded nothing — the same bug as
-    // the one above, in reverse.
+    // call inside the loop below would answer "yes" for every package. A run that downloaded
+    // the whole transaction would then report downloading nothing. That is the failure above,
+    // in reverse.
     let cached: Vec<bool> = installs.iter().map(|package| cache.contains(package)).collect();
     source.prefetch(&installs)?;
 

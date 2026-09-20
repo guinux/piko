@@ -2,8 +2,8 @@
 //!
 //! Which dependencies are ambiguous, and what an answer does to a plan, are
 //! [`piko_db::solve::ambiguities`] and [`piko_db::solve::Request::choose_provider`]. Any
-//! frontend gets those. What is left here is asking: rendering the candidates, reading a
-//! number, and deciding that `--noconfirm` and a read-only preview do not ask at all.
+//! frontend gets those. What is left here is the asking. That means rendering the candidates,
+//! reading a number, and deciding that `--noconfirm` and a read-only preview never ask.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -15,7 +15,7 @@ use crate::output;
 /// The `%DEPENDS%` entry an ambiguity is about, verbatim.
 ///
 /// This doubles as the question's identity. Two packages requiring the same thing are one
-/// question, not two: libalpm asks once and its accumulated package list answers the rest
+/// question, not two. libalpm asks once, and its accumulated package list answers the rest
 /// (`deps.c:816`).
 fn relation_of(universe: &Universe<'_>, ambiguity: &Ambiguity) -> String {
     crate::cmd::plan::relation_of(universe, ambiguity.dependent, ambiguity.dependency)
@@ -53,7 +53,7 @@ fn print_providers(
 /// Asks which provider answers each question in `report`, returning one answer per question.
 ///
 /// `answered` carries the answers already given this run, keyed by the dependency's text. A
-/// question whose text was answered before is applied again without being asked, which is what
+/// question whose text was answered before is applied again without being asked. That is what
 /// reproduces libalpm's accumulated package list answering later occurrences silently. It also
 /// collapses two dependents raising the same dependency in one round into one question.
 ///
@@ -95,8 +95,8 @@ pub fn answer(
 
 /// Reports the questions a non-interactive run answered with libalpm's default.
 ///
-/// `piko plan` never asks — a preview that blocks on stdin is worse than one that states its
-/// assumption — and neither does `--noconfirm`. Saying so keeps the plan honest: it is one of
+/// `piko plan` never asks, and neither does `--noconfirm`. A preview that blocks on stdin is
+/// worse than one that states its assumption. Saying so keeps the plan honest. It is one of
 /// several valid plans, and `piko install` is where the choice is made.
 pub fn report_defaults(universe: &Universe<'_>, report: &AmbiguityReport) {
     if report.is_empty() {
@@ -110,9 +110,9 @@ pub fn report_defaults(universe: &Universe<'_>, report: &AmbiguityReport) {
         report.found().len()
     );
     for ambiguity in report.found() {
-        // Named rather than counted, but not all of them: `tesseract requires tessdata` has
-        // 128 providers on a real system, and a note is not the prompt. The prompt lists every
-        // one, because there the list is what is being answered.
+        // Named rather than counted, but not all of them. `tesseract requires tessdata` has
+        // 128 providers on a real system, and a note is not the prompt. The prompt lists
+        // every one, because there the list is what is being answered.
         const SHOWN: usize = 5;
         let listed: Vec<String> =
             ambiguity.providers.iter().take(SHOWN).map(|id| name_of(*id)).collect();

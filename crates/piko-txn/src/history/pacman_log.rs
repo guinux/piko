@@ -37,9 +37,9 @@ const LOG_MODE: u32 = 0o644;
 
 /// Largest log a [`read`] will take in.
 ///
-/// A `pacman.log` on a long-lived system runs to a few megabytes; this is generous without
-/// being unbounded. Every read in piko is bounded, and a log is as attacker-influenced as any
-/// other file on disk: it holds the output of every scriptlet that ever ran.
+/// A `pacman.log` on a long-lived system runs to a few megabytes. This bound is generous
+/// without being unbounded. Every read in piko is bounded, and a log is as attacker-influenced
+/// as any other file on disk. It holds the output of every scriptlet that ever ran.
 pub const MAX_LOG_BYTES: u64 = 64 * 1024 * 1024;
 
 /// An open log file, appended to for the duration of a transaction.
@@ -54,8 +54,8 @@ impl PacmanLog {
     /// Opens `path` for appending, creating it if it is absent.
     ///
     /// `O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC` at mode `0644`, the same flags `log.c`
-    /// uses. The parent directory is **not** created: libalpm does not create it either, and a
-    /// missing `/var/log` means the caller pointed at a root that is not set up yet, which is
+    /// uses. The parent directory is **not** created, and libalpm does not create it either.
+    /// A missing `/var/log` means the caller pointed at a root that is not set up yet. That is
     /// worth reporting rather than papering over.
     ///
     /// # Errors
@@ -147,8 +147,8 @@ impl Line {
 
     /// The action this line reports, if it reports one.
     ///
-    /// Parses libalpm's four install verbs and its removal verb, in either tool's spelling —
-    /// the message text is identical, only the caller differs.
+    /// Parses libalpm's four install verbs and its removal verb, in either tool's spelling.
+    /// The message text is identical. Only the caller differs.
     #[must_use]
     pub fn action(&self) -> Option<Action> {
         let (verb, rest) = self.message.split_once(' ')?;
@@ -174,9 +174,9 @@ impl Line {
 
 /// One transaction, as the log describes it.
 ///
-/// This is what the log can say. It is less than [`super::Entry`] knows — no root, no dbpath,
-/// no `.pacnew` list — and more than the store holds, because it covers pacman's transactions
-/// too.
+/// This is what the log can say. It is less than [`super::Entry`] knows, carrying no root, no
+/// dbpath and no `.pacnew` list. It is more than the store holds, because it covers pacman's
+/// transactions too.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Session {
     /// The id piko stamped on the `transaction started` line, when piko wrote it.
@@ -200,8 +200,8 @@ pub struct Session {
 /// Reads and parses a log file, bounded by [`MAX_LOG_BYTES`].
 ///
 /// Unparseable lines are skipped rather than failing the read. A log file outlives the tools
-/// that wrote it, and a reader that refuses the whole file over one odd line is a reader that
-/// stops working on exactly the system whose history is worth looking at.
+/// that wrote it. A reader that refuses the whole file over one odd line fails on exactly the
+/// system whose history is worth looking at.
 ///
 /// # Errors
 ///
@@ -224,9 +224,9 @@ pub fn read(path: &Path) -> std::io::Result<Vec<Line>> {
 /// Groups parsed lines into transactions, newest last.
 ///
 /// A session runs from `transaction started` to `transaction completed`/`transaction failed`.
-/// A `Running '…'` line seen before a session begins is attached to it as the command line,
-/// which is how pacman's own `[PACMAN] Running '…'` reaches the same field piko records
-/// explicitly. Lines outside any session are dropped: they describe no transaction.
+/// A `Running '…'` line seen before a session begins is attached to it as the command line.
+/// That is how pacman's own `[PACMAN] Running '…'` reaches the same field piko records
+/// explicitly. Lines outside any session are dropped, because they describe no transaction.
 #[must_use]
 pub fn sessions(lines: &[Line]) -> Vec<Session> {
     let mut sessions: Vec<Session> = Vec::new();
@@ -289,8 +289,8 @@ fn running_command(message: &str) -> Option<String> {
 
 /// The id a `transaction started` message carries, or `None` for libalpm's un-suffixed form.
 ///
-/// Returns `Some(None)` for a start with no id, and `None` for a line that is not a start at
-/// all — the two answers a caller has to tell apart.
+/// Returns `Some(None)` for a start with no id. It returns `None` for a line that is not a
+/// start at all. A caller has to tell those two answers apart.
 fn started_id(message: &str) -> Option<Option<String>> {
     let rest = message.strip_prefix("transaction started")?;
     let rest = rest.trim();
@@ -374,7 +374,7 @@ mod tests {
     }
 
     /// libalpm does not create the directory either. A missing one means the caller named a
-    /// root that is not set up, and saying so beats creating `/var/log` behind their back.
+    /// root that is not set up. Saying so beats creating `/var/log` behind their back.
     #[test]
     fn a_missing_directory_is_reported_not_created() {
         let dir = temp();
@@ -415,7 +415,7 @@ mod tests {
         }
     }
 
-    /// What a line reports and what the writer would write for it must agree, or a
+    /// What a line reports and what the writer would write for it must agree. Otherwise a
     /// transaction read back says something the transaction did not do.
     #[test]
     fn an_action_round_trips_through_a_message() {

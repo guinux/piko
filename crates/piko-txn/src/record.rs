@@ -1,13 +1,13 @@
 //! Builds a local database entry from an installed package.
 //!
 //! The `desc` a package gets in `<dbpath>/local` is almost entirely a transcription of its
-//! `.PKGINFO`, with four fields the *transaction* supplies rather than the package:
-//! `%INSTALLDATE%`, `%REASON%`, `%VALIDATION%`, and a `%SIZE%` that libalpm takes from the
-//! installed size rather than the compressed one.
+//! `.PKGINFO`. Four fields come from the *transaction* rather than the package:
+//! `%INSTALLDATE%`, `%REASON%`, `%VALIDATION%` and `%SIZE%`. libalpm takes that last one from
+//! the installed size rather than the compressed one.
 //!
 //! Field order is [`RecordKind::Desc`]'s, which is `_alpm_local_db_write`'s
 //! (`be_local.c:997`). Building through [`Record::set`] rather than by concatenation keeps it
-//! that way: `set` inserts a section at its canonical position, so a field added here in the
+//! that way. `set` inserts a section at its canonical position. A field added here in the
 //! wrong place still lands in the right one.
 
 use alpm_pkginfo::PackageInfo;
@@ -25,15 +25,15 @@ pub struct InstallFacts {
     pub reason: PackageInstallReason,
     /// How the package file was verified.
     ///
-    /// Empty means the section is omitted. piko does not yet verify anything, so a caller that
-    /// has not checked a signature should pass [`PackageValidation::None`] rather than claim a
-    /// stronger one. The field records what was actually done.
+    /// Empty means the section is omitted. piko does not yet verify anything here. A caller
+    /// that has not checked a signature should pass [`PackageValidation::None`] rather than
+    /// claim a stronger one. The field records what was actually done.
     pub validation: Vec<PackageValidation>,
 }
 
 /// Builds the `desc` record for a newly installed package.
 ///
-/// `%SIZE%` is the package's installed size from `.PKGINFO`, not the size of the archive:
+/// `%SIZE%` is the package's installed size from `.PKGINFO`, not the size of the archive.
 /// libalpm's comment at `be_local.c:1026` is explicit that "csize is irrelevant once
 /// installed".
 ///
@@ -45,9 +45,9 @@ pub struct InstallFacts {
 /// parsed value writes a `desc` that differs from pacman's, measured at 11 of 120 real
 /// packages.
 ///
-/// `%PACKAGER%` is copied the same way, for a second reason on top of that one:
-/// [`crate::pkginfo::parse`] substitutes makepkg's default packager before the typed parse,
-/// so `info` holds a value the package file never carried.
+/// `%PACKAGER%` is copied the same way, for a second reason on top of that one.
+/// [`crate::pkginfo::parse`] substitutes makepkg's default packager before the typed parse. So
+/// `info` holds a value the package file never carried.
 #[must_use]
 pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Record {
     let mut record = Record::new(RecordKind::Desc);
@@ -110,8 +110,8 @@ pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Record {
 /// Builds the `files` record from what the installation actually laid down.
 ///
 /// This is deliberately driven by [`Extraction::owned`] rather than by the archive's member
-/// list. A `NoExtract` path is not on this system, and a `files` entry claiming it would make
-/// the package appear to own a file that a later removal would then fail to find.
+/// list. A `NoExtract` path is not on this system. A `files` entry claiming it would make the
+/// package appear to own a file a later removal then fails to find.
 #[must_use]
 pub fn files(extraction: &Extraction) -> Record {
     let mut record = Record::new(RecordKind::Files);

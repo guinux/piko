@@ -1,10 +1,12 @@
 //! `piko files`: the files one or more packages own.
 //!
-//! Uses its own `--quiet` convention, different from [`crate::cmd::list`]'s: `"{name} /{path}"`
-//! normally, just `"/{path}"` in quiet mode. There is no name/version row to reduce to a bare
-//! name here, so quiet instead drops the package prefix off each file line. It also uses a
-//! best-effort, continue-past-a-miss style: report each missing or unreadable name to stderr,
-//! keep going, and fail only at the end.
+//! Uses its own `--quiet` convention, different from [`crate::cmd::list`]'s. A line reads
+//! `"{name} /{path}"` normally, and just `"/{path}"` in quiet mode. There is no name/version
+//! row to reduce to a bare name here. So quiet drops the package prefix off each file line
+//! instead.
+//!
+//! It also continues past a miss rather than stopping. Each missing or unreadable name is
+//! reported to stderr, the run keeps going, and the failure comes at the end.
 
 use std::process::ExitCode;
 
@@ -17,8 +19,8 @@ use crate::output::{emit, report};
 /// `"/{path}"` in `--quiet` mode.
 ///
 /// This is a pure formatter, not a printer. [`emit`] must be called directly from the function
-/// that owns the loop, not from here, so a broken-pipe write error stops that loop rather than
-/// only returning from this helper.
+/// that owns the loop, not from here. That way a broken-pipe write error stops that loop,
+/// rather than only returning from this helper.
 fn file_line(name: impl std::fmt::Display, path: impl std::fmt::Display, quiet: bool) -> String {
     if quiet {
         format!("/{path}")
@@ -31,15 +33,15 @@ fn file_line(name: impl std::fmt::Display, path: impl std::fmt::Display, quiet: 
 /// `files` file.
 ///
 /// Continues past a name that is not installed, or whose `files` file cannot be read, instead
-/// of stopping at the first one. Each is reported to stderr, and the exit code is a failure
-/// only once something was missing or unreadable: `piko files` accepts more than one name, and
-/// a typo in one of several should not hide the rest.
+/// of stopping at the first one. Each is reported to stderr. The exit code is a failure only
+/// once something was missing or unreadable. `piko files` accepts more than one name, and a
+/// typo in one of several should not hide the rest.
 ///
 /// Unlike the repository case ([`files_repo`], [`files_installed_then_repos`]), there is no
 /// batching win to be had here. [`piko_db::LocalPackage::file_list`] is a plain, cheap,
-/// lazily-cached read of one package's own `files` file, not a shared archive walked once for
-/// many packages the way a repository's `.files` archive is. A simple per-name loop is the
-/// right amount of machinery.
+/// lazily-cached read of one package's own `files` file. It is not a shared archive walked
+/// once for many packages, the way a repository's `.files` archive is. A simple per-name loop
+/// is the right amount of machinery.
 pub fn files_installed(
     db: &LocalDatabase,
     names: &[String],
@@ -90,7 +92,7 @@ pub fn files_installed(
 /// Reads from a single repository database archive's `.files` sibling.
 ///
 /// Looks every name up first, then asks for their file lists together via
-/// [`RepoDatabase::file_lists`], so the `.files` archive is walked once for every package
+/// [`RepoDatabase::file_lists`]. So the `.files` archive is walked once for every package
 /// found, not once per package.
 pub fn files_repo(
     db: &RepoDatabase,
@@ -137,10 +139,11 @@ pub fn files_repo(
 /// `dbs` need not hold every configured repository. The caller only opens as many as are
 /// needed to resolve whichever names [`piko_db::resolve_installed_or_repo`] did not already
 /// find locally, via [`crate::context::open_repos_for_packages`]. Names resolved against a
-/// repository are grouped by which one, so each repository's `.files` archive is still walked
-/// once for all of them, not once per package. This mirrors [`files_repo`]'s own batching. An
-/// index kept alongside each name restores the overall order `names` was given in, once
-/// installed and repository results are merged back together.
+/// repository are grouped by which one. So each repository's `.files` archive is still walked
+/// once for all of them, not once per package. This mirrors [`files_repo`]'s own batching.
+///
+/// An index kept alongside each name restores the overall order `names` was given in. That
+/// happens once installed and repository results are merged back together.
 pub fn files_installed_then_repos(
     local: &LocalDatabase,
     dbs: &[RepoDatabase],

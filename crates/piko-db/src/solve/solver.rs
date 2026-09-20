@@ -8,7 +8,7 @@
 //! the failure as a single `alpm_depmissing_t`.
 //!
 //! A solver is safe to substitute here because **libalpm's answer is this solver's first
-//! descent**. ALPM offers exactly one candidate version per name per repository, so the
+//! descent**. ALPM offers exactly one candidate version per name per repository. So the
 //! search space is a choice among providers, not a search over version ranges. [`Problem`]
 //! stores each requirement's satisfiers in `resolvedep` preference order.
 //! [`Solver::decide`] always takes the first unassigned literal of the first unsatisfied
@@ -25,7 +25,7 @@
 //! variable (VSIDS and similar heuristics). That would be wrong twice over here: it would
 //! install packages nothing asked for, and it would not reproduce libalpm's ordering. Instead
 //! the default polarity is "not selected". A decision is only ever made to *repair* a clause
-//! that is not yet satisfied, by selecting the highest-priority candidate that would satisfy
+//! that is not yet satisfied. It selects the highest-priority candidate that would satisfy
 //! it. This is how libsolv drives package solving. It is also what makes the greedy descent
 //! and the search share one code path.
 //!
@@ -285,11 +285,12 @@ impl<'p> Solver<'p> {
         while let Some(literal) = self.trail.get(self.propagated).copied() {
             self.propagated = self.propagated.saturating_add(1);
 
-            // Clauses watching the literal that just became false. The list is moved out, not
-            // cloned: `visit_watch` needs `&mut self`, and cloning would be quadratic on a
-            // real problem, where a popular literal is watched by thousands of clauses.
-            // Conflict analysis may append to this same list — a learned clause starts
-            // watching its own literals — so whatever arrived while it was taken is merged
+            // Clauses watching the literal that just became false. The list is moved out,
+            // not cloned. `visit_watch` needs `&mut self`, and cloning would be quadratic on
+            // a real problem, where a popular literal is watched by thousands of clauses.
+            //
+            // Conflict analysis may append to this same list, because a learned clause starts
+            // watching its own literals. So whatever arrived while it was taken is merged
             // back, not dropped.
             let Some(slot) = self.watches.get_mut(literal.watch_index()) else { continue };
             let mut watching = std::mem::take(slot);
@@ -501,8 +502,8 @@ impl<'p> Solver<'p> {
         let mut queue = vec![conflict];
         // Sized over learned clauses too, since the walk follows reasons through them. The
         // guard must gate *expansion*, not merely the push onto `core`. The reason graph is
-        // routinely cyclic — a clause forces a literal whose reason is that same clause — so
-        // re-expanding a clause already visited does not terminate.
+        // routinely cyclic, since a clause forces a literal whose reason is that same clause.
+        // So re-expanding a clause already visited does not terminate.
         let mut seen = vec![false; self.problem.len().saturating_add(self.learned.len())];
 
         while let Some(id) = queue.pop() {
@@ -627,8 +628,8 @@ mod tests {
         assert_eq!(selected(&problem), [0, 1, 2, 3]);
     }
 
-    /// The heart of the fidelity claim: with several providers and no conflict, the solver
-    /// chooses the first listed one and the search never backtracks.
+    /// The heart of the fidelity claim. With several providers and no conflict, the solver
+    /// chooses the first listed one. The search never backtracks.
     #[test]
     fn the_first_listed_provider_wins_without_any_backtracking() {
         let mut problem = Problem::new(4);
@@ -647,7 +648,7 @@ mod tests {
         }
     }
 
-    /// The case libalpm cannot handle: the first provider conflicts with something already
+    /// The case libalpm cannot handle. The first provider conflicts with something already
     /// required, so the solver must back out and take the second.
     #[test]
     fn a_conflicting_first_choice_is_backed_out_of() {
@@ -716,17 +717,17 @@ mod tests {
     /// Unit propagation runs the implication backwards from the conflict at level 0.
     ///
     /// libalpm cannot do this. `_alpm_resolvedeps` would take the first provider (1), pull 3,
-    /// then pull 4, and only discover at `_alpm_sync_prepare`'s conflict step that 4 cannot
-    /// coexist with the target — a hard `ALPM_ERR_CONFLICTING_DEPS`.
+    /// then pull 4. It would discover only at `_alpm_sync_prepare`'s conflict step that 4
+    /// cannot coexist with the target, a hard `ALPM_ERR_CONFLICTING_DEPS`.
     ///
     /// This is also why a zero [`Solution::conflicts`] does not on its own mean "libalpm's
-    /// answer": propagation forestalled the decision libalpm would have made.
+    /// answer". Propagation forestalled the decision libalpm would have made.
     #[test]
     fn a_chain_that_conflicts_with_the_target_is_rejected_by_propagation_alone() {
         let mut problem = Problem::new(8);
         problem.add([pos(0)], ClauseKind::Target { target: id(0) });
         // 0 requires (1 or 2). Choosing 1 would force 3, which forces 4, which conflicts
-        // with 0 — so ¬4, ¬3 and ¬1 are all forced before any decision is taken.
+        // with 0. So ¬4, ¬3 and ¬1 are all forced before any decision is taken.
         requires(&mut problem, 0, [neg(0), pos(1), pos(2)]);
         requires(&mut problem, 1, [neg(1), pos(3)]);
         requires(&mut problem, 3, [neg(3), pos(4)]);

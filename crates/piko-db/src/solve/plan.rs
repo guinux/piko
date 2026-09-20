@@ -2,9 +2,9 @@
 //!
 //! libalpm has no equivalent value. Its plan is scattered across `trans->add`,
 //! `trans->remove`, `pkg->removes`, `pkg->oldpkg` and `trans->skip_remove`. It is observable
-//! only through callbacks that fire in the middle of resolution. A [`Plan`] is a plain
-//! struct instead: it can be printed, asserted on in a test, diffed against `pacman -Sp`, and
-//! handed to a commit engine that did not compute it.
+//! only through callbacks that fire in the middle of resolution. A [`Plan`] is a plain struct
+//! instead. It can be printed, asserted on in a test, and diffed against `pacman -Sp`. A
+//! commit engine that did not compute it can take it as it is.
 //!
 //! # Ordering
 //!
@@ -158,7 +158,7 @@ impl Plan {
     /// `alpm_checkdeps` ignores an already-broken dependency (`deps.c:369`), and so does piko.
     ///
     /// A caller may report these for some commands and not others. They therefore get a list
-    /// of their own rather than a [`PlanDiagnostic`]: a filtered [`PlanDiagnostic`] still
+    /// of their own rather than a [`PlanDiagnostic`]. A filtered [`PlanDiagnostic`] still
     /// spends the shared bound on entries the command never prints.
     ///
     /// Each entry names a package and one of its `%DEPENDS%` entries. Index that `%DEPENDS%`
@@ -273,7 +273,7 @@ impl Plan {
             match universe.installed_named(candidate.name().as_ref()) {
                 Some(previous) => {
                     // This replaces the installed copy with a different version of itself.
-                    // It is one step, not a removal plus an install: libalpm performs the
+                    // It is one step, not a removal plus an install. libalpm performs the
                     // removal *inside* `commit_single_pkg`, so the two halves cannot be
                     // separated or reordered.
                     installed_delta = installed_delta.saturating_sub(
@@ -316,14 +316,14 @@ impl Plan {
 ///
 /// - **The cache is probed under `%FILENAME%`, never under a name rebuilt from
 ///   `<name>-<version>-<arch>`.** The compression suffix varies between packages (`.zst`,
-///   `.xz`), so a rebuilt name can miss a file that is sitting right there. libalpm reads
+///   `.xz`). So a rebuilt name can miss a file that is sitting right there. libalpm reads
 ///   `pkg->filename` for exactly this reason.
 /// - **Reaching `%FILENAME%` forces the deferred `desc` parse.** The eager tier
 ///   (`repo::eager`) deliberately skips this field. The cost is bounded by the size of the
 ///   *plan*, not of the repository. Every caller that goes on to install forces the same
-///   parse for the same candidates moments later, and `Lazy` then serves it from cache.
+///   parse for the same candidates moments later. `Lazy` then serves it from cache.
 /// - **A candidate whose `desc` cannot be read counts in full.** Refusing to guess is the
-///   conservative choice, and it matches what an absent `%CSIZE%` already does.
+///   conservative choice. It matches what an absent `%CSIZE%` already does.
 fn pending_download(candidate: &Solvable<'_>, cache: &dyn PackageCache) -> u64 {
     // `None` means an installed solvable, which has nothing to fetch. `assemble` already
     // filters those out, so answering zero here costs nothing.
@@ -496,8 +496,8 @@ mod tests {
 
     /// A cache holding exactly the package file names it was built with.
     ///
-    /// The point of [`PackageCache`] being a trait: the download-size rule is exercised without
-    /// a directory, a file, or a `tempfile` anywhere in sight.
+    /// This is the point of [`PackageCache`] being a trait. The download-size rule is
+    /// exercised without a directory, a file, or a `tempfile` anywhere in sight.
     #[derive(Debug)]
     struct FakeCache(Vec<String>);
 
@@ -589,8 +589,8 @@ mod tests {
         assert!(position("right") < position("app"));
     }
 
-    /// libalpm warns and proceeds on a cycle rather than failing; so must piko, or piko could
-    /// not install package sets pacman installs every day.
+    /// libalpm warns and proceeds on a cycle rather than failing. So must piko. Otherwise
+    /// piko could not install package sets pacman installs every day.
     #[test]
     fn a_dependency_cycle_is_reported_but_still_produces_a_plan() {
         let scenario = Scenario::new()
@@ -617,7 +617,7 @@ mod tests {
 
     /// A dependency that is already unsatisfiable is left alone, and reported.
     ///
-    /// The plan must carry no removal at all. The reason must reach the caller as data: a
+    /// The plan must carry no removal at all. The reason must reach the caller as data. A
     /// system reaches this state only when a package its dependents need is force-removed,
     /// and nothing else reports that.
     #[test]
@@ -736,12 +736,12 @@ mod tests {
         assert_eq!(plan.installed_size_delta(), 1500);
     }
 
-    /// `%CSIZE%` is what a package weighs, not what it costs to fetch: a candidate already in
+    /// `%CSIZE%` is what a package weighs, not what it costs to fetch. A candidate already in
     /// the cache crosses no network at all.
     ///
     /// `compute_download_size` (`sync.c:310`) drops such a candidate to zero the same way.
-    /// Announcing the full figure for a plan already entirely on disk draws a progress bar
-    /// that can never move, which reads as re-downloading.
+    /// Announcing the full figure for a plan already on disk draws a progress bar that can
+    /// never move. That reads as re-downloading.
     #[test]
     fn a_cached_candidate_costs_nothing_to_download() {
         let scenario = Scenario::new()
@@ -926,9 +926,9 @@ mod tests {
         assert!(plan_removal(&scenario, "thing", false, false).is_none());
     }
 
-    /// Fidelity must still fire when a *different package* answers a dependency — the
-    /// name-based comparison that stopped `-Su` reporting 28 false divergences must not have
-    /// made the measure dead.
+    /// Fidelity must still fire when a *different package* answers a dependency. The
+    /// name-based comparison keeps `-Su` from reporting 28 false divergences. It must not
+    /// make the measure dead.
     #[test]
     fn choosing_a_different_provider_is_reported_as_divergence() {
         let scenario = Scenario::new()
@@ -975,8 +975,8 @@ mod tests {
             plan.fidelity()
         );
 
-        // The count on its own was measured to be uninformative; the report has to name what
-        // it counted, or the same always-on failure cannot be told from a real hit.
+        // The count on its own is uninformative, as measured. The report has to name what it
+        // counted. Otherwise an always-on failure cannot be told from a real hit.
         let [divergence] = plan.divergences() else {
             panic!("the counted requirement must be named: {:?}", plan.divergences())
         };
@@ -992,11 +992,11 @@ mod tests {
         assert_eq!(relation.as_deref(), Some("virtual"), "the index must reach the relation");
     }
 
-    /// What the scope filter is for: `encode` emits a requirement for every `%DEPENDS%` entry
-    /// of every candidate in the cone, the cone holds the whole installed set, and "every
-    /// installed package must remain" keeps all of it selected. So without the filter, an
-    /// unrelated quirk anywhere on the system counts as a divergence of every plan, whatever
-    /// the plan is.
+    /// This is what the scope filter is for. `encode` emits a requirement for every
+    /// `%DEPENDS%` entry of every candidate in the cone. The cone holds the whole installed
+    /// set, and "every installed package must remain" keeps all of it selected. So without
+    /// the filter, an unrelated quirk anywhere on the system counts as a divergence of every
+    /// plan, whatever the plan is.
     ///
     /// Here `host` already has `impl-b` answering its `virtual` dependency, while `impl-a`
     /// outranks it in preference order. libalpm never re-resolves `host`, so installing an
@@ -1039,13 +1039,13 @@ mod tests {
         assert!(plan.divergences().is_empty());
     }
 
-    /// A provider pulled in for an *earlier* `%DEPENDS%` entry of the same package answers the
-    /// later one, so libalpm never reaches the preference order for it.
+    /// A provider pulled in for an *earlier* `%DEPENDS%` entry of the same package answers
+    /// the later one. So libalpm never reaches the preference order for it.
     ///
     /// Measured on real data as `piko plan cl-alexandria`, which declares `cl-asdf` before
-    /// `common-lisp`: `ecl` provides both, so `clisp` — the head of the `common-lisp`
-    /// preference list — is never tried, and pacman's plan is `ecl` too. Reporting a
-    /// divergence there was a false positive.
+    /// `common-lisp`. `ecl` provides both, so `clisp` — the head of the `common-lisp`
+    /// preference list — is never tried. pacman's plan is `ecl` too. A divergence reported
+    /// there is a false positive.
     #[test]
     fn a_provider_taken_for_an_earlier_dependency_is_not_a_divergence() {
         let scenario = Scenario::new()
@@ -1085,9 +1085,9 @@ mod tests {
     /// A package the user named is in libalpm's package list before dependency resolution
     /// starts, so a dependency it satisfies is never raised.
     ///
-    /// Measured as `piko plan tesseract-data-sun`: the target pulls in `tesseract`, which
-    /// requires `tessdata`; the target itself provides it, so the head of the `tessdata` list
-    /// (`tesseract-data-afr`) is never consulted. Reporting that was a false positive.
+    /// Measured as `piko plan tesseract-data-sun`. The target pulls in `tesseract`, which
+    /// requires `tessdata`. The target itself provides it, so the head of the `tessdata` list
+    /// (`tesseract-data-afr`) is never consulted. Reporting that is a false positive.
     #[test]
     fn a_dependency_answered_by_the_named_target_is_not_a_divergence() {
         let scenario = Scenario::new()
@@ -1123,13 +1123,13 @@ mod tests {
         );
     }
 
-    /// An installed package the transaction keeps already satisfies the dependency, so
-    /// `alpm_checkdeps` reports nothing missing and the repository's literal match — which
-    /// outranks an installed *provider* — is never tried.
+    /// An installed package the transaction keeps already satisfies the dependency. So
+    /// `alpm_checkdeps` reports nothing missing, and the repository's literal match is never
+    /// tried. That literal match outranks an installed *provider*.
     ///
-    /// Measured as `piko plan corrosion`: it requires `rust`, `rustup` is installed and
+    /// Measured as `piko plan corrosion`. It requires `rust`, `rustup` is installed and
     /// provides it, and the literal `rust` package heads the preference list. pacman keeps
-    /// `rustup` too. Reporting that was a false positive.
+    /// `rustup` too. Reporting that is a false positive.
     #[test]
     fn a_dependency_answered_by_an_untouched_installed_package_is_not_a_divergence() {
         let scenario = Scenario::new()

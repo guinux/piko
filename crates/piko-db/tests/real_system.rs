@@ -232,8 +232,8 @@ fn every_package_is_findable_by_name() {
     }
 }
 
-/// `%URL%` is taken out of the text before the upstream parse, so the bytes it reports must be
-/// the bytes on disk — the oracle here is the `desc` file itself, read without piko.
+/// `%URL%` is taken out of the text before the upstream parse. So the bytes it reports must be
+/// the bytes on disk. The oracle here is the `desc` file itself, read without piko.
 ///
 /// The normalized form is only counted, not asserted on. `url::Url` refuses nothing on this
 /// machine today (0 of 1240), and pinning that would test Arch's packaging, not piko.

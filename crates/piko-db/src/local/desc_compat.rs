@@ -66,9 +66,9 @@ impl<'a> DescView<'a> {
 
     /// The underlying schema-tagged value, for callers that need the distinction.
     ///
-    /// Its `url` field is always `None`: `%URL%` is blanked before the upstream parser sees
+    /// Its `url` field is always `None`. `%URL%` is blanked before the upstream parser sees
     /// the text, so [`DescView::url`] and [`DescView::url_raw`] are the only sources for it.
-    /// Its `packager` field can likewise hold a substitute — read [`DescView::packager`] and
+    /// Its `packager` field can likewise hold a substitute. Read [`DescView::packager`] and
     /// [`DescView::packager_raw`] rather than it.
     #[must_use]
     pub const fn as_inner(&self) -> &'a DbDescFile {
@@ -269,8 +269,8 @@ mod tests {
         assert_eq!(view.description().to_string(), "An example package");
     }
 
-    /// An empty `%URL%` is how a package with no URL is recorded, and must stay distinct from
-    /// a value that failed to normalize: both are `None`, but only one has bytes.
+    /// An empty `%URL%` is how a package with no URL is recorded. It must stay distinct from
+    /// a value that failed to normalize. Both are `None`, but only one has bytes.
     #[test]
     fn an_empty_url_has_no_raw_value_either() {
         let text = MINIMAL_DESC_V1.replace("https://example.org/", "");

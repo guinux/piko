@@ -1,24 +1,24 @@
-//! A live, stacked list of transaction steps: a spinner on stderr while an item runs, and a
-//! plain checkmark line on stdout naming it.
+//! A live, stacked list of transaction steps. A spinner runs on stderr while an item runs, and a
+//! plain checkmark line on stdout names it.
 //!
 //! That checkmark line is written as soon as the item has something to print underneath, and
-//! otherwise when the item finishes. So a name always comes before the output it frames, in a
-//! captured log as much as on a terminal — stderr and its spinner are not there to fill the
-//! gap. The glyph marks the line that names whatever follows it; how the item ended is
-//! reported separately by `cmd::txn::report_side_effects`, which never read the glyph.
+//! otherwise when the item finishes. So a name always comes before the output it frames. That
+//! holds in a captured log as much as on a terminal. stderr and its spinner are not there to fill
+//! the gap. The glyph marks the line that names whatever follows it. How the item ended is
+//! reported separately by `cmd::txn::report_side_effects`, which never reads the glyph.
 //!
-//! Lines nest by two spaces per level: a package step or a hook at column zero, a scriptlet
-//! under its step, and each item's own output one level further in again.
+//! Lines nest by two spaces per level. A package step or a hook sits at column zero. A scriptlet
+//! sits under its step, and each item's own output one level further in again.
 //!
-//! A row is never left as a permanently kept `indicatif` bar. `MultiProgress` redraws its
-//! whole managed stack together on every tick and assumes that stack fits on screen. A
-//! transaction touching hundreds of packages (or, for [`VerifyDriver`], a long download/verify
-//! phase ahead of one) would leave that many finished bars behind, overflow the terminal, and
-//! corrupt the redraw: dropped lines, checkmarks that never appear. Instead, at most a handful
-//! of rows are ever alive in the `indicatif::MultiProgress` at once. A finished one is cleared
-//! (`finish_and_clear()`, never bare `finish()`) and its text reprinted as a plain line through
-//! [`StepList::suspend`], which lands in ordinary scrollback that `indicatif` has no further
-//! say over. `print_step_result` (stdout) still exists for what a row cannot show: a
+//! A row is never left as a permanently kept `indicatif` bar. `MultiProgress` redraws its whole
+//! managed stack together on every tick, and assumes that stack fits on screen. A transaction
+//! touching hundreds of packages would leave that many finished bars behind. It would overflow the
+//! terminal and corrupt the redraw: dropped lines, checkmarks that never appear. For
+//! [`VerifyDriver`] the same holds of a long download or verify phase ahead of one. Instead, at
+//! most a handful of rows are ever alive in the `indicatif::MultiProgress` at once. A finished one
+//! is cleared with `finish_and_clear()`, never bare `finish()`. Its text is reprinted as a plain
+//! line through [`StepList::suspend`], which lands in ordinary scrollback that `indicatif` has no
+//! further say over. `print_step_result` (stdout) still exists for what a row cannot show: a
 //! `.pacnew`/`.pacsave` notice, or a warning.
 
 use std::{
@@ -92,21 +92,21 @@ impl Row {
 
     /// Sets a [`Kind::Download`] row's total.
     ///
-    /// Used for the case where the total is not known until the download's own `Started`
-    /// event reports it: a single-file `piko refresh` row, unlike the grouped multi-file
-    /// install-download row.
+    /// Used where the total is not known until the download's own `Started` event reports it.
+    /// That is a single-file `piko refresh` row, unlike the grouped multi-file install-download
+    /// row.
     pub(crate) fn set_length(&self, len: u64) {
         self.bar.set_length(len);
     }
 
-    /// Leaves the message in place, swaps the spinner for a green check, and freezes whatever
+    /// Leaves the message in place and swaps the spinner for a green check. It freezes whatever
     /// count or byte total the row last showed, permanently.
     ///
     /// For a caller with a small, bounded number of rows it intends to keep on screen for the
-    /// whole run: `cmd::refresh`'s one row per configured repository. [`Self::finish_and_clear`]
-    /// is what [`VerifyDriver`] and [`CommitDriver`] use instead. A row that could number in
-    /// the hundreds (one package, one hook) cannot be kept this way; see this module's doc
-    /// comment.
+    /// whole run. `cmd::refresh`'s one row per configured repository is that caller.
+    /// [`Self::finish_and_clear`] is what [`VerifyDriver`] and [`CommitDriver`] use instead. A row
+    /// that could number in the hundreds, one package or one hook, cannot be kept this way. See
+    /// this module's doc comment.
     pub(crate) fn finish(self) {
         self.bar.set_style(style(self.kind, true));
         self.bar.finish();
@@ -124,12 +124,11 @@ impl Row {
 
     /// Removes the row from the display entirely, rather than leaving it checked off.
     ///
-    /// What [`VerifyDriver`] and [`CommitDriver`] call on every row they open, immediately
-    /// followed by printing its final text as a plain line; see this module's doc comment.
-    /// [`VerifyDriver::finish_download`] also uses this bare (no reprint) for the head row
+    /// What [`VerifyDriver`] and [`CommitDriver`] call on every row they open. Printing its final
+    /// text as a plain line follows immediately; see this module's doc comment.
+    /// [`VerifyDriver::finish_download`] also uses this bare, with no reprint, for the head row
     /// naming in-flight downloads. That row has nothing worth freezing once nothing is left in
-    /// flight; the byte total the download row itself settled on already says what was
-    /// fetched.
+    /// flight. The byte total the download row itself settled on already says what was fetched.
     pub(crate) fn finish_and_clear(self) {
         self.bar.finish_and_clear();
     }
@@ -221,9 +220,9 @@ impl StepList {
 
 /// What the head row says while `live` files are being fetched.
 ///
-/// Package file names carry a version, a pkgrel, and an architecture. Three of those side by
-/// side is a line nobody can read, so each is reduced to the package name it starts with. A
-/// name that does not parse (a database, `core.db`) is shown as it is.
+/// Package file names carry a version, a pkgrel, and an architecture. Three of those side by side
+/// is a line nobody can read. So each is reduced to the package name it starts with. A name that
+/// does not parse, such as the database `core.db`, is shown as it is.
 fn in_flight(live: &BTreeSet<String>) -> String {
     let names: Vec<String> = live
         .iter()
@@ -323,9 +322,9 @@ pub(crate) fn clear_download_rows(row: Option<Row>, head: Option<Row>) {
 
 /// Drives a per-repository download [`Row`] for `piko refresh`.
 ///
-/// Unlike the grouped multi-file install-download row (whose total comes from the plan, up
-/// front), each `piko refresh` row covers exactly one database file, so its total is not known
-/// until the download's own `Started` event reports it.
+/// Each `piko refresh` row covers exactly one database file, so its total is not known until the
+/// download's own `Started` event reports it. The grouped multi-file install-download row differs:
+/// its total comes from the plan, up front.
 pub(crate) fn database_download_sink(row: Row) -> impl Fn(piko_net::Event) + Send + Sync + 'static {
     move |event: piko_net::Event| {
         use piko_net::{Event as E, Kind};
@@ -342,20 +341,20 @@ pub(crate) fn database_download_sink(row: Row) -> impl Fn(piko_net::Event) + Sen
     }
 }
 
-/// Clears `row` and reprints `text` as a plain, checked-off line, through [`StepList::suspend`]
-/// so it lands in ordinary scrollback rather than `indicatif`'s managed area. This is the
-/// convention this module's doc comment explains. Every caller with a row that could recur
-/// many times (a resolved dependency set, a package, a hook, a download/verify phase) uses
-/// this instead of [`Row::finish`].
+/// Clears `row` and reprints `text` as a plain, checked-off line. It goes through
+/// [`StepList::suspend`], so it lands in ordinary scrollback rather than `indicatif`'s managed
+/// area. This is the convention this module's doc comment explains. Every caller with a row that
+/// could recur many times uses this instead of [`Row::finish`]. Those are a resolved dependency
+/// set, a package, a hook, and a download or verify phase.
 pub(crate) fn settle_row(steplist: &StepList, out: &mut impl std::io::Write, row: Row, text: &str) {
     settle_row_indented(steplist, out, row, "", text);
 }
 
 /// As [`settle_row`], with `indent` ahead of the check.
 ///
-/// [`CommitDriver`] nests its lines, and prints this same line from two places: the moment the
-/// item first has output to frame, or when it finishes having said nothing. Both go through
-/// here, so the two positions cannot drift into two different formats.
+/// [`CommitDriver`] nests its lines, and prints this same line from two places. One is the moment
+/// the item first has output to frame. The other is when it finishes having said nothing. Both go
+/// through here, so the two positions cannot drift into two different formats.
 pub(crate) fn settle_row_indented(
     steplist: &StepList,
     out: &mut impl std::io::Write,
@@ -483,10 +482,10 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
         }
     }
 
-    /// The download row settles as "Downloading packages" once nothing is currently
-    /// downloading. The head row naming in-flight files is cleared outright instead. It has
-    /// nothing worth freezing once nothing is left in flight; the byte total the download row
-    /// itself settled on already says what was fetched.
+    /// The download row settles as "Downloading packages" once nothing is currently downloading.
+    /// The head row naming in-flight files is cleared outright instead. It has nothing worth
+    /// freezing once nothing is left in flight. The byte total the download row itself settled on
+    /// already says what was fetched.
     fn finish_download(&mut self) {
         if let Some(row) = self.download_row.take() {
             self.settle(row, "Downloading packages");
@@ -537,24 +536,19 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
 }
 
 /// Drives one line per package and one line per hook through a `Staged::commit_with_progress`
-/// call: a spinner with `(n/total)` on the right while that item runs, and a plain checkmark
-/// line naming it. Also prints whatever [`print_step_result`] has to say about `out` as each
-/// install/remove step finishes.
+/// call. A spinner with `(n/total)` on the right runs while that item runs, and a plain checkmark
+/// line names it. It also prints whatever [`print_step_result`] has to say about `out` as each
+/// install or remove step finishes.
 ///
 /// The checkmark line is written by [`Self::announce`] the moment the item produces its first
 /// line of output, and by [`Self::close`] otherwise. Announcing cascades outwards first, so a
-/// scriptlet's chatter lands under the scriptlet's name, which lands under its package's. An
-/// item that announced early is only cleared when it finishes: printing its name a second time
-/// would say the same thing twice.
+/// scriptlet's chatter lands under the scriptlet's name, which lands under its package's. An item
+/// that announced early is only cleared when it finishes. Printing its name a second time would
+/// say the same thing twice.
 ///
-/// Each finished item becomes an ordinary printed line, not a permanently kept `indicatif` row.
-/// `MultiProgress` redraws its whole managed stack together on every tick and assumes it fits
-/// on screen, so a transaction touching hundreds of packages would leave hundreds of finished
-/// bars behind, overflow the terminal, and corrupt the redraw: dropped lines and lost
-/// checkmarks. At most one package-or-hook row and one nested scriptlet row are ever alive at
-/// once. A finished one is cleared and its text reprinted as a plain line via
-/// [`StepList::suspend`], which lands in ordinary scrollback that `indicatif` no longer has any
-/// say over.
+/// This keeps at most two rows alive at once: one package-or-hook row, and one nested scriptlet
+/// row. Each finished item becomes an ordinary printed line instead, through
+/// [`StepList::suspend`]. See this module's doc comment for why no row is ever kept.
 pub(crate) struct CommitDriver<'a, W> {
     steplist: &'a StepList,
     out: &'a mut W,
@@ -614,8 +608,8 @@ impl<'a, W: std::io::Write> CommitDriver<'a, W> {
         }
     }
 
-    /// Opens a transient [`Kind::Counted`] row for `text` at 1-based position `index + 1` of
-    /// `total`, keeping `text` alongside it for the plain line that will name it.
+    /// Opens a transient [`Kind::Counted`] row for `text`, at 1-based position `index + 1` of
+    /// `total`. It keeps `text` alongside the row, for the plain line that will name it.
     fn open_counted(&self, text: &str, index: usize, total: usize) -> OpenRow {
         let row = self.steplist.counted(text, total);
         row.set_position(index.saturating_add(1) as u64);
@@ -634,8 +628,8 @@ impl<'a, W: std::io::Write> CommitDriver<'a, W> {
         }
     }
 
-    /// Writes the plain line of every open row that has not written one yet, outermost first,
-    /// so output lands under the thing that produced it.
+    /// Writes the plain line of every open row that has not written one yet, outermost first.
+    /// Output then lands under the thing that produced it.
     fn announce(&mut self) {
         Self::announce_row(self.steplist, &mut *self.out, self.current.as_mut());
         Self::announce_row(self.steplist, &mut *self.out, self.scriptlet.as_mut());
@@ -643,32 +637,31 @@ impl<'a, W: std::io::Write> CommitDriver<'a, W> {
 
     /// Writes one row's plain line, if it has not been written already.
     ///
-    /// This takes `steplist`, `out` and the row separately rather than `&mut self`, because it
-    /// borrows two fields of the driver at once and the borrow checker needs to see them as
-    /// the distinct fields they are.
+    /// This takes `steplist`, `out` and the row separately rather than `&mut self`. It borrows two
+    /// fields of the driver at once. The borrow checker needs to see them as the distinct fields
+    /// they are.
     fn announce_row(steplist: &StepList, out: &mut W, slot: Option<&mut OpenRow>) {
         let Some(open) = slot else { return };
         if open.announced {
             return;
         }
         open.announced = true;
-        // Retiring the spinner here is what keeps the phrase on screen once rather than
-        // twice: checked off in the scrollback, and still spinning at the foot of the
-        // display. An item with output of its own no longer needs a spinner to show it is
-        // working.
+        // Retiring the spinner here is what keeps the phrase on screen once rather than twice.
+        // Twice means checked off in the scrollback, and still spinning at the foot of the
+        // display. An item with output of its own needs no spinner to show it is working.
         let indent = indent_for(open.depth);
         settle_row_indented(steplist, out, open.row.clone(), &indent, &open.text);
     }
 
     /// Names whatever is running, then writes and immediately flushes one line of its output.
     ///
-    /// The indent comes from the innermost open row, so the one decision about how deep a line
-    /// sits is made here rather than at each event arm.
+    /// The indent comes from the innermost open row. So the one decision about how deep a line
+    /// sits is made here, rather than at each event arm.
     ///
-    /// `out` is a `BufWriter` (`main.rs`; `piko list` writes over a thousand lines, and wants
-    /// it buffered). That is exactly wrong for a line meant to appear the instant it happens.
-    /// Without an explicit flush it sits in the buffer until 8 KiB accumulates or the process
-    /// exits, so a live transaction would print in bursts instead of one line at a time.
+    /// `out` is a `BufWriter` (`main.rs`). `piko list` writes over a thousand lines and wants it
+    /// buffered. That is exactly wrong for a line meant to appear the instant it happens. Without
+    /// an explicit flush it sits in the buffer until 8 KiB accumulates or the process exits. A live
+    /// transaction would then print in bursts instead of one line at a time.
     fn print_line(&mut self, text: &str) {
         self.announce();
         let innermost = self.scriptlet.as_ref().or(self.current.as_ref());
@@ -681,23 +674,24 @@ impl<'a, W: std::io::Write> CommitDriver<'a, W> {
         });
     }
 
-    /// Closes off whichever row is still open once `commit_with_progress` has returned. This
-    /// is not expected in the ordinary case, since every `*Started` this module opens is
-    /// matched by a `*Finished` it closes live from inside `handle`. But a row left spinning
-    /// after the call it belonged to ended would be a lie either way.
+    /// Closes off whichever row is still open once `commit_with_progress` has returned. This is
+    /// not expected in the ordinary case. Every `*Started` this module opens is matched by a
+    /// `*Finished` it closes live from inside `handle`. But a row left spinning after the call it
+    /// belonged to ended would be a lie either way.
     pub(crate) fn finish(mut self) {
         self.close(|driver| &mut driver.scriptlet);
         self.close(|driver| &mut driver.current);
     }
 }
 
-/// Prints what a finished step needs said in words rather than shown on its row: a warning, a
-/// `.pacnew` or a `.pacsave` notice. The plain "installed X"/"removed X" fact is the row itself
+/// Prints what a finished step needs said in words rather than shown on its row. That is a
+/// warning, or a `.pacnew` or `.pacsave` notice. The plain "installed X"/"removed X" fact is the
+/// row itself
 /// once it is checked off — nothing here repeats it.
 ///
-/// Write failures are ignored here rather than turned into an early return. This runs inside
-/// the progress callback, from the middle of a live commit, where aborting on a broken pipe
-/// would leave the transaction part-way applied. A dead stdout is instead caught by the next
+/// Write failures are ignored here rather than turned into an early return. This runs inside the
+/// progress callback, from the middle of a live commit. Aborting there on a broken pipe would
+/// leave the transaction part-way applied. A dead stdout is instead caught by the next
 /// `emit!` call after the commit finishes.
 fn print_step_result(
     out: &mut impl std::io::Write,
@@ -774,10 +768,10 @@ mod tests {
 
     /// Returns what a driver wrote, with styling removed.
     ///
-    /// `console` decides on color by testing file descriptor 1, never the sink it is handed —
-    /// so a suite run from a terminal styles the ✓ these tests capture into a `Vec<u8>` and a
-    /// piped one does not. The subject here is which lines come out, in which order, at which
-    /// indent; the colors are [`crate::style`]'s to test.
+    /// `console` decides on color by testing file descriptor 1, never the sink it is handed. So a
+    /// suite run from a terminal styles the ✓ these tests capture into a `Vec<u8>`, and a piped one
+    /// does not. The subject here is which lines come out, in which order, at which indent. The
+    /// colors are [`crate::style`]'s to test.
     fn rendered(out: Vec<u8>) -> String {
         let text = String::from_utf8(out).unwrap();
         console::strip_ansi_codes(&text).into_owned()

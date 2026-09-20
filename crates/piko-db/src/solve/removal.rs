@@ -15,13 +15,14 @@
 //! set to what is already installed, so repository candidates are inert. The test
 //! `a_removal_plan_is_the_same_with_and_without_repositories` in
 //! `crates/piko-db/tests/plan_real_system.rs` checks this against the real database over `-R`,
-//! `-Rs`, and `-Rc` alike. It matters in practice: a chroot being torn down may have no sync
-//! database at all, and requiring one would make a removal fail there for no reason.
+//! `-Rs`, and `-Rc` alike. This matters in practice. A chroot being torn down may have no
+//! sync database at all. Requiring one would fail a removal there for no reason.
 //!
 //! # `HoldPkg` does not live here
 //!
-//! `HoldPkg` is a **pacman frontend** guard, not a libalpm rule: `src/pacman/remove.c:133`,
-//! with nothing corresponding in `lib/libalpm/`. [`removal_names`] exists so a frontend can
+//! `HoldPkg` is a **pacman frontend** guard, not a libalpm rule. It sits at
+//! `src/pacman/remove.c:133`, with nothing corresponding in `lib/libalpm/`.
+//! [`removal_names`] exists so a frontend can
 //! apply that guard against the *prepared* removal list (`alpm_trans_get_remove`, not the names
 //! the user typed). The guard itself, its prompt, and its `pacman.conf` parsing are a
 //! frontend's concern.
@@ -57,8 +58,8 @@ pub enum RemovalFailure {
 /// A removal plan, with what the glob targets selected to reach it.
 ///
 /// The expansions are here rather than inside [`Removal::outcome`] because a caller needs them
-/// on both branches. A refusal names packages the user may never have typed, and the pattern
-/// that pulled them in is the one thing the refusal itself cannot show.
+/// on both branches. A refusal names packages the user may never have typed. The pattern that
+/// pulled them in is the one thing the refusal itself cannot show.
 #[derive(Debug)]
 pub struct Removal {
     /// One entry per glob target, in the order the targets were given. Empty when the caller
@@ -70,16 +71,16 @@ pub struct Removal {
 
 /// Plans removing `targets`, exactly as `piko plan -R` does.
 ///
-/// A target carrying `*`, `?` or `[` is a glob pattern, expanded against installed package
-/// names and the `%GROUPS%` groups installed packages carry. The expansion is a rewrite of the
-/// target list and nothing more, so a pattern plans exactly what naming what it selects would
-/// have planned. The returned expansions say what each pattern chose, for a caller that wants
-/// to show the cause of a plan it is about to print.
+/// A target carrying `*`, `?` or `[` is a glob pattern. It expands against installed package
+/// names, and against the `%GROUPS%` groups installed packages carry. The expansion is a
+/// rewrite of the target list and nothing more. So a pattern plans exactly what naming what
+/// it selects would have planned. The returned expansions say what each pattern chose. That
+/// serves a caller wanting to show the cause of a plan it is about to print.
 ///
-/// A target names an installed package, or a `%GROUPS%` group, which expands to every
-/// installed member — `pacman -R <group>` "will remove every package in that group". A member
-/// also named on its own costs nothing: the plan is read back from the solution, not from the
-/// request's list.
+/// A target names an installed package, or a `%GROUPS%` group. A group expands to every
+/// installed member, since `pacman -R <group>` "will remove every package in that group". A
+/// member also named on its own costs nothing. The plan is read back from the solution, not
+/// from the request's list.
 ///
 /// # Errors
 ///
@@ -93,7 +94,7 @@ pub fn plan_removal(
     limits: &Limits,
 ) -> Result<Removal, ExpansionFailure> {
     // A glob target is rewritten into the installed names it selects before anything is
-    // planned, so the loop below sees only names the user could have typed. This is the one
+    // planned. So the loop below sees only names the user could have typed. This is the one
     // failure that leaves no plan to report against, which is why it is the outer error.
     let (targets, expansions) = expand_installed_targets(universe, targets, limits)?;
 
@@ -103,8 +104,8 @@ pub fn plan_removal(
 
     for target in &targets {
         // A package first, a `%GROUPS%` group second. That is `remove_target`'s order in
-        // `src/pacman/remove.c`, and the same preference `resolve_targets` applies on the
-        // install side, so a name that is both means the package in either direction.
+        // `src/pacman/remove.c`. `resolve_targets` applies the same preference on the
+        // install side. So a name that is both means the package in either direction.
         match local.get_str(target).and_then(|_| universe.installed_named(target)) {
             Some(installed) => request = request.remove(installed.id()),
             None => {
@@ -146,12 +147,12 @@ pub fn plan_removal(
 
 /// The package names `plan_removal`'s removal steps refer to, in plan order.
 ///
-/// This is `alpm_trans_get_remove`: the *prepared* removal list, not the names the user typed.
-/// pacman defines a `HoldPkg`-style guard over that same list, which is what makes such a guard
-/// fire on a `-Rc` cascade that reaches a held package without naming it.
+/// This is `alpm_trans_get_remove`, the *prepared* removal list rather than the names the user
+/// typed. pacman defines a `HoldPkg`-style guard over that same list. That is what makes such
+/// a guard fire on a `-Rc` cascade reaching a held package it never named.
 ///
 /// A step the universe cannot resolve is skipped rather than reported. This list is meant to
-/// feed a guard, and a caller walking the same steps again immediately afterwards gets a real
+/// feed a guard. A caller walking the same steps again immediately afterwards gets a real
 /// error for that case. Failing twice for one cause would only bury the message that explains
 /// it.
 #[must_use]
@@ -247,8 +248,8 @@ mod tests {
         assert_eq!(removed_in_plan_order(&scenario, &["app"]), ["app", "mid", "base"]);
     }
 
-    /// "Groups can also be specified to be removed, in which case every package in that group
-    /// will be removed" — `pacman(8)`, on `-R`.
+    /// `pacman(8)` says this of `-R`: "Groups can also be specified to be removed, in which
+    /// case every package in that group will be removed".
     #[test]
     fn a_group_target_removes_every_installed_member() {
         let scenario = Scenario::new()
@@ -260,7 +261,7 @@ mod tests {
         assert_eq!(removed(&scenario, &["tools"]).unwrap(), ["editor", "linker"]);
     }
 
-    /// `remove_target` looks the name up as a package before it looks it up as a group, so a
+    /// `remove_target` looks the name up as a package before it looks it up as a group. So a
     /// system carrying both takes away the package alone.
     #[test]
     fn a_package_wins_over_a_group_of_the_same_name() {
@@ -286,8 +287,8 @@ mod tests {
     }
 
     /// `_alpm_remove_pkg` skips a duplicate target rather than refusing it. piko needs no
-    /// check of its own: the plan is read back from the solution, so naming a package twice —
-    /// as itself and through its group — describes the same removal.
+    /// check of its own. The plan is read back from the solution. So naming a package twice,
+    /// as itself and through its group, describes the same removal.
     #[test]
     fn naming_a_group_and_one_of_its_members_removes_each_package_once() {
         let scenario = Scenario::new()

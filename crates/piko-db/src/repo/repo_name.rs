@@ -1,7 +1,7 @@
 //! Parsing of repository names.
 //!
-//! Per [alpm-repo-name], a repository name is a UTF-8 string, at least one character long,
-//! that must not contain `/`, `?`, `!` or a newline, and must not start with `-`.
+//! Per [alpm-repo-name], a repository name is a UTF-8 string at least one character long. It
+//! must not contain `/`, `?`, `!` or a newline, and must not start with `-`.
 //!
 //! `alpm-types` has no type for this, confirmed by inspection of its `src/`. This is the
 //! second reimplementation this crate carries, alongside [`crate::EntryName`]. The spec is

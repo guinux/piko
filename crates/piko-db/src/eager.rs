@@ -3,14 +3,15 @@
 //! # Why this exists
 //!
 //! `DbDescFile::from_str_with_schema` and `RepoDescFile::from_str_with_schema` are
-//! all-or-nothing. They convert every section of a `desc` into its typed form, including
+//! all-or-nothing. They convert every section of a `desc` into its typed form. That includes
 //! `%LICENSE%` (SPDX), `%URL%` (through the `url` crate's IDNA machinery), `%PACKAGER%`, and
 //! the checksum fields. Measured against this machine's real databases, that conversion costs
 //! **18x a raw `%KEYWORD%` section split**, and dominates opening either database.
 //!
 //! All-or-nothing is also why `%URL%` and `%PACKAGER%` are taken out of the text before either
-//! parser sees it (`desc_compat::take_fields`): a value their typed conversion refuses would
-//! otherwise cost the `desc` every other section, down to the `%FILENAME%` an install downloads.
+//! parser sees it (`desc_compat::take_fields`). A value their typed conversion refuses would
+//! otherwise cost the `desc` every other section. That reaches down to the `%FILENAME%` an
+//! install downloads.
 //!
 //! Only a handful of sections are needed by everything. [`crate::solve::Universe`] reads the
 //! relation sections and `%GROUPS%` for every candidate in the universe, so deferring *those*
@@ -29,8 +30,9 @@
 //! The two `desc` formats differ only in which sections they carry. Both share an identical section
 //! grammar and an identical set of relation sections. The repository format adds
 //! `%CSIZE%`/`%ISIZE%`; the local format adds `%REASON%` and a dozen others. The scan that finds
-//! them is the same scan. `scan` does it once and hands every other section's lines to the caller,
-//! so neither side walks the text twice, and the two cannot drift on what a relation section is.
+//! them is the same scan. `scan` does it once and hands every other section's lines to the
+//! caller. So neither side walks the text twice, and the two cannot drift on what a relation
+//! section is.
 
 use std::str::FromStr;
 
@@ -59,17 +61,17 @@ pub(crate) struct Relations {
 ///
 /// # Why this is a choice and not a constant
 ///
-/// `%DEPENDS%` is by far the largest relation section — 73 286 of the 86 006 relation entries
-/// in this machine's `extra.db` — and the only one whose *whole-universe* conversion is
-/// wasted work. [`crate::solve::Universe::index`] builds its maps from `%PROVIDES%`,
-/// `%CONFLICTS%`, `%GROUPS%` and `%REPLACES%`, never from `%DEPENDS%`; only
-/// `crate::solve::encode` reads dependencies, and only for the solvables inside its
+/// `%DEPENDS%` is by far the largest relation section. It holds 73 286 of the 86 006 relation
+/// entries in this machine's `extra.db`. It is also the only one whose *whole-universe*
+/// conversion is wasted work. [`crate::solve::Universe::index`] builds its maps from
+/// `%PROVIDES%`, `%CONFLICTS%`, `%GROUPS%` and `%REPLACES%`, never from `%DEPENDS%`. Only
+/// `crate::solve::encode` reads dependencies. It reads them only for the solvables inside its
 /// reachable cone — **2629 of 16 429** on this machine's sysupgrade, 16%.
 ///
 /// Deferring it is worth 61 ms -> 27 ms across `extra.db` (`docs/perf-study.md` §3.4).
 ///
 /// It is deferred for **repository** candidates only. Every installed package is a seed of
-/// that cone, so a local `desc`'s `%DEPENDS%` is always needed and deferring it would buy
+/// that cone, so a local `desc`'s `%DEPENDS%` is always needed. Deferring it would buy
 /// nothing but a second pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Depends {
@@ -83,7 +85,7 @@ pub(crate) enum Depends {
 ///
 /// Carried by [`crate::repo::RepoDiagnostic::InvalidDesc`], whose package is dropped, and by
 /// [`crate::LocalPackage`]'s cached load failure. The full typed parse is deferred, so an
-/// `alpm_repo_db::Error` cannot occur at open time — it surfaces through the lazy `desc`
+/// `alpm_repo_db::Error` cannot occur at open time. It surfaces through the lazy `desc`
 /// accessor instead.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -139,10 +141,10 @@ impl std::error::Error for DescFieldError {
 /// `RelationOrSoname::from_str` tries alpm-sonamev2, then alpm-sonamev1, then
 /// alpm-package-relation, constructing and discarding a `winnow` error for each failed
 /// attempt. Measured over the 73 286 real `%DEPENDS%` entries in this machine's `extra.db`,
-/// that costs **1.47 µs** per entry against `PackageRelation::from_str`'s **0.15 µs** — a
-/// factor of ten.
+/// that costs **1.47 µs** per entry. `PackageRelation::from_str` costs **0.15 µs**, a factor
+/// of ten less.
 ///
-/// The screen is conservative and derived from the two upstream parsers, not guessed:
+/// The screen is conservative, and derived from the two upstream parsers rather than guessed.
 /// `SonameV2::parser` requires the `<prefix>:<soname>` delimiter, and `SonameV1`'s
 /// `SharedObjectName::parser` requires a literal `.so` suffix. A string containing neither
 /// can only be a `PackageRelation`, which is precisely the branch
@@ -152,17 +154,17 @@ impl std::error::Error for DescFieldError {
 ///
 /// The obvious shortcut — try `PackageRelation::from_str` first and accept whatever it
 /// returns — is **wrong**, and quietly so. `libexample.so` is a perfectly valid *package
-/// name*, so `PackageRelation` accepts it and the result would be `Relation` where the real
-/// parser returns `SonameV1`. That is not rare: of the 82 461 `%DEPENDS%` and `%PROVIDES%`
-/// entries across this machine's `core` and `extra`, **5320 are sonames**, and only 7 of
+/// name*. So `PackageRelation` accepts it, and the result reads `Relation` where the real
+/// parser returns `SonameV1`. That is not rare. Of the 82 461 `%DEPENDS%` and `%PROVIDES%`
+/// entries across this machine's `core` and `extra`, **5320 are sonames**. Only 7 of
 /// `extra`'s `%DEPENDS%` entries fail `PackageRelation` outright. Testing the string first is
 /// what makes the difference, and
 /// `the_fast_path_agrees_on_every_real_relation_in_every_repository` is what proves it.
 ///
-/// The fallback is unconditional on failure, not just on a match, so a malformed entry still
-/// reports the error `RelationOrSoname::from_str` would have reported rather than
+/// The fallback is unconditional on failure, not just on a match. So a malformed entry still
+/// reports the error `RelationOrSoname::from_str` would have reported, rather than
 /// `PackageRelation`'s narrower one. That keeps this observationally identical to the parser
-/// it replaces, at a cost paid only on input that was going to be rejected anyway.
+/// it replaces. The cost is paid only on input that was going to be rejected anyway.
 pub(crate) fn relation_or_soname(value: &str) -> Result<RelationOrSoname, alpm_types::Error> {
     // The screen, first: anything that could be either soname form goes to the real parser.
     if value.contains(':') || value.contains(".so") {
@@ -190,9 +192,9 @@ enum Section<'a> {
 impl<'a> Section<'a> {
     /// Classifies a `%KEYWORD%` name.
     fn classify(keyword: &'a str) -> Self {
-        // Matched as bytes because `str` cannot be matched in a `const fn` at all — not an
-        // MSRV limitation that a newer toolchain lifts, but unstable outright ("`str` cannot
-        // be compared in compile-time", rust-lang/rust#143874).
+        // Matched as bytes because `str` cannot be matched in a `const fn` at all. This is
+        // not an MSRV limitation that a newer toolchain lifts. It is unstable outright
+        // ("`str` cannot be compared in compile-time", rust-lang/rust#143874).
         match keyword.as_bytes() {
             b"DEPENDS" => Self::Depends,
             b"PROVIDES" => Self::Provides,
@@ -207,9 +209,9 @@ impl<'a> Section<'a> {
 /// Walks `text` once, collecting the relation sections and handing every other section's
 /// value lines to `other` as `(keyword, line)`.
 ///
-/// `text` is the *filtered* text — unknown sections already removed by
-/// [`crate::desc_compat::filter_unknown_sections`] — so a keyword reaching `other` is one
-/// this build knows but this module does not read.
+/// `text` is the *filtered* text. [`crate::desc_compat::filter_unknown_sections`] has already
+/// removed the unknown sections. So a keyword reaching `other` is one this build knows but
+/// this module does not read.
 ///
 /// # Errors
 ///
@@ -286,8 +288,8 @@ pub(crate) fn scan<'a>(
 ///
 /// # Errors
 ///
-/// [`DescFieldError::InvalidEntry`] if any entry fails to parse — the same error, from the
-/// same parser, that an eager scan would have reported at open time.
+/// [`DescFieldError::InvalidEntry`] if any entry fails to parse. That is the same error, from
+/// the same parser, that an eager scan would have reported at open time.
 pub(crate) fn parse_depends(
     text: &str,
     range: Option<(usize, usize)>,
@@ -364,7 +366,7 @@ mod tests {
         }
     }
 
-    /// A malformed entry must report the same failure as the parser being replaced, which is
+    /// A malformed entry must report the same failure as the parser being replaced. That is
     /// why the fallback is unconditional rather than gated on the screen.
     #[test]
     fn a_malformed_entry_still_reports_the_upstream_error() {
@@ -373,12 +375,12 @@ mod tests {
         assert!(RelationOrSoname::from_str(value).is_err());
     }
 
-    /// The acceptance gate for the screen: every `%DEPENDS%` and `%PROVIDES%` entry in every
-    /// repository on this machine must parse to the **identical** value through the fast path
-    /// and through `RelationOrSoname::from_str`.
+    /// The acceptance gate for the screen. Take every `%DEPENDS%` and `%PROVIDES%` entry in
+    /// every repository on this machine. Each must parse to the **identical** value through
+    /// the fast path and through `RelationOrSoname::from_str`.
     ///
     /// A fixture cannot establish this. The whole optimisation is a claim about which real
-    /// strings can be sonames, and only the real repositories can refute it — `extra` alone
+    /// strings can be sonames, and only the real repositories can refute it. `extra` alone
     /// holds 73 286 `%DEPENDS%` entries, of which 7 are sonames.
     #[test]
     #[ignore = "requires this machine's real /var/lib/pacman/sync"]

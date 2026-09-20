@@ -42,8 +42,8 @@ use crate::{
 ///
 /// `NoExtract` and `NoUpgrade` are `pacman.conf` directives that hold shell-glob patterns.
 /// They arrive here already resolved into predicates, not as patterns. This crate needs no
-/// opinion on glob syntax, and a caller can supply any policy it likes — including, in
-/// tests, an exact list.
+/// opinion on glob syntax. A caller can supply any policy it likes, including an exact list
+/// in tests.
 pub struct Filters<'a> {
     /// Paths never to extract at all.
     pub no_extract: &'a dyn Fn(&Path) -> bool,
@@ -92,9 +92,9 @@ pub enum Outcome {
 ///
 /// The local database entry is written from this record. So `owned` is the set of paths
 /// the package *has* on this system. That set is not quite the archive's list, and not
-/// quite the set of writes that happened. A `NoExtract` path is dropped: the file is
-/// genuinely not there. A directory that already existed is kept: it is there, and a file
-/// list missing a parent directory is one `alpm-db` refuses to re-read.
+/// quite the set of writes that happened. A `NoExtract` path is dropped, because the file is
+/// genuinely not there. A directory that already existed is kept, because it is there. And
+/// `alpm-db` refuses to re-read a file list missing a parent directory.
 #[derive(Clone, Debug, Default)]
 pub struct Extraction {
     /// Every payload path, in archive order, with what happened to it.
@@ -124,7 +124,7 @@ pub struct Extraction {
 /// One captured metadata member.
 ///
 /// The time travels with the bytes. A member is *copied* into the database entry rather than
-/// composed there, and the `ALPM-MTREE` data describes it as the archive holds it. An entry
+/// composed there. The `ALPM-MTREE` data describes it as the archive holds it. An entry
 /// written without the time disagrees with the data that describes it. `piko check` then
 /// reports the file as altered, on the day it was installed and on every check after.
 ///
@@ -230,8 +230,8 @@ pub fn install(
                 //
                 // This matters beyond neatness. `alpm-db` refuses a file list whose entries
                 // have no listed parent. Omitting a shared directory produces an entry that
-                // will not re-open, and every package installed after the first into a
-                // given tree hits this. `remove` then cannot read what it owns.
+                // will not re-open. Every package installed after the first into a given
+                // tree hits this. `remove` then cannot read what it owns.
                 if reason == SkipReason::DirectoryExists {
                     claim(&mut result, &mut claimed, &member.path);
                 }
@@ -486,8 +486,8 @@ mod tests {
 
     /// A member listed twice is owned once, because `%FILES%` is a set.
     ///
-    /// `tar` allows a repeated member and libalpm records the repeat, but `alpm-db` refuses a
-    /// `files` record that has one — so writing it would leave an entry piko cannot read back.
+    /// `tar` allows a repeated member, and libalpm records the repeat. `alpm-db` refuses a
+    /// `files` record that has one. So writing it would leave an entry piko cannot read back.
     /// `outcomes` still reports both members: two were processed, and that is what happened.
     #[test]
     fn a_member_listed_twice_is_owned_once() {
@@ -513,7 +513,7 @@ mod tests {
         assert_eq!(std::fs::read(dir_handle.path().join("usr/bin/foo")).unwrap(), b"second");
     }
 
-    /// A `NoExtract` path is not written and is *not* owned — the package does not have that
+    /// A `NoExtract` path is not written and is *not* owned. The package does not have that
     /// file on this system, so its `files` entry must not claim it.
     #[test]
     fn a_no_extract_path_is_neither_written_nor_owned() {
@@ -537,10 +537,10 @@ mod tests {
 
     /// The second package into a shared tree must still claim the directories it ships.
     ///
-    /// Its directories are already there, so extraction skips them — but the package does own
-    /// them, pacman records them, and `alpm-db` refuses to re-read a file list whose entries
-    /// have no listed parent. Dropping them made every package after the first produce a
-    /// database entry that would not open, which `remove` then could not act on.
+    /// Its directories are already there, so extraction skips them. The package still owns
+    /// them, and pacman records them. `alpm-db` refuses to re-read a file list whose entries
+    /// have no listed parent. Dropping them gives every package after the first a database
+    /// entry that will not open, which `remove` then cannot act on.
     #[test]
     fn a_directory_that_already_exists_is_still_owned() {
         let (_keep, pkg) = package(|b| {
@@ -700,8 +700,8 @@ mod tests {
 
     /// Rewrites the member name in a tar header, fixing the checksum.
     ///
-    /// `tar::Builder` refuses to emit a `..` path, which is the correct behaviour for a
-    /// well-behaved writer and useless for testing a hostile archive. A real attacker writes
+    /// `tar::Builder` refuses to emit a `..` path. That is the correct behaviour for a
+    /// well-behaved writer, and useless for testing a hostile archive. A real attacker writes
     /// the bytes directly, so the test does too.
     fn rename_first_member(bytes: &mut [u8], name: &str) {
         let header = bytes.get_mut(..512).expect("a tar header is 512 bytes");
@@ -716,8 +716,8 @@ mod tests {
         header.get_mut(148..156).expect("checksum field").copy_from_slice(text.as_bytes());
     }
 
-    /// Confinement holds at this layer too, not only in `rootfs`'s own tests — and against a
-    /// hand-crafted archive rather than one a library was willing to produce.
+    /// Confinement holds at this layer too, not only in `rootfs`'s own tests. This runs
+    /// against a hand-crafted archive, not one a library was willing to produce.
     #[test]
     fn a_traversing_member_fails_the_install() {
         let mut builder = tar::Builder::new(Vec::new());

@@ -1,8 +1,8 @@
 //! Runs a package's `.INSTALL` scriptlet.
 //!
-//! A package may ship a shell file defining up to six functions. libalpm sources that file and
-//! calls one of them at a fixed point in the transaction (`trans.c:337`, `add.c:495` and `:667`,
-//! `remove.c:711` and `:731`):
+//! A package may ship a shell file defining up to six functions. libalpm sources that file. It
+//! calls one of them at a fixed point in the transaction (`trans.c:337`, `add.c:495` and
+//! `:667`, `remove.c:711` and `:731`):
 //!
 //! | function | when |
 //! |---|---|
@@ -17,13 +17,13 @@
 //! # A failing scriptlet does not fail the transaction
 //!
 //! Every one of libalpm's call sites discards the return value. piko matches that on purpose.
-//! By the time `post_install` runs, the files are already on disk and the database entry is
-//! already written, so "undoing" is not available. Refusing to record a package whose files
+//! By the time `post_install` runs, the files are on disk and the database entry is written.
+//! "Undoing" is not available at that point. Refusing to record a package whose files
 //! exist would be worse than a scriptlet that did not finish.
 //!
 //! What piko adds is that the failure is **reported** rather than dropped. [`Outcome`] carries
-//! the exit status and everything the script printed back to the caller, and `Transaction`'s
-//! report carries it on to the user.
+//! the exit status and everything the script printed back to the caller. `Transaction`'s report
+//! carries it on to the user.
 
 use std::path::{Path, PathBuf};
 
@@ -53,7 +53,7 @@ const SCRIPTLET_FILE: &str = ".INSTALL";
 ///
 /// One constant covers both readers, not one per reader. [`crate::conflict`] reads the
 /// scriptlet out of the archive during `verify`, and `transaction::read_entry_scriptlet` reads
-/// it back out of the database entry at removal. The two must agree: a scriptlet that verified
+/// it back out of the database entry at removal. The two must agree. A scriptlet that verified
 /// and then could not be read back would leave a package whose `pre_remove` silently never
 /// runs.
 pub const MAX_SCRIPTLET_BYTES: u64 = 4 * 1024 * 1024;
@@ -107,8 +107,8 @@ impl Kind {
 /// This transcribes libalpm's `grep` (`trans.c:310`). It is a **substring search, not a
 /// parse**: any line mentioning the name counts, once anything from the first `#` is
 /// discarded. A scriptlet that merely says `# see post_install below` in a line with no `#`
-/// before it would match. Reproducing that behavior, rather than writing a real shell-function
-/// detector, is the point: tightening it would make piko silently skip a function pacman runs.
+/// before it would match. Reproducing that behavior is the point, rather than writing a real
+/// shell-function detector. Tightening it would make piko silently skip a function pacman runs.
 ///
 /// One difference exists, in the safe direction. libalpm reads into a 1024-byte buffer, and its
 /// own comment admits the needle can be split across two reads and missed. piko searches whole
@@ -138,7 +138,7 @@ struct Staging {
     /// This is a second [`crate::rootfs::Resolved`] rather than a flag, because the two
     /// removals happen in *different* directories. Holding only `tmp`'s descriptor would
     /// unlink `tmp/.INSTALL`, a path that does not exist — the real script sits one directory
-    /// deeper. The unlink then does nothing, the script stays in place, `rmdir` fails with
+    /// deeper. The unlink then does nothing and the script stays in place. `rmdir` fails with
     /// `ENOTEMPTY`, and every scriptlet leaks a directory into the root.
     script: Option<crate::rootfs::Resolved>,
 }
@@ -306,10 +306,10 @@ pub fn run(
 
 /// Whether `value` is safe to paste into a shell command line unquoted.
 ///
-/// This is deliberately a whitelist of what an alpm package version can contain
-/// (`alpm-package-version`: alphanumerics plus `.`, `_`, `+`, `-`, and `:` for the epoch
-/// separator), not a blacklist of metacharacters. A blacklist is one forgotten character away
-/// from a shell injection.
+/// This is deliberately a whitelist of what an alpm package version can contain, not a
+/// blacklist of metacharacters. `alpm-package-version` admits alphanumerics plus `.`, `_`, `+`,
+/// `-`, and `:` for the epoch separator. A blacklist is one forgotten character away from a
+/// shell injection.
 fn is_shell_safe(value: &str) -> bool {
     !value.is_empty()
         && value

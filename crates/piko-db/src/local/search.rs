@@ -14,16 +14,18 @@ pub type LocalSearchHit<'a> = (&'a LocalPackage, MatchKind);
 /// Scores every package in `packages` against `terms`, returning only those that matched
 /// **every** term.
 ///
-/// Comparisons are case-insensitive. Blank (or all-whitespace) terms are dropped; if nothing
-/// is left after that — an empty `terms`, or every term blank — nothing matches, rather than
-/// treating "no term" as an automatic pass. A term carrying `*`, `?` or `[` is a glob pattern,
-/// matched against the whole name, `%PROVIDES%` name or `%GROUPS%` entry; see
-/// [`MatchKind::Glob`]. Each package appears at most once, scored by the single highest
-/// [`MatchKind`] any one of its (all-matching) terms achieved. Results are sorted
-/// most-relevant-first, then by name to break ties deterministically.
+/// Comparisons are case-insensitive. Blank (or all-whitespace) terms are dropped. If nothing
+/// is left after that, nothing matches. That covers an empty `terms` and every term blank
+/// alike. "No term" is not an automatic pass.
 ///
-/// A package whose `desc` cannot be read is treated as matching nothing beyond an exact name or
-/// a pattern its name satisfies — see [`combined_match`].
+/// A term carrying `*`, `?` or `[` is a glob pattern. It is matched against the whole name,
+/// `%PROVIDES%` name or `%GROUPS%` entry. See [`MatchKind::Glob`]. Each package appears at
+/// most once, scored by the single highest [`MatchKind`] any one of its (all-matching) terms
+/// achieved. Results are sorted most-relevant-first, then by name to break ties
+/// deterministically.
+///
+/// A package whose `desc` cannot be read matches nothing beyond an exact name, or a pattern
+/// its name satisfies. See [`combined_match`].
 pub(crate) fn search<'a, 'q>(
     packages: &'a [LocalPackage],
     terms: impl IntoIterator<Item = &'q str>,
@@ -46,25 +48,25 @@ pub(crate) fn search<'a, 'q>(
 
 /// The best [`MatchKind`] achieved across `terms`, if `package` matches every one of them.
 ///
-/// `terms` must be non-empty. Returns `None` as soon as any term fails to match at all — the
-/// AND requirement — without evaluating the remaining terms.
+/// `terms` must be non-empty. Returns `None` as soon as any term fails to match at all, which
+/// is the AND requirement, without evaluating the remaining terms.
 ///
 /// The package's own lowercased text is built **here**, once, rather than inside
-/// [`best_match`] per term. Matching is case-insensitive, so lowercasing the name, every
-/// `%PROVIDES%` entry, the description and every group once per (package, term) pair would
-/// cost `terms.len()` times more allocation than the search needs.
+/// [`best_match`] per term. Matching is case-insensitive. The lowercasing covers the name,
+/// every `%PROVIDES%` entry, the description and every group. Doing it once per (package,
+/// term) pair would cost `terms.len()` times more allocation than the search needs.
 ///
-/// An exact name match needs no `desc` at all. Anything beyond that — `%PROVIDES%`, `%DESC%`,
-/// `%GROUPS%` — needs [`LocalPackage::desc`], which is lazy and can fail (a corrupt, missing or
-/// oversized `desc` file); `searchable` is `None` when it did. piko normally surfaces every such
-/// failure rather than treating it as absence. This is a deliberate, narrow exception, scoped to
-/// this best-effort bulk search only: a package whose `desc` cannot be read simply matches
-/// nothing beyond its name. Calling [`LocalPackage::desc`] directly on that package still fails
-/// loudly, as always; nothing about its own caching behavior changes.
+/// An exact name match needs no `desc` at all. `%PROVIDES%`, `%DESC%` and `%GROUPS%` each need
+/// [`LocalPackage::desc`], which is lazy and can fail on a corrupt, missing or oversized
+/// `desc` file. `searchable` is `None` when it did. piko normally surfaces every such failure
+/// rather than treating it as absence. This is a deliberate, narrow exception, scoped to this
+/// best-effort bulk search only. A package whose `desc` cannot be read matches nothing beyond
+/// its name. Calling [`LocalPackage::desc`] directly on that package still fails loudly, as
+/// always, and nothing about its own caching behavior changes.
 fn combined_match(package: &LocalPackage, terms: &[Term]) -> Option<MatchKind> {
     let name = package.name().as_ref().to_lowercase();
 
-    // An exact name match outranks everything and needs no `desc` at all, so a search whose
+    // An exact name match outranks everything and needs no `desc` at all. So a search whose
     // every term hits it never reads one.
     let searchable = if every_term_is_the_name(terms, &name) {
         None
@@ -240,7 +242,7 @@ pgp
         assert!(db.search(["*foo*"]).is_empty());
     }
 
-    /// The name is tested before `desc` is consulted, so an unreadable one costs a pattern
+    /// The name is tested before `desc` is consulted. So an unreadable `desc` costs a pattern
     /// nothing it could have answered from the name alone.
     #[test]
     fn a_corrupt_desc_package_is_still_found_by_a_pattern_on_its_name() {
@@ -343,8 +345,8 @@ pgp
         assert_eq!(names, ["good"], "the package with an unreadable desc must be silently skipped");
     }
 
-    /// A search that an exact name match already answers must not read `desc` at all — the
-    /// same "identity is free" property `LocalDatabase::open` has, extended to search.
+    /// A search that an exact name match already answers must not read `desc` at all. This is
+    /// `LocalDatabase::open`'s "identity is free" property, extended to search.
     #[test]
     fn an_exact_name_search_reads_no_desc() {
         let fixture = open_with_packages(&[
@@ -360,8 +362,8 @@ pgp
         assert!(!foo.is_desc_loaded(), "an exact name match must not force a desc read");
     }
 
-    /// The multi-term case: every term hitting the name exactly still needs no `desc`, but a
-    /// term that does not must still be able to consult one.
+    /// The multi-term case. Every term hitting the name exactly still needs no `desc`. A term
+    /// that does not must still be able to consult one.
     #[test]
     fn a_term_beyond_an_exact_name_match_still_consults_desc() {
         let fixture = open_with_packages(&[("foo", &desc_text("foo", "a web browser", ""))]);
