@@ -723,3 +723,169 @@ fn a_group_expands_to_exactly_what_pacman_lists() {
     );
     eprintln!("compared {compared} group(s); {installed_members} member(s) already installed");
 }
+
+/// Every step of a real plan has a cause, and a cause that names a `%DEPENDS%` entry names one
+/// the step really satisfies.
+///
+/// pacman offers no oracle for this, so the test is the property rather than the output. The
+/// second half is the one that matters: it proves the printed line is the edge the solver
+/// took, not a plausible edge reconstructed afterwards. A cause built from the wrong clause,
+/// or indexed into the wrong `%DEPENDS%` entry, fails here and passes every unit test.
+#[test]
+#[ignore = "requires a real ALPM local database and sync databases"]
+fn every_step_of_a_real_plan_has_a_cause_that_holds() {
+    let repos = open_repos();
+    if repos.is_empty() {
+        eprintln!("skipping: no repository could be opened");
+        return;
+    }
+    let Ok(local) = LocalDatabase::open("/var/lib/pacman/local") else {
+        eprintln!("skipping: no real local database");
+        return;
+    };
+
+    let limits = piko_db::Limits::default();
+    let universe =
+        Universe::build(&local, repos.iter().map(|db| (DbUsage::ALL, db)), UniverseOptions::new())
+            .unwrap();
+
+    // A sysupgrade alone can be empty on an up-to-date machine, which would assert nothing.
+    // A wide meta-package alongside it guarantees a plan with depth.
+    let mut request = Request::new().with_sysupgrade(&universe, false);
+    for target in ["plasma-meta", "gnome", "base-devel", "vlc"] {
+        let Ok(dep) = target.parse::<RelationOrSoname>() else { continue };
+        if let Some(id) = piko_db::solve::resolve_target(&universe, &dep) {
+            request = request.target(id);
+        }
+    }
+
+    let Ok(Ok(planned)) = piko_db::solve::solve_with_removals(&universe, &request, &limits) else {
+        eprintln!("skipping: this machine's repositories admit no plan for the targets");
+        return;
+    };
+    let asked =
+        piko_db::solve::ambiguities(&universe, &planned.encoded, &planned.selected, &limits);
+    let explanation = piko_db::solve::explain_plan(&universe, &planned, &request, &asked);
+    let plan = piko_db::solve::Plan::assemble(
+        &universe,
+        &planned,
+        request.targets(),
+        &limits,
+        &piko_db::solve::NoCache,
+    );
+    if plan.is_empty() {
+        eprintln!("skipping: nothing to do on this machine");
+        return;
+    }
+
+    let mut checked = 0_usize;
+    for step in plan.steps() {
+        let id = match step {
+            piko_db::solve::Step::Install { candidate, .. } => *candidate,
+            piko_db::solve::Step::Change { to, .. } => *to,
+            piko_db::solve::Step::Remove { package } => *package,
+        };
+        let name = universe.get(id).unwrap().name().to_string();
+        let cause = explanation.cause(id).unwrap_or_else(|| panic!("{name} has no cause"));
+
+        let piko_db::solve::Cause::Required { dependent, dependency, .. } = cause else {
+            continue;
+        };
+        let declarer = universe.get(dependent).unwrap();
+        let depends = declarer.depends().unwrap();
+        let relation = depends.get(dependency).unwrap_or_else(|| {
+            panic!("{name}: {} has no %DEPENDS% entry {dependency}", declarer.name())
+        });
+        assert!(
+            universe.satisfiers(relation).contains(&id),
+            "{name} is said to answer {relation}, declared by {}, and does not",
+            declarer.name()
+        );
+        checked += 1;
+    }
+
+    eprintln!("{} steps, {checked} of them dependency-caused", plan.steps().len());
+}
+
+/// Every remedy a diagnosis proposes must really leave a solution, against this machine's
+/// own databases.
+///
+/// The unit tests pin the shape of a remedy on a fixture of four packages. What they cannot
+/// pin is that the probe stays sound over a real installed set, where dropping one target
+/// leaves a thousand pins and fifteen thousand candidates still in play. So each
+/// `DropTarget` is applied for real — the transaction is planned again without that target —
+/// and has to succeed.
+///
+/// A remedy that does not work is worse than none: it sends the reader down a path the tool
+/// already knows fails.
+#[test]
+#[ignore = "requires a real ALPM local database and sync databases"]
+fn every_remedy_a_real_diagnosis_proposes_really_works() {
+    let repos = open_repos();
+    if repos.is_empty() {
+        eprintln!("skipping: no repository could be opened");
+        return;
+    }
+    let Ok(local) = LocalDatabase::open("/var/lib/pacman/local") else {
+        eprintln!("skipping: no real local database");
+        return;
+    };
+
+    let limits = piko_db::Limits::default();
+    let universe =
+        Universe::build(&local, repos.iter().map(|db| (DbUsage::ALL, db)), UniverseOptions::new())
+            .unwrap();
+
+    // Pairs that conflict on a real Arch system, so the diagnosis has something to work with.
+    // A pair neither repository carries is skipped rather than failing the test: which
+    // packages exist is the machine's business, not this test's.
+    let pairs = [["vim", "gvim"], ["jack2", "pipewire-jack"], ["iptables", "iptables-nft"]];
+
+    let mut checked = 0_usize;
+    for pair in pairs {
+        let ids: Vec<piko_db::solve::SolvableId> = pair
+            .iter()
+            .filter_map(|name| piko_db::solve::resolve_target(&universe, &name.parse().ok()?))
+            .collect();
+        if ids.len() != pair.len() {
+            continue;
+        }
+
+        let mut request = Request::new();
+        for id in &ids {
+            request = request.target(*id);
+        }
+        let Ok(Err(encoded)) = piko_db::solve::solve_with_removals(&universe, &request, &limits)
+        else {
+            continue;
+        };
+
+        let diagnosis = encoded.diagnose(&universe, &limits);
+        for remedy in diagnosis.remedies() {
+            let piko_db::solve::Remedy::DropTarget { package } = remedy else { continue };
+            let kept: Vec<piko_db::solve::SolvableId> = ids
+                .iter()
+                .copied()
+                .filter(|id| piko_db::solve::describe_candidate(&universe, *id) != *package)
+                .collect();
+            assert_eq!(kept.len(), ids.len() - 1, "{package} names no target of {pair:?}");
+
+            let mut reduced = Request::new();
+            for id in kept {
+                reduced = reduced.target(id);
+            }
+            let outcome = piko_db::solve::solve_with_removals(&universe, &reduced, &limits);
+            assert!(
+                matches!(outcome, Ok(Ok(_))),
+                "{pair:?}: {remedy} was proposed and does not leave a solution"
+            );
+            checked += 1;
+        }
+    }
+
+    if checked == 0 {
+        eprintln!("skipping: none of the sample pairs is available on this machine");
+        return;
+    }
+    eprintln!("{checked} proposed remedies applied and verified");
+}

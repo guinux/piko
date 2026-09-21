@@ -93,11 +93,8 @@ pub fn report(failure: &RemovalFailure) {
         RemovalFailure::NotInstalled(name) => {
             eprintln!("Error: no installed package or group named {name}");
         }
-        RemovalFailure::WouldBreakSystem(facts) => {
-            eprintln!("Error: removing this would leave the system unsatisfied");
-            for fact in facts {
-                eprintln!("  {fact}");
-            }
+        RemovalFailure::WouldBreakSystem(diagnosis) => {
+            crate::cmd::plan::print_diagnosis(diagnosis);
             eprintln!("Note: pass -c to remove the dependents too");
         }
         RemovalFailure::Planner(error) => crate::output::report(error.as_ref()),

@@ -16,6 +16,7 @@ mod encode;
 mod explain;
 mod file;
 mod glob;
+mod justify;
 mod plan;
 mod removal;
 mod solver;
@@ -27,16 +28,17 @@ pub use clause::{Clause, ClauseId, ClauseKind, Lit, Problem};
 pub use encode::{
     Ambiguity, AmbiguityReport, BrokenDependency, Divergence, Encoded, Fidelity, FidelityReport,
     GroupChoice, GroupTarget, IgnoredChange, IgnoredTarget, IgnoredUpgrade, Planned,
-    ProviderChoice, Request, Requirement, Resolution, Sysupgrade, TargetResolutionFailure,
-    ambiguities, encode, fidelity, recurse_unneeded, resolve_group, resolve_target,
-    resolve_targets, solve_with_removals, sysupgrade,
+    ProviderChoice, RemovalCause, Request, Requirement, Resolution, Sysupgrade,
+    TargetResolutionFailure, ambiguities, encode, fidelity, recurse_unneeded, resolve_group,
+    resolve_target, resolve_targets, solve_with_removals, sysupgrade,
 };
-pub use explain::{Derivation, Fact, describe_candidate};
+pub use explain::{Derivation, Diagnosis, Fact, Remedy, Shape, describe_candidate};
 pub use file::FilePackage;
 pub use glob::{
     Expansion, ExpansionFailure, InstallableTargets, Side, expand_installable_targets,
     expand_installed_names, expand_installed_targets,
 };
+pub use justify::{Alternative, Cause, PlanExplanation, Verdict, describe_cause, explain_plan};
 pub use plan::{Change, Plan, PlanDiagnostic, Step};
 pub use removal::{Removal, RemovalFailure, RemovalOptions, plan_removal, removal_names};
 pub use solver::{Outcome, Solution, Solver, Unsatisfiable, core_kinds};

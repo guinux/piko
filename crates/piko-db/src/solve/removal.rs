@@ -28,7 +28,10 @@
 //! frontend's concern.
 
 use crate::solve::glob::{Expansion, ExpansionFailure, expand_installed_targets};
-use crate::solve::{Plan, Request, Step, Universe, solve_with_removals};
+use crate::solve::{
+    AmbiguityReport, Diagnosis, Plan, PlanExplanation, Request, Step, Universe, explain_plan,
+    solve_with_removals,
+};
 use crate::{Error, Limits, LocalDatabase};
 
 /// Which flavour of removal to plan.
@@ -38,6 +41,11 @@ pub struct RemovalOptions {
     pub recursive: bool,
     /// `-c`: remove dependents too, instead of refusing.
     pub cascade: bool,
+    /// Also say why each package is removed.
+    ///
+    /// An option rather than always-on work. The explanation walks the clause set, which a
+    /// caller that only prints the plan never needs.
+    pub explain: bool,
 }
 
 /// Why a removal could not be planned.
@@ -48,9 +56,13 @@ pub enum RemovalFailure {
     NotInstalled(String),
     /// Removing the targets would break the system, and `-c` was not given.
     ///
-    /// Carries the derivation, already rendered: the chain of facts that makes the refusal
-    /// actionable rather than a bare "cannot remove".
-    WouldBreakSystem(Vec<String>),
+    /// Carries the diagnosis: what kind of failure it is, and the chain of facts that makes
+    /// the refusal actionable rather than a bare "cannot remove". Left as data, because
+    /// rendering it is the frontend's half.
+    ///
+    /// Boxed, like [`Self::Planner`]: a diagnosis carries a fact listing and a remedy list,
+    /// and this enum is returned by value from every removal that succeeds.
+    WouldBreakSystem(Box<Diagnosis>),
     /// The planner itself failed.
     Planner(Box<Error>),
 }
@@ -67,6 +79,9 @@ pub struct Removal {
     pub expansions: Vec<Expansion>,
     /// The plan, or why there is none.
     pub outcome: Result<Plan, RemovalFailure>,
+    /// Why each removed package is removed. `None` unless [`RemovalOptions::explain`] asked
+    /// for it, or when there is no plan to explain.
+    pub explanation: Option<PlanExplanation>,
 }
 
 /// Plans removing `targets`, exactly as `piko plan -R` does.
@@ -114,6 +129,7 @@ pub fn plan_removal(
                     return Ok(Removal {
                         expansions,
                         outcome: Err(RemovalFailure::NotInstalled(target.clone())),
+                        explanation: None,
                     });
                 }
                 for member in members {
@@ -123,8 +139,15 @@ pub fn plan_removal(
         }
     }
 
+    let mut explanation = None;
     let outcome = match solve_with_removals(universe, &request, limits) {
         Ok(Ok(planned)) => {
+            if options.explain {
+                // The empty report is the whole answer here. A removal plan selects no
+                // repository candidate, so no provider question was ever reached.
+                explanation =
+                    Some(explain_plan(universe, &planned, &request, &AmbiguityReport::default()));
+            }
             // `NoCache`, not any caller-supplied cache directories: a removal plan selects no
             // repository candidate at all (verified by
             // `a_removal_plan_is_the_same_with_and_without_repositories`). So the oracle is
@@ -138,11 +161,11 @@ pub fn plan_removal(
             ))
         }
         Ok(Err(encoded)) => {
-            Err(RemovalFailure::WouldBreakSystem(encoded.explain(universe, limits)))
+            Err(RemovalFailure::WouldBreakSystem(Box::new(encoded.diagnose(universe, limits))))
         }
         Err(error) => Err(RemovalFailure::Planner(Box::new(error))),
     };
-    Ok(Removal { expansions, outcome })
+    Ok(Removal { expansions, outcome, explanation })
 }
 
 /// The package names `plan_removal`'s removal steps refer to, in plan order.

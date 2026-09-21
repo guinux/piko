@@ -280,6 +280,42 @@ pub struct Limits {
     /// A count, so like [`Limits::solve_max_solvables`] it is reported through its own error
     /// rather than through [`Limit`], which enumerates only the size bounds.
     pub glob_max_expansion: usize,
+    /// Maximum number of supporting facts one explanation prints.
+    ///
+    /// An unsatisfiable core names one clause per frustrated requirement. A dependency with
+    /// five hundred providers, each needing a version that is not there, puts five hundred
+    /// lines in front of a reader who needs three.
+    ///
+    /// The bound covers the supporting detail only — what the installed set holds in place,
+    /// the requirements at issue, and the notes saying why nothing answers them. The facts
+    /// naming what was asked for and what contradicts it are kept whatever the count, because
+    /// an explanation trimmed down to neither of those names nothing at all.
+    ///
+    /// Exceeding it is deliberately not an error, for the reason
+    /// [`Limits::max_diagnostics`] is not: an explanation reports on a failure that has
+    /// already happened. The overflow is counted rather than dropped in silence
+    /// ([`Derivation::facts_dropped`](crate::solve::Derivation::facts_dropped)).
+    ///
+    /// Measured on the machine this was developed against: a core of 3 clauses for every
+    /// failure a real transaction produced, and 42 for a fan-out of 40 providers built to
+    /// stress it. So the default clears both with room to spare.
+    pub explain_max_facts: usize,
+    /// Maximum number of single-constraint changes an explanation tries before proposing one.
+    ///
+    /// Each candidate constraint is taken out of the compiled problem and the rest is solved
+    /// again, so a proposed change is one that demonstrably leaves a solution rather than a
+    /// guess. Only constraints in the unsatisfiable core are candidates, which is what keeps
+    /// the count small.
+    ///
+    /// Exceeding it is not an error, for the reason [`Limits::explain_max_facts`] is not. The
+    /// overflow is counted
+    /// ([`Diagnosis::probes_dropped`](crate::solve::Diagnosis::probes_dropped)).
+    ///
+    /// A probe costs one copy of the compiled problem plus one solve. Measured on the machine
+    /// this was developed against: 18 418 clauses copied, and a solve of about 1 ms, against
+    /// the 10 to 105 ms the encode it avoids would cost. Both sit on a path that has already
+    /// failed.
+    pub explain_max_probes: usize,
 }
 
 impl Default for Limits {
@@ -303,6 +339,8 @@ impl Default for Limits {
             solve_max_conflicts: 1 << 20,
             solve_max_clauses: 1 << 24,
             glob_max_expansion: 512,
+            explain_max_facts: 64,
+            explain_max_probes: 64,
         }
     }
 }

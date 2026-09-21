@@ -273,6 +273,32 @@ impl Problem {
         })
     }
 
+    /// This problem with the clauses in `dropped` left out.
+    ///
+    /// Clause ids are **not** preserved: removing a clause renumbers every clause after it.
+    /// The result is a problem to solve, never one to explain. A core taken from it names
+    /// clauses of the subset, and reading those ids against the original names the wrong
+    /// ones.
+    ///
+    /// The candidate count is kept, so a [`Lit`] built against the original stays valid
+    /// here. Dropping a clause only widens the solution set, so a subset that is still
+    /// unsatisfiable proves the dropped clause is not what made the whole impossible, and a
+    /// subset that is satisfiable proves it is.
+    ///
+    /// `dropped` is scanned linearly per clause. Callers drop one constraint at a time, so
+    /// the scan is over a single element.
+    #[must_use]
+    pub fn without(&self, dropped: &[ClauseId]) -> Self {
+        let mut subset = Self::new(self.solvables);
+        for (id, clause) in self.iter() {
+            if dropped.contains(&id) {
+                continue;
+            }
+            subset.add(clause.literals().iter().copied(), clause.kind());
+        }
+        subset
+    }
+
     /// Adds `¬a ∨ ¬b` for every pair in `group` — "at most one of these".
     ///
     /// Quadratic in the group size, which is fine. A group is the candidates sharing one
@@ -343,6 +369,56 @@ mod tests {
         assert_eq!(problem.literals_of(first), [Lit::negative(id(0)), Lit::positive(id(1))]);
         assert_eq!(problem.literals_of(second), [Lit::positive(id(2))]);
         assert_eq!(problem.get(second).unwrap().kind(), ClauseKind::Target { target: id(2) });
+    }
+
+    /// The subset must carry every surviving clause's literals *and* its kind, and must keep
+    /// the candidate count, so a literal built against the original still addresses the same
+    /// candidate.
+    #[test]
+    fn dropping_a_clause_keeps_every_other_clause_intact() {
+        let mut problem = Problem::new(4);
+        let first = problem.add(
+            [Lit::negative(id(0)), Lit::positive(id(1))],
+            ClauseKind::Requires { dependent: id(0), dependency: 0 },
+        );
+        let second = problem.add([Lit::positive(id(2))], ClauseKind::Target { target: id(2) });
+        let third = problem.add(
+            [Lit::negative(id(2)), Lit::negative(id(3))],
+            ClauseKind::Conflicts { declarer: id(2), other: id(3) },
+        );
+
+        let subset = problem.without(&[second]);
+
+        assert_eq!(subset.solvables(), 4);
+        assert_eq!(subset.len(), 2);
+        let kinds: Vec<ClauseKind> = subset.iter().map(|(_, clause)| clause.kind()).collect();
+        assert_eq!(
+            kinds,
+            [
+                ClauseKind::Requires { dependent: id(0), dependency: 0 },
+                ClauseKind::Conflicts { declarer: id(2), other: id(3) },
+            ]
+        );
+        assert_eq!(subset.literals_of(ClauseId::from_raw(0)), problem.literals_of(first));
+        assert_eq!(subset.literals_of(ClauseId::from_raw(1)), problem.literals_of(third));
+    }
+
+    /// Dropping nothing is the identity, and dropping an id the problem never issued changes
+    /// nothing either.
+    #[test]
+    fn dropping_no_clause_leaves_the_problem_as_it_was() {
+        let mut problem = Problem::new(2);
+        problem.add([Lit::positive(id(0))], ClauseKind::Target { target: id(0) });
+        problem.add([Lit::negative(id(1))], ClauseKind::Excluded { excluded: id(1) });
+
+        for dropped in [Vec::new(), vec![ClauseId::from_raw(9)]] {
+            let subset = problem.without(&dropped);
+            assert_eq!(subset.len(), problem.len());
+            for (id, clause) in problem.iter() {
+                assert_eq!(subset.literals_of(id), clause.literals());
+                assert_eq!(subset.get(id).unwrap().kind(), clause.kind());
+            }
+        }
     }
 
     /// A dependency with no satisfier produces one. It must not be confused with a clause

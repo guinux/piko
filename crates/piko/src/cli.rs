@@ -377,6 +377,20 @@ pub enum Command {
         #[arg(long)]
         names: bool,
 
+        /// Say why each step is in the plan.
+        ///
+        /// Each line names the package that pulled this one in, and the `%DEPENDS%` entry it
+        /// answers. A step's cause is itself a step of the same plan, or a package that stays
+        /// installed, so a full chain reads upward through the listing.
+        ///
+        /// A second line names a candidate that was passed over, when that is worth knowing:
+        /// one `IgnorePkg` or `IgnoreGroup` held back, one pacman would have preferred, or one
+        /// of several providers nobody was asked about.
+        ///
+        /// pacman has no equivalent. A plan says what will happen; this says why.
+        #[arg(long, conflicts_with = "names")]
+        explain: bool,
+
         /// Plan removing the targets instead of installing them.
         #[arg(long, short = 'R')]
         remove: bool,

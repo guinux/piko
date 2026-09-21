@@ -272,6 +272,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             targets,
             needed,
             names,
+            explain,
             remove,
             recursive,
             cascade,
@@ -318,6 +319,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 format,
                 cache,
                 &parsed.options.architecture,
+                *explain,
                 &mut out,
             )
         }

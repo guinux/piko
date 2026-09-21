@@ -8,10 +8,11 @@ use piko_db::{
     repo::RepoDatabase,
     resolve::IgnoreList,
     solve::{
-        Change, Encoded, Expansion, ExpansionFailure, Fidelity, IgnoredChange, IgnoredTarget,
-        IgnoredUpgrade, PackageCache, Plan, PlanDiagnostic, RemovalOptions, Request, Side,
-        SolvableId, Step, TargetResolutionFailure, Universe, UniverseOptions, plan_removal,
-        removal_names, resolve_targets, solve_with_removals,
+        Change, Diagnosis, Encoded, Expansion, ExpansionFailure, Fidelity, IgnoredChange,
+        IgnoredTarget, IgnoredUpgrade, PackageCache, Plan, PlanDiagnostic, PlanExplanation,
+        RemovalOptions, Request, Side, SolvableId, Step, TargetResolutionFailure, Universe,
+        UniverseOptions, describe_cause, explain_plan, plan_removal, removal_names,
+        resolve_targets, solve_with_removals,
     },
 };
 
@@ -58,11 +59,16 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
         TargetResolutionFailure::InvalidDependencyString(target) => {
             eprintln!("Error: {target} is not a valid dependency string");
         }
-        TargetResolutionFailure::NotFound(target) => {
+        TargetResolutionFailure::NotFound { target, nearest } => {
             eprintln!(
                 "Error: no package satisfying {target} was found in any configured \
                  repository"
             );
+            // The name is right and the version is not. Saying so is the difference between
+            // the reader checking their spelling and the reader checking their constraint.
+            if let Some(nearest) = nearest {
+                eprintln!("  the closest candidate is {nearest}");
+            }
         }
         TargetResolutionFailure::Pattern(failure) => report_expansion_failure(failure),
         // This is not the same failure as `NotFound`, and saying so is the whole point. The
@@ -249,9 +255,52 @@ fn ignore_detail(name: &str, reason: &piko_db::resolve::IgnoreReason) -> Option<
 /// with `cmd::txn::install`, which fails the same way `piko plan` does when its targets have
 /// no valid plan.
 pub(crate) fn report_unsatisfiable(universe: &Universe<'_>, encoded: Encoded, limits: &Limits) {
-    eprintln!("Error: the requested transaction has no solution");
-    for fact in encoded.explain(universe, limits) {
+    print_diagnosis(&encoded.diagnose(universe, limits));
+}
+
+/// Prints a diagnosis: what kind of failure it is, then the facts supporting it.
+///
+/// Shared by the two refusals that carry one, so a reader sees the same shape whether a
+/// transaction had no solution or a removal was refused. The headline comes from
+/// [`piko_db::solve::Shape`], never from the call site, so two commands cannot name one
+/// failure two ways.
+pub(crate) fn print_diagnosis(diagnosis: &Diagnosis) {
+    eprintln!("Error: {}", diagnosis.shape());
+    // Distinguishing this from a failure there was nothing to say about is the point of
+    // reporting it. Both leave an empty listing behind.
+    if diagnosis.gave_up() {
+        eprintln!("  the explanation itself exceeded the solver's conflict budget");
+        return;
+    }
+    for fact in diagnosis.derivation().facts() {
         eprintln!("  {fact}");
+    }
+    // A bound that trimmed the listing says so. A reader who cannot tell a short explanation
+    // from a trimmed one has no reason to trust either.
+    let dropped = diagnosis.derivation().facts_dropped();
+    if dropped > 0 {
+        eprintln!("  ... and {dropped} further fact(s) not shown");
+    }
+    print_remedies(diagnosis);
+}
+
+/// Prints the single changes that would leave the request solvable.
+///
+/// Nothing is printed when none was found. An empty list means no single change among those
+/// tried leaves a solution, and a line saying so would read as advice while offering none.
+/// The count of untried changes belongs to that same section, so it is printed only beside
+/// something to try.
+fn print_remedies(diagnosis: &Diagnosis) {
+    let remedies = diagnosis.remedies();
+    if remedies.is_empty() {
+        return;
+    }
+    for remedy in remedies {
+        eprintln!("Try: {remedy}");
+    }
+    let untried = diagnosis.probes_dropped();
+    if untried > 0 {
+        eprintln!("  ... and {untried} further change(s) not tried");
     }
 }
 
@@ -447,6 +496,7 @@ pub fn plan(
     format: Format,
     cache: &dyn PackageCache,
     architecture: &[alpm_types::Architecture],
+    explain: bool,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let limits = Limits::default();
@@ -478,7 +528,7 @@ pub fn plan(
     // `piko_db::solve`. See there for why that sharing matters, beyond tidiness.
     // `HoldPkg` has no libalpm equivalent, so it stays a CLI concern. See `cmd::removal`.
     if let Mode::Remove { recursive, cascade, hold_pkg } = mode {
-        let options = RemovalOptions { recursive, cascade };
+        let options = RemovalOptions { recursive, cascade, explain };
         let removal = match plan_removal(local, &universe, targets, options, &limits) {
             Ok(removal) => removal,
             Err(failure) => {
@@ -489,6 +539,7 @@ pub fn plan(
         // This prints before the outcome either way. A refusal names packages the user may
         // never have typed, and the pattern that pulled them in explains the list.
         print_expansions(&removal.expansions);
+        let explanation = removal.explanation;
         return match removal.outcome {
             Ok(built) => {
                 // `HoldPkg` guards the preview as well as the removal. pacman's check sits
@@ -506,7 +557,7 @@ pub fn plan(
                 if !crate::cmd::removal::hold_pkg_allows(&names, hold_pkg, true, out) {
                     return ExitCode::FAILURE;
                 }
-                render(&universe, &built, format, Reach::NamedTargets, out)
+                render(&universe, &built, format, Reach::NamedTargets, explanation.as_ref(), out)
             }
             Err(failure) => {
                 crate::cmd::removal::report(&failure);
@@ -563,10 +614,13 @@ pub fn plan(
     // `pacman.c` forces `noconfirm` for its own `--print` runs. Stating the assumption keeps
     // the plan honest. It is one of several valid plans, and `piko install` is where the
     // choice is actually made. On stderr, so `--names` stays diffable against `pacman -Sp`.
-    crate::cmd::provider::report_defaults(
-        &universe,
-        &piko_db::solve::ambiguities(&universe, &planned.encoded, &planned.selected, &limits),
-    );
+    let ambiguities =
+        piko_db::solve::ambiguities(&universe, &planned.encoded, &planned.selected, &limits);
+    crate::cmd::provider::report_defaults(&universe, &ambiguities);
+
+    // The same report both consumers read. A second `ambiguities` call could return a second
+    // list, and the two could disagree about what was asked.
+    let explanation = explain.then(|| explain_plan(&universe, &planned, &request, &ambiguities));
 
     let built = Plan::assemble(&universe, &planned, request.targets(), &limits, cache);
     // `-u` is what makes this a preview of `piko update`, so it is what turns the broken
@@ -576,7 +630,7 @@ pub fn plan(
     } else {
         Reach::NamedTargets
     };
-    render(&universe, &built, format, reach, out)
+    render(&universe, &built, format, reach, explanation.as_ref(), out)
 }
 
 /// Prints a plan's diagnostics and steps.
@@ -589,11 +643,40 @@ fn render(
     built: &Plan,
     format: Format,
     reach: Reach,
+    explanation: Option<&PlanExplanation>,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     print_diagnostics(universe, built, reach);
-    print_steps(universe, built, format, out)
+    print_steps(universe, built, format, explanation, out)
 }
+
+/// One step's cause line, then a line per candidate that was passed over.
+///
+/// The lines are returned rather than written, so the one loop that owns `out` keeps the
+/// broken-pipe handling `emit!` provides. They are indented past the verb, so a listing reads
+/// as a listing with notes rather than as two interleaved lists.
+fn cause_lines(
+    universe: &Universe<'_>,
+    explanation: &PlanExplanation,
+    id: SolvableId,
+) -> Vec<String> {
+    let Some(cause) = explanation.cause(id) else { return Vec::new() };
+    let indent = " ".repeat(CAUSE_INDENT);
+    let mut lines = vec![format!(
+        "{indent}{}",
+        console::style(format!("<- {}", describe_cause(universe, cause))).dim()
+    )];
+    for alternative in explanation.alternatives(id) {
+        lines.push(format!("{indent}{}", console::style(format!("!  {alternative}")).yellow()));
+    }
+    lines
+}
+
+/// How far a cause line is indented: past the icon, the verb, and the two spaces around them.
+///
+/// Fixed rather than measured. The name column's width changes with the longest package name,
+/// and a cause line that moved with it would make two plans hard to compare.
+const CAUSE_INDENT: usize = 13;
 
 /// The kind a [`Change`] renders as. The icon and color live in [`crate::style::ChangeKind`],
 /// which `piko history` reads the same way.
@@ -721,27 +804,37 @@ struct Row {
     name: String,
     version: String,
     new_version: Option<String>,
+    /// The cause lines that follow this one, already rendered. Empty unless `--explain` asked
+    /// for them. They are resolved here, where the step's [`SolvableId`] is in hand, rather
+    /// than carried through [`order_rows`] as an id to look up again.
+    cause: Vec<String>,
 }
 
 /// Every step of `built`, rendered into a [`Row`], in [`Plan::steps`] order.
-fn rows(universe: &Universe<'_>, built: &Plan) -> Vec<Row> {
+fn rows(universe: &Universe<'_>, built: &Plan, explanation: Option<&PlanExplanation>) -> Vec<Row> {
     built
         .steps()
         .iter()
-        .map(|step| match step {
-            Step::Install { candidate, .. } => {
-                let (name, version) = render_id(universe, *candidate);
-                Row { kind: ChangeKind::Install, name, version, new_version: None }
-            }
-            Step::Remove { package } => {
-                let (name, version) = render_id(universe, *package);
-                Row { kind: ChangeKind::Remove, name, version, new_version: None }
-            }
-            Step::Change { from, to, kind } => {
-                let (name, new) = render_id(universe, *to);
-                let (_, old) = render_id(universe, *from);
-                Row { kind: kind_of(*kind), name, version: old, new_version: Some(new) }
-            }
+        .map(|step| {
+            let (id, kind, name, version, new_version) = match step {
+                Step::Install { candidate, .. } => {
+                    let (name, version) = render_id(universe, *candidate);
+                    (*candidate, ChangeKind::Install, name, version, None)
+                }
+                Step::Remove { package } => {
+                    let (name, version) = render_id(universe, *package);
+                    (*package, ChangeKind::Remove, name, version, None)
+                }
+                Step::Change { from, to, kind } => {
+                    let (name, new) = render_id(universe, *to);
+                    let (_, old) = render_id(universe, *from);
+                    (*to, kind_of(*kind), name, old, Some(new))
+                }
+            };
+            let cause = explanation
+                .map(|explanation| cause_lines(universe, explanation, id))
+                .unwrap_or_default();
+            Row { kind, name, version, new_version, cause }
         })
         .collect()
 }
@@ -786,6 +879,7 @@ pub(crate) fn print_steps(
     universe: &Universe<'_>,
     built: &Plan,
     format: Format,
+    explanation: Option<&PlanExplanation>,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     if format == Format::Names {
@@ -802,12 +896,12 @@ pub(crate) fn print_steps(
         return ExitCode::SUCCESS;
     }
 
-    let mut listing = rows(universe, built);
+    let mut listing = rows(universe, built, explanation);
     order_rows(&mut listing);
     let (name_width, version_width) = column_widths(&listing);
 
     let mut tally = Tally::default();
-    for Row { kind, name, version, new_version } in &listing {
+    for Row { kind, name, version, new_version, cause } in &listing {
         tally.bump(*kind);
         // Padded before styling, not after. A `StyledObject` writes its ANSI codes straight
         // through `write!`, not `Formatter::pad`. So an outer `{:width$}` around a styled value
@@ -827,6 +921,9 @@ pub(crate) fn print_steps(
                 console::style(format!("{version:<version_width$}")).dim(),
                 kind.style().apply_to(new)
             ),
+        }
+        for line in cause {
+            emit!(out, "{line}");
         }
     }
 
@@ -877,7 +974,13 @@ mod tests {
     use super::*;
 
     fn row(kind: ChangeKind, name: &str) -> Row {
-        Row { kind, name: name.to_owned(), version: "1-1".to_owned(), new_version: None }
+        Row {
+            kind,
+            name: name.to_owned(),
+            version: "1-1".to_owned(),
+            new_version: None,
+            cause: Vec::new(),
+        }
     }
 
     #[test]

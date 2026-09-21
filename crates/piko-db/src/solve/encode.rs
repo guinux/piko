@@ -53,6 +53,8 @@ pub struct Request {
     allow_removals: bool,
     recursive: bool,
     ignored_upgrades: Vec<IgnoredUpgrade>,
+    sysupgrade_upgrades: Vec<SolvableId>,
+    sysupgrade_replacements: Vec<(SolvableId, SolvableId)>,
     provider_choices: Vec<ProviderChoice>,
     group_choices: Vec<GroupChoice>,
 }
@@ -80,6 +82,8 @@ impl Request {
             allow_removals: true,
             recursive: false,
             ignored_upgrades: Vec::new(),
+            sysupgrade_upgrades: Vec::new(),
+            sysupgrade_replacements: Vec::new(),
             provider_choices: Vec::new(),
             group_choices: Vec::new(),
         }
@@ -156,7 +160,33 @@ impl Request {
             self = self.target(*replacement).remove(*replaced);
         }
         self.ignored_upgrades = upgrade.ignored;
+        self.sysupgrade_upgrades = upgrade.upgrades;
+        self.sysupgrade_replacements = upgrade.replacements;
         self
+    }
+
+    /// The targets a full system upgrade added, as opposed to the ones the caller named.
+    ///
+    /// [`Self::targets`] holds both in one list, so a named target and an upgrade target are
+    /// otherwise the same value. A report that says why a package is in a plan needs to tell
+    /// them apart. The ids are kept rather than a range into `targets`, so the answer does not
+    /// depend on the order the caller called the builder in.
+    ///
+    /// Empty unless [`Self::with_sysupgrade`] was applied.
+    #[must_use]
+    pub fn sysupgrade_upgrades(&self) -> &[SolvableId] {
+        &self.sysupgrade_upgrades
+    }
+
+    /// The `(replacement, replaced)` pairs this upgrade took from `%REPLACES%`.
+    ///
+    /// These ride on the request for the reason [`Self::ignored_upgrades`] gives. A second
+    /// [`sysupgrade`] call could recover them, and would walk the installed set twice.
+    ///
+    /// Empty unless [`Self::with_sysupgrade`] was applied.
+    #[must_use]
+    pub fn sysupgrade_replacements(&self) -> &[(SolvableId, SolvableId)] {
+        &self.sysupgrade_replacements
     }
 
     /// The upgrades `IgnorePkg`/`IgnoreGroup` kept out of this request.
@@ -365,26 +395,27 @@ impl Encoded {
         &self.broken
     }
 
-    /// Explains why this compiled problem has no solution, as a chain of human-readable facts.
+    /// Diagnoses why this compiled problem has no solution.
     ///
     /// Re-solves rather than requiring the caller to have kept the
     /// [`Unsatisfiable`](crate::solve::Unsatisfiable) certificate around. This is fast, since
     /// the problem is already compiled. So a caller holding an `Encoded` from
-    /// [`solve_with_removals`]'s `Err` arm can explain it without a second encode step.
-    /// Returns an empty vector if the problem turns out solvable after all. That should not
-    /// happen for an `Encoded` obtained that way, but this function does not assume it.
+    /// [`solve_with_removals`]'s `Err` arm can diagnose it without a second encode step.
+    ///
+    /// Never fails: it reports on a failure that has already happened, and replacing that
+    /// with a second one tells the caller less than saying nothing would. A problem that
+    /// turns out solvable after all, or a re-solve that exhausts
+    /// [`Limits::solve_max_conflicts`], comes back as
+    /// [`Diagnosis::gave_up`](crate::solve::Diagnosis::gave_up).
     #[must_use]
-    pub fn explain(&self, universe: &Universe<'_>, limits: &Limits) -> Vec<String> {
+    pub fn diagnose(&self, universe: &Universe<'_>, limits: &Limits) -> crate::solve::Diagnosis {
         let Ok(crate::solve::Outcome::Unsatisfiable(unsat)) =
             crate::solve::Solver::new(&self.problem, *limits).solve()
         else {
-            return Vec::new();
+            return crate::solve::Diagnosis::gave_up_on();
         };
-        crate::solve::Derivation::build(universe, &self.problem, &unsat)
-            .facts()
-            .iter()
-            .map(ToString::to_string)
-            .collect()
+        let derivation = crate::solve::Derivation::build(universe, &self.problem, &unsat, limits);
+        crate::solve::Diagnosis::of(universe, &self.problem, &unsat, derivation, limits)
     }
 }
 
@@ -422,7 +453,17 @@ pub enum TargetResolutionFailure {
     InvalidDependencyString(String),
     /// A target parsed but named neither a package nor a `%GROUPS%` group in any configured
     /// repository.
-    NotFound(String),
+    NotFound {
+        /// The target as the user spelled it.
+        target: String,
+        /// The closest candidate carrying that package name, when the name exists and no
+        /// version of it satisfies the target.
+        ///
+        /// `None` when no candidate carries the name at all. The two call for different
+        /// reading: one says the version asked for is not there, the other says the name is
+        /// wrong.
+        nearest: Option<String>,
+    },
     /// A glob target could not be expanded into names.
     ///
     /// Wraps the expansion's own refusal. So the two commands that expand, install and
@@ -580,7 +621,9 @@ pub fn resolve_targets(
             universe.ignored_satisfiers(&dep).map(IgnoredTarget::from_candidate).collect();
         candidates.extend(ignored_members);
         if candidates.is_empty() {
-            return Err(TargetResolutionFailure::NotFound(target.clone()));
+            let nearest = crate::solve::explain::nearest_candidate(universe, &dep)
+                .map(|id| crate::solve::describe_candidate(universe, id));
+            return Err(TargetResolutionFailure::NotFound { target: target.clone(), nearest });
         }
         return Err(TargetResolutionFailure::Ignored { target: target.clone(), candidates });
     }
@@ -1149,7 +1192,7 @@ pub struct Ambiguity {
     ///
     /// Together with `dependent`, this names the requirement an answer applies to. Index
     /// `dependent`'s `%DEPENDS%` with it to quote the relation, the same resolution
-    /// [`Encoded::explain`] performs.
+    /// [`Encoded::diagnose`] performs.
     pub dependency: usize,
     /// The providers, in `resolvedep` preference order. Always at least two.
     ///
@@ -1159,7 +1202,10 @@ pub struct Ambiguity {
 }
 
 /// The provider questions a solution reached, and what the bound withheld.
-#[derive(Clone, Debug)]
+///
+/// [`Default`] gives the empty report: no questions, none withheld. A caller that solves a
+/// request which installs nothing needs a report to pass on, and has none to compute.
+#[derive(Clone, Debug, Default)]
 pub struct AmbiguityReport {
     found: Box<[Ambiguity]>,
     dropped: usize,
@@ -1268,9 +1314,99 @@ pub struct Planned {
     /// Installed packages the transaction removes, because something it must install
     /// conflicts with them.
     pub removed: Vec<SolvableId>,
+    /// Why each entry of `removed` is there.
+    ///
+    /// `removed` merges four sources and is then sorted, which leaves no trace of which
+    /// source an entry came from. This map records the answer where it is known. A caller
+    /// reporting a removal reads it instead of inferring one from the plan.
+    pub removal_causes: HashMap<SolvableId, RemovalCause>,
     /// How closely the solution tracked libalpm's greedy descent, and which requirements
     /// departed from it.
     pub fidelity: FidelityReport,
+}
+
+/// Why [`solve_with_removals`] takes an installed package away.
+///
+/// One variant per source that can add to [`Planned::removed`]. They are tested in the order
+/// written here, so a package covered by two sources reports the more specific one. A
+/// `%REPLACES%` pair names its replaced package through [`Request::remove`], so
+/// [`Self::Replaced`] must be tested before [`Self::Requested`] or every replacement reads as
+/// a request the caller never made.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum RemovalCause {
+    /// A `%REPLACES%` entry of an incoming package names this one.
+    Replaced {
+        /// The incoming package carrying the `%REPLACES%` entry.
+        replacement: SolvableId,
+    },
+    /// The caller asked for this package to be removed.
+    Requested,
+    /// A `%CONFLICTS%` entry ties this package to one the transaction installs.
+    Conflicts {
+        /// The incoming package on the other side of the conflict. Either side may have
+        /// declared it: `%CONFLICTS%` is symmetric once `depcmp` has matched it.
+        with: SolvableId,
+    },
+    /// This package requires something the transaction removes, and `-Rc` cascades rather
+    /// than refusing.
+    Cascaded {
+        /// One package it requires that the transaction removes.
+        needed: SolvableId,
+    },
+    /// The request has no solution while this package stays, and no single clause names the
+    /// reason.
+    ///
+    /// This is what relaxing a pin means, stated plainly. [`Self::Conflicts`] and
+    /// [`Self::Cascaded`] are the two shapes that can be named; a solution the solver found
+    /// some other way lands here.
+    Blocking,
+    /// `-Rs` found that nothing left installed needs this package.
+    Unneeded,
+}
+
+/// Why a pin that [`solve_with_removals`] relaxed ended up removed.
+///
+/// A pin is relaxed when the unsatisfiable core blames it. Two situations reach that point. A
+/// `%CONFLICTS%` clause ties the package to something the transaction installs, or the package
+/// requires something the transaction takes away and `-Rc` cascades. The clause set says which,
+/// so neither answer is guessed.
+///
+/// The conflict test runs first. A package can be both, and the conflict is the nearer cause:
+/// it is what made the transaction impossible while the package stayed.
+fn relaxed_cause(
+    universe: &Universe<'_>,
+    encoded: &Encoded,
+    chosen: &HashSet<SolvableId>,
+    id: SolvableId,
+) -> RemovalCause {
+    for (_, clause) in encoded.problem().iter() {
+        let ClauseKind::Conflicts { declarer, other } = clause.kind() else { continue };
+        let with = match (declarer == id, other == id) {
+            (true, _) => other,
+            (_, true) => declarer,
+            _ => continue,
+        };
+        if chosen.contains(&with) {
+            return RemovalCause::Conflicts { with };
+        }
+    }
+
+    // An installed satisfier the solution dropped is a package this transaction removes. That
+    // is the dependency the cascade followed to reach here.
+    if let Some(solvable) = universe.get(id) {
+        for dep in solvable.installed_depends().unwrap_or(&[]) {
+            for satisfier in universe.satisfiers(dep) {
+                let installed =
+                    universe.get(satisfier).is_some_and(|candidate| candidate.is_installed());
+                if installed && !chosen.contains(&satisfier) {
+                    return RemovalCause::Cascaded { needed: satisfier };
+                }
+            }
+        }
+    }
+
+    RemovalCause::Blocking
 }
 
 /// Solves `request`, removing installed packages that stand in the way when policy allows.
@@ -1319,6 +1455,22 @@ pub fn solve_with_removals(
                 removed.sort_unstable();
                 removed.dedup();
 
+                // Each source records its own entries as it contributes them. `or_insert`
+                // gives the first source that claims a package, so the order below is the
+                // precedence `RemovalCause` documents.
+                let mut causes: HashMap<SolvableId, RemovalCause> = HashMap::new();
+                for (replacement, replaced) in &request.sysupgrade_replacements {
+                    causes.insert(*replaced, RemovalCause::Replaced { replacement: *replacement });
+                }
+                for id in &request.removals {
+                    causes.entry(*id).or_insert(RemovalCause::Requested);
+                }
+                for id in &relaxed {
+                    causes
+                        .entry(*id)
+                        .or_insert_with(|| relaxed_cause(universe, &encoded, &chosen, *id));
+                }
+
                 if request.recursive {
                     // `-s` sweeps orphans out of what survives; those then become removals
                     // too. Run against the installed survivors only. A package this
@@ -1342,13 +1494,26 @@ pub fn solve_with_removals(
                     let orphans = recurse_unneeded(universe, &removed, &survivors, false);
                     let gone: HashSet<SolvableId> = orphans.iter().copied().collect();
                     selected.retain(|id| !gone.contains(id));
+                    for id in &orphans {
+                        causes.entry(*id).or_insert(RemovalCause::Unneeded);
+                    }
                     removed.extend(orphans);
                 }
 
                 removed.sort_unstable();
                 removed.dedup();
+                // A relaxed pin the solution kept is not a removal, and the loop above
+                // recorded it anyway. Trimming here keeps the map and the list in step.
+                let surviving: HashSet<SolvableId> = removed.iter().copied().collect();
+                causes.retain(|id, _| surviving.contains(id));
                 let fidelity = fidelity(universe, &encoded, &selected, limits);
-                return Ok(Ok(Planned { encoded, selected, removed, fidelity }));
+                return Ok(Ok(Planned {
+                    encoded,
+                    selected,
+                    removed,
+                    removal_causes: causes,
+                    fidelity,
+                }));
             }
             crate::solve::Outcome::Unsatisfiable(unsat) => unsat,
         };
@@ -2049,6 +2214,47 @@ mod tests {
         assert_eq!(resolved(&universe, &["tools"]), ["tools"]);
     }
 
+    /// A target whose name exists and whose version does not must name the version that is
+    /// there. Reported together with the refusal, because the two answer different questions
+    /// and only one of them is about spelling.
+    #[test]
+    fn a_target_whose_version_is_unavailable_names_the_closest_candidate() {
+        let scenario = Scenario::new().repo("core", [PackageSpec::new("app", "1.0.0-1")]).build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let failure = resolve_targets(
+            &universe,
+            Request::new(),
+            &["app>=2.0".to_owned()],
+            &Limits::default(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &failure,
+                TargetResolutionFailure::NotFound { target, nearest }
+                    if target == "app>=2.0" && nearest.as_deref() == Some("app 1.0.0-1 (core)")
+            ),
+            "{failure:?}"
+        );
+    }
+
+    /// A name no candidate carries has nothing to name, and must not borrow some other
+    /// package's.
+    #[test]
+    fn a_target_naming_nothing_at_all_has_no_closest_candidate() {
+        let scenario = Scenario::new().repo("core", [PackageSpec::new("app", "1.0.0-1")]).build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+
+        let failure =
+            resolve_targets(&universe, Request::new(), &["absent".to_owned()], &Limits::default())
+                .unwrap_err();
+        assert!(
+            matches!(&failure, TargetResolutionFailure::NotFound { nearest: None, .. }),
+            "{failure:?}"
+        );
+    }
+
     #[test]
     fn a_target_naming_neither_a_package_nor_a_group_is_reported() {
         let scenario = Scenario::new().repo("core", [PackageSpec::new("app", "1.0.0-1")]).build();
@@ -2057,7 +2263,10 @@ mod tests {
         let failure =
             resolve_targets(&universe, Request::new(), &["absent".to_owned()], &Limits::default())
                 .unwrap_err();
-        assert!(matches!(failure, TargetResolutionFailure::NotFound(name) if name == "absent"));
+        assert!(matches!(
+            failure,
+            TargetResolutionFailure::NotFound { target, .. } if target == "absent"
+        ));
     }
 
     /// A member both enabled repositories carry expands to one target. So the at-most-one

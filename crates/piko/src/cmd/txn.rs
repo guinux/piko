@@ -368,7 +368,7 @@ pub fn install(
     // Blank line separating the settled "Resolving dependencies" row from the step list below.
     emit!(out, "");
     let code =
-        crate::cmd::plan::print_steps(&universe, &built, crate::cmd::plan::Format::Full, out);
+        crate::cmd::plan::print_steps(&universe, &built, crate::cmd::plan::Format::Full, None, out);
     if code != ExitCode::SUCCESS {
         return code;
     }
@@ -984,7 +984,11 @@ fn planned(
         local,
         &universe,
         entries,
-        piko_db::solve::RemovalOptions { recursive: options.recursive, cascade: options.cascade },
+        piko_db::solve::RemovalOptions {
+            recursive: options.recursive,
+            cascade: options.cascade,
+            explain: false,
+        },
         &limits,
     ) {
         Ok(removal) => removal,
@@ -1051,7 +1055,8 @@ fn planned(
 
     // Blank line separating the settled "Resolving dependencies" row from the step list below.
     emit_line(out, "")?;
-    let code = crate::cmd::plan::print_steps(&universe, &plan, crate::cmd::plan::Format::Full, out);
+    let code =
+        crate::cmd::plan::print_steps(&universe, &plan, crate::cmd::plan::Format::Full, None, out);
     if code != ExitCode::SUCCESS {
         return Err(code);
     }
