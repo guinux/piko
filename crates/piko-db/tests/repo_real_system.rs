@@ -431,3 +431,51 @@ fn every_repository_url_parses_or_is_reported_raw() {
         println!("unparsable: {entry}");
     }
 }
+
+/// The measured property that lets piko date an unsigned database: `repo-add` stamps each new
+/// entry with the time it runs, so the newest member is the time of the last publication, and a
+/// mirror's `Last-Modified` (which piko and pacman both stamp onto the file) says the same. If
+/// `repo-add` or Arch's publishing ever stops behaving this way, this test fails, rather than
+/// the freshness checks quietly comparing the wrong thing.
+///
+/// It also prints what dating each archive costs, because a refresh does this once per
+/// database.
+#[test]
+#[ignore = "requires a real ALPM sync database"]
+fn the_newest_member_time_matches_the_file_time() {
+    let Ok(listing) = std::fs::read_dir(SYNC_DIR) else {
+        eprintln!("skipping: {SYNC_DIR} does not exist");
+        return;
+    };
+    let mut checked = 0;
+    for entry in listing {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|extension| extension != "db") {
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let newest =
+            piko_db::repo::freshness::newest_member_time(&path, &piko_db::Limits::default())
+                .unwrap()
+                .unwrap_or_else(|| panic!("{} has no dated member", path.display()));
+        let elapsed = started.elapsed();
+        let stamped = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        eprintln!(
+            "{}: newest member {newest}, file {stamped}, dated in {elapsed:?}",
+            path.display()
+        );
+        assert!(
+            newest.abs_diff(stamped) <= 2,
+            "{}: the newest member ({newest}) and the file time ({stamped}) disagree",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no .db archive in {SYNC_DIR}");
+}

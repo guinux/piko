@@ -19,6 +19,7 @@ pub(crate) mod archive;
 mod desc_compat;
 mod eager;
 mod files_arena;
+pub mod freshness;
 mod package;
 mod repo_name;
 mod search;

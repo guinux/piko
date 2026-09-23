@@ -11,6 +11,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    os::unix::ffi::OsStrExt as _,
     path::{Path, PathBuf},
 };
 
@@ -18,7 +19,7 @@ use alpm_types::{PackageInstallReason, PackageValidation};
 use piko_db::{EntryName, Limits};
 use piko_db_write::{DbLock, LocalDbWriter};
 
-use super::{Doomed, Patterns, Prepared, Replacement, Report, ScriptletRun};
+use super::{BackupProblem, Doomed, Patterns, Prepared, Replacement, Report, ScriptletRun};
 use crate::{
     error::Result,
     exec::Runner,
@@ -29,7 +30,7 @@ use crate::{
     progress::Event,
     record::{self, InstallFacts},
     remove::{RemovalContext, RemovalDisposition, decide_removal},
-    rootfs::RootDir,
+    rootfs::{Resolved, RootDir},
     scriptlet,
 };
 
@@ -89,6 +90,7 @@ pub(super) fn install_step(
     if let Some(old) = step.package.replaces.as_ref() {
         let (_, pacsaves) = remove_files(
             step.root,
+            &mut report.backup_problems,
             &Removal {
                 files: &old.files,
                 backups: &old.backups,
@@ -121,6 +123,10 @@ pub(super) fn install_step(
         step.ownership,
         step.limits,
     )?;
+
+    // The one place a `.pacnew` is collected. The recorder, the terminal and the transaction's
+    // report all read this list rather than deriving it from the outcomes again.
+    report.pacnews.extend(extraction.pacnews().map(Path::to_path_buf));
 
     // The `.PKGINFO` was parsed at verify time, so nothing here can refuse the package on its
     // own metadata. Refusing it here would happen after the payload above is already written.
@@ -299,6 +305,7 @@ pub(super) fn remove_step(
 
     let (touched, pacsaves) = remove_files(
         root,
+        &mut report.backup_problems,
         &Removal {
             files: &doomed.installed.files,
             backups: &doomed.installed.backups,
@@ -340,7 +347,15 @@ struct Removal<'a> {
 ///
 /// Every decision belongs to [`decide_removal`]. This function only asks the filesystem the
 /// questions that function's inputs are made of, then does what it says.
-fn remove_files(root: &RootDir, removal: &Removal<'_>) -> (usize, Vec<PathBuf>) {
+///
+/// Anything that stopped a backup file from being preserved lands on `problems`. A removal is
+/// never failed by one: the package is going away either way, and a file left in place is a
+/// warning about that file rather than a broken transaction.
+fn remove_files(
+    root: &RootDir,
+    problems: &mut Vec<BackupProblem>,
+    removal: &Removal<'_>,
+) -> (usize, Vec<PathBuf>) {
     let mut touched = 0_usize;
     let mut pacsaves = Vec::new();
 
@@ -387,16 +402,10 @@ fn remove_files(root: &RootDir, removal: &Removal<'_>) -> (usize, Vec<PathBuf>) 
                 touched = touched.saturating_add(1);
             }
             RemovalDisposition::SaveAsPacsave => {
-                let mut saved = resolved.name().to_os_string();
-                saved.push(".pacsave");
-                let _ = rustix::fs::renameat(
-                    resolved.dir(),
-                    resolved.name(),
-                    resolved.dir(),
-                    saved.as_os_str(),
-                );
-                pacsaves.push(PathBuf::from(format!("{}.pacsave", trimmed.display())));
-                touched = touched.saturating_add(1);
+                if let Some(saved) = save_as_pacsave(&resolved, &trimmed, problems) {
+                    pacsaves.push(saved);
+                    touched = touched.saturating_add(1);
+                }
             }
             RemovalDisposition::RemoveDirectoryIfEmpty => {
                 // Failure is ordinary here: another package may still own something inside.
@@ -413,8 +422,230 @@ fn remove_files(root: &RootDir, removal: &Removal<'_>) -> (usize, Vec<PathBuf>) 
     (touched, pacsaves)
 }
 
+/// Largest number of directory entries read while looking for existing `.pacsave` files.
+///
+/// A real `/etc` holds a few thousand entries. Past this, the listing is abandoned and the
+/// backup file is left in place, because the rotation needs the complete set.
+const MAX_PACSAVE_DIR_ENTRIES: usize = 100_000;
+
+/// Makes room beside `path` for a new `.pacsave`, then renames the file there.
+///
+/// An existing `<path>.pacsave` is rotated to `<path>.pacsave.1`, and every numbered one moves
+/// up with it. [`crate::remove::pacsave_rotation`] decides the renames from the set of files
+/// that are there; `shift_pacsave` (`remove.c:347`) keeps only the largest number it saw and
+/// then loops down through every integer below it.
+///
+/// `None` means the file was left where it is, with a [`BackupProblem`] saying why.
+///
+/// # An incomplete listing renames nothing
+///
+/// The rotation is only safe over the *complete* set of numbers. A listing that missed
+/// `.pacsave.7` would rename `.pacsave.6` on top of it and destroy a file the user kept. So a
+/// listing that cannot be finished leaves the backup file in place instead. `shift_pacsave`
+/// cannot reach this state, because it discards every rename failure.
+fn save_as_pacsave(
+    resolved: &Resolved,
+    path: &Path,
+    problems: &mut Vec<BackupProblem>,
+) -> Option<PathBuf> {
+    let (numbers, plain_exists) = match existing_pacsaves(resolved) {
+        Ok(found) => found,
+        Err(reason) => {
+            problems.push(BackupProblem::RotationImpossible { path: path.to_path_buf(), reason });
+            return None;
+        }
+    };
+
+    for (from, to) in crate::remove::pacsave_rotation(&numbers, plain_exists) {
+        let source = with_suffix(resolved.name(), &from);
+        let destination = with_suffix(resolved.name(), &to);
+        if let Err(error) = rustix::fs::renameat(
+            resolved.dir(),
+            source.as_os_str(),
+            resolved.dir(),
+            destination.as_os_str(),
+        ) {
+            // The renames run downwards, so each one moves a file only after the slot above
+            // it is free. Carrying on past a failure would rename the next file onto a slot
+            // that is still occupied.
+            problems.push(BackupProblem::RotationImpossible {
+                path: path.to_path_buf(),
+                reason: format!("{from} could not be renamed to {to}: {error}"),
+            });
+            return None;
+        }
+    }
+
+    let saved = with_suffix(resolved.name(), ".pacsave");
+    if let Err(error) =
+        rustix::fs::renameat(resolved.dir(), resolved.name(), resolved.dir(), saved.as_os_str())
+    {
+        problems.push(BackupProblem::RotationImpossible {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        });
+        return None;
+    }
+    Some(PathBuf::from(format!("{}.pacsave", path.display())))
+}
+
+/// The `.pacsave` files already sitting beside the file `resolved` names.
+///
+/// Returns the `N`s of the `<name>.pacsave.N` files, and whether a bare `<name>.pacsave` is
+/// there. The listing goes through the descriptor the renames use, so the directory read is
+/// the one that was resolved.
+///
+/// A number that does not fit in a `u32`, or that does not render back to the same digits, is
+/// an error rather than a value to skip. `.pacsave.01` read as `1` would make the rotation
+/// rename `.pacsave.1` to `.pacsave.2` while `.pacsave.01` stayed put, leaving two files that
+/// claim one rank.
+fn existing_pacsaves(resolved: &Resolved) -> std::result::Result<(Vec<u32>, bool), String> {
+    let handle = rustix::fs::openat(
+        resolved.dir(),
+        ".",
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|source| source.to_string())?;
+
+    let plain = with_suffix(resolved.name(), ".pacsave");
+    let prefix = with_suffix(resolved.name(), ".pacsave.");
+    let mut numbers = Vec::new();
+    let mut plain_exists = false;
+    let mut seen = 0_usize;
+
+    for entry in rustix::fs::Dir::read_from(&handle).map_err(|source| source.to_string())? {
+        let entry = entry.map_err(|source| source.to_string())?;
+        seen = seen.saturating_add(1);
+        if seen > MAX_PACSAVE_DIR_ENTRIES {
+            return Err(format!("the directory holds more than {MAX_PACSAVE_DIR_ENTRIES} entries"));
+        }
+        let name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes());
+        if name == plain {
+            plain_exists = true;
+            continue;
+        }
+        let Some(digits) = name.as_bytes().strip_prefix(prefix.as_bytes()) else {
+            continue;
+        };
+        let digits =
+            std::str::from_utf8(digits).map_err(|_| "a .pacsave number is not text".to_owned())?;
+        match digits.parse::<u32>() {
+            Ok(number) if number.to_string() == digits => numbers.push(number),
+            _ => {
+                return Err(format!(".pacsave.{digits} does not carry a usable number"));
+            }
+        }
+    }
+
+    Ok((numbers, plain_exists))
+}
+
+/// `name` with `suffix` appended.
+fn with_suffix(name: &std::ffi::OsStr, suffix: &str) -> std::ffi::OsString {
+    let mut joined = name.to_os_string();
+    joined.push(suffix);
+    joined
+}
+
 /// A path without tar's trailing slash on directories.
 fn trim_trailing_slash(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     PathBuf::from(text.strip_suffix('/').unwrap_or(&text))
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a failing assertion in a test should abort it loudly"
+)]
+mod tests {
+    use super::*;
+
+    /// A root holding `etc/foo.conf` plus whatever else is named, and the resolved handle on
+    /// that file.
+    fn resolved_target(extra: &[&str]) -> (tempfile::TempDir, RootDir, Resolved) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("etc")).unwrap();
+        std::fs::write(dir.path().join("etc/foo.conf"), b"current").unwrap();
+        for name in extra {
+            std::fs::write(dir.path().join("etc").join(name), name.as_bytes()).unwrap();
+        }
+        let root = RootDir::open(dir.path()).unwrap();
+        let resolved = root.resolve_parent(Path::new("etc/foo.conf")).unwrap();
+        (dir, root, resolved)
+    }
+
+    #[test]
+    fn saves_a_backup_file_when_nothing_is_beside_it() {
+        let (dir, _root, resolved) = resolved_target(&[]);
+        let mut problems = Vec::new();
+
+        let saved = save_as_pacsave(&resolved, Path::new("etc/foo.conf"), &mut problems);
+
+        assert_eq!(saved, Some(PathBuf::from("etc/foo.conf.pacsave")));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(std::fs::read(dir.path().join("etc/foo.conf.pacsave")).unwrap(), b"current");
+        assert!(!dir.path().join("etc/foo.conf").exists());
+    }
+
+    #[test]
+    fn rotates_what_is_already_beside_it() {
+        let (dir, _root, resolved) = resolved_target(&["foo.conf.pacsave", "foo.conf.pacsave.1"]);
+        let mut problems = Vec::new();
+
+        let saved = save_as_pacsave(&resolved, Path::new("etc/foo.conf"), &mut problems);
+
+        assert_eq!(saved, Some(PathBuf::from("etc/foo.conf.pacsave")));
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(std::fs::read(dir.path().join("etc/foo.conf.pacsave")).unwrap(), b"current");
+        assert_eq!(
+            std::fs::read(dir.path().join("etc/foo.conf.pacsave.1")).unwrap(),
+            b"foo.conf.pacsave"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("etc/foo.conf.pacsave.2")).unwrap(),
+            b"foo.conf.pacsave.1"
+        );
+    }
+
+    /// A listing that cannot be trusted renames nothing. A rotation run over a partial set
+    /// would move one save on top of another, and both are the user's own edits.
+    #[test]
+    fn a_listing_that_cannot_be_finished_leaves_the_file_in_place() {
+        let (dir, _root, resolved) = resolved_target(&["foo.conf.pacsave.01"]);
+        let mut problems = Vec::new();
+
+        let saved = save_as_pacsave(&resolved, Path::new("etc/foo.conf"), &mut problems);
+
+        assert_eq!(saved, None);
+        assert!(
+            matches!(problems.first(), Some(BackupProblem::RotationImpossible { .. })),
+            "{problems:?}"
+        );
+        assert_eq!(std::fs::read(dir.path().join("etc/foo.conf")).unwrap(), b"current");
+        assert_eq!(
+            std::fs::read(dir.path().join("etc/foo.conf.pacsave.01")).unwrap(),
+            b"foo.conf.pacsave.01"
+        );
+    }
+
+    /// Another package's saves sit in the same directory and must not be rotated.
+    #[test]
+    fn leaves_another_file_s_pacsaves_alone() {
+        let (dir, _root, resolved) = resolved_target(&["bar.conf.pacsave", "bar.conf.pacsave.1"]);
+        let mut problems = Vec::new();
+
+        assert!(save_as_pacsave(&resolved, Path::new("etc/foo.conf"), &mut problems).is_some());
+
+        assert_eq!(
+            std::fs::read(dir.path().join("etc/bar.conf.pacsave")).unwrap(),
+            b"bar.conf.pacsave"
+        );
+        assert!(!dir.path().join("etc/bar.conf.pacsave.2").exists());
+    }
 }

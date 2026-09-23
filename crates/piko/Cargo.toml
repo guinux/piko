@@ -22,6 +22,9 @@ piko-sig.workspace = true
 piko-txn.workspace = true
 # The CLI has failure modes no library crate has a type for — an unreadable `pacman.conf`,
 # a mistyped repository name, a rejected repository signature.
+# A merge writes the base and the merged result into a private scratch directory. Writing a
+# correct `mkdtemp` by hand, in a process that may be root, is not worth the saving.
+tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
 
@@ -30,7 +33,6 @@ time.workspace = true
 # that binary *is* the exec helper — see `tests/side_effects.rs`.
 rustix.workspace = true
 tar.workspace = true
-tempfile.workspace = true
 # `install` resolves package names through a repository database, so the same test binary
 # needs a way to build one — see `piko-db/src/fixture.rs`.
 piko-db = { workspace = true, features = ["fixture"] }

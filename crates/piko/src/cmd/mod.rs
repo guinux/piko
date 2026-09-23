@@ -8,11 +8,13 @@
 pub mod check;
 pub mod conf;
 pub mod files;
+pub mod freshness;
 pub mod group;
 pub mod history;
 pub mod info;
 pub mod list;
 pub mod local;
+pub mod merge;
 pub mod owns;
 pub mod plan;
 pub mod provider;

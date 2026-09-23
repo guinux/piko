@@ -247,7 +247,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 }
             }
         }
-        Command::CheckUpdates { repo_paths, quiet } => {
+        Command::CheckUpdates { repo_paths, quiet, max_age } => {
             let local = open_local_db(cli, &config)?;
             let repos: Vec<piko_db::repo::RepoDatabase> = if repo_paths.is_empty() {
                 open_all_repos(cli, &config)?.into_iter().map(|(_, db)| db).collect()
@@ -258,6 +258,9 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 }
                 repos
             };
+            // A frozen database makes this command answer "no updates" and nothing else. That
+            // is exactly the harm an old database does, so it is said on stderr.
+            report_stale_repos(cli, &config, repos.iter(), *max_age, offset);
             let (ignore_pkg, ignore_group) = ignore_lists(cli, &config);
             let ignores = IgnoreList::new(&ignore_pkg, &ignore_group);
             cmd::sync::check_updates(&local, &repos, ignores, *quiet, &mut out)
@@ -278,10 +281,14 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             cascade,
             sysupgrade,
             downgrade,
+            max_age,
         } => {
             let parsed = require_pacman_config(cli, &config)?;
             let local = open_local_db(cli, &config)?;
             let opened = open_all_repos(cli, &config)?;
+            if *sysupgrade {
+                report_stale_repos(cli, &config, opened.iter().map(|(_, db)| db), *max_age, offset);
+            }
             let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
             let format = if *names { cmd::plan::Format::Names } else { cmd::plan::Format::Full };
             if targets.is_empty() && !*sysupgrade {
@@ -348,6 +355,8 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                     sysupgrade: None,
                     refresh: false,
                     force: false,
+                    accept_older: false,
+                    max_age: 0,
                     overwrite,
                     noscriptlet: *noscriptlet,
                     hookdir,
@@ -365,6 +374,8 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             downgrade,
             norefresh,
             force,
+            accept_older,
+            max_age,
             overwrite,
             noscriptlet,
             hookdir,
@@ -383,6 +394,8 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                     sysupgrade: Some(*downgrade),
                     refresh: !*norefresh,
                     force: *force,
+                    accept_older: *accept_older,
+                    max_age: *max_age,
                     overwrite,
                     noscriptlet: *noscriptlet,
                     hookdir,
@@ -432,7 +445,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 &mut out,
             )
         }
-        Command::Refresh { repos, force, files } => {
+        Command::Refresh { repos, force, files, accept_older, max_age } => {
             let record = recording(cli, &config, &resolve_dbpath(cli, &config), offset);
             cmd::txn::note(
                 &record,
@@ -444,9 +457,13 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 require_pacman_config(cli, &config)?,
                 &resolve_dbpath(cli, &config),
                 repos,
-                *force,
-                *files,
+                cmd::refresh::Options {
+                    force: *force,
+                    files: *files,
+                    freshness: freshness_policy(*accept_older, *max_age),
+                },
                 &cancel,
+                offset,
             )
         }
         Command::Report => cmd::txn::report(&resolve_dbpath(cli, &config), &mut out),
@@ -463,6 +480,27 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             },
             &mut out,
         ),
+        Command::Merge { root, output, diffprog, mergeprog, threeway, paths } => {
+            let root = root.clone().unwrap_or_else(|| resolve_root_dir(cli, &config));
+            let selection = if paths.is_empty() {
+                cmd::merge::Selection::All
+            } else {
+                cmd::merge::Selection::Typed(paths.clone())
+            };
+            cmd::merge::merge(
+                &root,
+                &open_local_db(cli, &config)?,
+                &cache_dirs(&config, cli),
+                cmd::merge::Options {
+                    output: *output,
+                    diffprog: diffprog.clone(),
+                    mergeprog: mergeprog.clone(),
+                    threeway: *threeway,
+                    selection,
+                },
+                &mut out,
+            )
+        }
         Command::Conf { directive } => {
             cmd::conf::conf(require_pacman_config(cli, &config)?, directive.as_deref(), &mut out)
         }
@@ -522,6 +560,10 @@ struct SyncArgs<'a> {
     refresh: bool,
     /// `--force`. Always `false` for `install`, which has no such flag.
     force: bool,
+    /// `--accept-older`. Always `false` for `install`, which has no such flag.
+    accept_older: bool,
+    /// `--max-age`, in days. `0` for `install`, which has no such flag and warns about no age.
+    max_age: u64,
     /// `--overwrite` glob patterns.
     overwrite: &'a [String],
     /// `--noscriptlet`. Inverted into `SideEffects::scriptlets` by [`sync`].
@@ -535,6 +577,36 @@ struct SyncArgs<'a> {
     /// The UTC offset every timestamp is rendered in, captured in `main` — see
     /// [`piko_txn::LocalOffset`].
     offset: piko_txn::LocalOffset,
+}
+
+/// The freshness policy for a refresh, from `--accept-older` and `--max-age`, at the current
+/// time.
+fn freshness_policy(accept_older: bool, max_age_days: u64) -> piko_net::FreshnessPolicy {
+    piko_net::FreshnessPolicy {
+        accept_older,
+        max_age: cmd::freshness::max_age(max_age_days),
+        now: std::time::SystemTime::now(),
+    }
+}
+
+/// Warns about each database in `repos` that is older than `--max-age`, or dated in the future.
+fn report_stale_repos<'a>(
+    cli: &Cli,
+    config: &ConfigCache,
+    repos: impl IntoIterator<Item = &'a piko_db::repo::RepoDatabase>,
+    max_age_days: u64,
+    offset: piko_txn::LocalOffset,
+) {
+    let dated: Vec<_> = repos
+        .into_iter()
+        .map(|db| (db.name(), context::repo_publication(db, cli, config)))
+        .collect();
+    cmd::freshness::report_stale(
+        dated,
+        std::time::SystemTime::now(),
+        cmd::freshness::max_age(max_age_days),
+        offset,
+    );
 }
 
 /// Runs `piko install` or `piko update`. It gathers everything either needs from the
@@ -577,7 +649,12 @@ fn sync(
     let pre_cancel = if args.refresh {
         cmd::txn::note(&record, "synchronizing package lists");
         let (cancel, mode) = crate::signal::install_cancel_handler();
-        let code = cmd::refresh::refresh(parsed, &dbpath, &[], args.force, false, &cancel);
+        let options = cmd::refresh::Options {
+            force: args.force,
+            files: false,
+            freshness: freshness_policy(args.accept_older, args.max_age),
+        };
+        let code = cmd::refresh::refresh(parsed, &dbpath, &[], options, &cancel, args.offset);
         if code != ExitCode::SUCCESS {
             return Ok(code);
         }
@@ -586,6 +663,11 @@ fn sync(
         None
     };
     let opened = open_all_repos(cli, config)?;
+    // The refresh above already reported each database's age, after asking other mirrors. With
+    // `--norefresh`, the plan rests on whatever is on disk, and only an age can be reported.
+    if !args.refresh && args.sysupgrade.is_some() {
+        report_stale_repos(cli, config, opened.iter().map(|(_, db)| db), args.max_age, args.offset);
+    }
     let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
     let signing = signing_policy(cli, config);
     Ok(cmd::txn::install(

@@ -176,6 +176,64 @@ pub fn multiselect(out: &mut impl std::io::Write, prompt: &str, count: usize) ->
     }
 }
 
+/// Prints `prompt` and waits for one of `letters`, returning the index of the one answered.
+///
+/// `letters` are the accepted answers, in the order the prompt lists them. Each is one ASCII
+/// letter, read case-insensitively. The answer comes back as an index into that list.
+///
+/// **There is no default.** [`confirm`] has a "do nothing" answer and [`select`] has a first
+/// candidate; this question has neither. Removing a file, overwriting one and merging two are
+/// three different irreversible acts, and an empty line names none of them. So an empty line
+/// asks again, as an out-of-range answer does in [`select`].
+///
+/// **A closed or empty stdin answers `on_eof`**, which callers set to the letter that quits.
+/// That is [`confirm`]'s refusal rather than [`select`]'s default, and for a stronger reason:
+/// this prompt runs once per entry of a list. Taking "skip" for every one would walk the whole
+/// list and exit zero, which reads the same as having resolved it.
+///
+/// The letters are a way of typing a choice at a terminal, like [`multiselect`]'s grammar. What
+/// each choice does to the two files is `piko_txn::merge::apply`'s.
+///
+/// `out` is flushed before the prompt is written to it, as in the three prompts above.
+pub fn choose(
+    out: &mut impl std::io::Write,
+    prompt: &str,
+    letters: &[char],
+    on_eof: usize,
+) -> usize {
+    if letters.is_empty() {
+        return on_eof;
+    }
+    loop {
+        if write!(out, "{prompt}").and_then(|()| out.flush()).is_err() {
+            return on_eof;
+        }
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            return on_eof;
+        }
+        if let Some(index) = parse_letter(&line, letters) {
+            return index;
+        }
+        let spelled: Vec<String> = letters.iter().map(char::to_string).collect();
+        eprintln!("Invalid value: it must be one of {}", spelled.join(", "));
+    }
+}
+
+/// Reads one answered line of [`choose`], or `None` if it named no letter.
+///
+/// Split out so the grammar is testable without a terminal, as [`parse_selection`] is.
+fn parse_letter(line: &str, letters: &[char]) -> Option<usize> {
+    let mut characters = line.trim().chars();
+    let typed = characters.next()?;
+    // One letter and nothing else. `rr` and `r x` name no single choice, and guessing at one
+    // would guess at an irreversible act.
+    if characters.next().is_some() {
+        return None;
+    }
+    letters.iter().position(|letter| letter.eq_ignore_ascii_case(&typed))
+}
+
 /// Reads one answered line of [`multiselect`], or `None` if it was malformed.
 ///
 /// Split out from [`multiselect`] so the grammar is testable without a terminal.
@@ -430,6 +488,25 @@ mod tests {
     use piko_txn::LocalOffset;
 
     use super::*;
+
+    #[test]
+    fn a_letter_answers_whatever_its_case() {
+        let letters = ['v', 'm', 's', 'r', 'o', 'q'];
+        assert_eq!(parse_letter("v\n", &letters), Some(0));
+        assert_eq!(parse_letter("Q\n", &letters), Some(5));
+        assert_eq!(parse_letter("  r  \n", &letters), Some(3));
+    }
+
+    /// Guessing at a line that names no single letter would guess at an irreversible act.
+    #[test]
+    fn a_line_that_names_no_single_letter_asks_again() {
+        let letters = ['v', 'm', 's', 'r', 'o', 'q'];
+        assert_eq!(parse_letter("\n", &letters), None);
+        assert_eq!(parse_letter("   \n", &letters), None);
+        assert_eq!(parse_letter("x\n", &letters), None);
+        assert_eq!(parse_letter("rr\n", &letters), None);
+        assert_eq!(parse_letter("r x\n", &letters), None);
+    }
 
     #[test]
     fn a_selection_is_read_as_a_zero_based_index() {

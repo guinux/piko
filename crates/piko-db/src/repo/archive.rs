@@ -82,6 +82,9 @@ pub(crate) struct Skipped {
 /// same way [`Error::TooManyEntries`] aborts the local database's scan. It must not be
 /// downgraded to a diagnostic that lets the walk continue.
 ///
+/// Returns the newest member modification time, with the same meaning as
+/// [`newest_member_time`]. It costs nothing here, because every header is read anyway.
+///
 /// # Errors
 ///
 /// - [`Error::UnsupportedCompression`] if the archive's header does not match gzip, zstd, xz,
@@ -95,35 +98,12 @@ pub(crate) fn walk(
     limits: &Limits,
     mut on_item: impl FnMut(ArchiveItem) -> Result<()>,
     mut on_skip: impl FnMut(Skipped),
-) -> Result<()> {
-    let mut file = fs_util::open_following_symlinks(path)?;
-
-    let compressed_len =
-        file.metadata().map_err(|source| Error::io(path, IoAction::Metadata, source))?.len();
-    if compressed_len > limits.repo_compressed_bytes {
-        return Err(Error::LimitExceeded {
-            path: path.to_path_buf(),
-            limit: Limit::RepoCompressed,
-            max: limits.repo_compressed_bytes,
-        });
-    }
-
-    let settings = sniff_file(&mut file, path)?;
-    let decoder = CompressionDecoder::new(file, settings)
-        .map_err(|source| Error::io(path, IoAction::Decompress, std::io::Error::other(source)))?;
-
-    let tripped = Arc::new(AtomicBool::new(false));
-    let bounded = BoundedReader {
-        inner: decoder,
-        limit: limits.repo_inflated_bytes,
-        read_so_far: 0,
-        tripped: Arc::clone(&tripped),
-    };
-    let mut archive = tar::Archive::new(bounded);
-
+) -> Result<Option<u64>> {
+    let (mut archive, tripped) = open_bounded(path, limits)?;
     let classify = |source: std::io::Error| classify_io_error(path, source, &tripped, limits);
 
     let entries = archive.entries().map_err(classify)?;
+    let mut newest = NewestMember::default();
     // Keyed on the *parsed* identity, rather than on the raw path string. That identity is the
     // entry directory name plus which member it is. A path spelled differently but denoting the
     // same member, with an interior `.` component say, would slip past a raw-string key. The
@@ -132,6 +112,7 @@ pub(crate) fn walk(
 
     for entry in entries {
         let mut entry = entry.map_err(classify)?;
+        newest.observe(entry.header());
 
         // The header is consulted before the path is materialised. So the directory member
         // every package contributes costs no allocation at all: one skipped allocation per
@@ -203,7 +184,88 @@ pub(crate) fn walk(
         })?;
     }
 
-    Ok(())
+    Ok(newest.value())
+}
+
+/// Returns the newest modification time of any member of the archive at `path`, in seconds
+/// since the Unix epoch.
+///
+/// This reads tar headers only. No member body is buffered, and no `desc` is parsed. The walk
+/// still inflates the whole stream, because a compressed tar has no index, so it is bounded
+/// exactly as [`walk`] is: [`Limits::repo_compressed_bytes`] before decompression, and
+/// [`Limits::repo_inflated_bytes`] during it. The inflated bound also bounds the number of
+/// members, because each one costs at least one 512-byte header.
+///
+/// `None` means that no member carries a non-zero time. A reproducible archive builder can
+/// write every member at time zero, and that is no evidence of when the archive was made.
+///
+/// # Errors
+///
+/// As [`walk`], except that no member is read, so [`Limits::repo_entry_bytes`] never applies.
+pub(crate) fn newest_member_time(path: &Path, limits: &Limits) -> Result<Option<u64>> {
+    let (mut archive, tripped) = open_bounded(path, limits)?;
+    let classify = |source: std::io::Error| classify_io_error(path, source, &tripped, limits);
+    let mut newest = NewestMember::default();
+    for entry in archive.entries().map_err(classify)? {
+        newest.observe(entry.map_err(classify)?.header());
+    }
+    Ok(newest.value())
+}
+
+/// The newest member modification time seen so far in one archive walk.
+///
+/// `repo-add` writes each new entry at the time it runs, and it keeps the time of every entry
+/// it copies from the previous archive. So the newest member is the time of the last
+/// publication that added a package. Every member counts, directories included, and a header
+/// whose time field does not parse is passed over rather than failing the walk.
+#[derive(Default)]
+struct NewestMember(u64);
+
+impl NewestMember {
+    fn observe(&mut self, header: &tar::Header) {
+        if let Ok(time) = header.mtime() {
+            self.0 = self.0.max(time);
+        }
+    }
+
+    fn value(&self) -> Option<u64> {
+        (self.0 > 0).then_some(self.0)
+    }
+}
+
+/// Opens `path`, checks its compressed size, sniffs its compression, and wraps the decoder in
+/// a [`BoundedReader`].
+///
+/// Returns the tar reader and the flag the bounded reader trips on overrun, which
+/// `classify_io_error` reads to tell a limit violation apart from a corrupt archive.
+fn open_bounded(
+    path: &Path,
+    limits: &Limits,
+) -> Result<(tar::Archive<BoundedReader<CompressionDecoder<'static>>>, Arc<AtomicBool>)> {
+    let mut file = fs_util::open_following_symlinks(path)?;
+
+    let compressed_len =
+        file.metadata().map_err(|source| Error::io(path, IoAction::Metadata, source))?.len();
+    if compressed_len > limits.repo_compressed_bytes {
+        return Err(Error::LimitExceeded {
+            path: path.to_path_buf(),
+            limit: Limit::RepoCompressed,
+            max: limits.repo_compressed_bytes,
+        });
+    }
+
+    let settings = sniff_file(&mut file, path)?;
+    let decoder = CompressionDecoder::new(file, settings)
+        .map_err(|source| Error::io(path, IoAction::Decompress, std::io::Error::other(source)))?;
+
+    let tripped = Arc::new(AtomicBool::new(false));
+    let bounded = BoundedReader {
+        inner: decoder,
+        limit: limits.repo_inflated_bytes,
+        read_so_far: 0,
+        tripped: Arc::clone(&tripped),
+    };
+    Ok((tar::Archive::new(bounded), tripped))
 }
 
 /// Which of an entry directory's two metadata members a tar member is.
@@ -316,31 +378,7 @@ pub(crate) fn walk_matching(
         return Ok(());
     }
 
-    let mut file = fs_util::open_following_symlinks(path)?;
-
-    let compressed_len =
-        file.metadata().map_err(|source| Error::io(path, IoAction::Metadata, source))?.len();
-    if compressed_len > limits.repo_compressed_bytes {
-        return Err(Error::LimitExceeded {
-            path: path.to_path_buf(),
-            limit: Limit::RepoCompressed,
-            max: limits.repo_compressed_bytes,
-        });
-    }
-
-    let settings = sniff_file(&mut file, path)?;
-    let decoder = CompressionDecoder::new(file, settings)
-        .map_err(|source| Error::io(path, IoAction::Decompress, std::io::Error::other(source)))?;
-
-    let tripped = Arc::new(AtomicBool::new(false));
-    let bounded = BoundedReader {
-        inner: decoder,
-        limit: limits.repo_inflated_bytes,
-        read_so_far: 0,
-        tripped: Arc::clone(&tripped),
-    };
-    let mut archive = tar::Archive::new(bounded);
-
+    let (mut archive, tripped) = open_bounded(path, limits)?;
     let classify = |source: std::io::Error| classify_io_error(path, source, &tripped, limits);
 
     let entries = archive.entries().map_err(classify)?;

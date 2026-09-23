@@ -144,6 +144,11 @@ pub enum StepOutcome<'a> {
         replaced: Option<&'a EntryName>,
         /// What extraction did.
         extraction: &'a Extraction,
+        /// `.pacnew` files this step left on disk, if any.
+        ///
+        /// Collected once, by the step. Reading the slice keeps this and the recorder on one
+        /// list. See [`Extraction::pacnews`].
+        pacnews: &'a [PathBuf],
         /// `.pacsave` files this step created, if any (from the fake removal of a replaced
         /// version's modified backup files).
         pacsaves: &'a [PathBuf],

@@ -91,35 +91,41 @@ fn refresh(sync: &Path, url: &str) -> piko_net::Result<Outcome> {
 }
 
 fn refresh_forced(sync: &Path, url: &str, force: bool) -> piko_net::Result<Outcome> {
-    Refresher::default().refresh(
-        sync,
-        "core",
-        &[url.to_owned()],
-        None,
-        unsigned(),
-        force,
-        &piko_net::Cancel::new(),
-    )
+    Refresher::default()
+        .refresh(sync, "core", &[url.to_owned()], None, unsigned(), force, &piko_net::Cancel::new())
+        .map(|refreshed| refreshed.outcome)
 }
+
+/// A repository archive, labelled so two of them differ in their bytes, published at
+/// `mtime`.
+///
+/// A refresh dates an unsigned download by reading it as an archive, so the body must be one.
+fn database(label: &str, mtime: u64) -> Vec<u8> {
+    piko_db::fixture::gzip_tar_at(&[("foo-1.0.0-1/desc", label.as_bytes())], mtime)
+}
+
+/// Tue, 18 Aug 2026 18:18:06 GMT.
+const FIRST: u64 = 1_787_077_086;
+/// Wed, 19 Aug 2026 10:00:00 GMT.
+const SECOND: u64 = 1_787_133_600;
 
 /// The regression: a 304 must leave the installed database exactly as it was.
 #[test]
 fn a_not_modified_response_does_not_touch_the_database() {
     let dir = tempfile::tempdir().unwrap();
     let sync = dir.path();
-    let (url, server) = serve(vec![
-        ok_response(b"a real database", "Tue, 18 Aug 2026 18:18:06 GMT"),
-        not_modified(),
-    ]);
+    let live = database("a real database", FIRST);
+    let (url, server) =
+        serve(vec![ok_response(&live, "Tue, 18 Aug 2026 18:18:06 GMT"), not_modified()]);
 
     assert_eq!(refresh(sync, &url).unwrap(), Outcome::Updated);
-    assert_eq!(std::fs::read(sync.join("core.db")).unwrap(), b"a real database");
+    assert_eq!(std::fs::read(sync.join("core.db")).unwrap(), live);
 
     // Second run: the file is stamped, so the conditional request goes out and is answered 304.
     assert_eq!(refresh(sync, &url).unwrap(), Outcome::UpToDate);
     assert_eq!(
         std::fs::read(sync.join("core.db")).unwrap(),
-        b"a real database",
+        live,
         "a 304 truncated or replaced the live database"
     );
 
@@ -140,7 +146,8 @@ fn a_not_modified_response_does_not_touch_the_database() {
 #[test]
 fn the_first_request_is_unconditional() {
     let dir = tempfile::tempdir().unwrap();
-    let (url, server) = serve(vec![ok_response(b"db", "Tue, 18 Aug 2026 18:18:06 GMT")]);
+    let (url, server) =
+        serve(vec![ok_response(&database("db", FIRST), "Tue, 18 Aug 2026 18:18:06 GMT")]);
 
     assert_eq!(refresh(dir.path(), &url).unwrap(), Outcome::Updated);
 
@@ -157,8 +164,9 @@ fn the_first_request_is_unconditional() {
 fn an_empty_body_is_refused_rather_than_installed() {
     let dir = tempfile::tempdir().unwrap();
     let sync = dir.path();
+    let live = database("a real database", FIRST);
     let (url, server) = serve(vec![
-        ok_response(b"a real database", "Tue, 18 Aug 2026 18:18:06 GMT"),
+        ok_response(&live, "Tue, 18 Aug 2026 18:18:06 GMT"),
         ok_response(b"", "Wed, 19 Aug 2026 10:00:00 GMT"),
     ]);
 
@@ -173,7 +181,7 @@ fn an_empty_body_is_refused_rather_than_installed() {
     );
     assert_eq!(
         std::fs::read(sync.join("core.db")).unwrap(),
-        b"a real database",
+        live,
         "an empty download replaced the live database"
     );
     drop(server.join());
@@ -184,7 +192,8 @@ fn an_empty_body_is_refused_rather_than_installed() {
 #[test]
 fn the_download_carries_the_servers_last_modified() {
     let dir = tempfile::tempdir().unwrap();
-    let (url, server) = serve(vec![ok_response(b"db", "Tue, 18 Aug 2026 18:18:06 GMT")]);
+    let (url, server) =
+        serve(vec![ok_response(&database("db", FIRST), "Tue, 18 Aug 2026 18:18:06 GMT")]);
 
     refresh(dir.path(), &url).unwrap();
 
@@ -216,14 +225,15 @@ fn an_unexpected_status_is_not_installed() {
 fn force_bypasses_the_conditional_request() {
     let dir = tempfile::tempdir().unwrap();
     let sync = dir.path();
+    let updated = database("an updated database", SECOND);
     let (url, server) = serve(vec![
-        ok_response(b"a real database", "Tue, 18 Aug 2026 18:18:06 GMT"),
-        ok_response(b"an updated database", "Wed, 19 Aug 2026 10:00:00 GMT"),
+        ok_response(&database("a real database", FIRST), "Tue, 18 Aug 2026 18:18:06 GMT"),
+        ok_response(&updated, "Wed, 19 Aug 2026 10:00:00 GMT"),
     ]);
 
     assert_eq!(refresh_forced(sync, &url, false).unwrap(), Outcome::Updated);
     assert_eq!(refresh_forced(sync, &url, true).unwrap(), Outcome::Updated);
-    assert_eq!(std::fs::read(sync.join("core.db")).unwrap(), b"an updated database");
+    assert_eq!(std::fs::read(sync.join("core.db")).unwrap(), updated);
 
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 2);

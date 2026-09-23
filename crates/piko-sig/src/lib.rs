@@ -66,6 +66,10 @@ pub mod decision;
 pub mod error;
 pub mod keyring;
 
-pub use decision::{Policy, Rejection, SignatureOutcome, Status, Trust, Verdict, decide};
+pub use decision::{
+    Policy, Rejection, SignatureOutcome, Status, Trust, Verdict, decide, newest_creation,
+};
 pub use error::{Error, Result};
-pub use keyring::{Keyring, open_context, signature_path, verify_database};
+pub use keyring::{
+    Checked, Keyring, open_context, signature_path, verify_database, verify_database_dated,
+};

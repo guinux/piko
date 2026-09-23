@@ -345,11 +345,26 @@ usr/bin/foo
 #[must_use]
 #[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
 pub fn gzip_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    gzip_tar_at(entries, 0)
+}
+
+/// As [`gzip_tar`], with every member's modification time set to `mtime` (Unix seconds).
+///
+/// `repo-add` stamps each entry with the time it wrote it, and the newest such time is how
+/// piko dates a repository database. A time of zero, which [`gzip_tar`] writes, dates nothing.
+///
+/// # Panics
+///
+/// As [`gzip_tar`].
+#[must_use]
+#[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
+pub fn gzip_tar_at(entries: &[(&str, &[u8])], mtime: u64) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for (path, content) in entries {
         let mut header = tar::Header::new_gnu();
         header.set_size(content.len() as u64);
         header.set_mode(0o644);
+        header.set_mtime(mtime);
         header.set_cksum();
         builder.append_data(&mut header, path, *content).expect("failed to append a tar entry");
     }
@@ -407,6 +422,20 @@ impl RepoFixture {
     /// As [`RepoFixture::write_archive`] and [`gzip_tar`].
     pub fn write_gzip_archive(&self, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
         self.write_archive(name, &gzip_tar(entries))
+    }
+
+    /// As [`RepoFixture::write_gzip_archive`], with every member written at `mtime`.
+    ///
+    /// # Panics
+    ///
+    /// As [`RepoFixture::write_archive`] and [`gzip_tar_at`].
+    pub fn write_gzip_archive_at(
+        &self,
+        name: &str,
+        entries: &[(&str, &[u8])],
+        mtime: u64,
+    ) -> PathBuf {
+        self.write_archive(name, &gzip_tar_at(entries, mtime))
     }
 }
 

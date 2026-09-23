@@ -64,7 +64,7 @@
 //! let cancel = Cancel::new();
 //!
 //! let refresher = Refresher::default();
-//! let outcome = refresher.refresh(
+//! let refreshed = refresher.refresh(
 //!     Path::new("/var/lib/pacman/sync"),
 //!     "core",
 //!     &["https://mirror.example/core/os/x86_64".to_owned()],
@@ -74,14 +74,29 @@
 //!     &cancel,
 //! )?;
 //!
-//! match outcome {
+//! match refreshed.outcome {
 //!     // `core.db` was downloaded, verified against `core.db.sig`, then renamed into place.
 //!     Outcome::Updated => println!("core updated"),
 //!     // A `304`. The live database was never touched.
 //!     Outcome::UpToDate => println!("core already current"),
+//!     // Every server offered an older `core.db`. The installed one stays.
+//!     Outcome::Kept => println!("core kept"),
+//! }
+//! // Servers passed over, and a database older than the age limit, are reported here.
+//! for note in &refreshed.notes {
+//!     println!("{note:?}");
 //! }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! # A signature proves origin, not freshness
+//!
+//! A mirror can serve an old but correctly signed database, or keep serving the same one.
+//! So a refresh also compares the date of what it downloads with the date of what is
+//! installed, refuses an older database, and moves on to the next server. It warns about a
+//! database older than an age limit, after asking a few more servers for a newer one. See
+//! [`freshness`] for the two levels of protection this gives, and for why an older database
+//! moves on to the next server while a bad signature does not.
 //!
 //! # What is deliberately not here
 //!
@@ -96,6 +111,7 @@
 pub mod cancel;
 pub mod concurrency;
 pub mod error;
+pub mod freshness;
 mod pool;
 pub mod progress;
 pub mod refresh;
@@ -103,5 +119,6 @@ pub mod refresh;
 pub use cancel::Cancel;
 pub use concurrency::Concurrency;
 pub use error::{Error, Result};
+pub use freshness::{FreshnessNote, FreshnessPolicy, Refreshed};
 pub use progress::{Event, Kind};
 pub use refresh::{DatabaseKind, Outcome, PackageFetch, Refresher, RepoRefresh, refresh};

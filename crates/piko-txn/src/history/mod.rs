@@ -592,6 +592,17 @@ impl Recorder {
         }
     }
 
+    /// `path` joined onto the installation root.
+    ///
+    /// `pacman.log` names a backup file by its full path. libalpm builds it that way:
+    /// `extract_single_file` joins the root before the warning is written
+    /// (`filename = handle->root + entryname`, `add.c:215`). The `.pacnew` and `.pacsave`
+    /// paths a transaction carries are root-relative, so a log line has to be joined here for
+    /// a file driven by pacman and by piko to read the same way.
+    fn absolute(&self, path: &Path) -> PathBuf {
+        self.entry.root.join(path)
+    }
+
     /// Writes `transaction started`, before the first mutation.
     pub(crate) fn started(&mut self) {
         let id = self.entry.id.clone();
@@ -618,14 +629,14 @@ impl Recorder {
     /// the database entry is updated (`add.c:641`).
     fn step(&mut self, step: &crate::Step, outcome: &StepOutcome<'_>) {
         let (action, pacsaves) = match *outcome {
-            StepOutcome::Installed { entry, replaced, extraction, pacsaves } => {
-                for path in self::pacnew_paths(extraction) {
+            StepOutcome::Installed { entry, replaced, pacnews, pacsaves, .. } => {
+                for path in pacnews {
                     self.log(&format!(
                         "warning: {} installed as {}",
-                        self::strip_pacnew(&path).display(),
-                        path.display()
+                        self.absolute(&self::strip_pacnew(path)).display(),
+                        self.absolute(path).display()
                     ));
-                    self.entry.pacnew.push(path);
+                    self.entry.pacnew.push(path.clone());
                 }
                 (Action::installed(entry, replaced), pacsaves)
             }
@@ -640,8 +651,8 @@ impl Recorder {
         for path in pacsaves {
             self.log(&format!(
                 "warning: {} saved as {}",
-                self::strip_pacsave(path).display(),
-                path.display()
+                self.absolute(&self::strip_pacsave(path)).display(),
+                self.absolute(path).display()
             ));
             self.entry.pacsave.push(path.clone());
         }
@@ -713,20 +724,6 @@ impl Recorder {
 /// starting in the same second, against two different databases.
 fn transaction_id(started: i64) -> String {
     format!("{started}-{}", std::process::id())
-}
-
-/// Every `.pacnew` an extraction left on disk.
-fn pacnew_paths(extraction: &crate::install::Extraction) -> Vec<PathBuf> {
-    extraction
-        .outcomes
-        .iter()
-        .filter_map(|(_, outcome)| match outcome {
-            crate::install::Outcome::Backup(crate::extract::BackupOutcome::KeptBoth { pacnew }) => {
-                Some(pacnew.clone())
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 /// The path a `.pacnew` was diverted from.

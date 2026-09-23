@@ -89,7 +89,17 @@ pub struct Report {
     pub installed: Vec<(String, Extraction)>,
     /// Packages removed, and how many files each removal touched.
     pub removed: Vec<(String, usize)>,
-    /// `.pacsave` files created, by path.
+    /// `.pacnew` files left on disk, by root-relative path, in step order.
+    ///
+    /// The package shipped a version of a backup file the user had edited, so both are on
+    /// disk now. libalpm reports this through `ALPM_EVENT_PACNEW_CREATED`, fired mid-extraction
+    /// and kept nowhere; a front end that wants to act on it afterwards has to read its own log
+    /// back. See [`crate::merge`] for what acts on this.
+    pub pacnews: Vec<PathBuf>,
+    /// `.pacsave` files created, by root-relative path, in step order.
+    ///
+    /// A file rotated out of the way to make room for one of these is not here. It was already
+    /// the user's to resolve before this transaction ran.
     pub pacsaves: Vec<PathBuf>,
     /// Every scriptlet function that ran, in order, with how it ended.
     ///
@@ -111,6 +121,25 @@ pub struct Report {
     /// Returned rather than raised: neither `pacman.log` nor the history store may fail a
     /// transaction. See [`crate::history`].
     pub history_problems: Vec<crate::history::Problem>,
+    /// Everything that stopped a backup file from being preserved.
+    ///
+    /// Returned rather than raised. The package is going away either way, so a file left in
+    /// place is a warning about that file rather than a broken transaction.
+    pub backup_problems: Vec<BackupProblem>,
+}
+
+/// Why a backup file could not be preserved the way a removal intended.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum BackupProblem {
+    /// The file was left where it is, because the `.pacsave` beside it could not be rotated.
+    #[error("{} was left in place: {reason}", path.display())]
+    RotationImpossible {
+        /// The file that is still there.
+        path: PathBuf,
+        /// What stopped the rotation.
+        reason: String,
+    },
 }
 
 /// One scriptlet function that piko ran.
@@ -1168,6 +1197,7 @@ impl Transaction<Staged<'_>> {
                         });
                     };
                     next_package = next_package.saturating_add(1);
+                    let pacnews_before = report.pacnews.len();
                     let pacsaves_before = report.pacsaves.len();
                     let extraction = self::install_step(
                         &InstallStep {
@@ -1193,6 +1223,7 @@ impl Transaction<Staged<'_>> {
                             entry: &package.entry,
                             replaced: package.replaces.as_ref().map(|old| &old.entry),
                             extraction: &extraction,
+                            pacnews: report.pacnews.get(pacnews_before..).unwrap_or_default(),
                             pacsaves: report.pacsaves.get(pacsaves_before..).unwrap_or_default(),
                         },
                     });
@@ -2383,6 +2414,59 @@ mod tests {
             b"edited by the user"
         );
         assert!(!root.path().join("etc/foo.conf").exists(), "the original was left behind");
+    }
+
+    /// A second save rotates the first out of the way rather than writing over it.
+    ///
+    /// Both copies are the user's own edits, from two different times. Overwriting one is a
+    /// loss nothing recovers from, which is why `shift_pacsave` (`remove.c:347`) exists.
+    #[test]
+    fn a_second_pacsave_rotates_the_first_one_out_of_the_way() {
+        let cache = tempfile::tempdir().unwrap();
+        for version in ["1.0.0-1", "2.0.0-1", "3.0.0-1"] {
+            write_package(
+                cache.path(),
+                &format!("foo-{version}-x86_64.pkg.tar"),
+                version,
+                &["etc/foo.conf"],
+                &[("etc/foo.conf", b"shipped"), ("usr/bin/foo", b"binary")],
+            );
+        }
+        // The version that drops the backup file, so each install of it saves what is there.
+        write_package(
+            cache.path(),
+            "foo-9.0.0-1-x86_64.pkg.tar",
+            "9.0.0-1",
+            &[],
+            &[("usr/bin/foo", b"binary")],
+        );
+
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let lock = DbLock::acquire(db.path()).unwrap();
+
+        // Three rounds, each editing the file and then upgrading to the version that drops it.
+        for (round, edit) in
+            [b"first edit".as_slice(), b"second edit", b"third edit"].iter().enumerate()
+        {
+            let version = ["1.0.0-1", "2.0.0-1", "3.0.0-1"].get(round).unwrap();
+            install_foo(cache.path(), db.path(), root.path(), &lock, version);
+            std::fs::write(root.path().join("etc/foo.conf"), edit).unwrap();
+            let report = install_foo(cache.path(), db.path(), root.path(), &lock, "9.0.0-1");
+            assert_eq!(report.pacsaves, [PathBuf::from("etc/foo.conf.pacsave")]);
+            assert!(report.backup_problems.is_empty(), "{:?}", report.backup_problems);
+        }
+
+        // The newest save is the plain one; the older two moved up, oldest furthest.
+        assert_eq!(std::fs::read(root.path().join("etc/foo.conf.pacsave")).unwrap(), b"third edit");
+        assert_eq!(
+            std::fs::read(root.path().join("etc/foo.conf.pacsave.1")).unwrap(),
+            b"second edit"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("etc/foo.conf.pacsave.2")).unwrap(),
+            b"first edit"
+        );
     }
 
     /// A package whose archive lists a member twice still produces a usable entry.

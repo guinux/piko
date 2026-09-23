@@ -309,6 +309,13 @@ pub enum Command {
         /// arrow, no summary.
         #[arg(short, long)]
         quiet: bool,
+        /// Warn about a repository database published more than this many days ago. 0 turns
+        /// the warning off.
+        ///
+        /// A quiet repository and a frozen mirror look the same by age alone, so this warns
+        /// and never refuses.
+        #[arg(long, value_name = "DAYS", default_value_t = crate::cmd::freshness::DEFAULT_MAX_AGE_DAYS)]
+        max_age: u64,
     },
 
     /// Resolves a dependency string to the name(s) of the sync-repository package(s) that
@@ -413,6 +420,14 @@ pub enum Command {
         /// (`pacman -Suu`).
         #[arg(long, requires = "sysupgrade")]
         downgrade: bool,
+
+        /// With --sysupgrade, warn about a repository database published more than this many
+        /// days ago. 0 turns the warning off.
+        ///
+        /// `plan` downloads nothing, so it cannot ask a mirror for anything newer. It only says
+        /// that the plan rests on an old database.
+        #[arg(long, value_name = "DAYS", default_value_t = crate::cmd::freshness::DEFAULT_MAX_AGE_DAYS)]
+        max_age: u64,
     },
 
     /// Explain why an installed package is present.
@@ -573,8 +588,24 @@ pub enum Command {
         ///
         /// Skips the conditional request entirely, so a `304` can never come back. Ignored
         /// with `--norefresh`, since nothing is fetched either way.
+        ///
+        /// Unlike pacman's `-Syy`, this does not accept a database older than the installed
+        /// one. `--accept-older` does that.
         #[arg(short, long)]
         force: bool,
+        /// Install a repository database even when it is older than the installed one.
+        ///
+        /// Use this to go back to an earlier snapshot, such as the Arch Linux Archive, with
+        /// `--downgrade`. Without it, an older database is refused and the next server is tried.
+        #[arg(long, conflicts_with = "norefresh")]
+        accept_older: bool,
+        /// Warn about a repository database published more than this many days ago. 0 turns
+        /// the warning off.
+        ///
+        /// A quiet repository and a frozen mirror look the same by age alone, so this warns
+        /// and never refuses.
+        #[arg(long, value_name = "DAYS", default_value_t = crate::cmd::freshness::DEFAULT_MAX_AGE_DAYS)]
+        max_age: u64,
         /// Overwrite files another package owns, for paths matching these glob patterns.
         #[arg(long, value_name = "GLOB")]
         overwrite: Vec<String>,
@@ -656,6 +687,11 @@ pub enum Command {
     /// **The signature is checked before the download replaces anything.** A database that fails
     /// its repository's `SigLevel` is discarded. The existing one is left in place. So a hostile
     /// or broken mirror cannot degrade a working system.
+    ///
+    /// **A database older than the installed one is refused too.** A signature does not prove
+    /// that a database is current, and a mirror can replay an old one. The next server is tried
+    /// instead. A database published longer ago than `--max-age` sends the refresh to a few more
+    /// servers for a newer one, then warns.
     #[command(visible_alias = "rf")]
     Refresh {
         /// Repositories to refresh. Refreshes every configured one when omitted.
@@ -665,8 +701,25 @@ pub enum Command {
         /// Skips the conditional request entirely, so a `304` can never come back. Use this
         /// for a locally corrupted database, or a mirror whose clock disagrees with its own
         /// `Last-Modified`.
+        ///
+        /// Unlike pacman's `-Syy`, this does not accept a database older than the installed
+        /// one. `--accept-older` does that.
         #[arg(short, long)]
         force: bool,
+        /// Install a database even when it is older than the installed one.
+        ///
+        /// A valid signature proves who made a database, not that it is current. So a database
+        /// older than the installed one is refused, and the next server is tried. Use this to go
+        /// back to an earlier snapshot on purpose, such as the Arch Linux Archive.
+        #[arg(long)]
+        accept_older: bool,
+        /// Warn about a repository database published more than this many days ago. 0 turns
+        /// the warning off.
+        ///
+        /// A quiet repository and a frozen mirror look the same by age alone, so this warns
+        /// and never refuses.
+        #[arg(long, value_name = "DAYS", default_value_t = crate::cmd::freshness::DEFAULT_MAX_AGE_DAYS)]
+        max_age: u64,
         /// Also refresh each repository's `<repo>.files` database.
         ///
         /// The file lists `piko files --repo <NAME>` reads. pacman splits this across two
@@ -723,6 +776,70 @@ pub enum Command {
         /// Print one line per transaction, with no per-package detail.
         #[arg(short, long)]
         quiet: bool,
+    },
+
+    /// Resolve the .pacnew and .pacsave files transactions left behind.
+    ///
+    /// A transaction that meets a configuration file you edited keeps both copies. The package's
+    /// version lands beside yours as `<path>.pacnew`, or yours is kept as `<path>.pacsave` when
+    /// the package goes away. This finds every such file and offers one decision per file: view
+    /// the difference, merge three ways against an older build in a cache directory, skip it,
+    /// remove it, or overwrite the installed file with it. It is pacdiff's counterpart.
+    ///
+    /// The pending files are found through the %BACKUP% entries of the installed packages, so
+    /// each one arrives with the package that declared it.
+    ///
+    /// A pending file holding the same bytes as the installed one carries nothing, so it is
+    /// removed without asking. One that piko could not read is reported and skipped; no
+    /// destructive action is offered for a pair it could not compare. A `.pacsave.N` is listed
+    /// and reported, never offered: it is a historical copy with no current version to merge it
+    /// against.
+    ///
+    /// There is no --noconfirm. Removing a file, overwriting one and merging two are three
+    /// different irreversible acts, and none is a safe default. Use --output for a
+    /// non-interactive listing.
+    ///
+    /// The difference and merge programs run on the host, with this terminal, and with piko's
+    /// own privileges. They are never run inside --root. A program that reads a configuration
+    /// file reads root's under sudo, so `DIFFPROG='vim -d'` runs root's vimrc.
+    #[command(visible_alias = "mg")]
+    Merge {
+        /// Where to look. Defaults to RootDir from pacman.conf, or `/`.
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+
+        /// Print the pending files, one absolute path per line, and change nothing.
+        #[arg(short, long)]
+        output: bool,
+
+        /// The program that shows a difference. Defaults to $DIFFPROG, then `diff -u`.
+        ///
+        /// The default prints the difference and returns, so the question is asked again
+        /// straight after. Set an editor, such as `vim -d`, to edit the files there instead.
+        ///
+        /// Split on whitespace, with `'` and `"` quoting a run. No shell runs, so nothing is
+        /// expanded; a value that needs one must name it, as in `sh -c ...`.
+        #[arg(long, value_name = "COMMAND")]
+        diffprog: Option<String>,
+
+        /// The program that merges three files. Defaults to $MERGEPROG, then `diff3 -m`.
+        ///
+        /// It is given the installed file, the base, and the pending file, in that order, and
+        /// its standard output is the merged result. Split the same way --diffprog is.
+        #[arg(long, value_name = "COMMAND")]
+        mergeprog: Option<String>,
+
+        /// Show a three-way difference rather than a two-way one, when a base is available.
+        ///
+        /// This hands --diffprog three paths, so it needs a program that reads three. `diff`
+        /// takes two; `vim -d` takes three.
+        #[arg(short = '3', long)]
+        threeway: bool,
+
+        /// Resolve only these paths, instead of everything pending. Either the installed file
+        /// or the pending one names a pair.
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
     },
 
     /// Parse and dump a pacman.conf-style configuration file.

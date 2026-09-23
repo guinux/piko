@@ -3,17 +3,19 @@
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use alpm_types::PackageFileName;
+use piko_db::repo::freshness::{self as dating, Publication, Staleness};
 use piko_db_write::AtomicFile;
-use piko_sig::{Keyring, Policy, Verdict};
+use piko_sig::{Checked, Keyring, Policy, Verdict};
 
 use crate::{
     cancel::Cancel,
     concurrency::Concurrency,
     error::{Error, Result},
+    freshness::{Baseline, FreshnessNote, FreshnessPolicy, Refreshed},
     pool,
     progress::{Event, Kind},
 };
@@ -28,7 +30,16 @@ pub enum Outcome {
     /// This comes from a `304` answer to a conditional request, not from comparing contents.
     /// Reaching it depends on the download having been stamped with the server's
     /// `Last-Modified`. The next request then offers back the exact value the server issued.
+    ///
+    /// A `200` whose `Last-Modified` equals the local file's time counts too, and its body is
+    /// not read. libcurl makes the same judgement for pacman. Some mirrors answer `304` only to
+    /// an exact match, and answer `200` otherwise.
     UpToDate,
+    /// No server offered a database at least as new as the installed one, so it was kept.
+    ///
+    /// Not an error: the system keeps the best database any server had. The
+    /// [`Refreshed::notes`] say which servers were passed over and why.
+    Kept,
 }
 
 /// Bounds and behaviour for downloading.
@@ -52,6 +63,15 @@ pub struct Limits {
     pub max_package_bytes: u64,
     /// How long to wait for the whole request.
     pub timeout: Duration,
+    /// How many further servers are asked for a newer database when the one in place is older
+    /// than the age limit.
+    ///
+    /// Each is a conditional request, so a server with nothing newer costs one exchange of
+    /// headers. The bound stops a long mirror list from turning one stale repository into
+    /// dozens of downloads.
+    pub freshness_probes: usize,
+    /// Bounds for dating a downloaded archive, which decompresses all of it.
+    pub archive: piko_db::Limits,
 }
 
 impl Default for Limits {
@@ -62,6 +82,8 @@ impl Default for Limits {
             max_bytes: 512 * 1024 * 1024,
             max_package_bytes: 8 * 1024 * 1024 * 1024,
             timeout: Duration::from_secs(60),
+            freshness_probes: 3,
+            archive: piko_db::Limits::default(),
         }
     }
 }
@@ -101,6 +123,67 @@ enum Signature {
     Absent,
     /// Downloaded into a temporary beside its destination.
     Downloaded(AtomicFile),
+}
+
+/// What the local copy of a database says about a download, before its body is read.
+///
+/// A package download has no local copy, and uses [`LocalCopy::NONE`].
+#[derive(Clone, Copy)]
+struct LocalCopy<'a> {
+    /// The `If-Modified-Since` value, or `None` for an unconditional request.
+    since: Option<&'a str>,
+    /// The local file's time, in seconds since the Unix epoch. `fetch` stamped it with the
+    /// server's own `Last-Modified` when it downloaded the file.
+    stamp: Option<u64>,
+    /// Whether a `200` whose `Last-Modified` equals `stamp` means "not modified".
+    equal_is_current: bool,
+    /// Whether a `200` whose `Last-Modified` is older than `stamp` is passed over.
+    older_is_behind: bool,
+}
+
+impl LocalCopy<'_> {
+    const NONE: Self =
+        Self { since: None, stamp: None, equal_is_current: false, older_is_behind: false };
+}
+
+/// What a request produced.
+enum Fetched {
+    /// The server said the local copy is current, with a `304` or with an equal
+    /// `Last-Modified`.
+    NotModified,
+    /// The server's `Last-Modified` is older than the local copy, so the body was not read.
+    Behind {
+        /// The `Last-Modified` it sent, in seconds since the Unix epoch.
+        last_modified: u64,
+    },
+    /// The body, downloaded into a temporary beside its destination.
+    Body(AtomicFile),
+}
+
+/// What one server contributed to a database refresh.
+enum Step {
+    /// A database from this server is now installed. It carries a note when the database is
+    /// older than the one it replaced.
+    Installed(Option<FreshnessNote>),
+    /// The server says the installed database is current.
+    Current,
+    /// The server offered nothing at least as new as the installed database.
+    PassedOver(FreshnessNote),
+    /// The server could not supply a usable database, for this reason.
+    Failed(String),
+}
+
+/// Everything about one database refresh that stays the same from server to server.
+///
+/// Bundled for the same reason as [`Target`] and [`Controls`].
+struct Attempt<'a> {
+    name: &'a str,
+    destination: &'a Path,
+    sig_destination: &'a Path,
+    keyring: Option<&'a Keyring>,
+    policy: Policy,
+    accept_older: bool,
+    controls: Controls<'a>,
 }
 
 /// The temporaries a refresh has downloaded, and where the signature belongs.
@@ -158,6 +241,8 @@ pub struct RepoRefresh<'a> {
     pub servers: &'a [String],
     /// The repository's effective database policy.
     pub policy: Policy,
+    /// How the refresh judges the age of what it downloads.
+    pub freshness: FreshnessPolicy,
 }
 
 /// One package in a batch fetch.
@@ -229,11 +314,13 @@ impl Refresher {
 
     /// Refreshes `<repo>.db` into `sync_dir`, verifying before it lands.
     ///
-    /// Use [`Refresher::refresh_all`] with [`DatabaseKind::Files`] to fetch `<repo>.files`.
+    /// Use [`Refresher::refresh_all`] with [`DatabaseKind::Files`] to fetch `<repo>.files`, or
+    /// to choose a [`FreshnessPolicy`] other than the default.
     ///
     /// `servers` are tried in order, as pacman tries mirrors. The first that answers wins, and
     /// a failure moves to the next rather than aborting. Every failure is collected so that
-    /// [`Error::AllServersFailed`] can name them all.
+    /// [`Error::AllServersFailed`] can name them all. A server whose database is older than the
+    /// installed one also moves to the next; see [`crate::freshness`].
     ///
     /// `keyring` and `policy` decide what the download must satisfy. When `policy.check` is
     /// false, nothing is verified — the same `SigLevel = Never` escape the rest of piko honors.
@@ -258,7 +345,7 @@ impl Refresher {
         policy: Policy,
         force: bool,
         cancel: &Cancel,
-    ) -> Result<Outcome> {
+    ) -> Result<Refreshed> {
         self.refresh_with_progress(sync_dir, repo, servers, keyring, policy, force, cancel, &|_| {})
     }
 
@@ -267,7 +354,7 @@ impl Refresher {
     /// `progress` is a narrow, deliberate exception to the rule that diagnostics are returned,
     /// not logged. See [`crate::progress`]'s documentation before treating this as license to
     /// add another one. It is called synchronously and may be called many times per file. It
-    /// duplicates no information the returned `Result<Outcome>` does not already carry.
+    /// duplicates no information the returned `Result<Refreshed>` does not already carry.
     ///
     /// # Errors
     ///
@@ -289,10 +376,16 @@ impl Refresher {
         force: bool,
         cancel: &Cancel,
         progress: &(dyn Fn(Event) + Sync),
-    ) -> Result<Outcome> {
+    ) -> Result<Refreshed> {
         self.refresh_one(
             sync_dir,
-            RepoRefresh { name: repo, kind: DatabaseKind::Db, servers, policy },
+            RepoRefresh {
+                name: repo,
+                kind: DatabaseKind::Db,
+                servers,
+                policy,
+                freshness: FreshnessPolicy::default(),
+            },
             keyring,
             Concurrency::default(),
             force,
@@ -307,9 +400,16 @@ impl Refresher {
     /// `worker` decides only which mirror this attempt starts on
     /// ([`Concurrency::servers_for`]). Every one is still tried in turn, so the failover of a
     /// single serial refresh is unchanged.
+    ///
+    /// The servers are tried in order until one installs a database or says the installed one
+    /// is current. A server that offers only an older database is passed over, and if every
+    /// server does that, the installed database is kept. Then, for a `.db` archive, the age
+    /// check runs. A database older than the age limit sends the refresh to the servers not yet
+    /// tried, a few at most, for a newer one.
     #[allow(
         clippy::too_many_arguments,
-        reason = "the public `refresh_with_progress` this backs already documents why each                   concern is named separately; this adds the two the batch decides"
+        reason = "the public `refresh_with_progress` this backs already documents why each \
+                  concern is named separately; this adds the two the batch decides"
     )]
     fn refresh_one(
         &self,
@@ -321,8 +421,8 @@ impl Refresher {
         worker: usize,
         cancel: &Cancel,
         progress: &(dyn Fn(Event) + Sync),
-    ) -> Result<Outcome> {
-        let RepoRefresh { name: repo, kind, servers, policy } = repo;
+    ) -> Result<Refreshed> {
+        let RepoRefresh { name: repo, kind, servers, policy, freshness } = repo;
         if servers.is_empty() {
             return Err(Error::NoServers { repo: repo.to_owned() });
         }
@@ -334,6 +434,108 @@ impl Refresher {
 
         let name = kind.file_name(repo);
         let destination = sync_dir.join(&name);
+        let sig_destination = sync_dir.join(format!("{name}.sig"));
+        let attempt = Attempt {
+            name: &name,
+            destination: &destination,
+            sig_destination: &sig_destination,
+            keyring,
+            policy,
+            accept_older: freshness.accept_older,
+            controls: Controls { cancel, progress },
+        };
+        let mut baseline = Baseline::new(&destination, keyring, policy, self.limits.archive);
+
+        let order: Vec<&String> = concurrency.servers_for(servers, worker).collect();
+        let mut notes = Vec::new();
+        let mut attempts = Vec::new();
+        let mut settled = None;
+        let mut tried = 0_usize;
+        for server in &order {
+            tried = tried.saturating_add(1);
+            let url = format!("{}/{name}", server.trim_end_matches('/'));
+            match self.attempt(&url, &attempt, force, &mut baseline)? {
+                Step::Installed(note) => {
+                    notes.extend(note);
+                    settled = Some(Outcome::Updated);
+                    break;
+                }
+                Step::Current => {
+                    settled = Some(Outcome::UpToDate);
+                    break;
+                }
+                Step::PassedOver(note) => notes.push(note),
+                Step::Failed(reason) => attempts.push((url, reason)),
+            }
+        }
+        let mut outcome = match settled {
+            Some(outcome) => outcome,
+            // Every server that answered offered something older. The installed database is
+            // the best one available, so it stays, and the notes say why.
+            None if !notes.is_empty() => Outcome::Kept,
+            None => return Err(Error::AllServersFailed { file: name, attempts }),
+        };
+
+        // The age check covers the package metadata only. A `.files` archive installs
+        // nothing, and its lag already shows as a version-skew error when it is read.
+        if kind == DatabaseKind::Db {
+            let mut probed = 0_usize;
+            while let Some(current) = baseline.get() {
+                match dating::staleness(current, freshness.now, freshness.max_age) {
+                    Staleness::Fresh => break,
+                    Staleness::FromTheFuture { ahead } => {
+                        notes.push(FreshnessNote::FromTheFuture { publication: current, ahead });
+                        break;
+                    }
+                    Staleness::Stale { age } => {
+                        // Under `accept_older` the user chose an old snapshot on purpose, and a
+                        // probe would accept anything at all. So there is nothing to probe for.
+                        let next = order.get(tried).filter(|_| {
+                            !freshness.accept_older && probed < self.limits.freshness_probes
+                        });
+                        let Some(server) = next else {
+                            notes.push(FreshnessNote::Stale {
+                                publication: current,
+                                age,
+                                max_age: freshness.max_age.unwrap_or_default(),
+                                probed,
+                            });
+                            break;
+                        };
+                        tried = tried.saturating_add(1);
+                        probed = probed.saturating_add(1);
+                        let url = format!("{}/{name}", server.trim_end_matches('/'));
+                        match self.attempt(&url, &attempt, false, &mut baseline)? {
+                            Step::Installed(note) => {
+                                notes.extend(note);
+                                outcome = Outcome::Updated;
+                            }
+                            Step::PassedOver(note) => notes.push(note),
+                            Step::Current | Step::Failed(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Refreshed { outcome, publication: baseline.peek(), notes })
+    }
+
+    /// Asks one server for the database, and installs it only if it verifies and is at least
+    /// as new as the installed one.
+    ///
+    /// Returns `Err` only for what must stop the whole refresh: a cancellation, or a
+    /// signature that was checked and refused. Everything else is this server's problem, and
+    /// the caller moves on to the next one.
+    fn attempt(
+        &self,
+        url: &str,
+        attempt: &Attempt<'_>,
+        force: bool,
+        baseline: &mut Baseline<'_>,
+    ) -> Result<Step> {
+        let Attempt { name, destination, sig_destination, keyring, policy, accept_older, controls } =
+            *attempt;
 
         // A conditional request uses the local file's mtime, which `fetch` stamped with the
         // server's own `Last-Modified` when it downloaded the file. Sending back the exact
@@ -341,76 +543,120 @@ impl Refresher {
         // date later than its `Last-Modified` gets a full 200, even though RFC 7232 §3.3 asks
         // for 304. The exact value gets 304 (3/3, at -1h/exact/+1h/+1d). Sending piko's own
         // download time instead never saves a transfer.
-        let since = if force { None } else { last_modified(&destination) };
+        let since = if force { None } else { last_modified(destination) };
+        let local = LocalCopy {
+            since: since.as_deref(),
+            stamp: local_stamp(destination),
+            // `force` asks for the download even when nothing changed.
+            equal_is_current: !force,
+            // `force` does not turn this off. Only `accept_older` does, because it is the one
+            // option that says an older database is wanted.
+            older_is_behind: !accept_older,
+        };
 
-        let mut attempts = Vec::new();
-        for server in concurrency.servers_for(servers, worker) {
-            let url = format!("{}/{name}", server.trim_end_matches('/'));
-            match self.fetch(
-                &url,
-                &destination,
-                since.as_deref(),
-                &name,
-                Target { kind: Kind::Database, max_bytes: self.limits.max_bytes },
-                Controls { cancel, progress },
-            ) {
-                Ok(None) => return Ok(Outcome::UpToDate),
-                Ok(Some(database)) => {
-                    // The signature comes from the same server as the database. Taking it
-                    // from another would let a well-behaved mirror vouch for a hostile one.
-                    let sig_destination = sync_dir.join(format!("{name}.sig"));
-                    match self.fetch_signature(
-                        &url,
-                        &sig_destination,
-                        &name,
-                        policy,
-                        cancel,
-                        progress,
-                    ) {
-                        Ok(signature) => {
-                            // Past this point a failure is an answer, not a transport
-                            // problem. `install` refuses a signature that does not verify,
-                            // and another mirror would only be one more chance at a yes.
-                            // So "could not check" falls through to the next server, and
-                            // "checked and wrong" stops here.
-                            self.install(
-                                Downloaded { database, signature, sig_destination },
-                                &name,
-                                keyring,
-                                policy,
-                                progress,
-                            )?;
-                            return Ok(Outcome::Updated);
-                        }
-                        Err(Error::Cancelled) => return Err(Error::Cancelled),
-                        // This server served the database but could not be asked for its
-                        // signature: a 500, a timeout, a redirect. The two must come from
-                        // one server, so the recovery is the next server for *both*. Pairing
-                        // this database with someone else's signature is the thing that rule
-                        // forbids. `database` is dropped uncommitted here, and `AtomicFile`
-                        // takes its temporary with it, so the live file is untouched.
-                        Err(error) => attempts.push((url, error.to_string())),
-                    }
-                }
-                Err(Error::Cancelled) => return Err(Error::Cancelled),
-                Err(error) => attempts.push((url, error.to_string())),
+        let database = match self.fetch(
+            url,
+            destination,
+            local,
+            name,
+            Target { kind: Kind::Database, max_bytes: self.limits.max_bytes },
+            controls,
+        ) {
+            Ok(Fetched::NotModified) => return Ok(Step::Current),
+            Ok(Fetched::Behind { last_modified }) => {
+                return Ok(Step::PassedOver(FreshnessNote::Behind {
+                    server: url.to_owned(),
+                    last_modified,
+                }));
             }
-        }
-        Err(Error::AllServersFailed { file: name, attempts })
+            Ok(Fetched::Body(database)) => database,
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(error) => return Ok(Step::Failed(error.to_string())),
+        };
+
+        // The signature comes from the same server as the database. Taking it from another
+        // would let a well-behaved mirror vouch for a hostile one.
+        let signature = match self.fetch_signature(
+            url,
+            sig_destination,
+            name,
+            policy,
+            controls.cancel,
+            controls.progress,
+        ) {
+            Ok(signature) => signature,
+            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            // This server served the database but could not be asked for its signature: a
+            // 500, a timeout, a redirect. The two must come from one server, so the recovery is
+            // the next server for *both*. Pairing this database with someone else's signature
+            // is the thing that rule forbids. `database` is dropped uncommitted here, and
+            // `AtomicFile` takes its temporary with it, so the live file is untouched.
+            Err(error) => return Ok(Step::Failed(error.to_string())),
+        };
+
+        // Past this point a signature failure is an answer, not a transport problem. `verify`
+        // refuses a signature that does not verify, and another mirror would only be one more
+        // chance at a yes. So "could not check" falls through to the next server, and
+        // "checked and wrong" stops here.
+        let signed_at = self.verify(&database, &signature, name, keyring, policy)?;
+
+        // A verified signature dates the database. Without one, the archive's newest member
+        // does, which needs one decompression of the download.
+        let newest_member = if signed_at.is_none() {
+            match dating::newest_member_time(database.path(), &self.limits.archive) {
+                Ok(newest) => newest,
+                Err(error) => {
+                    return Ok(Step::Failed(format!(
+                        "the downloaded {name} is not a readable repository archive: {error}"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        let candidate = Publication::new(signed_at, newest_member);
+        let installed = baseline.get();
+        let comparison = dating::compare(candidate, installed);
+
+        let note = if comparison.is_acceptable() {
+            None
+        } else if accept_older {
+            Some(FreshnessNote::AcceptedOlder {
+                server: url.to_owned(),
+                candidate,
+                replaced: installed,
+            })
+        } else {
+            // Both temporaries drop here, unlinked, and the destination never changed.
+            return Ok(Step::PassedOver(FreshnessNote::RefusedOlder {
+                server: url.to_owned(),
+                candidate,
+                installed,
+                comparison,
+            }));
+        };
+
+        self.commit(
+            Downloaded { database, signature, sig_destination: sig_destination.to_path_buf() },
+            controls.progress,
+        )?;
+        baseline.replace(candidate);
+        Ok(Step::Installed(note))
     }
 
     /// Downloads `url` into a temporary beside `destination`.
     ///
-    /// `Ok(None)` means the server answered "not modified".
+    /// `local` describes the copy already at `destination`, if any. It decides whether the
+    /// request is conditional, and whether a `200` is read at all: see [`LocalCopy`].
     fn fetch(
         &self,
         url: &str,
         destination: &Path,
-        since: Option<&str>,
+        local: LocalCopy<'_>,
         name: &str,
         target: Target,
         controls: Controls<'_>,
-    ) -> Result<Option<AtomicFile>> {
+    ) -> Result<Fetched> {
         let Target { kind, max_bytes } = target;
         let Controls { cancel, progress } = controls;
         // Checked before the request, not only inside the stream. A worker that was just
@@ -419,7 +665,7 @@ impl Refresher {
             return Err(Error::Cancelled);
         }
         let mut request = self.agent.get(url);
-        if let Some(value) = since {
+        if let Some(value) = local.since {
             request = request.header("If-Modified-Since", value);
         }
 
@@ -444,7 +690,7 @@ impl Refresher {
         // `DatabaseOptional`.
         match response.status().as_u16() {
             200 => {}
-            304 => return Ok(None),
+            304 => return Ok(Fetched::NotModified),
             other => {
                 return Err(Error::Io {
                     path: PathBuf::from(url),
@@ -460,6 +706,24 @@ impl Refresher {
             .get("last-modified")
             .and_then(|value| value.to_str().ok())
             .and_then(parse_http_date);
+
+        // libcurl's time condition, which pacman relies on, applies to a `200` as well as to a
+        // `304`. Measured with `curl -z` against a server that ignores `If-Modified-Since`: a
+        // `Last-Modified` equal to or older than the local file's time writes nothing, and
+        // pacman reports the database as up to date. Some mirrors answer `304` only to an exact
+        // match, so without this a mirror that is behind would replace a newer database.
+        //
+        // The header is not signed. It is used here only to rule a body out, never to accept
+        // one, so a mirror that lies in it can only cause itself to be skipped.
+        if let (Some(local_time), Some(served)) = (local.stamp, stamp) {
+            if local.older_is_behind && served < local_time {
+                return Ok(Fetched::Behind { last_modified: served });
+            }
+            if local.equal_is_current && served == local_time {
+                return Ok(Fetched::NotModified);
+            }
+        }
+
         // Display-only, per this module's documentation. Never fed into `max_bytes`.
         let total = response
             .headers()
@@ -491,7 +755,7 @@ impl Refresher {
         {
             file.set_modified(time);
         }
-        Ok(Some(file))
+        Ok(Fetched::Body(file))
     }
 
     /// Downloads the detached signature for a database or package, when the policy will use
@@ -573,46 +837,53 @@ impl Refresher {
         Ok(Signature::Downloaded(file))
     }
 
-    /// Verifies the downloaded temporaries and, only then, renames them into place.
+    /// Verifies the downloaded temporaries, while the live database is still the old one.
     ///
-    /// The order here is the whole point of the module; see its documentation.
-    fn install(
+    /// Returns when the accepted signature was made, if a signature was verified. The order
+    /// around this is the whole point of the module; see its documentation.
+    fn verify(
         &self,
-        downloaded: Downloaded,
+        database: &AtomicFile,
+        signature: &Signature,
         name: &str,
         keyring: Option<&Keyring>,
         policy: Policy,
-        progress: &(dyn Fn(Event) + Sync),
-    ) -> Result<()> {
-        let Downloaded { database, signature, sig_destination } = downloaded;
-        if policy.check {
-            let Some(keyring) = keyring else {
-                return Err(Error::SignatureUncheckable {
-                    file: name.to_owned(),
-                    reason: "the policy requires a signature but no keyring was given".to_owned(),
-                });
-            };
-
-            // Verified at the temporary path, while the live database is still the old one.
-            let outcomes = match &signature {
-                Signature::Downloaded(signature) => keyring
-                    .verify_detached(database.path(), signature.path())
-                    .map_err(|source| Error::SignatureUncheckable {
-                        file: name.to_owned(),
-                        reason: source.to_string(),
-                    })?,
-                Signature::NotRequested | Signature::Absent => Vec::new(),
-            };
-
-            if let Verdict::Rejected(rejection) = piko_sig::decide(&outcomes, policy) {
-                // Both temporaries drop here, unlinked, and the destination never changed.
-                return Err(Error::SignatureRejected {
-                    file: name.to_owned(),
-                    reason: rejection.to_string(),
-                });
-            }
+    ) -> Result<Option<SystemTime>> {
+        if !policy.check {
+            return Ok(None);
         }
+        let Some(keyring) = keyring else {
+            return Err(Error::SignatureUncheckable {
+                file: name.to_owned(),
+                reason: "the policy requires a signature but no keyring was given".to_owned(),
+            });
+        };
 
+        let outcomes = match signature {
+            Signature::Downloaded(signature) => keyring
+                .verify_detached(database.path(), signature.path())
+                .map_err(|source| Error::SignatureUncheckable {
+                    file: name.to_owned(),
+                    reason: source.to_string(),
+                })?,
+            Signature::NotRequested | Signature::Absent => Vec::new(),
+        };
+
+        let checked = Checked::from_outcomes(&outcomes, policy);
+        if let Verdict::Rejected(rejection) = checked.verdict {
+            // The temporaries drop with the caller, unlinked, and the destination never
+            // changed.
+            return Err(Error::SignatureRejected {
+                file: name.to_owned(),
+                reason: rejection.to_string(),
+            });
+        }
+        Ok(checked.signed_at)
+    }
+
+    /// Renames verified temporaries into place.
+    fn commit(&self, downloaded: Downloaded, progress: &(dyn Fn(Event) + Sync)) -> Result<()> {
+        let Downloaded { database, signature, sig_destination } = downloaded;
         // The database lands first. A crash between the two leaves a database with a stale
         // signature, which the next open rejects. The reverse order would leave a signature
         // that vouches for a file that is not there yet.
@@ -740,7 +1011,7 @@ impl Refresher {
             match self.fetch(
                 &url,
                 &destination,
-                None,
+                LocalCopy::NONE,
                 &name,
                 Target { kind: Kind::Package, max_bytes: self.limits.max_package_bytes },
                 controls,
@@ -748,15 +1019,16 @@ impl Refresher {
                 // A server answering "not modified" to a request that carried no
                 // `If-Modified-Since` is not behaving like HTTP. Treat it as a failure of
                 // this server rather than silently reporting success with nothing
-                // downloaded.
-                Ok(None) => {
+                // downloaded. `LocalCopy::NONE` has no time to be behind, so `Behind` cannot
+                // arise here, and is treated the same way.
+                Ok(Fetched::NotModified | Fetched::Behind { .. }) => {
                     attempts.push((
                         url,
                         "the server answered \"not modified\" to an unconditional request"
                             .to_owned(),
                     ));
                 }
-                Ok(Some(file)) => {
+                Ok(Fetched::Body(file)) => {
                     let sig_destination = cache_dir.join(format!("{name}.sig"));
                     let signature = match self.fetch_signature(
                         &url,
@@ -831,7 +1103,7 @@ impl Refresher {
         force: bool,
         cancel: &Cancel,
         progress: &(dyn Fn(usize, Event) + Sync),
-    ) -> Vec<Result<Outcome>> {
+    ) -> Vec<Result<Refreshed>> {
         // The key is the file name, not the repository name. A `--files` batch names one
         // repository twice, on purpose. Its `.db` and its `.files` are two destinations, so
         // two workers cannot race for one temporary.
@@ -958,6 +1230,15 @@ fn stream_bounded(
         })?;
         on_chunk(read as u64);
     }
+}
+
+/// The existing database's mtime in seconds since the Unix epoch.
+///
+/// `fetch` stamped it with the server's own `Last-Modified`, so this is what that server said
+/// about the file's age. `None` when there is no file.
+fn local_stamp(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
 }
 
 /// The existing database's mtime as an HTTP date, for a conditional request.
@@ -1098,7 +1379,7 @@ pub fn refresh(
     policy: Policy,
     force: bool,
     cancel: &Cancel,
-) -> Result<Outcome> {
+) -> Result<Refreshed> {
     Refresher::default().refresh(sync_dir, repo, servers, keyring, policy, force, cancel)
 }
 

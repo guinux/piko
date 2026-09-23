@@ -121,6 +121,24 @@ pub struct Extraction {
     pub unreadable: Vec<PathBuf>,
 }
 
+impl Extraction {
+    /// Every `.pacnew` this extraction left on disk, in archive order.
+    ///
+    /// A [`BackupOutcome::KeptBoth`] is what says a file is there. The other two backup
+    /// outcomes either moved the packaged version into place or removed the `.pacnew` as
+    /// redundant, so neither leaves anything for a user to merge.
+    ///
+    /// This is the only place that knows the rule. The recorder, the terminal and the
+    /// transaction's report each read one collected list, rather than three copies of this
+    /// `match`.
+    pub fn pacnews(&self) -> impl Iterator<Item = &Path> {
+        self.outcomes.iter().filter_map(|(_, outcome)| match outcome {
+            Outcome::Backup(BackupOutcome::KeptBoth { pacnew }) => Some(pacnew.as_path()),
+            _ => None,
+        })
+    }
+}
+
 /// One captured metadata member.
 ///
 /// The time travels with the bytes. A member is *copied* into the database entry rather than

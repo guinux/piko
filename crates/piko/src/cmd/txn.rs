@@ -482,6 +482,7 @@ pub fn install(
         recording: options.side_effects.recording.clone(),
         check_space: options.check_space,
         cancel: Some(cancel_flag),
+        report_pending: !options.download_only,
     };
     run(
         root,
@@ -878,6 +879,8 @@ pub fn remove(
         // before deleting, so a file the user told piko never to touch survives a removal.
         patterns: options.patterns,
         recording: side_effects.recording.clone(),
+        // A removal writes no file, but it does save modified configuration files.
+        report_pending: true,
         ..Settings::default()
     };
     run(
@@ -1098,6 +1101,10 @@ struct Settings {
     /// [`run`] holds that check, and explains it. This is `None` for a transaction with no
     /// handler installed, which is every removal.
     cancel: Option<piko_net::Cancel>,
+    /// Whether a finished commit names the configuration files it left behind.
+    ///
+    /// False for `-w`, which commits nothing and so leaves none.
+    report_pending: bool,
 }
 
 /// The live step list `run` drives, bundled so its own parameter count stays under clippy's
@@ -1232,7 +1239,14 @@ fn run(
     match result {
         Ok(report) => {
             report_side_effects(&report);
+            // Released before the follow-up, not after. An editor left open for ten minutes
+            // must not hold `db.lck`. What is on disk is already final: the `PostTransaction`
+            // hooks ran inside `commit`, and the scan that follows reopens the local database
+            // read-only, which needs no lock.
             let _ = lock.release();
+            if settings.report_pending {
+                crate::cmd::merge::report_pending(root, &report, out);
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -1299,6 +1313,13 @@ fn report_side_effects(report: &piko_txn::Report) {
     // Neither record can fail a transaction, so a problem with one arrives here rather than
     // as an error. See `piko_txn::history`.
     for problem in &report.history_problems {
+        eprintln!("Warning: {problem}");
+    }
+
+    // A backup file that could not be preserved is a warning about that file. The package it
+    // belonged to is gone either way, so failing the transaction over it would report a
+    // completed removal as a broken one.
+    for problem in &report.backup_problems {
         eprintln!("Warning: {problem}");
     }
 

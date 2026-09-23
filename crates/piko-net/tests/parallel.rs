@@ -29,6 +29,7 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 
@@ -43,7 +44,10 @@ use std::{
 };
 
 use alpm_types::PackageFileName;
-use piko_net::{Cancel, Concurrency, DatabaseKind, Outcome, PackageFetch, Refresher, RepoRefresh};
+use piko_net::{
+    Cancel, Concurrency, DatabaseKind, FreshnessPolicy, Outcome, PackageFetch, Refresher,
+    RepoRefresh,
+};
 use piko_sig::Policy;
 
 /// How long each response is held open, so overlapping transfers actually overlap.
@@ -119,19 +123,31 @@ fn serve_one(mut stream: std::net::TcpStream, seen: &Seen) {
     let response = if path.ends_with(".sig") {
         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
     } else {
-        let body = b"a database or a package, as far as this test is concerned";
+        // A real archive, because a refresh dates an unsigned database by reading it as one.
+        // A package fetch does not look inside, so the same body serves for both.
+        let body = piko_db::fixture::gzip_tar_at(&[("foo-1.0.0-1/desc", b"x")], PUBLISHED);
         let mut out = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nLast-Modified: Wed, 26 Aug 2026 08:31:27 \
              GMT\r\n\r\n",
             body.len()
         )
         .into_bytes();
-        out.extend_from_slice(body);
+        out.extend_from_slice(&body);
         out
     };
     let _ = stream.write_all(&response);
     let _ = stream.flush();
     seen.live.fetch_sub(1, Ordering::SeqCst);
+}
+
+/// When every served archive was published: Wed, 26 Aug 2026 08:31:27 GMT, its
+/// `Last-Modified`.
+const PUBLISHED: u64 = 1_787_733_087;
+
+/// A day after [`PUBLISHED`], so no database here is old enough to send a refresh looking at
+/// other mirrors. The requests each test counts are the ones it makes itself.
+fn freshness() -> FreshnessPolicy {
+    FreshnessPolicy::new(std::time::UNIX_EPOCH + std::time::Duration::from_secs(PUBLISHED + 86_400))
 }
 
 /// Unsigned: the path under test is the download, not the keyring.
@@ -283,6 +299,7 @@ fn repositories_refresh_concurrently_and_report_in_input_order() {
             kind: DatabaseKind::Db,
             servers: &servers,
             policy: unsigned_database(),
+            freshness: freshness(),
         })
         .collect();
 
@@ -304,7 +321,7 @@ fn repositories_refresh_concurrently_and_report_in_input_order() {
     assert_eq!(results.len(), names.len());
     for (index, result) in results.iter().enumerate() {
         assert_eq!(
-            *result.as_ref().expect("every repository refreshes"),
+            result.as_ref().expect("every repository refreshes").outcome,
             Outcome::Updated,
             "repository {index} ({}) did not update",
             names[index]
@@ -420,6 +437,7 @@ fn a_repository_named_twice_is_refused_before_any_io() {
             kind: DatabaseKind::Files,
             servers: &servers,
             policy: unsigned_database(),
+            freshness: freshness(),
         })
         .collect();
 
@@ -455,6 +473,7 @@ fn a_repositorys_db_and_files_are_fetched_side_by_side() {
             kind,
             servers: &servers,
             policy: unsigned_database(),
+            freshness: freshness(),
         })
         .collect();
 
@@ -469,7 +488,10 @@ fn a_repositorys_db_and_files_are_fetched_side_by_side() {
     );
     assert_eq!(results.len(), 2);
     for result in &results {
-        assert!(matches!(result, Ok(Outcome::Updated)), "both archives must install: {result:?}");
+        assert!(
+            matches!(result, Ok(refreshed) if refreshed.outcome == Outcome::Updated),
+            "both archives must install: {result:?}"
+        );
     }
 
     let mut fetched: Vec<String> = seen.paths();

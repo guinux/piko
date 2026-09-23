@@ -465,17 +465,7 @@ fn verify_repo_archive(
         // falls back the same way; see `signing_policy`.
         return Ok(());
     };
-    // Through `RepositoryConfig::effective_sig_level`, never by reading `sig_level` directly.
-    // A repository that declares no `SigLevel` of its own keeps the parser's `USE_DEFAULT`
-    // sentinel (bit 31) rather than the global value. Using the raw field would read a sentinel
-    // as though it were a policy. This function must share the rule rather than restate it.
-    let level = parsed
-        .repositories
-        .iter()
-        .find(|configured| configured.name == *repo)
-        .map_or(parsed.options.sig_level, |configured| {
-            configured.effective_sig_level(parsed.options.sig_level)
-        });
+    let level = database_sig_level(parsed, repo);
 
     match piko_sig::verify_database(archive, &parsed.options.gpg_dir, level) {
         // An unverifiable archive is not a bad archive. Both stop the read. The two errors keep
@@ -489,6 +479,42 @@ fn verify_repo_archive(
         }
         Ok(piko_sig::Verdict::Accepted { .. }) => Ok(()),
     }
+}
+
+/// The `SigLevel` a configured repository's database is held to.
+///
+/// Through `RepositoryConfig::effective_sig_level`, never by reading `sig_level` directly. A
+/// repository that declares no `SigLevel` of its own keeps the parser's `USE_DEFAULT` sentinel
+/// (bit 31) rather than the global value. Using the raw field would read a sentinel as though
+/// it were a policy. Every caller must share the rule rather than restate it.
+fn database_sig_level(parsed: &PacmanConfig, repo: &RepoName) -> piko_db::config::SigLevel {
+    parsed
+        .repositories
+        .iter()
+        .find(|configured| configured.name == *repo)
+        .map_or(parsed.options.sig_level, |configured| {
+            configured.effective_sig_level(parsed.options.sig_level)
+        })
+}
+
+/// When an opened repository database was published, for a command that warns about an old
+/// one without refreshing it.
+///
+/// A signature that verifies under the repository's `SigLevel` dates it; otherwise the
+/// archive's newest member does, recorded when the database was opened. This checks the
+/// signature a second time, after [`open_repo_by_name`] already did. That costs nothing on a
+/// repository with no `.sig`, which is every Arch repository, and one hash of the archive on a
+/// signed one. A check that fails, or no readable config, leaves only the archive date.
+pub fn repo_publication(
+    db: &RepoDatabase,
+    cli: &Cli,
+    config: &ConfigCache,
+) -> Option<piko_db::repo::freshness::Publication> {
+    let signed_at = config.get(cli).ok().and_then(|parsed| {
+        let level = database_sig_level(parsed, db.name());
+        piko_sig::verify_database_dated(db.path(), &parsed.options.gpg_dir, level).ok()?.signed_at
+    });
+    piko_db::repo::freshness::Publication::new(signed_at, db.newest_member_time())
 }
 
 /// Opens every repository configured in `pacman.conf`, in file (priority) order, skipping any that

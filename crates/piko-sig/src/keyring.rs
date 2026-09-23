@@ -22,12 +22,15 @@
 //!   cache finds no signing key, and no error is raised.
 //! - GPGME, over the same corpus, returned `good` with `Full` validity for every package.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use piko_db::config::SigLevel;
 
 use crate::{
-    decision::{Policy, SignatureOutcome, Status, Trust, Verdict},
+    decision::{Policy, SignatureOutcome, Status, Trust, Verdict, newest_creation},
     error::{Error, Result},
 };
 
@@ -156,16 +159,50 @@ impl Keyring {
     ///
     /// Returns [`Error::Gpgme`] if a signature is present but GnuPG could not be run over it.
     pub fn check(&self, path: &Path, policy: Policy) -> Result<Verdict> {
+        self.check_dated(path, policy).map(|checked| checked.verdict)
+    }
+
+    /// As [`Keyring::check`], and also reports when the accepted signature was made.
+    ///
+    /// # Errors
+    ///
+    /// As [`Keyring::check`].
+    pub fn check_dated(&self, path: &Path, policy: Policy) -> Result<Checked> {
         // Skipping the whole thing when the policy asks for nothing also skips spawning gpg.
         // This is what keeps `SigLevel = Never` free rather than merely permissive.
         if !policy.check {
-            return Ok(Verdict::Accepted { verified: false });
+            return Ok(Checked { verdict: Verdict::Accepted { verified: false }, signed_at: None });
         }
 
         let signature = signature_path(path);
         let outcomes =
             if signature.is_file() { self.verify_detached(path, &signature)? } else { Vec::new() };
-        Ok(crate::decision::decide(&outcomes, policy))
+        Ok(Checked::from_outcomes(&outcomes, policy))
+    }
+}
+
+/// A verdict, and when the signature behind it was made.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Checked {
+    /// Whether the policy accepts the file.
+    pub verdict: Verdict,
+    /// When the newest good signature was made.
+    ///
+    /// Set only when the verdict is `Accepted { verified: true }`. An unsigned file, or one
+    /// the policy refused, has no signature time worth trusting.
+    pub signed_at: Option<SystemTime>,
+}
+
+impl Checked {
+    /// Applies `policy` to `outcomes`, and dates the result if it verified.
+    #[must_use]
+    pub fn from_outcomes(outcomes: &[SignatureOutcome], policy: Policy) -> Self {
+        let verdict = crate::decision::decide(outcomes, policy);
+        let signed_at = match verdict {
+            Verdict::Accepted { verified: true } => newest_creation(outcomes),
+            _ => None,
+        };
+        Self { verdict, signed_at }
     }
 }
 
@@ -188,11 +225,27 @@ impl Keyring {
 /// opened. Returns [`Error::Gpgme`] if a signature is present but GnuPG could not run. A
 /// signature that was checked and refused is not an error here. See [`Verdict::Rejected`].
 pub fn verify_database(archive: &Path, gpg_dir: &Path, sig_level: SigLevel) -> Result<Verdict> {
+    verify_database_dated(archive, gpg_dir, sig_level).map(|checked| checked.verdict)
+}
+
+/// As [`verify_database`], and also reports when the accepted signature was made.
+///
+/// A caller that judges how recent a database is wants this date. It is the only date about a
+/// signed database that a mirror cannot forge.
+///
+/// # Errors
+///
+/// As [`verify_database`].
+pub fn verify_database_dated(
+    archive: &Path,
+    gpg_dir: &Path,
+    sig_level: SigLevel,
+) -> Result<Checked> {
     let policy = Policy::for_database(sig_level);
     if !policy.check {
-        return Ok(Verdict::Accepted { verified: false });
+        return Ok(Checked { verdict: Verdict::Accepted { verified: false }, signed_at: None });
     }
-    Keyring::open(gpg_dir)?.check(archive, policy)
+    Keyring::open(gpg_dir)?.check_dated(archive, policy)
 }
 
 /// GPGME takes a NUL-terminated path. A Rust path may legitimately not be UTF-8.
@@ -251,7 +304,7 @@ fn describe(signature: gpgme::Signature<'_>) -> SignatureOutcome {
         _ => Trust::Unknown,
     };
 
-    SignatureOutcome { status, trust, fingerprint }
+    SignatureOutcome { status, trust, fingerprint, created: signature.creation_time() }
 }
 
 /// The conventional location of a detached signature: the file's own name plus `.sig`.

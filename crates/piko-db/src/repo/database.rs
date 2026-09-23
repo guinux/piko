@@ -222,6 +222,8 @@ pub struct RepoDatabase {
     diagnostics: Box<[RepoDiagnostic]>,
     /// How many diagnostics were found beyond [`Limits::max_diagnostics`] and so not kept.
     diagnostics_dropped: usize,
+    /// The newest member modification time in the archive, recorded during the open.
+    newest_member_time: Option<u64>,
     /// The same `Arc` every [`RepoPackage`] in `packages` holds a clone of. Kept here too so
     /// [`Self::file_lists`] can recognise a package that was **not** produced by this
     /// database — see there.
@@ -351,7 +353,7 @@ impl RepoDatabase {
         // both hold a `&RefCell<Sink<_>>`, and borrow it mutably only for the push.
         let diagnostics = RefCell::new(Sink::new(&options.limits));
 
-        archive::walk(
+        let newest_member_time = archive::walk(
             path,
             &options.limits,
             |item| {
@@ -401,6 +403,7 @@ impl RepoDatabase {
             packages,
             diagnostics,
             diagnostics_dropped,
+            newest_member_time,
             files_source,
         })
     }
@@ -421,6 +424,21 @@ impl RepoDatabase {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The newest modification time of any member of the opened archive, in seconds since the
+    /// Unix epoch.
+    ///
+    /// `repo-add` writes a new entry at the time it runs and keeps the time of every entry it
+    /// copies. So this is when the repository last published a package. Measured on `core.db`
+    /// and `extra.db`, it matches the mirror's `Last-Modified` to within one second. `None`
+    /// means every member carries time zero, which some reproducible archive builders write.
+    ///
+    /// It is authenticated only as far as the archive is. For an unsigned database, the mirror
+    /// chose it. See [`crate::repo::freshness`] for how it is used.
+    #[must_use]
+    pub const fn newest_member_time(&self) -> Option<u64> {
+        self.newest_member_time
     }
 
     /// Looks up a package by name.

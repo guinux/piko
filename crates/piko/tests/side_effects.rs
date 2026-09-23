@@ -35,12 +35,13 @@ use std::{
 const PIKO: &str = env!("CARGO_BIN_EXE_piko");
 
 /// A `.PKGINFO` for `name` at `version`.
-fn pkginfo(name: &str, version: &str, depends: &[&str]) -> String {
+fn pkginfo(name: &str, version: &str, depends: &[&str], backups: &[&str]) -> String {
     let depends: String = depends.iter().map(|entry| format!("depend = {entry}\n")).collect();
+    let backups: String = backups.iter().map(|entry| format!("backup = {entry}\n")).collect();
     format!(
         "pkgname = {name}\npkgbase = {name}\npkgver = {version}\npkgdesc = x\n\
          url = https://example.org/\nbuilddate = 1733737242\n\
-         packager = A <a@b.c>\nsize = 4\narch = x86_64\nlicense = MIT\n{depends}"
+         packager = A <a@b.c>\nsize = 4\narch = x86_64\nlicense = MIT\n{depends}{backups}"
     )
 }
 
@@ -58,7 +59,7 @@ fn write_package(cache: &Path, version: &str, script: Option<&str>) {
 fn write_package_as_root(cache: &Path, version: &str, script: Option<&str>) {
     std::fs::write(
         cache.join(format!("foo-{version}-x86_64.pkg.tar")),
-        package_tar_owned("foo", version, script, &[], &[], 0, 0),
+        package_tar_owned("foo", version, script, &[], &[], &[], 0, 0),
     )
     .unwrap();
 }
@@ -96,6 +97,7 @@ fn write_package_depending_on(cache: &Path, name: &str, version: &str, depends: 
             None,
             &[],
             depends,
+            &[],
             u64::from(rustix::process::getuid().as_raw()),
             u64::from(rustix::process::getgid().as_raw()),
         ),
@@ -124,18 +126,46 @@ fn package_tar(name: &str, version: &str, script: Option<&str>, extra: &[(&str, 
         script,
         extra,
         &[],
+        &[],
+        u64::from(rustix::process::getuid().as_raw()),
+        u64::from(rustix::process::getgid().as_raw()),
+    )
+}
+
+/// [`package_tar`], for a package that declares `backups` as `%BACKUP%` paths.
+///
+/// A path declared here must also be shipped in `extra`, the way a real package ships the
+/// configuration file it backs up.
+fn package_tar_with_backups(
+    name: &str,
+    version: &str,
+    extra: &[(&str, &str)],
+    backups: &[&str],
+) -> Vec<u8> {
+    package_tar_owned(
+        name,
+        version,
+        None,
+        extra,
+        &[],
+        backups,
         u64::from(rustix::process::getuid().as_raw()),
         u64::from(rustix::process::getgid().as_raw()),
     )
 }
 
 /// [`package_tar`], with the ownership every member names spelled out.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct part of the archive this builds"
+)]
 fn package_tar_owned(
     name: &str,
     version: &str,
     script: Option<&str>,
     extra: &[(&str, &str)],
     depends: &[&str],
+    backups: &[&str],
     uid: u64,
     gid: u64,
 ) -> Vec<u8> {
@@ -155,7 +185,7 @@ fn package_tar_owned(
         builder.append_data(&mut header, path, contents).unwrap();
     };
 
-    add(".PKGINFO", pkginfo(name, version, depends).as_bytes(), false);
+    add(".PKGINFO", pkginfo(name, version, depends, backups).as_bytes(), false);
     if let Some(script) = script {
         add(".INSTALL", script.as_bytes(), false);
     }
@@ -400,6 +430,53 @@ impl Sandbox {
         let mut child = command.stdin(Stdio::piped()).spawn().unwrap();
         std::io::Write::write_all(&mut child.stdin.take().unwrap(), answer.as_bytes()).unwrap();
         child.wait_with_output().unwrap()
+    }
+
+    /// Runs `piko merge`, answering the prompts with `answer` when one is given.
+    ///
+    /// `--diffprog` and `--mergeprog` are pointed at `true`, a program that starts, prints
+    /// nothing and succeeds. A test here checks what piko does with a pair, not what an
+    /// external program shows.
+    fn run_merge(&self, extra: &[&str], answer: Option<&str>) -> Output {
+        let mut command = Command::new(PIKO);
+        command
+            .arg("merge")
+            .arg("--config")
+            .arg(self.path("pacman.conf"))
+            .arg("--root")
+            .arg(self.path("root"))
+            .arg("--dbpath")
+            .arg(self.path("db"))
+            .arg("--diffprog")
+            .arg("true")
+            .arg("--mergeprog")
+            .arg("true")
+            .args(extra)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let Some(answer) = answer else {
+            return command.stdin(Stdio::null()).output().unwrap();
+        };
+        let mut child = command.stdin(Stdio::piped()).spawn().unwrap();
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), answer.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    /// Installs a package that ships `etc/foo.conf` and declares it as a `%BACKUP%` path.
+    fn install_with_backup(&self, version: &str, shipped: &str) -> Output {
+        std::fs::write(
+            self.path(&format!("cache/conf-{version}-x86_64.pkg.tar")),
+            package_tar_with_backups(
+                "conf",
+                version,
+                &[("etc/foo.conf", shipped)],
+                &["etc/foo.conf"],
+            ),
+        )
+        .unwrap();
+        self.write_repo(&[("conf", version, &[])]);
+        self.run_install(&["conf"], &[])
     }
 
     /// Writes `<dbpath>/sync/test.db` with one `desc` per `(name, version, depends)` triple.
@@ -2300,5 +2377,262 @@ fn owns_continues_past_a_path_nothing_owns() {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains(&format!("No package owns {stray}")),
         "{seen}"
+    );
+}
+
+/// An upgrade that leaves a `.pacnew` says so once the transaction is over, and `piko merge`
+/// then finds the same file.
+///
+/// The transaction reports and stops. Resolving a configuration file is an irreversible act
+/// with no safe default, so it is never asked for here.
+#[test]
+fn an_upgrade_that_leaves_a_pacnew_says_so_after_the_transaction() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+
+    let output = sandbox.install_with_backup("2.0.0-1", "shipped by version two");
+    let printed = text(&output);
+
+    assert!(printed.contains("Configuration files need attention"), "{printed}");
+    assert!(printed.contains("foo.conf.pacnew"), "{printed}");
+    assert!(printed.contains("Run 'piko merge' to resolve them."), "{printed}");
+    assert!(!printed.contains("(V)iew"), "{printed}");
+    assert!(!printed.contains("Resolve them now"), "{printed}");
+
+    assert_eq!(std::fs::read(sandbox.path("root/etc/foo.conf")).unwrap(), b"edited by the user");
+    let listed = text(&sandbox.run_merge(&["--output"], None));
+    assert!(listed.contains("etc/foo.conf.pacnew"), "{listed}");
+}
+
+/// `--output` is the non-interactive mode. It lists and changes nothing.
+#[test]
+fn merge_output_lists_a_pacnew_and_changes_nothing() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+    sandbox.install_with_backup("2.0.0-1", "shipped by version two");
+
+    let output = sandbox.run_merge(&["--output"], None);
+
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("etc/foo.conf.pacnew"), "{}", text(&output));
+    assert!(sandbox.path("root/etc/foo.conf.pacnew").exists());
+    assert_eq!(std::fs::read(sandbox.path("root/etc/foo.conf")).unwrap(), b"edited by the user");
+}
+
+/// A pending file holding the target's bytes carries nothing, so it goes without a question.
+/// Stdin is closed, which proves no question was asked.
+#[test]
+fn merge_removes_a_pacnew_identical_to_the_installed_file_without_asking() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+    sandbox.install_with_backup("2.0.0-1", "shipped by version two");
+    // Make the two agree behind piko's back.
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"shipped by version two").unwrap();
+
+    let output = sandbox.run_merge(&[], None);
+
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(!sandbox.path("root/etc/foo.conf.pacnew").exists());
+    assert_eq!(
+        std::fs::read(sandbox.path("root/etc/foo.conf")).unwrap(),
+        b"shipped by version two"
+    );
+}
+
+/// A closed stdin quits rather than skipping every file. "Everything skipped" and "everything
+/// resolved" would otherwise exit the same way.
+#[test]
+fn merge_quits_on_a_closed_stdin_rather_than_skipping_everything() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+    sandbox.install_with_backup("2.0.0-1", "shipped by version two");
+
+    let output = sandbox.run_merge(&[], None);
+
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(sandbox.path("root/etc/foo.conf.pacnew").exists());
+    assert_eq!(std::fs::read(sandbox.path("root/etc/foo.conf")).unwrap(), b"edited by the user");
+}
+
+#[test]
+fn merge_overwrite_moves_the_pacnew_into_place() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+    sandbox.install_with_backup("2.0.0-1", "shipped by version two");
+
+    let output = sandbox.run_merge(&[], Some("o\n"));
+
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(!sandbox.path("root/etc/foo.conf.pacnew").exists());
+    assert_eq!(
+        std::fs::read(sandbox.path("root/etc/foo.conf")).unwrap(),
+        b"shipped by version two"
+    );
+}
+
+#[test]
+fn merge_remove_deletes_only_the_pacnew() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+    sandbox.install_with_backup("2.0.0-1", "shipped by version two");
+
+    let output = sandbox.run_merge(&[], Some("r\n"));
+
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(!sandbox.path("root/etc/foo.conf.pacnew").exists());
+    assert_eq!(std::fs::read(sandbox.path("root/etc/foo.conf")).unwrap(), b"edited by the user");
+}
+
+/// A numbered `.pacsave` has no current version to merge against, so it is named and left
+/// alone. `pacdiff` warns about these once at the end too.
+#[test]
+fn a_numbered_pacsave_is_reported_and_never_offered() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf.pacsave.1"), b"an older save").unwrap();
+
+    let output = sandbox.run_merge(&[], Some("q\n"));
+
+    let printed = text(&output);
+    assert!(printed.contains("foo.conf.pacsave.1"), "{printed}");
+    assert!(printed.contains("no current version to merge against"), "{printed}");
+    assert!(!printed.contains("(V)iew"), "{printed}");
+    assert_eq!(
+        std::fs::read(sandbox.path("root/etc/foo.conf.pacsave.1")).unwrap(),
+        b"an older save"
+    );
+}
+
+/// A second removal must not write over the first save. Both are the user's own edits.
+#[test]
+fn a_second_removal_rotates_the_first_pacsave() {
+    let sandbox = Sandbox::new();
+
+    for edit in [b"first edit".as_slice(), b"second edit"] {
+        sandbox.install_with_backup("1.0.0-1", "shipped by the package");
+        std::fs::write(sandbox.path("root/etc/foo.conf"), edit).unwrap();
+        let output = sandbox.run_remove(&["conf"], &["--noconfirm"], None);
+        assert!(output.status.success(), "{}", text(&output));
+    }
+
+    assert_eq!(std::fs::read(sandbox.path("root/etc/foo.conf.pacsave")).unwrap(), b"second edit");
+    assert_eq!(std::fs::read(sandbox.path("root/etc/foo.conf.pacsave.1")).unwrap(), b"first edit");
+}
+
+/// The recap names what this transaction wrote, and nothing else. A `.pacnew` left by an
+/// earlier transaction belongs to `piko merge`.
+#[test]
+fn the_recap_names_only_what_this_transaction_wrote() {
+    let sandbox = Sandbox::new();
+
+    // An older pending file, from a package this transaction never touches.
+    std::fs::write(
+        sandbox.path("cache/other-1.0.0-1-x86_64.pkg.tar"),
+        package_tar_with_backups(
+            "other",
+            "1.0.0-1",
+            &[("etc/other.conf", "shipped")],
+            &["etc/other.conf"],
+        ),
+    )
+    .unwrap();
+    sandbox.write_repo(&[("other", "1.0.0-1", &[])]);
+    assert!(sandbox.run_install(&["other"], &[]).status.success());
+    std::fs::write(sandbox.path("root/etc/other.conf"), b"edited long ago").unwrap();
+    std::fs::write(sandbox.path("root/etc/other.conf.pacnew"), b"from an old upgrade").unwrap();
+
+    // Now a transaction that leaves one of its own.
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+    let printed = text(&sandbox.install_with_backup("2.0.0-1", "shipped by version two"));
+
+    assert!(printed.contains("foo.conf.pacnew"), "{printed}");
+    assert!(!printed.contains("other.conf.pacnew"), "{printed}");
+
+    // `piko merge` on its own still lists both.
+    let listed = text(&sandbox.run_merge(&["--output"], None));
+    assert!(listed.contains("etc/foo.conf.pacnew"), "{listed}");
+    assert!(listed.contains("etc/other.conf.pacnew"), "{listed}");
+}
+
+/// A path names a pair however it is spelled, and the rest of the list is left alone.
+#[test]
+fn merge_resolves_only_the_path_it_was_given() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+    sandbox.install_with_backup("2.0.0-1", "shipped by version two");
+    std::fs::write(sandbox.path("root/etc/spare.conf.pacnew"), b"not in the selection").unwrap();
+
+    let listed = text(&sandbox.run_merge(&["--output", "/etc/foo.conf"], None));
+    assert!(listed.contains("etc/foo.conf.pacnew"), "{listed}");
+    assert!(!listed.contains("spare.conf"), "{listed}");
+
+    let output = sandbox.run_merge(&["etc/foo.conf.pacnew"], Some("r\n"));
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(!sandbox.path("root/etc/foo.conf.pacnew").exists());
+}
+
+/// An interactive transaction reports its configuration files and asks nothing about them.
+///
+/// The prompt this test drives is the install confirmation. Nothing follows it: the recap is
+/// the last thing printed, and the run ends with stdin still holding an unread answer.
+#[test]
+fn an_interactive_transaction_reports_pending_files_without_asking() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+
+    std::fs::write(
+        sandbox.path("cache/conf-2.0.0-1-x86_64.pkg.tar"),
+        package_tar_with_backups(
+            "conf",
+            "2.0.0-1",
+            &[("etc/foo.conf", "shipped by version two")],
+            &["etc/foo.conf"],
+        ),
+    )
+    .unwrap();
+    sandbox.write_repo(&[("conf", "2.0.0-1", &[])]);
+
+    // `y` answers the install confirmation. The second line would answer a follow-up, and is
+    // left unread on purpose.
+    let mut child = Command::new(PIKO)
+        .arg("install")
+        .arg("--config")
+        .arg(sandbox.path("pacman.conf"))
+        .arg("--root")
+        .arg(sandbox.path("root"))
+        .arg("--dbpath")
+        .arg(sandbox.path("db"))
+        .arg("--hookdir")
+        .arg(sandbox.path("hooks"))
+        .arg("conf")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), b"y\nq\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let printed = text(&output);
+
+    assert!(printed.contains("Proceed with installation?"), "{printed}");
+    assert!(printed.contains("Configuration files need attention"), "{printed}");
+    assert!(printed.contains("Run 'piko merge' to resolve them."), "{printed}");
+    assert!(!printed.contains("Resolve them now"), "{printed}");
+    assert!(!printed.contains("(V)iew"), "{printed}");
+
+    // Both files are still there, untouched.
+    assert_eq!(std::fs::read(sandbox.path("root/etc/foo.conf")).unwrap(), b"edited by the user");
+    assert_eq!(
+        std::fs::read(sandbox.path("root/etc/foo.conf.pacnew")).unwrap(),
+        b"shipped by version two"
     );
 }

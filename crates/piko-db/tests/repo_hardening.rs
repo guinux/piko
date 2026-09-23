@@ -16,7 +16,7 @@ use std::{path::Path, time::Duration};
 use piko_db::{
     Error, Limit, Limits,
     fixture::{MINIMAL_REPO_DESC_V2, MINIMAL_REPO_FILES, RepoFixture},
-    repo::{RepoDatabase, RepoName, RepoOpenOptions},
+    repo::{RepoDatabase, RepoName, RepoOpenOptions, freshness},
 };
 
 /// Runs `body` on another thread, failing if it does not finish within `timeout`.
@@ -371,4 +371,79 @@ mod files_version_skew {
         assert_eq!(first, second);
         assert!(first.contains("2-1") && first.contains("1-1"), "{first}");
     }
+}
+
+/// Dating an archive inflates all of it, so it needs the same inflated bound as an open.
+#[test]
+fn dating_a_decompression_bomb_is_caught_as_limit_exceeded() {
+    let fixture = RepoFixture::new();
+    let huge = "x".repeat(10_000);
+    let path = fixture.write_gzip_archive_at(
+        "core.db",
+        &[(&format!("{}/desc", entry("foo", "1.0.0-1")), huge.as_bytes())],
+        1_000,
+    );
+
+    let limits = Limits { repo_inflated_bytes: 1024, ..Limits::default() };
+    let err = freshness::newest_member_time(&path, &limits).unwrap_err();
+    assert!(matches!(&err, Error::LimitExceeded { limit: Limit::RepoInflated, .. }), "got {err:?}");
+}
+
+/// The compressed-size bound fires before any decompression starts.
+#[test]
+fn dating_an_oversized_archive_is_refused_before_decompression() {
+    let fixture = RepoFixture::new();
+    let path = fixture.write_gzip_archive_at("core.db", &[("foo-1.0.0-1/desc", b"x")], 1_000);
+
+    let limits = Limits { repo_compressed_bytes: 4, ..Limits::default() };
+    let err = freshness::newest_member_time(&path, &limits).unwrap_err();
+    assert!(
+        matches!(&err, Error::LimitExceeded { limit: Limit::RepoCompressed, .. }),
+        "got {err:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dating_a_fifo_does_not_block() {
+    let fixture = RepoFixture::new();
+    let path = fixture.path().join("core.db");
+
+    let made = std::process::Command::new("mkfifo").arg(&path).status().is_ok_and(|s| s.success());
+    if !made {
+        eprintln!("skipping: mkfifo is unavailable");
+        return;
+    }
+
+    with_timeout(Duration::from_secs(10), move || {
+        let err = freshness::newest_member_time(&path, &Limits::default()).unwrap_err();
+        assert!(
+            matches!(&err, Error::NotARegularFile { .. } | Error::Io { .. }),
+            "a FIFO must be refused, not blocked on; got {err:?}"
+        );
+    });
+}
+
+/// A symlink to a FIFO is followed, as an archive's final symlink is, and then refused by the
+/// same regular-file check.
+#[cfg(unix)]
+#[test]
+fn dating_a_symlink_to_a_fifo_does_not_block() {
+    let fixture = RepoFixture::new();
+    let fifo = fixture.path().join("fifo");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status().is_ok_and(|s| s.success());
+    if !made {
+        eprintln!("skipping: mkfifo is unavailable");
+        return;
+    }
+    let path = fixture.path().join("core.db");
+    std::os::unix::fs::symlink(&fifo, &path).unwrap();
+
+    with_timeout(Duration::from_secs(10), move || {
+        let err = freshness::newest_member_time(&path, &Limits::default()).unwrap_err();
+        assert!(
+            matches!(&err, Error::NotARegularFile { .. } | Error::Io { .. }),
+            "a FIFO must be refused, not blocked on; got {err:?}"
+        );
+    });
 }

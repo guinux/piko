@@ -21,6 +21,8 @@
 //!   A file carrying two signatures, one good and one invalid, is rejected. "Any valid
 //!   signature is enough" is the intuitive reading, and the insecure one.
 
+use std::time::SystemTime;
+
 use piko_db::config::SigLevel;
 
 /// What GnuPG concluded about one signature.
@@ -70,6 +72,26 @@ pub struct SignatureOutcome {
     pub trust: Trust,
     /// The signing key's fingerprint, when GnuPG reported one.
     pub fingerprint: Option<String>,
+    /// When the signature was made, as the signature itself records it.
+    ///
+    /// This time is inside the signed data, so nobody without the key can change it. That makes
+    /// it the one date about a signed repository database that a mirror cannot forge.
+    /// `None` when GnuPG reported no time.
+    pub created: Option<SystemTime>,
+}
+
+/// The newest creation time among the good signatures in `signatures`.
+///
+/// Only a signature that verified (a valid one, or a valid one whose key has since expired)
+/// is counted. A bad signature proves nothing, so its time proves nothing either. Call this on
+/// signatures that [`decide`] accepted.
+#[must_use]
+pub fn newest_creation(signatures: &[SignatureOutcome]) -> Option<SystemTime> {
+    signatures
+        .iter()
+        .filter(|signature| matches!(signature.status, Status::Valid | Status::KeyExpired))
+        .filter_map(|signature| signature.created)
+        .max()
 }
 
 /// What a `SigLevel` asks of one kind of file.
@@ -254,14 +276,37 @@ pub fn decide(signatures: &[SignatureOutcome], policy: Policy) -> Verdict {
     reason = "a failing assertion in a test should abort it loudly"
 )]
 mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
     use super::*;
+
+    fn made_at(status: Status, seconds: u64) -> SignatureOutcome {
+        SignatureOutcome {
+            status,
+            trust: Trust::Full,
+            fingerprint: None,
+            created: UNIX_EPOCH.checked_add(Duration::from_secs(seconds)),
+        }
+    }
+
+    /// Only a good signature dates the file. A newer time on an invalid signature must not win.
+    #[test]
+    fn the_newest_creation_counts_good_signatures_only() {
+        let signatures = [
+            made_at(Status::Valid, 100),
+            made_at(Status::KeyExpired, 200),
+            made_at(Status::Invalid, 900),
+        ];
+        assert_eq!(newest_creation(&signatures), UNIX_EPOCH.checked_add(Duration::from_secs(200)));
+        assert_eq!(newest_creation(&[]), None);
+    }
 
     /// pacman's default for packages on a stock Arch system: Required, TrustedOnly.
     const REQUIRED_TRUSTED: Policy =
         Policy { check: true, optional: false, marginal_ok: false, unknown_ok: false };
 
     fn signature(status: Status, trust: Trust) -> SignatureOutcome {
-        SignatureOutcome { status, trust, fingerprint: Some("ABC123".to_owned()) }
+        SignatureOutcome { status, trust, fingerprint: Some("ABC123".to_owned()), created: None }
     }
 
     #[test]

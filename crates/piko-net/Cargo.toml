@@ -21,5 +21,7 @@ thiserror.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 
 [dev-dependencies]
-piko-db.workspace = true
+# A refresh dates what it downloads by reading it as a repository archive, so a test mirror has
+# to serve a real one — see `piko-db/src/fixture.rs`.
+piko-db = { workspace = true, features = ["fixture"] }
 tempfile.workspace = true

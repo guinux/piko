@@ -3,16 +3,32 @@
 use std::{path::Path, process::ExitCode};
 
 use piko_db::config::PacmanConfig;
-use piko_net::{Cancel, Concurrency, DatabaseKind, Outcome, Refresher, RepoRefresh};
+use piko_net::{
+    Cancel, Concurrency, DatabaseKind, FreshnessPolicy, Outcome, Refresher, RepoRefresh,
+};
 
-use crate::output::report;
+use crate::{cmd::freshness, output::report};
+
+/// How `refresh` fetches, and how it judges what it fetches.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Bypass the conditional request, so a `304` can never come back.
+    pub force: bool,
+    /// Add each selected repository's `<repo>.files` archive beside its `<repo>.db`.
+    pub files: bool,
+    /// Whether an older database is accepted, and how old one may be before a warning.
+    pub freshness: FreshnessPolicy,
+}
 
 /// Downloads each configured repository's database into `<dbpath>/sync`.
 ///
 /// Refreshes named repositories only when `only` is non-empty, every configured one
-/// otherwise. `force` bypasses the conditional request, so a `304` can never come back.
-/// `files` adds each selected repository's `<repo>.files` archive beside its `<repo>.db`.
-/// pacman fetches that archive through a separate `-Fy` operation.
+/// otherwise. See [`Options`] for the rest. pacman fetches `.files` archives through a
+/// separate `-Fy` operation.
+///
+/// What `piko_net` learned about each database's age is printed after the rows, one line per
+/// note (see [`freshness::render_note`]). None of it changes the exit code: every note leaves
+/// the system on the best database a server had.
 ///
 /// A repository that fails does not stop the others. One dead mirror set should not prevent
 /// the rest of the system from being refreshed. The exit code still reports that something
@@ -30,10 +46,11 @@ pub fn refresh(
     config: &PacmanConfig,
     dbpath: &Path,
     only: &[String],
-    force: bool,
-    files: bool,
+    options: Options,
     cancel: &Cancel,
+    offset: piko_txn::LocalOffset,
 ) -> ExitCode {
+    let Options { force, files, freshness } = options;
     let sync_dir = dbpath.join("sync");
     let refresher = Refresher::default();
 
@@ -83,6 +100,7 @@ pub fn refresh(
             policy: piko_sig::Policy::for_database(
                 repo.effective_sig_level(config.options.sig_level),
             ),
+            freshness,
         })
         .collect();
 
@@ -112,11 +130,31 @@ pub fn refresh(
     );
 
     let mut failed = false;
+    let mut notes = Vec::new();
     for (((name, kind), row), result) in targets.iter().zip(rows).zip(results) {
+        let file = kind.file_name(name);
         match result {
-            Ok(Outcome::Updated) => row.finish(),
-            Ok(Outcome::UpToDate) => {
-                row.finish_plain(format!("{} (up to date)", label(name, *kind)));
+            Ok(refreshed) => {
+                match refreshed.outcome {
+                    Outcome::Updated => row.finish(),
+                    Outcome::UpToDate => {
+                        row.finish_plain(format!("{} (up to date)", label(name, *kind)));
+                    }
+                    Outcome::Kept => {
+                        row.finish_plain(format!(
+                            "{} (kept: no newer database)",
+                            label(name, *kind)
+                        ));
+                    }
+                }
+                notes.extend(
+                    refreshed.notes.iter().map(|note| freshness::render_note(&file, note, offset)),
+                );
+                // After the notes, which name each server that was passed over and why. This
+                // line is their conclusion.
+                if refreshed.outcome == Outcome::Kept {
+                    notes.push(freshness::render_kept(&file, refreshed.publication, offset));
+                }
             }
             Err(error) => {
                 row.finish();
@@ -124,6 +162,11 @@ pub fn refresh(
                 failed = true;
             }
         }
+    }
+    // After every row, rather than beside its own. A note names its file, and printing it in
+    // the middle of the rows would split the list the user reads for what was refreshed.
+    for line in &notes {
+        steps.suspend(|| eprintln!("{line}"));
     }
 
     // Through `suspend`, as every other line this function prints. The finished rows still

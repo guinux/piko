@@ -36,7 +36,7 @@ use std::{
 };
 
 use piko_db::config::SigLevel;
-use piko_sig::{Keyring, Policy, Rejection, Verdict, signature_path};
+use piko_sig::{Keyring, Policy, Rejection, Verdict, signature_path, verify_database_dated};
 
 /// A GnuPG home with one generated, ultimately-trusted key.
 ///
@@ -89,10 +89,23 @@ impl Signer {
 
     /// Writes a detached signature for `file`, beside it.
     fn sign(&self, file: &Path) -> bool {
+        self.sign_with(file, &[])
+    }
+
+    /// As [`Signer::sign`], with the signature's creation time fixed to `unix_seconds`.
+    ///
+    /// gpg's `--faked-system-time <seconds>!` freezes its clock, which is how a test makes an
+    /// older and a newer signature of one repository without waiting between them.
+    fn sign_at(&self, file: &Path, unix_seconds: u64) -> bool {
+        self.sign_with(file, &["--faked-system-time", &format!("{unix_seconds}!")])
+    }
+
+    fn sign_with(&self, file: &Path, extra: &[&str]) -> bool {
         Command::new("gpg")
             .args(["--homedir"])
             .arg(self.home.path())
             .args(["--batch", "--yes", "--pinentry-mode", "loopback", "--passphrase", ""])
+            .args(extra)
             .arg("--output")
             .arg(signature_path(file))
             .arg("--detach-sign")
@@ -196,4 +209,39 @@ fn a_disabled_policy_does_not_consult_the_keyring() {
     let never = Policy::for_database(SigLevel::default());
     assert!(!never.check, "the default SigLevel should not ask for a database check");
     assert_eq!(keyring.check(&db, never).unwrap(), Verdict::Accepted { verified: false });
+}
+
+/// The signature's own creation time is the date a mirror cannot forge. It must come back from
+/// the check exactly as the signer set it.
+#[test]
+fn an_accepted_signature_reports_when_it_was_made() {
+    let Some(signer) = Signer::new() else { return };
+    let work = tempfile::tempdir().unwrap();
+    let db = database(work.path(), b"a database signed at a known time\n");
+    // The key must exist at the faked time, so the time is after the key was generated.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let signed = now + 3_600;
+    assert!(signer.sign_at(&db, signed), "signing failed");
+
+    let checked = verify_database_dated(&db, signer.path(), SigLevel::DATABASE).unwrap();
+    assert_eq!(checked.verdict, Verdict::Accepted { verified: true });
+    assert_eq!(
+        checked.signed_at,
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(signed))
+    );
+}
+
+/// An unsigned database under `Optional` is accepted, but carries no date: there is no
+/// signature to take one from.
+#[test]
+fn an_unsigned_database_has_no_signature_time() {
+    let Some(signer) = Signer::new() else { return };
+    let work = tempfile::tempdir().unwrap();
+    let db = database(work.path(), b"unsigned\n");
+
+    let checked =
+        verify_database_dated(&db, signer.path(), SigLevel::DATABASE | SigLevel::DATABASE_OPTIONAL)
+            .unwrap();
+    assert_eq!(checked.verdict, Verdict::Accepted { verified: false });
+    assert_eq!(checked.signed_at, None);
 }

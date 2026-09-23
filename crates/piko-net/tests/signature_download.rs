@@ -94,15 +94,16 @@ fn refresh_from(
     keyring: Option<&Keyring>,
     policy: Policy,
 ) -> piko_net::Result<piko_net::Outcome> {
-    Refresher::default().refresh(
-        sync,
-        "core",
-        servers,
-        keyring,
-        policy,
-        false,
-        &piko_net::Cancel::new(),
-    )
+    Refresher::default()
+        .refresh(sync, "core", servers, keyring, policy, false, &piko_net::Cancel::new())
+        .map(|refreshed| refreshed.outcome)
+}
+
+/// A repository archive whose one member holds `label`, so two databases differ in their
+/// bytes. A refresh dates an unsigned download by reading it as an archive, so the body must
+/// be one.
+fn database(label: &str) -> Vec<u8> {
+    piko_db::fixture::gzip_tar_at(&[("foo-1.0.0-1/desc", label.as_bytes())], 1_787_077_086)
 }
 
 /// A throwaway GnuPG home. It lets the test reach "the database is unsigned and that is
@@ -141,8 +142,10 @@ fn keyring() -> Option<(tempfile::TempDir, Keyring)> {
 #[test]
 fn a_not_modified_answer_to_a_signature_request_is_reported_as_such() {
     let dir = tempfile::tempdir().unwrap();
-    let url =
-        serve(vec![ok_response(b"a real database"), b"HTTP/1.1 304 Not Modified\r\n\r\n".to_vec()]);
+    let url = serve(vec![
+        ok_response(&database("a real database")),
+        b"HTTP/1.1 304 Not Modified\r\n\r\n".to_vec(),
+    ]);
 
     let error = refresh(dir.path(), &url, None, optional()).unwrap_err();
     let message = error.to_string();
@@ -155,7 +158,7 @@ fn a_not_modified_answer_to_a_signature_request_is_reported_as_such() {
 #[test]
 fn an_empty_signature_body_is_refused_rather_than_handed_to_the_verifier() {
     let dir = tempfile::tempdir().unwrap();
-    let url = serve(vec![ok_response(b"a real database"), ok_response(b"")]);
+    let url = serve(vec![ok_response(&database("a real database")), ok_response(b"")]);
 
     let error = refresh(dir.path(), &url, None, optional()).unwrap_err();
     let message = error.to_string();
@@ -173,13 +176,13 @@ fn a_signature_from_a_previous_refresh_is_removed_when_the_server_has_none() {
     std::fs::write(dir.path().join("core.db.sig"), b"a signature for the previous database")
         .unwrap();
 
-    let url = serve(vec![ok_response(b"a real database"), not_found()]);
+    let url = serve(vec![ok_response(&database("a real database")), not_found()]);
     assert_eq!(
         refresh(dir.path(), &url, Some(&keyring), optional()).unwrap(),
         piko_net::Outcome::Updated
     );
 
-    assert_eq!(std::fs::read(dir.path().join("core.db")).unwrap(), b"a real database");
+    assert_eq!(std::fs::read(dir.path().join("core.db")).unwrap(), database("a real database"));
     assert!(
         !dir.path().join("core.db.sig").exists(),
         "a signature for the previous database survived beside the new one"
@@ -203,19 +206,19 @@ fn a_mirror_that_cannot_supply_a_signature_hands_the_whole_file_to_the_next_one(
 
     // The first mirror answers the database, then fails the `.sig` with a server error.
     let broken = serve(vec![
-        ok_response(b"the first mirror's database"),
+        ok_response(&database("the first mirror's database")),
         b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec(),
     ]);
     // The second answers both: a database, and "no signature here", which `DatabaseOptional`
     // accepts.
-    let working = serve(vec![ok_response(b"the second mirror's database"), not_found()]);
+    let working = serve(vec![ok_response(&database("the second mirror's database")), not_found()]);
 
     let outcome = refresh_from(dir.path(), &[broken, working], Some(&keyring), optional()).unwrap();
 
     assert_eq!(outcome, piko_net::Outcome::Updated);
     assert_eq!(
         std::fs::read(dir.path().join("core.db")).unwrap(),
-        b"the second mirror's database",
+        database("the second mirror's database"),
         "the database and its signature came from different mirrors"
     );
 }
@@ -229,8 +232,8 @@ fn a_signature_failure_on_every_mirror_fails_the_refresh() {
     let dir = tempfile::tempdir().unwrap();
     let server_error =
         || b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec();
-    let first = serve(vec![ok_response(b"a database"), server_error()]);
-    let second = serve(vec![ok_response(b"a database"), server_error()]);
+    let first = serve(vec![ok_response(&database("a database")), server_error()]);
+    let second = serve(vec![ok_response(&database("a database")), server_error()]);
 
     let error = refresh_from(dir.path(), &[first, second], None, optional()).unwrap_err();
     let message = error.to_string();
@@ -248,7 +251,7 @@ fn a_signature_is_left_alone_when_the_policy_never_asks_for_one() {
     std::fs::write(dir.path().join("core.db.sig"), b"the user's own signature").unwrap();
 
     // One response only: no `.sig` request is made at all under this policy.
-    let url = serve(vec![ok_response(b"a real database")]);
+    let url = serve(vec![ok_response(&database("a real database"))]);
     assert_eq!(refresh(dir.path(), &url, None, never()).unwrap(), piko_net::Outcome::Updated);
 
     assert_eq!(std::fs::read(dir.path().join("core.db.sig")).unwrap(), b"the user's own signature");
