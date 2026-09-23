@@ -12,6 +12,7 @@ mod cmd;
 mod context;
 mod error;
 mod output;
+mod privilege;
 mod progress;
 mod signal;
 mod style;
@@ -34,6 +35,7 @@ use crate::context::{
 };
 use crate::error::Error;
 use crate::output::report;
+use crate::privilege::{Target, require_root};
 
 fn main() -> ExitCode {
     // This runs before clap parses anything. The helper's arguments are a program and that
@@ -344,6 +346,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             download_only,
         } => {
             let root = root.clone().unwrap_or_else(|| resolve_root_dir(cli, &config));
+            require_transaction_root("install", cli, &config, &root)?;
             sync(
                 cli,
                 &config,
@@ -383,6 +386,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             download_only,
         } => {
             let root = root.clone().unwrap_or_else(|| resolve_root_dir(cli, &config));
+            require_transaction_root("update", cli, &config, &root)?;
             sync(
                 cli,
                 &config,
@@ -418,6 +422,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             noconfirm,
         } => {
             let root = root.clone().unwrap_or_else(|| resolve_root_dir(cli, &config));
+            require_transaction_root("remove", cli, &config, &root)?;
             let record = recording(cli, &config, &resolve_dbpath(cli, &config), offset);
             cmd::txn::note(
                 &record,
@@ -446,6 +451,13 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             )
         }
         Command::Refresh { repos, force, files, accept_older, max_age } => {
+            require_root(
+                "refresh",
+                &Target::Databases {
+                    dbpath: &resolve_dbpath(cli, &config),
+                    named: cli.dbpath.is_some(),
+                },
+            )?;
             let record = recording(cli, &config, &resolve_dbpath(cli, &config), offset);
             cmd::txn::note(
                 &record,
@@ -506,12 +518,13 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
         Command::Conf { directive } => {
             cmd::conf::conf(require_pacman_config(cli, &config)?, directive.as_deref(), &mut out)
         }
-        Command::Key { gpgdir, keyring_dir, command } => cmd::key::key(
-            &resolve_gpg_dir(gpgdir.as_deref(), cli, &config),
-            keyring_dir,
-            command,
-            &mut out,
-        ),
+        Command::Key { gpgdir: named, keyring_dir, command } => {
+            let gpgdir = resolve_gpg_dir(named.as_deref(), cli, &config);
+            if privilege::changes_keyring(command) {
+                require_root("key", &Target::Keyring { gpgdir: &gpgdir, named: named.is_some() })?;
+            }
+            cmd::key::key(&gpgdir, keyring_dir, command, &mut out)
+        }
     };
 
     // A broken pipe is what `piko list | head` looks like. It is not a failure.
@@ -523,6 +536,25 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
     }
 
     Ok(code)
+}
+
+/// Refuses a transaction into `root` unless this process may change the system.
+///
+/// `install`, `update` and `remove` share this. See [`privilege`] for what counts as the system.
+fn require_transaction_root(
+    command: &'static str,
+    cli: &Cli,
+    config: &ConfigCache,
+    root: &Path,
+) -> Result<(), Error> {
+    require_root(
+        command,
+        &Target::Transaction {
+            root,
+            dbpath: &resolve_dbpath(cli, config),
+            dbpath_named: cli.dbpath.is_some(),
+        },
+    )
 }
 
 /// The two install-reason flags, as one value.

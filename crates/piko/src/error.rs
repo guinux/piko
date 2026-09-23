@@ -1,9 +1,9 @@
 //! The error type every subcommand dispatch path propagates.
 //!
-//! The CLI fails in three ways no library crate has a type for. A `pacman.conf` that a
+//! The CLI fails in four ways no library crate has a type for. A `pacman.conf` that a
 //! subcommand about the configuration cannot fall back from. A repository name typed wrong on
-//! the command line. And a repository archive whose signature the configured `SigLevel`
-//! refuses.
+//! the command line. A repository archive whose signature the configured `SigLevel`
+//! refuses. And a user that is not root, running a command that changes the system.
 //!
 //! None of those is a `piko_db::Error`. Borrowing that enum to carry them costs the CLI twice
 //! over. Every helper returning a different type needs a hand-written `match` instead of `?`.
@@ -71,5 +71,18 @@ pub enum Error {
         /// What stopped the check.
         #[source]
         source: piko_sig::Error,
+    },
+
+    /// A command that writes to a system path was run by a user that is not root.
+    ///
+    /// See [`crate::privilege`] for which paths count as the system's.
+    #[error("piko {command} must run as root to change {}. Run it as root, or use {flags} to name paths you own", path.display())]
+    NotRoot {
+        /// The subcommand, as typed.
+        command: &'static str,
+        /// The system path the command would change.
+        path: PathBuf,
+        /// The flags that name paths the user can own instead.
+        flags: &'static str,
     },
 }

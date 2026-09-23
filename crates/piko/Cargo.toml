@@ -21,6 +21,8 @@ piko-net.workspace = true
 piko-sig.workspace = true
 piko-sig-write.workspace = true
 piko-txn.workspace = true
+# `privilege` reads the effective user ID, to refuse a system change by a user that is not root.
+rustix.workspace = true
 # The CLI has failure modes no library crate has a type for — an unreadable `pacman.conf`,
 # a mistyped repository name, a rejected repository signature.
 # A merge writes the base and the merged result into a private scratch directory. Writing a
