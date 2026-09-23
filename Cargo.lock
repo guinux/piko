@@ -1541,11 +1541,13 @@ dependencies = [
  "clap",
  "console",
  "ctrlc",
+ "gpgme",
  "indicatif",
  "piko-db",
  "piko-db-write",
  "piko-net",
  "piko-sig",
+ "piko-sig-write",
  "piko-txn",
  "rustix",
  "tar",
@@ -1583,18 +1585,6 @@ dependencies = [
  "piko-db",
  "tempfile",
  "thiserror",
-]
-
-[[package]]
-name = "piko-key"
-version = "0.1.0"
-dependencies = [
- "clap",
- "gpgme",
- "piko-db",
- "piko-sig",
- "piko-sig-write",
- "tempfile",
 ]
 
 [[package]]

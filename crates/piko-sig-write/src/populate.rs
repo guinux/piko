@@ -273,7 +273,7 @@ fn parse_revoked_line(line: &str) -> std::result::Result<Option<String>, &'stati
     Ok(Some(parse_key_reference(line)?.to_owned()))
 }
 
-/// Every `<name>.gpg` stem directly under `keyrings_dir`, sorted — used when `piko-key
+/// Every `<name>.gpg` stem directly under `keyrings_dir`, sorted — used when `piko key
 /// populate` is given no names, matching pacman-key's own glob-everything default.
 ///
 /// # Errors

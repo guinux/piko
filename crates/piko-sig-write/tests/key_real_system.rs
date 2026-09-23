@@ -1,5 +1,5 @@
 //! Exercises the one operation the hermetic unit tests deliberately avoid: generating a real
-//! RSA-4096 master key, the way `piko-key init` actually does it.
+//! RSA-4096 master key, the way `piko key init` actually does it.
 //!
 //! `#[ignore]`d for the same reason `piko-db/tests/real_system.rs` is. It has a real cost and
 //! a real environment dependency, a functioning `gpg-agent`. Every `cargo test` run should not

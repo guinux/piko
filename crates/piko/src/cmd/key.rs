@@ -1,13 +1,40 @@
-//! One function per subcommand.
+//! `piko key`: bootstrapping and administering the keyring piko verifies against.
+//!
+//! This is pacman-key's counterpart, with one function per subcommand. Bootstrapping and
+//! administering a keyring is a distinct concern from verifying against one. See
+//! `piko-sig-write`'s crate doc for why that split runs one way. It also says why every real
+//! operation here happens through GPGME rather than a `gpg` subprocess.
 
 use std::{path::Path, process::ExitCode};
 
 use piko_sig_write::{KeyInfo, KeyringAdmin};
 
+use crate::cli::KeyCommand;
 use crate::output::{confirm, emit, report};
 
-/// `piko-key init`.
-pub fn init(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
+/// Runs one `piko key` subcommand against the keyring at `gpgdir`.
+pub fn key(
+    gpgdir: &Path,
+    keyring_dir: &Path,
+    command: &KeyCommand,
+    out: &mut impl std::io::Write,
+) -> ExitCode {
+    match command {
+        KeyCommand::Init => init(gpgdir, out),
+        KeyCommand::Populate { keyrings } => populate(gpgdir, keyring_dir, keyrings, out),
+        KeyCommand::Add { files } => add(gpgdir, files, out),
+        KeyCommand::LsignKey { keyids, noconfirm } => lsign_key(gpgdir, keyids, *noconfirm, out),
+        KeyCommand::ListKeys { keyids } => list_keys(gpgdir, keyids, out),
+        KeyCommand::Delete { keyids, secret, noconfirm } => {
+            delete(gpgdir, keyids, *secret, *noconfirm, out)
+        }
+        KeyCommand::Verify { signature, file } => verify(gpgdir, signature, file.as_deref(), out),
+        KeyCommand::Updatedb => updatedb(gpgdir, out),
+    }
+}
+
+/// `piko key init`.
+fn init(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
     match KeyringAdmin::init(gpgdir) {
         Ok((_, outcome)) => {
             if outcome.master_key_created {
@@ -24,8 +51,8 @@ pub fn init(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
     }
 }
 
-/// `piko-key populate`.
-pub fn populate(
+/// `piko key populate`.
+fn populate(
     gpgdir: &Path,
     keyring_dir: &Path,
     names: &[String],
@@ -89,8 +116,8 @@ pub fn populate(
     ExitCode::SUCCESS
 }
 
-/// `piko-key add`.
-pub fn add(gpgdir: &Path, files: &[std::path::PathBuf], out: &mut impl std::io::Write) -> ExitCode {
+/// `piko key add`.
+fn add(gpgdir: &Path, files: &[std::path::PathBuf], out: &mut impl std::io::Write) -> ExitCode {
     let admin = match KeyringAdmin::open(gpgdir) {
         Ok(admin) => admin,
         Err(error) => {
@@ -119,8 +146,8 @@ pub fn add(gpgdir: &Path, files: &[std::path::PathBuf], out: &mut impl std::io::
     ExitCode::SUCCESS
 }
 
-/// `piko-key lsign-key`.
-pub fn lsign_key(
+/// `piko key lsign-key`.
+fn lsign_key(
     gpgdir: &Path,
     keyids: &[String],
     noconfirm: bool,
@@ -156,14 +183,14 @@ pub fn lsign_key(
     ExitCode::SUCCESS
 }
 
-/// `piko-key list-keys`.
+/// `piko key list-keys`.
 ///
 /// [`KeyringAdmin::find_keys`] does the matching, so `keyids` accepts every pattern
 /// `gpg --list-keys` accepts. An empty `keyids` lists the whole keyring.
 ///
 /// An empty result is an error only when the user named a pattern. A keyring with no key at all
 /// is not a failure, and `gpg --list-keys` draws the same line.
-pub fn list_keys(gpgdir: &Path, keyids: &[String], out: &mut impl std::io::Write) -> ExitCode {
+fn list_keys(gpgdir: &Path, keyids: &[String], out: &mut impl std::io::Write) -> ExitCode {
     let admin = match KeyringAdmin::open(gpgdir) {
         Ok(admin) => admin,
         Err(error) => {
@@ -215,13 +242,13 @@ fn expired_suffix(key: &KeyInfo) -> &'static str {
     if key.is_expired { " [expired]" } else { "" }
 }
 
-/// `piko-key delete`.
+/// `piko key delete`.
 ///
 /// `secret` is the `--secret` flag. It becomes `allow_secret`, and defaults to `false`. piko
 /// then refuses a key that has a secret key, and names that key in the error. pacman-key makes
 /// the same choice: its `--delete` runs `gpg --delete-key`, which deletes public keys only
 /// (`pacman-key.sh.in:392`).
-pub fn delete(
+fn delete(
     gpgdir: &Path,
     keyids: &[String],
     secret: bool,
@@ -254,7 +281,7 @@ pub fn delete(
     ExitCode::SUCCESS
 }
 
-/// The policy `piko-key verify` judges a signature against.
+/// The policy `piko key verify` judges a signature against.
 ///
 /// A signature is required, and its key must be fully trusted. That is pacman's own default for
 /// a package file: `SigLevel = Required` sets `check`, and `TrustedOnly` clears `marginal_ok`
@@ -262,7 +289,7 @@ pub fn delete(
 const VERIFY_POLICY: piko_sig::Policy =
     piko_sig::Policy { check: true, optional: false, marginal_ok: false, unknown_ok: false };
 
-/// `piko-key verify`.
+/// `piko key verify`.
 ///
 /// The exit code comes from [`piko_sig::decide`], the same function `piko install` and
 /// `piko update` reach through `Transaction::verify`. This command therefore answers the
@@ -271,7 +298,7 @@ const VERIFY_POLICY: piko_sig::Policy =
 /// The status lines still print first, so a rejected signature shows both its status and its
 /// trust before the reason. This diverges from `gpg --verify`, which reports trust as a
 /// warning and still exits `0`.
-pub fn verify(
+fn verify(
     gpgdir: &Path,
     signature: &Path,
     file: Option<&Path>,
@@ -326,8 +353,8 @@ pub fn verify(
     }
 }
 
-/// `piko-key updatedb`.
-pub fn updatedb(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
+/// `piko key updatedb`.
+fn updatedb(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
     let admin = match KeyringAdmin::open(gpgdir) {
         Ok(admin) => admin,
         Err(error) => {
@@ -352,8 +379,8 @@ enum Decision {
     /// Act on this fingerprint. Never act on the identifier the user typed.
     Proceed(String),
     /// The user declined this key. The caller continues with the next key, because each key
-    /// is a separate question. A decline is not an error, so this carries no exit code.
-    /// `crates/piko` also ends a declined transaction with `ExitCode::SUCCESS`.
+    /// is a separate question. A decline is not an error, so this carries no exit code. A
+    /// declined transaction also ends with `ExitCode::SUCCESS`.
     Declined,
     /// piko could not resolve the key. The caller stops. pacman-key's `check_keyids_exist`
     /// does the same, and refuses the whole command rather than part of it.

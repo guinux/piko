@@ -116,7 +116,7 @@ pub struct KeyInfo {
     pub user_ids: Vec<String>,
     /// How much this key's own certifications of other keys count.
     pub owner_trust: OwnerTrust,
-    /// Whether the key has been disabled (`piko-key delete`'s softer sibling).
+    /// Whether the key has been disabled (`piko key delete`'s softer sibling).
     pub is_disabled: bool,
     /// Whether the key (or its primary user ID) has been revoked.
     pub is_revoked: bool,
@@ -347,7 +347,7 @@ impl KeyringAdmin {
     /// It is also sufficient. A key's validity for verifying a signature is decided by the *best*
     /// certification path any of its user IDs has. It is not decided by all of them at once. That
     /// is why
-    /// `piko-key verify` reports full trust for packages from a key whose secondary user IDs were
+    /// `piko key verify` reports full trust for packages from a key whose secondary user IDs were
     /// never separately signed.
     ///
     /// [`gpgme_op_keysign`]: https://www.gnupg.org/documentation/manuals/gpgme/Signing-Keys.html
@@ -661,7 +661,7 @@ const LAYOUT_FILES: &[(&str, u32)] = &[("pubring.gpg", READABLE_MODE), ("secring
 ///
 /// `no-self-sigs-only` is left out. `pacman-key` adds it only for GnuPG 2.2.17 and later. And an
 /// option GnuPG does not recognize makes *every* later invocation fail rather than warn.
-/// The gate costs a version parse for a keyserver option piko never reaches: `piko-key` has no
+/// The gate costs a version parse for a keyserver option piko never reaches: `piko key` has no
 /// `--recv-keys` or `--refresh-keys`.
 const GPG_CONF_OPTIONS: &[&str] = &[
     "no-greeting",
@@ -964,7 +964,7 @@ mod tests {
     ///
     /// This test pins the intended behavior, but does not on its own prove it. False
     /// idempotency shows up only across separate processes, each with a fresh `gpg-agent`
-    /// interaction — not within one already-warmed-up test process. Run the `piko-key` binary
+    /// interaction — not within one already-warmed-up test process. Run `piko key lsign-key`
     /// twice from a shell to see that half.
     fn foreign_public_key_with_two_uids() -> Option<(PathBuf, String)> {
         let home = tempfile::tempdir().ok()?;

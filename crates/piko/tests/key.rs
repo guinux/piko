@@ -1,4 +1,4 @@
-//! Runs the `piko-key` binary against a throwaway keyring.
+//! Runs `piko key` against a throwaway keyring.
 //!
 //! Only the real process reaches two of the behaviors here. The confirmation prompt reads
 //! `std::io::stdin()` directly, so an answer needs a child process and a pipe. The default
@@ -82,9 +82,10 @@ fn new_home() -> Option<PathBuf> {
     Some(path)
 }
 
-/// Runs `piko-key --gpgdir <home> <args…>` and writes `stdin` to the confirmation prompt.
+/// Runs `piko key --gpgdir <home> <args…>` and writes `stdin` to the confirmation prompt.
 fn run(home: &Path, args: &[&str], stdin: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_piko-key"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_piko"))
+        .arg("key")
         .arg("--gpgdir")
         .arg(home)
         .args(args)
@@ -168,7 +169,7 @@ fn delete_still_removes_a_public_key_without_the_secret_flag() {
 /// Builds a keyring, and a file signed by a vendor key that keyring knows but does not trust.
 ///
 /// Returns the keyring path, the detached signature, and the vendor fingerprint. The signed
-/// file sits next to the signature, so `piko-key verify <sig>` finds it on its own. `None` if
+/// file sits next to the signature, so `piko key verify <sig>` finds it on its own. `None` if
 /// GnuPG cannot be reached.
 fn signed_file() -> Option<(PathBuf, PathBuf, String)> {
     let home = new_home()?;

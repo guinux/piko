@@ -8,7 +8,6 @@ members = [
     "crates/piko-sig-write",
     "crates/piko-txn",
     "crates/piko",
-    "crates/piko-key",
 ]
 
 [workspace.package]

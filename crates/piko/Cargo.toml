@@ -19,6 +19,7 @@ piko-db.workspace = true
 piko-db-write.workspace = true
 piko-net.workspace = true
 piko-sig.workspace = true
+piko-sig-write.workspace = true
 piko-txn.workspace = true
 # The CLI has failure modes no library crate has a type for — an unreadable `pacman.conf`,
 # a mistyped repository name, a rejected repository signature.
@@ -29,6 +30,8 @@ thiserror.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+# `tests/key.rs` builds its throwaway keyrings through GPGME directly.
+gpgme.workspace = true
 # Scriptlet and hook execution can only be exercised where the `piko` binary exists, because
 # that binary *is* the exec helper — see `tests/side_effects.rs`.
 rustix.workspace = true

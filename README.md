@@ -78,17 +78,17 @@ Transaction:
 | `piko update [targets]...` | `up` | Upgrade the system, or the given targets. |
 | `piko remove <packages>...` | `rm` | Remove packages. Supports `-s`/`--recursive`, `-c`/`--cascade`. |
 
-Keyring management (`piko-key`):
+Keyring management (`piko key`):
 
 | Command | Purpose |
 |---|---|
-| `piko-key init` | Create the keyring and piko's local master signing key, if either is missing. |
-| `piko-key populate [names]...` | Import and locally trust vendor keyrings (e.g. `archlinux`) from `/usr/share/pacman/keyrings`. |
-| `piko-key add <files>...` | Import OpenPGP key material from files. |
-| `piko-key lsign-key <keyids>...` | Locally sign one or more keys, establishing them in the web of trust. |
-| `piko-key list-keys [keyids]...` | List keys in the keyring. |
-| `piko-key delete <keyids>...` | Delete one or more keys. |
-| `piko-key verify <sig> [file]` | Verify a detached signature. |
+| `piko key init` | Create the keyring and piko's local master signing key, if either is missing. |
+| `piko key populate [names]...` | Import and locally trust vendor keyrings (e.g. `archlinux`) from `/usr/share/pacman/keyrings`. |
+| `piko key add <files>...` | Import OpenPGP key material from files. |
+| `piko key lsign-key <keyids>...` | Locally sign one or more keys, establishing them in the web of trust. |
+| `piko key list-keys [keyids]...` | List keys in the keyring. |
+| `piko key delete <keyids>...` | Delete one or more keys. |
+| `piko key verify <sig> [file]` | Verify a detached signature. |
 
 ## Building the project
 

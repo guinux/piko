@@ -19,7 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - OpenPGP signature verification (GPGME-backed) for packages and repository databases.
 - Installing a package file named by a path or a URL, pacman's `-U`, spelled as an ordinary
   `piko install` target.
-- Keyring administration through `piko-key`, pacman-key's counterpart.
+- Keyring administration through `piko key`, pacman-key's counterpart.
 - Repository database refresh and package download, with signature verification before a
   download replaces anything on disk. Downloads run in parallel, and `SIGINT` cancels them.
 - `piko refresh --files`: each selected repository's `<repo>.files` archive is fetched beside

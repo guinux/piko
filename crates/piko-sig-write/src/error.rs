@@ -39,7 +39,7 @@ pub enum Error {
     },
 
     /// An operation that needs piko's local signing key found none.
-    #[error("the keyring at {} has no piko master key; run `piko-key init` first", home.display())]
+    #[error("the keyring at {} has no piko master key; run `piko key init` first", home.display())]
     NoMasterKey {
         /// The keyring directory that was searched.
         home: PathBuf,
@@ -57,7 +57,7 @@ pub enum Error {
     /// A delete would also have deleted a secret key, and the caller did not allow that.
     ///
     /// The message names the flag, not the GPGME failure. [`Error::NoMasterKey`] names
-    /// `piko-key init` for the same reason: the caller's next step is the useful part. GPGME
+    /// `piko key init` for the same reason: the caller's next step is the useful part. GPGME
     /// reports `GPG_ERR_CONFLICT` here, which says nothing about that next step.
     #[error(
         "the key {keyid} in the keyring at {} has a secret key; pass --secret to delete it too",
@@ -120,6 +120,6 @@ mod tests {
     fn a_no_master_key_error_names_the_keyring() {
         let error = Error::NoMasterKey { home: PathBuf::from("/etc/pacman.d/gnupg") };
         assert!(error.to_string().contains("/etc/pacman.d/gnupg"), "{error}");
-        assert!(error.to_string().contains("piko-key init"), "{error}");
+        assert!(error.to_string().contains("piko key init"), "{error}");
     }
 }

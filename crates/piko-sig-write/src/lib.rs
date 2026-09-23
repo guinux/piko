@@ -55,7 +55,7 @@
 //!
 //! No keyserver or WKD lookups (`gpg --recv-keys`/`--refresh-keys`), and no interactive trust
 //! editing (`gpg --edit-key`'s REPL). Both need a human or a network in the loop that this
-//! crate deliberately does not assume; see `piko-key`'s own scope notes.
+//! crate deliberately does not assume, and `piko key` offers neither.
 
 pub mod admin;
 mod edit;

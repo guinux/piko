@@ -52,13 +52,27 @@ fn serve(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<String
                 request.push_str(&line);
             }
             seen.push(request);
-            let _ = stream.write_all(&response);
+            write_closing(&mut stream, &response);
             let _ = stream.flush();
         }
         seen
     });
 
     (format!("http://127.0.0.1:{port}"), handle)
+}
+
+/// Writes `response` with a `Connection: close` header after its status line.
+///
+/// This server answers one request per connection. Without the header, the client keeps the
+/// connection for its next request. If it sends that request before this server closes the
+/// connection, nothing reads the request, and the client gets a reset. That happens only on a
+/// loaded machine, so the header is what makes a two-request test deterministic.
+fn write_closing(stream: &mut impl Write, response: &[u8]) {
+    let end = response.windows(2).position(|pair| pair == b"\r\n").unwrap_or(response.len());
+    let (status, rest) = response.split_at(end);
+    let _ = stream.write_all(status);
+    let _ = stream.write_all(b"\r\nConnection: close");
+    let _ = stream.write_all(rest);
 }
 
 fn ok_response(body: &[u8]) -> Vec<u8> {

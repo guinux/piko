@@ -12,6 +12,7 @@ pub mod freshness;
 pub mod group;
 pub mod history;
 pub mod info;
+pub mod key;
 pub mod list;
 pub mod local;
 pub mod merge;

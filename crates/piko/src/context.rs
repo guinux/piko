@@ -264,6 +264,30 @@ pub fn resolve_dbpath(cli: &Cli, config: &ConfigCache) -> PathBuf {
     }
 }
 
+/// Resolves the keyring `piko key` administers, in three steps. `--gpgdir` if given, else
+/// `GPGDir` from the parsed pacman.conf, else the hardcoded default with a warning.
+///
+/// The same three-step resolution [`resolve_dbpath`] uses. [`signing_policy`] falls back
+/// without a warning, because a transaction states its weakened verification on its own. An
+/// administration command has no such line, so it says here which keyring it changes.
+pub fn resolve_gpg_dir(gpgdir: Option<&Path>, cli: &Cli, config: &ConfigCache) -> PathBuf {
+    if let Some(gpgdir) = gpgdir {
+        return gpgdir.to_path_buf();
+    }
+
+    match config.get(cli) {
+        Ok(config) => config.options.gpg_dir.clone(),
+        Err(error) => {
+            eprintln!(
+                "Warning: failed to read {} ({error}); falling back to {}",
+                cli.config.display(),
+                piko_db::config::DEFAULT_GPG_DIR
+            );
+            PathBuf::from(piko_db::config::DEFAULT_GPG_DIR)
+        }
+    }
+}
+
 /// Resolves the effective transaction log, in three steps. `--logfile` if given, else `LogFile`
 /// from the parsed pacman.conf, else the hardcoded default with a warning.
 ///

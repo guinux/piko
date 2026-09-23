@@ -29,8 +29,8 @@ use crate::cli::{Cli, Command};
 use crate::context::{
     ConfigCache, cache_dirs, hold_pkg, hook_dirs, ignore_lists, open_all_repos, open_local_db,
     open_repo_by_name, open_repo_db, open_repos_for_packages, parse_repo_arg, path_patterns,
-    recording, require_pacman_config, resolve_dbpath, resolve_log_file, resolve_root_dir,
-    signing_policy,
+    recording, require_pacman_config, resolve_dbpath, resolve_gpg_dir, resolve_log_file,
+    resolve_root_dir, signing_policy,
 };
 use crate::error::Error;
 use crate::output::report;
@@ -504,6 +504,12 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
         Command::Conf { directive } => {
             cmd::conf::conf(require_pacman_config(cli, &config)?, directive.as_deref(), &mut out)
         }
+        Command::Key { gpgdir, keyring_dir, command } => cmd::key::key(
+            &resolve_gpg_dir(gpgdir.as_deref(), cli, &config),
+            keyring_dir,
+            command,
+            &mut out,
+        ),
     };
 
     // A broken pipe is what `piko list | head` looks like. It is not a failure.
