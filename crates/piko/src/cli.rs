@@ -735,9 +735,10 @@ pub enum Command {
 
     /// Report an unfinished transaction, if the database records one.
     ///
-    /// Read-only: it describes what was interrupted and how far it got. It cannot undo what
-    /// was applied. piko keeps no copy of overwritten files, so there is nothing to roll back
-    /// to. See `docs/locking.md` and the `journal` module.
+    /// Read-only: it describes what was interrupted and how far it got, and prints the
+    /// commands that finish it. It cannot undo what was applied. piko keeps no copy of
+    /// overwritten files, so there is nothing to roll back to. See `docs/locking.md` and the
+    /// `journal` module.
     Report,
 
     /// Show the transactions this system has run, newest last.

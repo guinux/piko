@@ -466,7 +466,9 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 offset,
             )
         }
-        Command::Report => cmd::txn::report(&resolve_dbpath(cli, &config), &mut out),
+        Command::Report => {
+            cmd::txn::report(&resolve_dbpath(cli, &config), cli.dbpath.as_deref(), &mut out)
+        }
         Command::History { last, package, since, until, all, quiet } => cmd::history::history(
             &resolve_log_file(cli, &config),
             &resolve_dbpath(cli, &config),

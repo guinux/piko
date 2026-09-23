@@ -685,6 +685,54 @@ fn abort_on_fail_stops_the_transaction_before_anything_changes() {
     assert!(!sandbox.path("db/piko-journal").exists(), "a journal was left behind");
 }
 
+/// A journal this build cannot read still records a transaction that did not finish. A
+/// transaction must refuse over it, exactly as over a readable one, and leave it in place.
+/// `piko report` and `piko history` must report it as there, never as absent.
+#[test]
+fn a_journal_that_cannot_be_read_refuses_the_transaction() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    let journal = "piko-journal 2\nsomething a newer build wrote\n";
+    std::fs::write(sandbox.path("db/piko-journal"), journal).unwrap();
+
+    let output = sandbox.install("1.0.0-1", &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "the transaction should have been refused:\n{seen}");
+    assert!(seen.contains("cannot be read"), "{seen}");
+    assert!(seen.contains("piko report"), "{seen}");
+    assert!(!sandbox.path("root/usr/bin/foo").exists(), "files were written anyway");
+    assert!(
+        sandbox.path("db/local/foo-1.0.0-1").symlink_metadata().is_err(),
+        "an entry was written"
+    );
+    assert!(!sandbox.path("db/db.lck").exists(), "the lock was left behind");
+    assert_eq!(
+        std::fs::read_to_string(sandbox.path("db/piko-journal")).unwrap(),
+        journal,
+        "the journal was changed"
+    );
+
+    let report = Command::new(PIKO)
+        .arg("report")
+        .arg("--config")
+        .arg(sandbox.path("pacman.conf"))
+        .arg("--dbpath")
+        .arg(sandbox.path("db"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let seen = text(&report);
+    assert!(!report.status.success(), "{seen}");
+    assert!(!seen.contains("No unfinished transaction"), "{seen}");
+    assert!(seen.contains("its journal cannot be read"), "{seen}");
+    assert!(seen.contains("format version \"2\""), "{seen}");
+
+    let history = run_history(&sandbox, &[]);
+    let seen = text(&history);
+    assert!(seen.contains("its journal cannot be read"), "{seen}");
+}
+
 /// Without `AbortOnFail`, the same failing hook must not stop anything.
 #[test]
 fn a_failing_hook_without_abort_on_fail_is_only_a_warning() {

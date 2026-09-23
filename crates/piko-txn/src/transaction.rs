@@ -76,7 +76,9 @@ impl Step {
     /// The journal line for this step.
     fn intent(&self) -> Intent {
         match self {
-            Self::Install { package, .. } => Intent::Install { package: package.to_string() },
+            Self::Install { package, reason } => {
+                Intent::Install { package: package.to_string(), reason: Some(*reason) }
+            }
             Self::Remove { entry, .. } => Intent::Remove { entry: entry.as_str().to_owned() },
         }
     }

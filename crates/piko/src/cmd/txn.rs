@@ -13,6 +13,7 @@ use std::{
     process::ExitCode,
 };
 
+use alpm_types::PackageInstallReason;
 use piko_db::EntryName;
 use piko_db::config::{DbUsage, RepositoryConfig, SigLevel};
 use piko_db::repo::RepoDatabase;
@@ -1152,7 +1153,8 @@ fn run(
 
     // A journal already there means a previous run did not finish. Refusing is the safe answer.
     // piko cannot know what state the system is in. Layering another transaction on top would
-    // make that state harder to work out later.
+    // make that state harder to work out later. A journal this build cannot read is refused
+    // too: only a missing file means that no transaction is unfinished.
     match journal::read(dbpath) {
         Ok(Some(_)) => {
             progress.clear_downloads();
@@ -1163,6 +1165,12 @@ fn run(
             return ExitCode::FAILURE;
         }
         Ok(None) => {}
+        Err(error @ piko_txn::Error::JournalUnreadable { .. }) => {
+            progress.clear_downloads();
+            report_error(&error);
+            eprintln!("A previous transaction did not finish; run `piko report` to see it");
+            return ExitCode::FAILURE;
+        }
         Err(error) => {
             progress.clear_downloads();
             report_error(&error);
@@ -1346,11 +1354,20 @@ fn overwrite_from(patterns: Vec<String>) -> Overwrite {
     Overwrite::new(move |path| piko_db::resolve::matches_any(&patterns, &path.to_string_lossy()))
 }
 
-/// Reports an unfinished transaction, if the database records one.
+/// Reports an unfinished transaction, if the database records one, and the commands that
+/// finish it.
 ///
-/// Read-only. It describes; it does not repair. There is nothing to repair to. See the
-/// note on atomicity in [`piko_txn::journal`].
-pub fn report(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
+/// Read-only. It describes; it does not repair. There is nothing to roll back to. See the
+/// note on atomicity in [`piko_txn::journal`]. What is left to do is decided by
+/// [`journal::Record::recovery`]. This function only spells it as command lines.
+///
+/// `dbpath_flag` is the `--dbpath` the user gave, if any. The commands repeat it, so they act
+/// on the database this report read.
+pub fn report(
+    dbpath: &Path,
+    dbpath_flag: Option<&Path>,
+    out: &mut impl std::io::Write,
+) -> ExitCode {
     // `join` normalizes a `dbpath` the caller spelled with a trailing separator, which a
     // formatted "{dbpath}/piko-journal" would print as a doubled slash.
     let journal_path = dbpath.join(journal::JOURNAL_FILE);
@@ -1360,6 +1377,20 @@ pub fn report(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
             emit!(out, "No unfinished transaction is recorded");
             return ExitCode::SUCCESS;
         }
+        Err(piko_txn::Error::JournalUnreadable { reason, .. }) => {
+            // The journal is there, so a previous run did not finish. What it did is unknown,
+            // so no command can finish it. Removing the journal is the only way to run a
+            // transaction again, and only the user can decide that it is safe.
+            emit!(out, "An unfinished transaction is recorded, but its journal cannot be read");
+            emit!(out, "  Journal: {}", journal_path.display());
+            emit!(out, "  Reason:  {reason}");
+            emit!(out, "");
+            emit!(out, "piko refuses every transaction while the journal is there. The system");
+            emit!(out, "can be partly changed. Read the journal, and check the packages it names.");
+            emit!(out, "Then remove it:");
+            emit!(out, "  rm {}", shell_word(&journal_path.to_string_lossy()));
+            return ExitCode::FAILURE;
+        }
         Err(error) => {
             report_error(&error);
             return ExitCode::FAILURE;
@@ -1368,7 +1399,8 @@ pub fn report(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
 
     if !record.begun {
         emit!(out, "A transaction was recorded but never started; the system is unchanged");
-        emit!(out, "Remove {} to clear it", journal_path.display());
+        emit!(out, "Remove the journal to clear it:");
+        emit!(out, "  rm {}", shell_word(&journal_path.to_string_lossy()));
         return ExitCode::SUCCESS;
     }
 
@@ -1384,14 +1416,202 @@ pub fn report(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
         emit!(out, "Not applied:");
         for intent in outstanding {
             match intent {
-                Intent::Install { package } => emit!(out, "  Install {package}"),
+                Intent::Install { package, .. } => emit!(out, "  Install {package}"),
                 Intent::Remove { entry } => emit!(out, "  Remove {entry}"),
             }
         }
     }
 
     emit!(out, "");
-    emit!(out, "The applied steps cannot be undone; re-run the operation to finish it,");
-    emit!(out, "Then remove {}", journal_path.display());
+    let local = match LocalDatabase::open(dbpath.join("local")) {
+        Ok(local) => local,
+        Err(error) => {
+            // Without the database, piko cannot tell which removals are still to do. The
+            // journal can still go, and the operation can be run again by hand.
+            report_error(&error);
+            emit!(out, "The applied steps cannot be undone. Remove the journal:");
+            emit!(out, "  rm {}", shell_word(&journal_path.to_string_lossy()));
+            emit!(out, "Then run the operation again");
+            return ExitCode::FAILURE;
+        }
+    };
+    let recovery = record.recovery(&local);
+
+    emit!(out, "The applied steps cannot be undone. To finish the transaction, run in order:");
+    for command in recovery_commands(&recovery, &record.root, dbpath_flag, &journal_path) {
+        emit!(out, "  {command}");
+    }
+    if recovery.interrupted.is_some() {
+        emit!(out, "");
+        emit!(out, "The interruption can have cut the first install part-way. Then some of its");
+        emit!(out, "files are on disk with no package that owns them. `--overwrite '*'` applies");
+        emit!(out, "to that package only, and lets it replace them.");
+    }
+    if !recovery.unreadable.is_empty() {
+        emit!(out, "");
+        emit!(out, "These steps cannot be read from the journal, and are not in the commands:");
+        for step in &recovery.unreadable {
+            emit!(out, "  {step}");
+        }
+    }
     ExitCode::SUCCESS
+}
+
+/// Spells a [`journal::Recovery`] as the command lines that carry it out, in order.
+///
+/// The journal goes first, because piko refuses every transaction while it is there. Then the
+/// cut install, on its own so that `--overwrite` covers nothing else. Then the removals, then
+/// the installs, one command per install reason.
+fn recovery_commands(
+    recovery: &journal::Recovery,
+    root: &Path,
+    dbpath_flag: Option<&Path>,
+    journal_path: &Path,
+) -> Vec<String> {
+    let mut piko = String::from("piko");
+    if let Some(dbpath) = dbpath_flag {
+        piko.push_str(" --dbpath ");
+        piko.push_str(&shell_word(&dbpath.to_string_lossy()));
+    }
+    let root_flag = if root == Path::new("/") {
+        String::new()
+    } else {
+        format!(" --root {}", shell_word(&root.to_string_lossy()))
+    };
+    let names = |targets: &[&journal::Reinstall]| {
+        targets.iter().map(|target| target.name.to_string()).collect::<Vec<_>>().join(" ")
+    };
+
+    let mut commands = vec![format!("rm {}", shell_word(&journal_path.to_string_lossy()))];
+    if let Some(target) = &recovery.interrupted {
+        commands.push(format!(
+            "{piko} install{root_flag}{} --overwrite '*' {}",
+            reason_flag(target.reason),
+            target.name
+        ));
+    }
+    if !recovery.remove.is_empty() {
+        let names = recovery.remove.iter().map(ToString::to_string).collect::<Vec<_>>();
+        commands.push(format!("{piko} remove{root_flag} --nodeps {}", names.join(" ")));
+    }
+    // Dependencies first, so each explicit package finds what it needs already there.
+    for reason in [Some(PackageInstallReason::Depend), Some(PackageInstallReason::Explicit), None] {
+        let targets =
+            recovery.install.iter().filter(|target| target.reason == reason).collect::<Vec<_>>();
+        if !targets.is_empty() {
+            commands.push(format!(
+                "{piko} install{root_flag}{} {}",
+                reason_flag(reason),
+                names(&targets)
+            ));
+        }
+    }
+    commands
+}
+
+/// The `piko install` flag that gives a package its install reason again.
+///
+/// No flag when the journal does not record the reason. A plain install then keeps the reason
+/// of a package already installed, and marks a new one explicit.
+const fn reason_flag(reason: Option<PackageInstallReason>) -> &'static str {
+    match reason {
+        Some(PackageInstallReason::Depend) => " --asdeps",
+        Some(PackageInstallReason::Explicit) => " --asexplicit",
+        None => "",
+    }
+}
+
+/// Quotes `text` for a POSIX shell, only when it needs quoting.
+///
+/// A printed command is copied into a shell. A path with a space in it, unquoted, would name
+/// two arguments.
+fn shell_word(text: &str) -> std::borrow::Cow<'_, str> {
+    let plain = !text.is_empty()
+        && text.chars().all(|c| c.is_ascii_alphanumeric() || "@%+=:,./_-".contains(c));
+    if plain {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(format!("'{}'", text.replace('\'', "'\\''")))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+mod tests {
+    use piko_txn::journal::{Recovery, Reinstall};
+
+    use super::*;
+
+    fn reinstall(name: &str, reason: Option<PackageInstallReason>) -> Reinstall {
+        Reinstall { name: name.parse().unwrap(), reason }
+    }
+
+    const JOURNAL: &str = "/var/lib/pacman/piko-journal";
+
+    /// The journal goes first, since piko refuses every transaction while it is there. The cut
+    /// install is alone, so `--overwrite` covers nothing else. Dependencies install before
+    /// explicit packages.
+    #[test]
+    fn the_commands_run_in_the_order_that_finishes_the_transaction() {
+        let recovery = Recovery {
+            interrupted: Some(reinstall("foo", Some(PackageInstallReason::Explicit))),
+            remove: vec!["old".parse().unwrap(), "older".parse().unwrap()],
+            install: vec![
+                reinstall("bar", Some(PackageInstallReason::Explicit)),
+                reinstall("libbar", Some(PackageInstallReason::Depend)),
+                reinstall("baz", None),
+            ],
+            unreadable: Vec::new(),
+        };
+
+        let commands = recovery_commands(&recovery, Path::new("/"), None, Path::new(JOURNAL));
+        assert_eq!(
+            commands,
+            [
+                "rm /var/lib/pacman/piko-journal",
+                "piko install --asexplicit --overwrite '*' foo",
+                "piko remove --nodeps old older",
+                "piko install --asdeps libbar",
+                "piko install --asexplicit bar",
+                "piko install baz",
+            ]
+        );
+    }
+
+    /// The commands act on the root and the database the transaction changed.
+    #[test]
+    fn the_commands_carry_the_root_and_the_dbpath() {
+        let recovery = Recovery { remove: vec!["old".parse().unwrap()], ..Recovery::default() };
+
+        let commands = recovery_commands(
+            &recovery,
+            Path::new("/mnt/new root"),
+            Some(Path::new("/mnt/db")),
+            Path::new("/mnt/db/piko-journal"),
+        );
+        assert_eq!(
+            commands,
+            [
+                "rm /mnt/db/piko-journal",
+                "piko --dbpath /mnt/db remove --root '/mnt/new root' --nodeps old",
+            ]
+        );
+    }
+
+    /// Nothing left to do: only the journal goes.
+    #[test]
+    fn an_empty_recovery_only_removes_the_journal() {
+        let commands =
+            recovery_commands(&Recovery::default(), Path::new("/"), None, Path::new(JOURNAL));
+        assert_eq!(commands, ["rm /var/lib/pacman/piko-journal"]);
+    }
+
+    #[test]
+    fn a_word_is_quoted_only_when_a_shell_would_split_or_expand_it() {
+        assert_eq!(shell_word("/var/lib/pacman"), "/var/lib/pacman");
+        assert_eq!(shell_word("a b"), "'a b'");
+        assert_eq!(shell_word("*"), "'*'");
+        assert_eq!(shell_word("it's"), "'it'\\''s'");
+        assert_eq!(shell_word(""), "''");
+    }
 }

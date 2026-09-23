@@ -263,6 +263,9 @@ fn outcome_mark(outcome: &Outcome) -> console::StyledObject<String> {
 
 /// Reports an unfinished transaction, if the database still records one.
 ///
+/// A journal that is there but cannot be read is reported too. Only a missing journal is
+/// silent.
+///
 /// Read-only, and reusing what `piko report` already reads. A history that ends just before
 /// the transaction that broke the system would be missing its most useful entry.
 fn unfinished_note(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
@@ -278,6 +281,19 @@ fn unfinished_note(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(None) => ExitCode::SUCCESS,
+        // A journal this build cannot read still means a transaction did not finish. The
+        // history printed above is correct, so this is a note, as for a readable journal.
+        Err(piko_txn::Error::JournalUnreadable { .. }) => {
+            emit!(
+                out,
+                "{}",
+                console::Style::new().yellow().apply_to(
+                    "an unfinished transaction is recorded, but its journal cannot be read; \
+                     run `piko report` to see it"
+                )
+            );
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             report_error(&error);
             ExitCode::FAILURE

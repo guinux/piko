@@ -492,6 +492,19 @@ pub enum Error {
         source: piko_sig::Error,
     },
 
+    /// A transaction journal exists, but this build cannot read it.
+    ///
+    /// The file is there, so a previous run wrote it and did not finish. What that run
+    /// recorded is unknown, and so is the state of the system. So this refuses a transaction
+    /// the same way a readable journal does. It is never read as "no journal".
+    #[error("{} records a transaction that cannot be read: {reason}", path.display())]
+    JournalUnreadable {
+        /// The journal file.
+        path: PathBuf,
+        /// Why it cannot be read.
+        reason: crate::journal::Unreadable,
+    },
+
     /// An owner query was given an empty path.
     ///
     /// The one way [`crate::owner::Owners::query`] can fail. Every other outcome, including a

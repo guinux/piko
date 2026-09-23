@@ -52,3 +52,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (numbers, `N-M` ranges, `^` to exclude, empty line for all). `--noconfirm` takes every
   member, and `piko plan` states on stderr that it did the same. pacman's `-S <group>`
   question. See `docs/libalpm-compat.md` §130.
+- `piko report` prints the commands that finish an interrupted transaction: remove the journal,
+  reinstall the package whose install was cut with `--overwrite '*'`, then remove and install
+  what is left, with each package's install reason. The journal now records install reasons.
+  See `docs/libalpm-compat.md` §158.
+- A transaction journal that exists but cannot be read (no header, an unknown format version, or
+  not text) refuses every transaction, as a readable one does. `piko report` and `piko history`
+  report it as there and unreadable, not as absent. See `docs/libalpm-compat.md` §159.
