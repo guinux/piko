@@ -63,9 +63,13 @@
 //! // Installed on the CLI's `SIGINT` handler. Checked once per 64 KiB.
 //! let cancel = Cancel::new();
 //!
+//! // `-Sy` holds the database lock for the whole refresh, as libalpm's `alpm_db_update` does.
+//! let lock = piko_db_write::DbLock::acquire(Path::new("/var/lib/pacman"))?;
+//!
 //! let refresher = Refresher::default();
 //! let refreshed = refresher.refresh(
 //!     Path::new("/var/lib/pacman/sync"),
+//!     &lock,
 //!     "core",
 //!     &["https://mirror.example/core/os/x86_64".to_owned()],
 //!     Some(&keyring),

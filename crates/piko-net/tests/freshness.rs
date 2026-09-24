@@ -40,6 +40,10 @@ use piko_net::{
 };
 use piko_sig::Policy;
 
+mod common;
+
+use common::SyncDir;
+
 /// Tue, 18 Aug 2026 18:18:06 GMT.
 const T1: u64 = 1_787_077_086;
 /// Wed, 19 Aug 2026 10:00:00 GMT.
@@ -142,7 +146,16 @@ fn refresh_kind(
         freshness,
     }];
     Refresher::default()
-        .refresh_all(sync, &repos, None, Concurrency::new(1), force, &Cancel::new(), &|_, _| {})
+        .refresh_all(
+            sync,
+            &common::lock(sync),
+            &repos,
+            None,
+            Concurrency::new(1),
+            force,
+            &Cancel::new(),
+            &|_, _| {},
+        )
         .pop()
         .unwrap()
 }
@@ -164,7 +177,7 @@ fn installed(sync: &Path) -> Vec<u8> {
 /// the next one serves. pacman would stop at the first and call the database up to date.
 #[test]
 fn a_mirror_whose_last_modified_is_older_is_passed_over_for_the_next() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     install(sync.path(), &database("installed", T2), T2);
     let newer = database("newer", T3);
     let (behind, _) = serve(vec![ok(&database("behind", T1), T1)]);
@@ -185,7 +198,7 @@ fn a_mirror_whose_last_modified_is_older_is_passed_over_for_the_next() {
 /// and the file is not replaced.
 #[test]
 fn an_equal_last_modified_counts_as_not_modified() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let live = database("installed", T2);
     install(sync.path(), &live, T2);
     let (mirror, requests) = serve(vec![ok(&database("same publication", T2), T2)]);
@@ -201,7 +214,7 @@ fn an_equal_last_modified_counts_as_not_modified() {
 /// header passes it, and the archive's own date catches it.
 #[test]
 fn an_older_archive_behind_a_newer_last_modified_is_refused() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     install(sync.path(), &database("installed", T2), T2);
     let newer = database("newer", T3);
     let (lying, _) = serve(vec![ok(&database("old content", T1), T9)]);
@@ -228,7 +241,7 @@ fn an_older_archive_behind_a_newer_last_modified_is_refused() {
 /// error.
 #[test]
 fn every_mirror_older_keeps_the_installed_database() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let live = database("installed", T2);
     install(sync.path(), &live, T2);
     let (first, _) = serve(vec![ok(&database("behind", T1), T1)]);
@@ -246,7 +259,7 @@ fn every_mirror_older_keeps_the_installed_database() {
 /// condition. A habitual forced refresh must not switch off the rollback check with it.
 #[test]
 fn force_does_not_accept_an_older_database() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let live = database("installed", T2);
     install(sync.path(), &live, T2);
     let (behind, _) = serve(vec![ok(&database("behind", T1), T1)]);
@@ -266,7 +279,7 @@ fn force_does_not_accept_an_older_database() {
 /// `force` still re-downloads a database with the same date.
 #[test]
 fn force_downloads_an_equal_last_modified_again() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     install(sync.path(), &database("installed", T2), T2);
     let again = database("the same publication, compressed again", T2);
     let (mirror, _) = serve(vec![ok(&again, T2)]);
@@ -280,7 +293,7 @@ fn force_downloads_an_equal_last_modified_again() {
 /// The explicit override: an older database is installed, and the caller hears about it.
 #[test]
 fn accept_older_installs_an_older_database_and_says_so() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     install(sync.path(), &database("installed", T2), T2);
     let snapshot = database("an archive snapshot", T1);
     let (archive, _) = serve(vec![ok(&snapshot, T1)]);
@@ -305,7 +318,7 @@ fn accept_older_installs_an_older_database_and_says_so() {
 /// found there is installed.
 #[test]
 fn a_stale_database_is_replaced_by_a_newer_one_from_another_mirror() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     install(sync.path(), &database("installed", T1), T1);
     let newer = database("newer", T3);
     let (frozen, _) = serve(vec![not_modified()]);
@@ -324,7 +337,7 @@ fn a_stale_database_is_replaced_by_a_newer_one_from_another_mirror() {
 /// `Limits::freshness_probes` other mirrors.
 #[test]
 fn a_stale_database_is_reported_after_a_bounded_number_of_probes() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let live = database("installed", T1);
     install(sync.path(), &live, T1);
     let mirrors: Vec<_> = (0..5).map(|_| serve(vec![not_modified()])).collect();
@@ -359,7 +372,7 @@ fn a_stale_database_is_reported_after_a_bounded_number_of_probes() {
 /// costs a full decompression on every refresh.
 #[test]
 fn a_files_archive_is_not_probed_for_age() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     std::fs::write(sync.path().join("core.files"), database("files", T1)).unwrap();
     std::fs::File::options()
         .write(true)
@@ -389,7 +402,7 @@ fn a_files_archive_is_not_probed_for_age() {
 /// that is wrong.
 #[test]
 fn a_database_from_the_future_is_installed_and_reported() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let (mirror, _) = serve(vec![ok(&database("new", T3), T3)]);
 
     let refreshed = refresh(sync.path(), &[mirror], policy_at(T3 - 2 * 86_400), false).unwrap();
@@ -409,7 +422,7 @@ fn a_database_from_the_future_is_installed_and_reported() {
 /// failure and the next one serves.
 #[test]
 fn an_unreadable_archive_moves_on_to_the_next_mirror() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let good = database("good", T3);
     let (broken, _) = serve(vec![ok(b"not an archive at all", T3)]);
     let (working, _) = serve(vec![ok(&good, T3)]);
@@ -423,7 +436,7 @@ fn an_unreadable_archive_moves_on_to_the_next_mirror() {
 /// The first refresh has no installed database to compare with, so any database is accepted.
 #[test]
 fn the_first_refresh_accepts_any_database() {
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let old = database("old", T1);
     let (mirror, _) = serve(vec![ok(&old, T1)]);
 

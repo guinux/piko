@@ -25,6 +25,10 @@ use piko_net::{
 };
 use piko_sig::Policy;
 
+mod common;
+
+use common::SyncDir;
+
 /// The `[core]` servers from `/etc/pacman.conf`, or `None` to skip.
 fn core_servers() -> Option<Vec<String>> {
     let config = piko_db::config::PacmanConfig::open("/etc/pacman.conf").ok()?;
@@ -43,7 +47,16 @@ fn refresh(sync: &Path, servers: &[String], accept_older: bool) -> Refreshed {
         freshness: FreshnessPolicy { accept_older, ..FreshnessPolicy::default() },
     }];
     Refresher::default()
-        .refresh_all(sync, &repos, None, Concurrency::new(1), false, &Cancel::new(), &|_, _| {})
+        .refresh_all(
+            sync,
+            &common::lock(sync),
+            &repos,
+            None,
+            Concurrency::new(1),
+            false,
+            &Cancel::new(),
+            &|_, _| {},
+        )
         .pop()
         .unwrap()
         .unwrap()
@@ -64,7 +77,7 @@ fn the_archive_is_refused_until_it_is_asked_for() {
     let day = String::from_utf8(output.stdout).unwrap().trim().to_owned();
     let archive = vec![format!("https://archive.archlinux.org/repos/{day}/core/os/x86_64")];
 
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let current = refresh(sync.path(), &servers, false);
     assert_eq!(current.outcome, Outcome::Updated);
     let installed = std::fs::read(sync.path().join("core.db")).unwrap();

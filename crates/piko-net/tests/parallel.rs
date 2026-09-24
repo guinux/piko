@@ -50,6 +50,10 @@ use piko_net::{
 };
 use piko_sig::Policy;
 
+mod common;
+
+use common::SyncDir;
+
 /// How long each response is held open, so overlapping transfers actually overlap.
 const HOLD: Duration = Duration::from_millis(60);
 
@@ -288,7 +292,7 @@ fn packages_are_fetched_largest_first_but_reported_in_input_order() {
 #[test]
 fn repositories_refresh_concurrently_and_report_in_input_order() {
     let (url, seen) = mirror();
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let servers = vec![url];
 
     let names = ["core", "extra", "multilib", "community"];
@@ -306,6 +310,7 @@ fn repositories_refresh_concurrently_and_report_in_input_order() {
     let seen_order = Mutex::new(Vec::new());
     let results = Refresher::default().refresh_all(
         sync.path(),
+        &common::lock(sync.path()),
         &repos,
         None,
         Concurrency::new(4),
@@ -428,7 +433,7 @@ fn a_batch_refuses_a_duplicate_rather_than_racing_for_one_temporary() {
 #[test]
 fn a_repository_named_twice_is_refused_before_any_io() {
     let (url, seen) = mirror();
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let servers = vec![url];
     let repos: Vec<RepoRefresh<'_>> = ["core", "core"]
         .iter()
@@ -443,6 +448,7 @@ fn a_repository_named_twice_is_refused_before_any_io() {
 
     let results = Refresher::default().refresh_all(
         sync.path(),
+        &common::lock(sync.path()),
         &repos,
         None,
         Concurrency::new(4),
@@ -463,7 +469,7 @@ fn a_repository_named_twice_is_refused_before_any_io() {
 #[test]
 fn a_repositorys_db_and_files_are_fetched_side_by_side() {
     let (url, seen) = mirror();
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let servers = vec![url];
 
     let repos: Vec<RepoRefresh<'_>> = [DatabaseKind::Db, DatabaseKind::Files]
@@ -479,6 +485,7 @@ fn a_repositorys_db_and_files_are_fetched_side_by_side() {
 
     let results = Refresher::default().refresh_all(
         sync.path(),
+        &common::lock(sync.path()),
         &repos,
         None,
         Concurrency::new(2),

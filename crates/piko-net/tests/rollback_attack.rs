@@ -40,6 +40,10 @@ use piko_net::{
 };
 use piko_sig::{Keyring, Policy};
 
+mod common;
+
+use common::SyncDir;
+
 /// Wed, 19 Aug 2026 10:00:00 GMT: the installed database's stamp.
 const STAMP: u64 = 1_787_133_600;
 /// Fri, 01 Jan 2027 00:00:00 GMT: a `Last-Modified` newer than the stamp, so the header lets
@@ -196,6 +200,7 @@ fn refresh(
     Refresher::default()
         .refresh_all(
             sync,
+            &common::lock(sync),
             &repos,
             Some(keyring),
             Concurrency::new(1),
@@ -213,7 +218,7 @@ fn refresh(
 #[test]
 fn a_replayed_older_signed_database_is_refused() {
     let Some(signer) = Signer::new() else { return };
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     // The archive dates agree with the signatures here. The next test separates them.
     let old = database("old", STAMP - 86_400);
     let current = database("current", STAMP);
@@ -242,7 +247,7 @@ fn a_replayed_older_signed_database_is_refused() {
 #[test]
 fn a_signed_database_is_dated_by_its_signature_not_its_archive() {
     let Some(signer) = Signer::new() else { return };
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let current = database("current", STAMP);
     install(sync.path(), &current, Some(&signer.sign(&current, 2_000)));
     let old = database("old, with a new archive date", STAMP + 30 * 86_400);
@@ -260,7 +265,7 @@ fn a_signed_database_is_dated_by_its_signature_not_its_archive() {
 #[test]
 fn leaving_out_the_signature_does_not_bypass_the_check() {
     let Some(signer) = Signer::new() else { return };
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let current = database("current", STAMP);
     install(sync.path(), &current, Some(&signer.sign(&current, 2_000)));
     let unsigned = database("unsigned, with a new archive date", STAMP + 30 * 86_400);
@@ -290,7 +295,7 @@ fn leaving_out_the_signature_does_not_bypass_the_check() {
 #[test]
 fn a_newer_signed_database_is_installed() {
     let Some(signer) = Signer::new() else { return };
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     let current = database("current", STAMP);
     install(sync.path(), &current, Some(&signer.sign(&current, 1_000)));
     let newer = database("newer", STAMP);
@@ -314,7 +319,7 @@ fn a_newer_signed_database_is_installed() {
 #[test]
 fn an_unsigned_database_with_a_forged_date_is_accepted() {
     let Some(signer) = Signer::new() else { return };
-    let sync = tempfile::tempdir().unwrap();
+    let sync = SyncDir::new();
     install(sync.path(), &database("current", STAMP), None);
     let forged = database("old content, forged date", STAMP + 86_400);
     let mirror = serve(vec![ok(&forged), not_found()]);

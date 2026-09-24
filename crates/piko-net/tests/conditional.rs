@@ -35,6 +35,10 @@ use std::{
 use piko_net::{Outcome, Refresher};
 use piko_sig::Policy;
 
+mod common;
+
+use common::SyncDir;
+
 /// Serves `responses` in order, one per connection, then stops.
 ///
 /// Deliberately the crudest HTTP server that works. It reads the request headers, discards
@@ -92,7 +96,16 @@ fn refresh(sync: &Path, url: &str) -> piko_net::Result<Outcome> {
 
 fn refresh_forced(sync: &Path, url: &str, force: bool) -> piko_net::Result<Outcome> {
     Refresher::default()
-        .refresh(sync, "core", &[url.to_owned()], None, unsigned(), force, &piko_net::Cancel::new())
+        .refresh(
+            sync,
+            &common::lock(sync),
+            "core",
+            &[url.to_owned()],
+            None,
+            unsigned(),
+            force,
+            &piko_net::Cancel::new(),
+        )
         .map(|refreshed| refreshed.outcome)
 }
 
@@ -112,7 +125,7 @@ const SECOND: u64 = 1_787_133_600;
 /// The regression: a 304 must leave the installed database exactly as it was.
 #[test]
 fn a_not_modified_response_does_not_touch_the_database() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     let sync = dir.path();
     let live = database("a real database", FIRST);
     let (url, server) =
@@ -145,7 +158,7 @@ fn a_not_modified_response_does_not_touch_the_database() {
 /// The first request has nothing to be conditional about.
 #[test]
 fn the_first_request_is_unconditional() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     let (url, server) =
         serve(vec![ok_response(&database("db", FIRST), "Tue, 18 Aug 2026 18:18:06 GMT")]);
 
@@ -162,7 +175,7 @@ fn the_first_request_is_unconditional() {
 /// Defence in depth behind the status check: a 200 carrying nothing is refused, not installed.
 #[test]
 fn an_empty_body_is_refused_rather_than_installed() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     let sync = dir.path();
     let live = database("a real database", FIRST);
     let (url, server) = serve(vec![
@@ -191,7 +204,7 @@ fn an_empty_body_is_refused_rather_than_installed() {
 /// makes the next conditional request send a value the server recognises.
 #[test]
 fn the_download_carries_the_servers_last_modified() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     let (url, server) =
         serve(vec![ok_response(&database("db", FIRST), "Tue, 18 Aug 2026 18:18:06 GMT")]);
 
@@ -209,7 +222,7 @@ fn the_download_carries_the_servers_last_modified() {
 /// An unexpected status is an error, not a body to install.
 #[test]
 fn an_unexpected_status_is_not_installed() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     let (url, server) =
         serve(vec![b"HTTP/1.1 500 Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()]);
 
@@ -223,7 +236,7 @@ fn an_unexpected_status_is_not_installed() {
 /// second request into one the server could answer 304.
 #[test]
 fn force_bypasses_the_conditional_request() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     let sync = dir.path();
     let updated = database("an updated database", SECOND);
     let (url, server) = serve(vec![

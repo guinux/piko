@@ -8,7 +8,7 @@ use std::{
 
 use alpm_types::PackageFileName;
 use piko_db::repo::freshness::{self as dating, Publication, Staleness};
-use piko_db_write::AtomicFile;
+use piko_db_write::{AtomicFile, DbLock};
 use piko_sig::{Checked, Keyring, Policy, Verdict};
 
 use crate::{
@@ -325,8 +325,13 @@ impl Refresher {
     /// `keyring` and `policy` decide what the download must satisfy. When `policy.check` is
     /// false, nothing is verified — the same `SigLevel = Never` escape the rest of piko honors.
     ///
+    /// `lock` is `<dbpath>/db.lck`, for the `<dbpath>` whose `sync` directory `sync_dir` is.
+    /// libalpm holds the same lock for the whole of `alpm_db_update` (`be_sync.c:163`), so a
+    /// refresh and a pacman transaction never write under one database path at once.
+    ///
     /// # Errors
     ///
+    /// Returns [`Error::WrongLock`] before any I/O if `lock` belongs to another database path.
     /// Returns [`Error`] if no server could supply the database, if it exceeded
     /// [`Limits::max_bytes`], or if it failed verification. In every case the existing
     /// database is left in place.
@@ -339,6 +344,7 @@ impl Refresher {
     pub fn refresh(
         &self,
         sync_dir: &Path,
+        lock: &DbLock,
         repo: &str,
         servers: &[String],
         keyring: Option<&Keyring>,
@@ -346,7 +352,17 @@ impl Refresher {
         force: bool,
         cancel: &Cancel,
     ) -> Result<Refreshed> {
-        self.refresh_with_progress(sync_dir, repo, servers, keyring, policy, force, cancel, &|_| {})
+        self.refresh_with_progress(
+            sync_dir,
+            lock,
+            repo,
+            servers,
+            keyring,
+            policy,
+            force,
+            cancel,
+            &|_| {},
+        )
     }
 
     /// As [`Refresher::refresh`], reporting progress through `progress` as it happens.
@@ -369,6 +385,7 @@ impl Refresher {
     pub fn refresh_with_progress(
         &self,
         sync_dir: &Path,
+        lock: &DbLock,
         repo: &str,
         servers: &[String],
         keyring: Option<&Keyring>,
@@ -377,6 +394,7 @@ impl Refresher {
         cancel: &Cancel,
         progress: &(dyn Fn(Event) + Sync),
     ) -> Result<Refreshed> {
+        check_lock(sync_dir, lock)?;
         self.refresh_one(
             sync_dir,
             RepoRefresh {
@@ -1085,8 +1103,9 @@ impl Refresher {
     ///
     /// # Errors
     ///
-    /// Per entry, as [`Refresher::refresh`]. A `repos` naming the same *file* twice fails
-    /// every entry with [`Error::DuplicateTarget`] before any I/O. Two workers would otherwise
+    /// Per entry, as [`Refresher::refresh`]. A `lock` for another database path fails every
+    /// entry with [`Error::WrongLock`] before any I/O. A `repos` naming the same *file* twice
+    /// fails every entry with [`Error::DuplicateTarget`] before any I/O. Two workers would otherwise
     /// race for one atomic-write temporary. One repository named twice is not a duplicate:
     /// its `.db` and its `.files` are two destinations.
     #[allow(
@@ -1097,6 +1116,7 @@ impl Refresher {
     pub fn refresh_all(
         &self,
         sync_dir: &Path,
+        lock: &DbLock,
         repos: &[RepoRefresh<'_>],
         keyring: Option<&Keyring>,
         concurrency: Concurrency,
@@ -1104,6 +1124,12 @@ impl Refresher {
         cancel: &Cancel,
         progress: &(dyn Fn(usize, Event) + Sync),
     ) -> Vec<Result<Refreshed>> {
+        if let Err(Error::WrongLock { lock, sync_dir }) = check_lock(sync_dir, lock) {
+            return repos
+                .iter()
+                .map(|_| Err(Error::WrongLock { lock: lock.clone(), sync_dir: sync_dir.clone() }))
+                .collect();
+        }
         // The key is the file name, not the repository name. A `--files` batch names one
         // repository twice, on purpose. Its `.db` and its `.files` are two destinations, so
         // two workers cannot race for one temporary.
@@ -1371,8 +1397,13 @@ fn parse_http_date(value: &str) -> Option<u64> {
 /// # Errors
 ///
 /// As [`Refresher::refresh`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the same concerns `Refresher::refresh` names, with the bounds defaulted away"
+)]
 pub fn refresh(
     sync_dir: &Path,
+    lock: &DbLock,
     repo: &str,
     servers: &[String],
     keyring: Option<&Keyring>,
@@ -1380,7 +1411,18 @@ pub fn refresh(
     force: bool,
     cancel: &Cancel,
 ) -> Result<Refreshed> {
-    Refresher::default().refresh(sync_dir, repo, servers, keyring, policy, force, cancel)
+    Refresher::default().refresh(sync_dir, lock, repo, servers, keyring, policy, force, cancel)
+}
+
+/// Checks that `lock` is the `db.lck` of the database path that holds `sync_dir`.
+///
+/// This is checked rather than assumed, because the failure it prevents is silent. The refresh
+/// would write an unlocked `sync` directory, while a lock is held over an unrelated one.
+fn check_lock(sync_dir: &Path, lock: &DbLock) -> Result<()> {
+    if lock.path().parent() == sync_dir.parent() {
+        return Ok(());
+    }
+    Err(Error::WrongLock { lock: lock.path().to_path_buf(), sync_dir: sync_dir.to_path_buf() })
 }
 
 #[cfg(test)]
@@ -1448,9 +1490,11 @@ mod tests {
     #[test]
     fn a_repository_with_no_servers_is_refused_before_any_io() {
         let dir = tempfile::tempdir().unwrap();
+        let lock = DbLock::acquire(dir.path()).unwrap();
         let error = Refresher::default()
             .refresh(
-                dir.path(),
+                &dir.path().join("sync"),
+                &lock,
                 "core",
                 &[],
                 None,
@@ -1460,6 +1504,28 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, Error::NoServers { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_lock_for_another_database_path_is_refused_before_any_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let lock = DbLock::acquire(other.path()).unwrap();
+        let sync = dir.path().join("sync");
+        let error = Refresher::default()
+            .refresh(
+                &sync,
+                &lock,
+                "core",
+                &["http://127.0.0.1:9/core".to_owned()],
+                None,
+                Policy::for_database(Default::default()),
+                false,
+                &Cancel::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(error, Error::WrongLock { .. }), "{error:?}");
+        assert!(!sync.exists(), "the refresh created the sync directory before refusing");
     }
 
     #[test]

@@ -36,6 +36,10 @@ use std::{
 use piko_net::Refresher;
 use piko_sig::{Keyring, Policy};
 
+mod common;
+
+use common::SyncDir;
+
 /// Serves `responses` in order, one per connection, then stops.
 fn serve(responses: Vec<Vec<u8>>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -109,7 +113,16 @@ fn refresh_from(
     policy: Policy,
 ) -> piko_net::Result<piko_net::Outcome> {
     Refresher::default()
-        .refresh(sync, "core", servers, keyring, policy, false, &piko_net::Cancel::new())
+        .refresh(
+            sync,
+            &common::lock(sync),
+            "core",
+            servers,
+            keyring,
+            policy,
+            false,
+            &piko_net::Cancel::new(),
+        )
         .map(|refreshed| refreshed.outcome)
 }
 
@@ -155,7 +168,7 @@ fn keyring() -> Option<(tempfile::TempDir, Keyring)> {
 /// The `304` guard, in the path that never had it. The message must name the status.
 #[test]
 fn a_not_modified_answer_to_a_signature_request_is_reported_as_such() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     let url = serve(vec![
         ok_response(&database("a real database")),
         b"HTTP/1.1 304 Not Modified\r\n\r\n".to_vec(),
@@ -171,7 +184,7 @@ fn a_not_modified_answer_to_a_signature_request_is_reported_as_such() {
 /// A `200` with nothing in it is not "unsigned". The server said it had a signature.
 #[test]
 fn an_empty_signature_body_is_refused_rather_than_handed_to_the_verifier() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     let url = serve(vec![ok_response(&database("a real database")), ok_response(b"")]);
 
     let error = refresh(dir.path(), &url, None, optional()).unwrap_err();
@@ -186,7 +199,7 @@ fn an_empty_signature_body_is_refused_rather_than_handed_to_the_verifier() {
 #[test]
 fn a_signature_from_a_previous_refresh_is_removed_when_the_server_has_none() {
     let Some((_home, keyring)) = keyring() else { return };
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     std::fs::write(dir.path().join("core.db.sig"), b"a signature for the previous database")
         .unwrap();
 
@@ -216,7 +229,7 @@ fn a_signature_from_a_previous_refresh_is_removed_when_the_server_has_none() {
 #[test]
 fn a_mirror_that_cannot_supply_a_signature_hands_the_whole_file_to_the_next_one() {
     let Some((_home, keyring)) = keyring() else { return };
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
 
     // The first mirror answers the database, then fails the `.sig` with a server error.
     let broken = serve(vec![
@@ -243,7 +256,7 @@ fn a_mirror_that_cannot_supply_a_signature_hands_the_whole_file_to_the_next_one(
 /// error also has to say what each mirror did, not only that none worked.
 #[test]
 fn a_signature_failure_on_every_mirror_fails_the_refresh() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     let server_error =
         || b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec();
     let first = serve(vec![ok_response(&database("a database")), server_error()]);
@@ -261,7 +274,7 @@ fn a_signature_failure_on_every_mirror_fails_the_refresh() {
 /// over a question that was never asked.
 #[test]
 fn a_signature_is_left_alone_when_the_policy_never_asks_for_one() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = SyncDir::new();
     std::fs::write(dir.path().join("core.db.sig"), b"the user's own signature").unwrap();
 
     // One response only: no `.sig` request is made at all under this policy.

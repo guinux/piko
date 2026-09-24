@@ -46,6 +46,22 @@ pub enum Error {
         file: String,
     },
 
+    /// A refresh was handed a lock belonging to a different database path.
+    ///
+    /// The lock must be `<dbpath>/db.lck` for the `<dbpath>` whose `sync` directory is written.
+    /// Any other lock leaves that directory unlocked, which nothing else would report.
+    #[error(
+        "the lock at {} does not belong to the database that holds {}",
+        lock.display(),
+        sync_dir.display()
+    )]
+    WrongLock {
+        /// The lock file that was presented.
+        lock: PathBuf,
+        /// The sync directory being written.
+        sync_dir: PathBuf,
+    },
+
     /// The download exceeded the size bound.
     ///
     /// A mirror is not trusted to be honest about how much it will send. So the bound is

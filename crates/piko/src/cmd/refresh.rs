@@ -30,6 +30,11 @@ pub struct Options {
 /// note (see [`freshness::render_note`]). None of it changes the exit code: every note leaves
 /// the system on the best database a server had.
 ///
+/// `<dbpath>/db.lck` is held for the whole refresh, and taken before anything else, as
+/// libalpm's `alpm_db_update` does (`be_sync.c:163`). A held lock fails the command at once,
+/// before any download. The lock is released when this function returns, so `update` can take
+/// it again for its transaction, as pacman's `-Syu` does.
+///
 /// A repository that fails does not stop the others. One dead mirror set should not prevent
 /// the rest of the system from being refreshed. The exit code still reports that something
 /// failed, so a script cannot mistake a partial refresh for a complete one.
@@ -53,6 +58,14 @@ pub fn refresh(
     let Options { force, files, freshness } = options;
     let sync_dir = dbpath.join("sync");
     let refresher = Refresher::default();
+
+    let lock = match piko_db_write::DbLock::acquire(dbpath) {
+        Ok(lock) => lock,
+        Err(error) => {
+            report(&error);
+            return ExitCode::FAILURE;
+        }
+    };
 
     // Opened once, only if some repository will actually use it. A system with no keyring can
     // still refresh repositories whose SigLevel asks for nothing.
@@ -121,6 +134,7 @@ pub fn refresh(
 
     let results = refresher.refresh_all(
         &sync_dir,
+        &lock,
         &requests,
         keyring.as_ref(),
         Concurrency::new(config.options.parallel_downloads),

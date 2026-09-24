@@ -1439,6 +1439,27 @@ fn update_refreshes_repositories_by_default() {
         sandbox.path("db/sync/test.db").exists(),
         "update did not refresh the database:\n{seen}"
     );
+    assert!(!sandbox.path("db/db.lck").exists(), "the lock was left behind");
+}
+
+/// The refresh takes `db.lck`, as libalpm's `alpm_db_update` does, so a held lock stops it
+/// before any download. `Server` points at a port with nothing listening. So a refresh that
+/// ignored the lock would fail on the connection instead, with a different message.
+#[test]
+fn update_refuses_to_refresh_while_the_database_is_locked() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let sandbox = Sandbox::with_server(&format!("http://127.0.0.1:{port}"));
+    std::fs::write(sandbox.path("db/db.lck"), b"").unwrap();
+
+    let output = sandbox.run_update(&[], &[]);
+    let seen = text(&output);
+    assert!(!output.status.success(), "the refresh ran under a held lock:\n{seen}");
+    assert!(seen.contains("unable to lock the database"), "{seen}");
+    assert!(!sandbox.path("db/sync/test.db").exists(), "a database was downloaded:\n{seen}");
+    assert!(sandbox.path("db/db.lck").exists(), "the other process's lock was removed");
 }
 
 /// `--norefresh` skips the pre-plan refresh entirely, `pacman -Su`. `Server` points at a port
