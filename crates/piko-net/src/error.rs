@@ -134,6 +134,37 @@ pub enum Error {
     Cancelled,
 }
 
+/// Renders `error` followed by every cause in its chain, joined by `": "`.
+///
+/// Use this where an error becomes text, as in the attempts of [`Error::AllServersFailed`].
+/// The message of an [`Error::Io`] names the action and the path only, and its source carries
+/// the reason. A reporter that walks the chain prints that reason. `to_string` alone drops it,
+/// and the user then reads "failed to download <url>" with no reason at all.
+pub(crate) fn with_causes(error: &dyn std::error::Error) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let _ = write!(text, ": {cause}");
+        source = cause.source();
+    }
+    text
+}
+
+/// The reason one server failed, as one attempt of [`Error::AllServersFailed`] records it.
+///
+/// Each attempt is already listed under its URL. An [`Error::Io`] about that same URL names it
+/// again in its message, so only its causes are kept. An error about another file keeps its
+/// whole message, because which file failed is the information. The `.sig` fetched beside a
+/// download is the usual case.
+pub(crate) fn attempt_reason(url: &str, error: &Error) -> String {
+    match error {
+        Error::Io { path, source, .. } if path.as_os_str() == url => with_causes(source),
+        other => with_causes(other),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -162,6 +193,39 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("a.example"), "{message}");
         assert!(message.contains("timed out"), "{message}");
+    }
+
+    /// An attempt stored as text keeps the reason that the source of an `Io` error carries.
+    #[test]
+    fn with_causes_keeps_the_whole_chain() {
+        let error = Error::Io {
+            path: "http://a.example/core.db".into(),
+            action: "download",
+            source: std::io::Error::other("io: Connection reset by peer"),
+        };
+        assert_eq!(
+            with_causes(&error),
+            "failed to download http://a.example/core.db: io: Connection reset by peer"
+        );
+        assert_eq!(with_causes(&Error::Cancelled), "the download was cancelled");
+    }
+
+    /// An attempt names its URL once. An error about another file still names that file.
+    #[test]
+    fn attempt_reason_drops_only_the_repeated_url() {
+        let url = "http://a.example/core.db";
+        let reset = |path: &str| Error::Io {
+            path: path.into(),
+            action: "download",
+            source: std::io::Error::other("io: Connection reset by peer"),
+        };
+        assert_eq!(attempt_reason(url, &reset(url)), "io: Connection reset by peer");
+        assert_eq!(
+            attempt_reason(url, &reset("http://a.example/core.db.sig")),
+            "failed to download http://a.example/core.db.sig: io: Connection reset by peer"
+        );
+        let empty = Error::EmptyDownload { file: "core.db".to_owned() };
+        assert_eq!(attempt_reason(url, &empty), empty.to_string());
     }
 
     /// A rejection has to say the system was left alone. Otherwise the user's next move is to

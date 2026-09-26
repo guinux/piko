@@ -121,23 +121,15 @@ pub struct SigningPolicy {
 /// `strstr(i->data, "://")` and loads each half under its own directive. `piko_txn::classify`
 /// makes the same split.
 ///
-/// A config that cannot be read falls back to verifying nothing, which is the same fallback
-/// every other setting here takes. That is the weak direction, and it is stated plainly in
-/// `piko install`'s output rather than left implicit.
-pub fn signing_policy(cli: &Cli, config: &ConfigCache) -> SigningPolicy {
-    match config.get(cli) {
-        Ok(parsed) => SigningPolicy {
-            gpg_dir: parsed.options.gpg_dir.clone(),
-            sig_level: parsed.options.sig_level,
-            local_file_sig_level: parsed.options.local_file_sig_level,
-            remote_file_sig_level: parsed.options.remote_file_sig_level,
-        },
-        Err(_) => SigningPolicy {
-            gpg_dir: PathBuf::from(piko_db::config::DEFAULT_GPG_DIR),
-            sig_level: piko_db::config::SigLevel::default(),
-            local_file_sig_level: piko_db::config::SigLevel::default(),
-            remote_file_sig_level: piko_db::config::SigLevel::default(),
-        },
+/// It takes a parsed config, and has no fallback for one that cannot be read. A transaction
+/// refuses to run without a readable config, as pacman does: with no config there is no
+/// signature policy, and "verify nothing" is not a policy to default to.
+pub fn signing_policy(parsed: &PacmanConfig) -> SigningPolicy {
+    SigningPolicy {
+        gpg_dir: parsed.options.gpg_dir.clone(),
+        sig_level: parsed.options.sig_level,
+        local_file_sig_level: parsed.options.local_file_sig_level,
+        remote_file_sig_level: parsed.options.remote_file_sig_level,
     }
 }
 
@@ -456,8 +448,9 @@ pub fn open_repo_by_name(
 ///
 /// Everything here that is a frontend decision rather than an ALPM security rule: resolving
 /// `parsed` from `cli`/`config` at all (a GUI might refuse outright rather than fall back),
-/// and the "no readable config means no check" fallback (every other setting in this module
-/// takes the same fallback; see [`signing_policy`]).
+/// and the "no readable config means no check" fallback. That fallback serves only the
+/// commands that read: a transaction refuses to run without a readable config before it opens
+/// a repository (see [`require_pacman_config`]), so no verdict here decides what is installed.
 ///
 /// # The verdict is not an I/O error, and must not be spelled as one
 ///

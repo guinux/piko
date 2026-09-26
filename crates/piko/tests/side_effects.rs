@@ -169,6 +169,59 @@ fn package_tar_owned(
     uid: u64,
     gid: u64,
 ) -> Vec<u8> {
+    package_tar_full(name, version, script, extra, depends, backups, "", uid, gid)
+}
+
+/// Writes a package whose `.PKGINFO` declares `replaces` and `conflicts`.
+///
+/// `verify` compares every archive's `.PKGINFO` with the repository `desc` the plan used, as
+/// pacman does. So a package in a repository written with [`Sandbox::write_repo_with_relations`]
+/// must declare the same relations, or the install is refused.
+fn write_package_with_relations(
+    cache: &Path,
+    name: &str,
+    version: &str,
+    replaces: &[&str],
+    conflicts: &[&str],
+) {
+    let relations: String = replaces
+        .iter()
+        .map(|entry| format!("replaces = {entry}\n"))
+        .chain(conflicts.iter().map(|entry| format!("conflict = {entry}\n")))
+        .collect();
+    std::fs::write(
+        cache.join(format!("{name}-{version}-x86_64.pkg.tar")),
+        package_tar_full(
+            name,
+            version,
+            None,
+            &[],
+            &[],
+            &[],
+            &relations,
+            u64::from(rustix::process::getuid().as_raw()),
+            u64::from(rustix::process::getgid().as_raw()),
+        ),
+    )
+    .unwrap();
+}
+
+/// [`package_tar_owned`], with `relations` appended to the `.PKGINFO` as written.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each argument is a distinct part of the archive this builds"
+)]
+fn package_tar_full(
+    name: &str,
+    version: &str,
+    script: Option<&str>,
+    extra: &[(&str, &str)],
+    depends: &[&str],
+    backups: &[&str],
+    relations: &str,
+    uid: u64,
+    gid: u64,
+) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
 
     let mut add = |path: &str, contents: &[u8], directory: bool| {
@@ -185,7 +238,8 @@ fn package_tar_owned(
         builder.append_data(&mut header, path, contents).unwrap();
     };
 
-    add(".PKGINFO", pkginfo(name, version, depends, backups).as_bytes(), false);
+    let info = format!("{}{relations}", pkginfo(name, version, depends, backups));
+    add(".PKGINFO", info.as_bytes(), false);
     if let Some(script) = script {
         add(".INSTALL", script.as_bytes(), false);
     }
@@ -213,9 +267,17 @@ fn package_tar_owned(
     builder.into_inner().unwrap()
 }
 
+/// The SHA-256 of `bytes`, as `%SHA256SUM%` spells it.
+fn sha256_of(bytes: &[u8]) -> String {
+    alpm_types::Sha256Checksum::calculate_from(bytes).to_string()
+}
+
 /// A minimal, valid repository `desc` for `name` at `version`, naming exactly the file
 /// [`write_package_with`] writes (no compression suffix) so `CacheDirSource` finds it.
-fn repo_desc(name: &str, version: &str, depends: &[&str]) -> String {
+///
+/// `sha256` is the file's `%SHA256SUM%`. piko compares every repository package with it, so it
+/// must be the checksum of the bytes the test installs. [`Sandbox::write_repo`] computes it.
+fn repo_desc(name: &str, version: &str, depends: &[&str], sha256: &str) -> String {
     let mut desc = format!(
         "%FILENAME%\n{name}-{version}-x86_64.pkg.tar\n\n\
          %NAME%\n{name}\n\n\
@@ -224,7 +286,7 @@ fn repo_desc(name: &str, version: &str, depends: &[&str]) -> String {
          %DESC%\nAn example package\n\n\
          %CSIZE%\n4\n\n\
          %ISIZE%\n4\n\n\
-         %SHA256SUM%\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n\n\
+         %SHA256SUM%\n{sha256}\n\n\
          %URL%\nhttps://example.org/\n\n\
          %ARCH%\nx86_64\n\n\
          %BUILDDATE%\n1733737242\n\n\
@@ -254,8 +316,9 @@ fn repo_desc_with_relations(
     depends: &[&str],
     replaces: &[&str],
     conflicts: &[&str],
+    sha256: &str,
 ) -> String {
-    let mut desc = repo_desc(name, version, depends);
+    let mut desc = repo_desc(name, version, depends, sha256);
     for (key, values) in [("REPLACES", replaces), ("CONFLICTS", conflicts)] {
         if values.is_empty() {
             continue;
@@ -486,7 +549,11 @@ impl Sandbox {
         let bodies: Vec<(String, Vec<u8>)> = packages
             .iter()
             .map(|(name, version, depends)| {
-                (format!("{name}-{version}/desc"), repo_desc(name, version, depends).into_bytes())
+                let sha256 = self.published_sha256(name, version);
+                (
+                    format!("{name}-{version}/desc"),
+                    repo_desc(name, version, depends, &sha256).into_bytes(),
+                )
             })
             .collect();
         let entries: Vec<(&str, &[u8])> =
@@ -494,14 +561,29 @@ impl Sandbox {
         std::fs::write(self.path("db/sync/test.db"), piko_db::fixture::gzip_tar(&entries)).unwrap();
     }
 
+    /// The `%SHA256SUM%` to publish for `name` at `version`.
+    ///
+    /// The checksum of the file in the cache, when the test put one there first. Otherwise the
+    /// checksum of [`package_tar`]'s default archive, which is what a download test serves. A
+    /// test that writes another archive after the repository publishes a checksum it does not
+    /// match, and piko refuses the archive.
+    fn published_sha256(&self, name: &str, version: &str) -> String {
+        let cached = self.path(&format!("cache/{name}-{version}-x86_64.pkg.tar"));
+        match std::fs::read(cached) {
+            Ok(bytes) => sha256_of(&bytes),
+            Err(_) => sha256_of(&package_tar(name, version, None, &[])),
+        }
+    }
+
     /// As [`Sandbox::write_repo`], for entries that also declare `%REPLACES%`/`%CONFLICTS%`.
     fn write_repo_with_relations(&self, packages: &[RepoEntryWithRelations<'_>]) {
         let bodies: Vec<(String, Vec<u8>)> = packages
             .iter()
             .map(|(name, version, depends, replaces, conflicts)| {
+                let sha256 = self.published_sha256(name, version);
                 (
                     format!("{name}-{version}/desc"),
-                    repo_desc_with_relations(name, version, depends, replaces, conflicts)
+                    repo_desc_with_relations(name, version, depends, replaces, conflicts, &sha256)
                         .into_bytes(),
                 )
             })
@@ -685,6 +767,57 @@ fn abort_on_fail_stops_the_transaction_before_anything_changes() {
     assert!(!sandbox.path("db/piko-journal").exists(), "a journal was left behind");
 }
 
+/// A package file named by path is installed from a private copy staged under the cache, and
+/// the copy is gone once the command returns. The user's own file is left as it was.
+#[test]
+fn a_named_package_file_is_installed_from_a_private_copy() {
+    let sandbox = Sandbox::new();
+    let downloads = tempfile::tempdir().unwrap();
+    let named = downloads.path().join("foo-1.0.0-1-x86_64.pkg.tar");
+    let bytes = package_tar("foo", "1.0.0-1", None, &[]);
+    std::fs::write(&named, &bytes).unwrap();
+
+    let output = sandbox.run_install(&[named.to_str().unwrap()], &[]);
+    let seen = text(&output);
+
+    assert!(output.status.success(), "{seen}");
+    assert!(sandbox.path("root/usr/bin/foo").exists(), "the named file was not installed:\n{seen}");
+    assert_eq!(std::fs::read(&named).unwrap(), bytes, "the user's file was changed");
+    let staging_left = std::fs::read_dir(sandbox.path("cache"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().starts_with("piko-staging."));
+    assert!(!staging_left, "the staging directory was left in the cache");
+}
+
+/// A journal left by an unfinished transaction refuses the next one, names `piko report`, and
+/// is left as it was. The refusal comes from the library, which a second frontend shares.
+#[test]
+fn a_leftover_journal_refuses_the_transaction() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    let journal = format!(
+        "piko-journal 1\nroot {}\ndbpath {}\nstep 0 remove bar-1.0-1\nbegin\n",
+        sandbox.path("root").display(),
+        sandbox.path("db").display()
+    );
+    std::fs::write(sandbox.path("db/piko-journal"), &journal).unwrap();
+
+    let output = sandbox.install("1.0.0-1", &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "the transaction should have been refused:\n{seen}");
+    assert!(seen.contains("records an unfinished transaction"), "{seen}");
+    assert!(seen.contains("piko report"), "{seen}");
+    assert!(!sandbox.path("root/usr/bin/foo").exists(), "files were written anyway");
+    assert!(!sandbox.path("db/db.lck").exists(), "the lock was left behind");
+    assert_eq!(
+        std::fs::read_to_string(sandbox.path("db/piko-journal")).unwrap(),
+        journal,
+        "the journal was changed"
+    );
+}
+
 /// A journal this build cannot read still records a transaction that did not finish. A
 /// transaction must refuse over it, exactly as over a readable one, and leave it in place.
 /// `piko report` and `piko history` must report it as there, never as absent.
@@ -731,6 +864,43 @@ fn a_journal_that_cannot_be_read_refuses_the_transaction() {
     let history = run_history(&sandbox, &[]);
     let seen = text(&history);
     assert!(seen.contains("its journal cannot be read"), "{seen}");
+}
+
+/// A transaction refuses to run without a readable pacman.conf, as pacman does. With no config
+/// there is no `SigLevel` to hold a package to and no `HoldPkg` to ask about, and the empty
+/// fallbacks would install unverified or remove a held package without asking.
+#[test]
+fn a_transaction_refuses_a_config_it_cannot_read() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    let installed = sandbox.install("1.0.0-1", &[]);
+    assert!(installed.status.success(), "{}", text(&installed));
+    let missing = sandbox.path("missing.conf");
+
+    for command in ["remove", "install"] {
+        let output = Command::new(PIKO)
+            .arg(command)
+            .arg("--config")
+            .arg(&missing)
+            .arg("--root")
+            .arg(sandbox.path("root"))
+            .arg("--dbpath")
+            .arg(sandbox.path("db"))
+            .arg("--hookdir")
+            .arg(sandbox.path("hooks"))
+            .arg("--noconfirm")
+            .arg("foo")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let seen = text(&output);
+
+        assert!(!output.status.success(), "{command} ran without a config:\n{seen}");
+        assert!(seen.contains("failed to read"), "{command}: {seen}");
+        assert!(sandbox.path("root/usr/bin/foo").exists(), "{command} removed a file");
+        assert!(sandbox.path("db/local/foo-1.0.0-1").is_dir(), "{command} changed the entry");
+        assert!(!sandbox.path("db/db.lck").exists(), "{command} left the lock behind");
+    }
 }
 
 /// Without `AbortOnFail`, the same failing hook must not stop anything.
@@ -990,7 +1160,7 @@ fn upgrading_deletes_a_file_the_new_version_drops() {
 #[test]
 fn installing_by_name_pulls_in_its_dependency() {
     let sandbox = Sandbox::new();
-    write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
+    write_package_depending_on(&sandbox.path("cache"), "foo", "1.0.0-1", &["bar"]);
     write_package_with(&sandbox.path("cache"), "bar", "1.0.0-1", None, &[]);
     sandbox.write_repo(&[("foo", "1.0.0-1", &["bar"]), ("bar", "1.0.0-1", &[])]);
 
@@ -1358,6 +1528,72 @@ fn update_with_nothing_pending_reports_it() {
     assert!(seen.contains("Nothing to do"), "{seen}");
 }
 
+/// A cached package whose `.PKGINFO` does not declare what its repository `desc` says is
+/// refused before anything is written, as pacman refuses it. Here the `desc` says `foo` needs
+/// `bar`, and the archive declares no dependency.
+#[test]
+fn a_package_that_contradicts_its_repository_entry_is_refused() {
+    let sandbox = Sandbox::new();
+    write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
+    write_package_with(&sandbox.path("cache"), "bar", "1.0.0-1", None, &[]);
+    sandbox.write_repo(&[("foo", "1.0.0-1", &["bar"]), ("bar", "1.0.0-1", &[])]);
+
+    let output = sandbox.run_install(&["foo"], &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "the install should have been refused:\n{seen}");
+    assert!(seen.contains("does not match the plan for foo 1.0.0-1: depend differ"), "{seen}");
+    assert!(
+        !sandbox.path("cache/foo-1.0.0-1-x86_64.pkg.tar").exists(),
+        "the refused file stayed in the cache:\n{seen}"
+    );
+    assert!(!sandbox.path("root/usr/bin/foo").exists(), "files were written anyway");
+    assert!(!sandbox.path("root/usr/bin/bar").exists(), "files were written anyway");
+}
+
+/// A cached package whose bytes are not the ones its repository publishes in `%SHA256SUM%` is
+/// refused and removed from the cache, although its name, version and `.PKGINFO` all match.
+/// The sandbox checks no signature, as `SigLevel = Never`: pacman compares the checksum
+/// anyway.
+#[test]
+fn a_package_whose_checksum_differs_from_its_repository_is_refused() {
+    let sandbox = Sandbox::new();
+    write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
+    sandbox.write_repo(&[("foo", "1.0.0-1", &[])]);
+    // Same package, other payload: what a damaged download or a substituted build looks like.
+    write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[("usr/share/x", "y")]);
+
+    let output = sandbox.run_install(&["foo"], &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "the install should have been refused:\n{seen}");
+    assert!(seen.contains("but the repository database publishes"), "{seen}");
+    assert!(
+        !sandbox.path("cache/foo-1.0.0-1-x86_64.pkg.tar").exists(),
+        "the refused file stayed in the cache:\n{seen}"
+    );
+    assert!(!sandbox.path("root/usr/bin/foo").exists(), "files were written anyway");
+}
+
+/// `--downloadonly` compares the checksum as an install does, and removes the file it refuses.
+#[test]
+fn download_only_refuses_a_package_whose_checksum_differs() {
+    let sandbox = Sandbox::new();
+    write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
+    sandbox.write_repo(&[("foo", "1.0.0-1", &[])]);
+    write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[("usr/share/x", "y")]);
+
+    let output = sandbox.run_install(&["foo"], &["--downloadonly"]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "the download should have been refused:\n{seen}");
+    assert!(seen.contains("but the repository database publishes"), "{seen}");
+    assert!(
+        !sandbox.path("cache/foo-1.0.0-1-x86_64.pkg.tar").exists(),
+        "the refused file stayed in the cache:\n{seen}"
+    );
+}
+
 /// `update` must apply a `%REPLACES%` pair: install the replacement and remove what it
 /// replaces, both shown in the plan before anything happens.
 #[test]
@@ -1368,7 +1604,7 @@ fn update_applies_a_replaces_pair() {
     assert!(sandbox.run_install(&["old"], &[]).status.success());
 
     // The repository no longer offers `old` at all, only `new`, which replaces it.
-    write_package_with(&sandbox.path("cache"), "new", "1.0.0-1", None, &[]);
+    write_package_with_relations(&sandbox.path("cache"), "new", "1.0.0-1", &["old"], &[]);
     sandbox.write_repo_with_relations(&[("new", "1.0.0-1", &[], &["old"], &[])]);
 
     let output = sandbox.run_update(&[], &["--norefresh"]);
@@ -1401,7 +1637,7 @@ fn update_removes_a_conflicting_package() {
     assert!(sandbox.run_install(&["foo"], &[]).status.success());
 
     // The next `foo` version conflicts with the already-installed `bar`.
-    write_package_with(&sandbox.path("cache"), "foo", "2.0.0-1", None, &[]);
+    write_package_with_relations(&sandbox.path("cache"), "foo", "2.0.0-1", &[], &["bar"]);
     sandbox.write_repo_with_relations(&[("foo", "2.0.0-1", &[], &[], &["bar"])]);
 
     let output = sandbox.run_update(&[], &["--norefresh"]);
@@ -1427,7 +1663,7 @@ fn update_removes_a_conflicting_package() {
 fn update_refreshes_repositories_by_default() {
     let body = piko_db::fixture::gzip_tar(&[(
         "foo-1.0.0-1/desc",
-        repo_desc("foo", "1.0.0-1", &[]).as_bytes(),
+        repo_desc("foo", "1.0.0-1", &[], &sha256_of(b"")).as_bytes(),
     )]);
     let sandbox = Sandbox::with_server(&serve_once(body));
 
@@ -1487,6 +1723,11 @@ fn update_norefresh_skips_the_database_refresh() {
 ///
 /// As `piko-net`'s own `conditional.rs`/`package.rs` test harnesses: the crudest server that
 /// works. That is all a package download from a repository's `Server` needs here.
+///
+/// The response says `Connection: close`, as every response of `serve_many` does. Without it,
+/// HTTP/1.1 lets the client keep the connection for its next request, which this server never
+/// reads. The client then gets a reset rather than a refused connection, and only on a loaded
+/// machine.
 fn serve_once(body: Vec<u8>) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -1495,7 +1736,10 @@ fn serve_once(body: Vec<u8>) -> String {
             use std::io::{Read as _, Write as _};
             let mut discard = [0_u8; 4096];
             let _ = stream.read(&mut discard);
-            let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                body.len()
+            );
             let _ = stream.write_all(header.as_bytes());
             let _ = stream.write_all(&body);
             let _ = stream.flush();
@@ -1541,14 +1785,16 @@ fn serve_many(bodies: std::collections::HashMap<String, Vec<u8>>) -> (String, Ar
                 match bodies.get(&path) {
                     Some(body) => {
                         counter.fetch_add(1, Ordering::SeqCst);
-                        let header =
-                            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                            body.len()
+                        );
                         let _ = stream.write_all(header.as_bytes());
                         let _ = stream.write_all(body);
                     }
                     None => {
                         let _ = stream
-                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
                     }
                 }
                 let _ = stream.flush();
@@ -1684,6 +1930,63 @@ fn download_only_refuses_an_unsigned_package() {
         !sandbox.path("root/usr/bin/foo").exists(),
         "the refused package was installed anyway:\n{seen}"
     );
+    assert!(
+        sandbox.path("cache/foo-1.0.0-1-x86_64.pkg.tar").exists(),
+        "an unsigned package was removed from the cache:\n{seen}"
+    );
+}
+
+/// A package whose signature is read and refused is removed from the cache with its `.sig`, as
+/// pacman's `prompt_to_delete` removes it. Here the key that signed it is not in the keyring.
+#[test]
+fn a_package_whose_signature_is_refused_is_removed_from_the_cache() {
+    let Some(stranger) = gpg_home() else { return };
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    sandbox.write_repo(&[("foo", "1.0.0-1", &[])]);
+    sandbox.require_signatures();
+    let package = sandbox.path("cache/foo-1.0.0-1-x86_64.pkg.tar");
+    let signature = sandbox.path("cache/foo-1.0.0-1-x86_64.pkg.tar.sig");
+    let signed = Command::new("gpg")
+        .arg("--homedir")
+        .arg(stranger.path())
+        .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+        .arg("--output")
+        .arg(&signature)
+        .arg("--detach-sign")
+        .arg(&package)
+        .output()
+        .unwrap();
+    assert!(signed.status.success(), "{}", String::from_utf8_lossy(&signed.stderr));
+
+    let output = sandbox.run_install(&["foo"], &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "the install should have been refused:\n{seen}");
+    assert!(seen.contains("not in the keyring"), "{seen}");
+    assert!(!package.exists(), "the refused file stayed in the cache:\n{seen}");
+    assert!(!signature.exists(), "its .sig stayed in the cache:\n{seen}");
+    assert!(!sandbox.path("root/usr/bin/foo").exists(), "files were written anyway");
+}
+
+/// A GnuPG home with one generated signing key, or `None` if `gpg` is unavailable.
+fn gpg_home() -> Option<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = tempfile::tempdir().ok()?;
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).ok()?;
+    let output = Command::new("gpg")
+        .arg("--homedir")
+        .arg(home.path())
+        .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+        .args(["--quick-generate-key", "piko test <test@example.invalid>", "ed25519"])
+        .args(["sign", "never"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        eprintln!("skipping: no test key: {}", String::from_utf8_lossy(&output.stderr));
+        return None;
+    }
+    Some(home)
 }
 
 /// `--root /` skips the `chroot(2)` call, as libalpm does, to run with fewer capabilities. The

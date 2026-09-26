@@ -60,7 +60,8 @@
 //!
 //! Installing one package file that already sits in a cache directory. `verify` reads it and
 //! checks it against the rest of the system; `stage` takes the database lock; only `commit`
-//! writes.
+//! writes. A transaction a solver planned is built with [`Transaction::from_plan`] instead, from
+//! a [`TransactionPlan`], so each package is also compared with what the plan says it is.
 //!
 //! ```rust,no_run
 //! use std::path::{Path, PathBuf};
@@ -122,16 +123,13 @@ pub use extract::{BackupAction, Disposition, EntryContext};
 pub use file_target::FileTarget;
 pub use history::{Action, LocalOffset, Recording};
 pub use install::{Extraction, Filters, install};
-pub use plan::{
-    DownloadOnlyOutcome, ReasonPolicy, download_only, download_targets, install_steps,
-    verification_from,
-};
+pub use plan::{DownloadOnlyOutcome, PackageOrigins, ReasonPolicy, TransactionPlan, download_only};
 pub use remove::{RemovalContext, RemovalDisposition, decide_removal, pacsave_rotation};
 pub use rootfs::{Resolved, RootDir, UnsafePath};
 pub use source::{
     CacheDirSource, DownloadDir, DownloadTarget, DownloadingSource, FileSource, Location,
-    PackageSource, RejectedCacheDir, RejectionReason, Skipped, select_download_dir,
+    PackageSource, PlanSource, RejectedCacheDir, RejectionReason, Skipped, select_download_dir,
 };
 pub use space::{MemberFootprint, PartitionSpace};
 pub use target::{TargetKind, classify};
-pub use transaction::{Patterns, Report, Step, Transaction};
+pub use transaction::{Expected, Patterns, Published, Report, Step, Transaction, Validation};

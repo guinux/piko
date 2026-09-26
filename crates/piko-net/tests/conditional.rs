@@ -36,6 +36,7 @@ use piko_net::{Outcome, Refresher};
 use piko_sig::Policy;
 
 mod common;
+mod connection;
 
 use common::SyncDir;
 
@@ -62,7 +63,7 @@ fn serve(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<String
                 request.push_str(&line);
             }
             seen.push(request);
-            let _ = stream.write_all(&response);
+            connection::write_closing(&mut stream, &response);
             let _ = stream.flush();
         }
         seen
@@ -228,6 +229,11 @@ fn an_unexpected_status_is_not_installed() {
 
     let error = refresh(dir.path(), &url).unwrap_err();
     assert!(matches!(error, piko_net::Error::AllServersFailed { .. }), "{error:?}");
+    // The status is the reason this server failed, so the user must see it.
+    let message = error.to_string();
+    assert!(message.contains("status: 500"), "{message}");
+    // The attempt is listed under its URL, so the reason does not repeat it.
+    assert_eq!(message.matches(&format!("{url}/core.db")).count(), 1, "{message}");
     assert!(!dir.path().join("core.db").exists(), "a 500 left a file behind");
     drop(server.join());
 }

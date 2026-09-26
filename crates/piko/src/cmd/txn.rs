@@ -8,7 +8,6 @@
 //! system.
 
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -24,12 +23,11 @@ use piko_db::solve::{
 use piko_db::{Limits, LocalDatabase};
 use piko_sig::Policy;
 use piko_txn::{
-    CacheDirSource, DownloadingSource, FileSource, FileTarget, PackageSource, Step, TargetKind,
-    Transaction,
+    CacheDirSource, FileTarget, PackageOrigins, PackageSource, Step, TargetKind, Transaction,
+    TransactionPlan,
     conflict::Overwrite,
     file_target,
     journal::{self, Intent},
-    transaction::Verification,
 };
 
 use crate::output::{emit, report as report_error};
@@ -63,11 +61,10 @@ pub struct InstallOptions {
     pub overwrite: Vec<String>,
     /// The GnuPG keyring directory, from `pacman.conf`'s `GPGDir`.
     pub gpg_dir: PathBuf,
-    /// The fallback `SigLevel` for a package whose repository could not be resolved.
+    /// `[options]`' `SigLevel`, which a repository with no `SigLevel` of its own inherits.
     ///
     /// A package resolved through a repository is checked against that repository's own
-    /// `SigLevel`, resolved per candidate and fed to
-    /// [`piko_txn::Transaction::policy_overrides`]. This value is only the defensive fallback.
+    /// `SigLevel`, which [`piko_txn::TransactionPlan::new`] resolves per candidate.
     /// See [`crate::context::signing_policy`] for the three directives and which target each
     /// one governs.
     pub sig_level: SigLevel,
@@ -157,7 +154,8 @@ pub struct Catalog<'a> {
 /// [`piko_txn::classify`] for how a target is told apart from a name.
 ///
 /// A package already in a cache directory is used as-is. A missing one is downloaded from its
-/// own repository's configured servers before installing. See [`DownloadingSource`].
+/// own repository's configured servers before installing. See
+/// [`piko_txn::TransactionPlan::source`].
 pub fn install(
     root: &Path,
     dbpath: &Path,
@@ -407,30 +405,32 @@ pub fn install(
     // it while a download runs. `run` reads this one once, after every download is over.
     let cancel_flag = cancel.clone();
 
-    let steps = match piko_txn::install_steps(&universe, &built, &explicit_targets, options.reasons)
-    {
-        Ok(steps) => steps,
-        Err(error) => {
-            report_error(&error);
-            return ExitCode::FAILURE;
-        }
+    // The steps, and what each incoming package must be: the fields its `.PKGINFO` repeats
+    // from the plan, a repository package's `%SHA256SUM%` and `%PGPSIG%`, where it is
+    // downloaded from, the signature policy it is held to, and the keyring that checks it.
+    // Built together, from one plan, so no install step goes without them.
+    let origins = PackageOrigins {
+        repos: catalog.configs,
+        sig_level: options.sig_level,
+        files: &prepared.files,
+        gpg_dir: &options.gpg_dir,
     };
-
-    let package_targets =
-        piko_txn::download_targets(&universe, &built, catalog.configs, options.sig_level);
-    let (verification, policy_overrides) = match piko_txn::verification_from(
-        &options.gpg_dir,
-        options.sig_level,
-        &package_targets,
-        &prepared.files,
+    let plan = match TransactionPlan::new(
+        &universe,
+        &built,
+        &explicit_targets,
+        options.reasons,
+        origins,
     ) {
-        Ok(result) => result,
+        Ok(plan) => plan,
         Err(error) => {
             report_error(&error);
-            eprintln!(
-                "Note: set SigLevel = Never in pacman.conf to install without \
-                 checking signatures"
-            );
+            if matches!(error, piko_txn::Error::KeyringUnusable { .. }) {
+                eprintln!(
+                    "Note: set SigLevel = Never in pacman.conf to install without \
+                     checking signatures"
+                );
+            }
             return ExitCode::FAILURE;
         }
     };
@@ -439,15 +439,15 @@ pub fn install(
     // every candidate is already in a cache directory, since `Plan::assemble` was given `cache`
     // above.
     let rig = crate::progress::download_rig(&steplist, built.download_size());
-    let source = match DownloadingSource::new(
+    // The named files in front of the cache, each from a private copy; see
+    // `TransactionPlan::source`. It lives until `run` returns, past the commit.
+    let source = match plan.source(
         cache_dirs,
-        package_targets,
         cancel,
         piko_net::Concurrency::new(options.parallel_downloads),
+        options.check_space,
         rig.sink,
-    )
-    .map(|source| source.check_space(options.check_space))
-    {
+    ) {
         Ok(source) => source,
         Err(error) => {
             crate::progress::clear_download_rows(rig.row, rig.head);
@@ -456,27 +456,9 @@ pub fn install(
         }
     };
     report_download_dir(&steplist, source.download_dir());
-    // The named files go in front of the cache: the plan chose them, so the source must serve
-    // them. A `FileSource` with nothing in it is a pass-through, so this costs nothing when no
-    // file was named.
-    let source = FileSource::new(prepared.paths_by_name(), Box::new(source));
-
-    if options.download_only {
-        return download_only(
-            &source,
-            &cache,
-            &steps,
-            &verification,
-            &policy_overrides,
-            Progress { steplist: &steplist, download: rig.row, download_head: rig.head },
-            out,
-        );
-    }
 
     let settings = Settings {
         overwrite: overwrite_from(options.overwrite),
-        verification,
-        policy_overrides,
         scriptlets: options.side_effects.scriptlets,
         hook_dirs: options.side_effects.hook_dirs.clone(),
         patterns: options.patterns,
@@ -485,10 +467,19 @@ pub fn install(
         cancel: Some(cancel_flag),
         report_pending: !options.download_only,
     };
+    if options.download_only {
+        return download_only(
+            &source,
+            &cache,
+            &plan,
+            Progress { steplist: &steplist, download: rig.row, download_head: rig.head },
+            out,
+        );
+    }
     run(
         root,
         dbpath,
-        steps,
+        plan,
         &source,
         Progress { steplist: &steplist, download: rig.row, download_head: rig.head },
         settings,
@@ -511,14 +502,6 @@ impl PreparedTargets {
     /// keeps them alongside it, rather than rebuild them.
     fn candidates(&self) -> Vec<&piko_db::solve::FilePackage> {
         self.files.iter().map(FileTarget::candidate).collect()
-    }
-
-    /// Where each named file is, keyed by the name a plan step addresses it by.
-    fn paths_by_name(&self) -> HashMap<String, PathBuf> {
-        self.files
-            .iter()
-            .map(|target| (target.file_name().to_string(), target.path().to_path_buf()))
-            .collect()
     }
 }
 
@@ -705,7 +688,7 @@ fn report_space_problems(
     });
 }
 
-/// Downloads every missing package named in `steps` into the cache, installing nothing.
+/// Downloads every missing package `plan` installs into the cache, installing nothing.
 ///
 /// A thin CLI wrapper around [`piko_txn::download_only`]. See there for what it does and why.
 /// This drives the live step list. It reports any [`piko_txn::Error`] the call stops on.
@@ -723,13 +706,11 @@ fn report_space_problems(
 fn download_only(
     source: &dyn PackageSource,
     cache: &CacheDirSource,
-    steps: &[Step],
-    verification: &Verification,
-    policy_overrides: &HashMap<String, Policy>,
+    plan: &TransactionPlan,
     progress: Progress<'_>,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
-    let total = steps.iter().filter(|step| matches!(step, Step::Install { .. })).count();
+    let total = plan.steps().iter().filter(|step| matches!(step, Step::Install { .. })).count();
     let mut driver = crate::progress::VerifyDriver::new(
         progress.steplist,
         &mut *out,
@@ -737,14 +718,10 @@ fn download_only(
         progress.download_head,
     );
     let mut checked = 0_usize;
-    let result =
-        piko_txn::download_only(source, cache, steps, verification, policy_overrides, |_outcome| {
-            checked = checked.saturating_add(1);
-            driver.handle(piko_txn::progress::VerifyEvent::SignatureChecked {
-                index: checked,
-                total,
-            });
-        });
+    let result = piko_txn::download_only(source, cache, plan, |_outcome| {
+        checked = checked.saturating_add(1);
+        driver.handle(piko_txn::progress::VerifyEvent::SignatureChecked { index: checked, total });
+    });
     // Closes whatever row is still open, on success and on failure alike.
     driver.finish();
     match result {
@@ -865,14 +842,11 @@ pub fn remove(
         }
     };
 
-    let steps = entries_to_remove
-        .into_iter()
-        .map(|entry| Step::Remove { entry, no_save: options.no_save })
-        .collect();
+    let plan = TransactionPlan::removal(entries_to_remove, options.no_save);
 
-    // Verification and `--overwrite` are install-side: a removal installs no package, so there
-    // is nothing to verify and it writes no file. Scriptlets and hooks are not. `pre_remove`
-    // and `post_remove` exist, and `Operation = Remove` is a hook trigger.
+    // `--overwrite` is install-side: a removal writes no file. A removal plan checks no
+    // signature, because it installs no package. Scriptlets and hooks are not install-side.
+    // `pre_remove` and `post_remove` exist, and `Operation = Remove` is a hook trigger.
     let settings = Settings {
         scriptlets: side_effects.scriptlets,
         hook_dirs: side_effects.hook_dirs.clone(),
@@ -887,7 +861,7 @@ pub fn remove(
     run(
         root,
         dbpath,
-        steps,
+        plan,
         &source,
         Progress { steplist: &steplist, download: None, download_head: None },
         settings,
@@ -1078,11 +1052,6 @@ fn planned(
 struct Settings {
     /// Which paths are released from file-conflict detection.
     overwrite: Overwrite,
-    /// How package signatures are checked.
-    verification: Verification,
-    /// Per-file overrides for `verification`'s policy, keyed by cache file name — see
-    /// [`piko_txn::Transaction::policy_overrides`].
-    policy_overrides: HashMap<String, Policy>,
     /// Whether `.INSTALL` scriptlets run.
     scriptlets: bool,
     /// The `HookDir`s the hooks to run before and after are read from.
@@ -1134,7 +1103,7 @@ impl Progress<'_> {
 fn run(
     root: &Path,
     dbpath: &Path,
-    steps: Vec<Step>,
+    plan: TransactionPlan,
     source: &dyn PackageSource,
     mut progress: Progress<'_>,
     settings: Settings,
@@ -1145,37 +1114,10 @@ fn run(
     // clears them first, for two reasons. A live row redraws over a bare `eprintln!` mid-line.
     // And a row left ticking on a stopped run still claims a download that never starts.
     // `remove` passes no rows, so the call costs it nothing.
-    if steps.is_empty() {
+    if plan.steps().is_empty() {
         progress.clear_downloads();
         emit!(out, "Nothing to do");
         return ExitCode::SUCCESS;
-    }
-
-    // A journal already there means a previous run did not finish. Refusing is the safe answer.
-    // piko cannot know what state the system is in. Layering another transaction on top would
-    // make that state harder to work out later. A journal this build cannot read is refused
-    // too: only a missing file means that no transaction is unfinished.
-    match journal::read(dbpath) {
-        Ok(Some(_)) => {
-            progress.clear_downloads();
-            eprintln!(
-                "Error: an unfinished transaction is recorded in this database; \
-                 run `piko report` to see it"
-            );
-            return ExitCode::FAILURE;
-        }
-        Ok(None) => {}
-        Err(error @ piko_txn::Error::JournalUnreadable { .. }) => {
-            progress.clear_downloads();
-            report_error(&error);
-            eprintln!("A previous transaction did not finish; run `piko report` to see it");
-            return ExitCode::FAILURE;
-        }
-        Err(error) => {
-            progress.clear_downloads();
-            report_error(&error);
-            return ExitCode::FAILURE;
-        }
     }
 
     let lock = match piko_db_write::DbLock::acquire(dbpath) {
@@ -1187,11 +1129,9 @@ fn run(
         }
     };
 
-    let total_steps = steps.len();
-    let planned = Transaction::new(root, dbpath, steps)
+    let total_steps = plan.steps().len();
+    let planned = Transaction::from_plan(root, dbpath, plan)
         .overwrite(settings.overwrite)
-        .verification(settings.verification)
-        .policy_overrides(settings.policy_overrides)
         .scriptlets(settings.scriptlets)
         .hook_dirs(settings.hook_dirs)
         .patterns(settings.patterns)
@@ -1215,7 +1155,7 @@ fn run(
     let verified = match verified {
         Ok(verified) => verified,
         Err(error) => {
-            report_error(&error);
+            report_refusal(&error);
             return ExitCode::FAILURE;
         }
     };
@@ -1235,7 +1175,7 @@ fn run(
     let staged = match verified.stage(&lock) {
         Ok(staged) => staged,
         Err(error) => {
-            report_error(&error);
+            report_refusal(&error);
             return ExitCode::FAILURE;
         }
     };
@@ -1277,6 +1217,20 @@ fn run(
             let _ = lock.release();
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Reports an error that refused a transaction before it changed anything.
+///
+/// A journal left by a previous run is refused by `Transaction::verify`, and again by `stage`.
+/// Either way the user is sent to `piko report`, which prints what that run did.
+fn report_refusal(error: &piko_txn::Error) {
+    report_error(error);
+    if matches!(
+        error,
+        piko_txn::Error::UnfinishedTransaction { .. } | piko_txn::Error::JournalUnreadable { .. }
+    ) {
+        eprintln!("A previous transaction did not finish; run `piko report` to see it");
     }
 }
 

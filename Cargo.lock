@@ -1615,6 +1615,8 @@ name = "piko-sig-write"
 version = "0.1.0"
 dependencies = [
  "gpgme",
+ "libc",
+ "piko-db",
  "piko-sig",
  "tempfile",
  "thiserror",
@@ -1627,12 +1629,14 @@ dependencies = [
  "alpm-compress",
  "alpm-pkginfo",
  "alpm-types",
+ "base64 0.22.1",
  "libc",
  "piko-db",
  "piko-db-write",
  "piko-net",
  "piko-sig",
  "rustix",
+ "sha2",
  "tar",
  "tempfile",
  "thiserror",

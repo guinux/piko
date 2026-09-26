@@ -704,6 +704,9 @@ fn print_step_result(
             for path in &extraction.unreadable {
                 let _ = writeln!(out, "  Warning: could not hash {}", path.display());
             }
+            for problem in &extraction.xattr_problems {
+                let _ = writeln!(out, "  Warning: {problem}");
+            }
             // A `.pacnew` the user is never told about is a configuration change that never
             // happens, silently.
             for (_, step_outcome) in &extraction.outcomes {

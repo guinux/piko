@@ -11,11 +11,17 @@
 //!
 //! # Two things a first reading of `signing.c` gets wrong
 //!
-//! - **An expired key is not a rejection.** `ALPM_SIGSTATUS_KEY_EXPIRED` falls through into
-//!   the same branch as `ALPM_SIGSTATUS_VALID`. It is judged on trust alone. The signature was
-//!   made while the key was valid. Only an expired signature (`SIG_EXPIRED`) is fatal. Given
-//!   how many Arch packager keys carry expiry dates, collapsing the two would reject a large
-//!   share of a real cache.
+//! - **An expired key is not a rejection by itself.** `ALPM_SIGSTATUS_KEY_EXPIRED` falls
+//!   through into the same branch as `ALPM_SIGSTATUS_VALID` (`signing.c:830`), so it is judged
+//!   on trust alone. Only an expired signature (`SIG_EXPIRED`) is fatal whatever the trust.
+//!
+//!   In practice the trust decides, and it is not full. GnuPG 2.4 reports no trust status for
+//!   a signature from an expired key or an expired signing subkey, so GPGME reads its validity
+//!   as unknown. `TrustedOnly` refuses it, and `TrustAll` accepts it. Nothing compares the
+//!   signature's creation time with the key's expiry: GnuPG tests the expiry against the
+//!   current time, and the signer chooses the creation time. So "the signature was made while
+//!   the key was valid" is not a property this rule can rely on. A key that must stop signing
+//!   has to be revoked or disabled.
 //! - **Every signature must pass, not just one of them.** libalpm's loop is
 //!   `for(num = 0; !ret && num < count; num++)`. It stops at the first failure and returns it.
 //!   A file carrying two signatures, one good and one invalid, is rejected. "Any valid
@@ -42,7 +48,15 @@ pub enum Status {
     /// The signing key is not in the keyring.
     KeyUnknown,
     /// The signing key is present but disabled.
+    ///
+    /// GnuPG does not report this in a signature's status. It is read off the key.
     KeyDisabled,
+    /// The signing key has been revoked.
+    ///
+    /// libalpm has no status for this and reports it as [`Status::Invalid`]. It is kept
+    /// apart here because the remedy differs: a revoked key needs a new key, while an invalid
+    /// signature suggests a corrupt or tampered file.
+    KeyRevoked,
     /// The signature does not verify.
     Invalid,
 }
@@ -166,6 +180,11 @@ pub enum Rejection {
         /// The key.
         fingerprint: Option<String>,
     },
+    /// The signing key has been revoked.
+    KeyRevoked {
+        /// The key.
+        fingerprint: Option<String>,
+    },
     /// The signature does not verify.
     Invalid,
 }
@@ -197,6 +216,9 @@ impl std::fmt::Display for Rejection {
             }
             Self::KeyDisabled { fingerprint } => {
                 write!(f, "the signing key {} is disabled", key(fingerprint.as_ref()))
+            }
+            Self::KeyRevoked { fingerprint } => {
+                write!(f, "the signing key {} has been revoked", key(fingerprint.as_ref()))
             }
             Self::Invalid => f.write_str("the signature is invalid"),
         }
@@ -262,6 +284,9 @@ pub fn decide(signatures: &[SignatureOutcome], policy: Policy) -> Verdict {
             Status::KeyDisabled => {
                 return Verdict::Rejected(Rejection::KeyDisabled { fingerprint });
             }
+            Status::KeyRevoked => {
+                return Verdict::Rejected(Rejection::KeyRevoked { fingerprint });
+            }
             Status::Invalid => return Verdict::Rejected(Rejection::Invalid),
         }
     }
@@ -315,11 +340,25 @@ mod tests {
         assert_eq!(decide(&sigs, REQUIRED_TRUSTED), Verdict::Accepted { verified: true });
     }
 
-    /// The rule that would otherwise reject a large share of a real cache.
+    /// libalpm's fall-through: the expired status alone refuses nothing. The trust decides.
     #[test]
     fn an_expired_key_is_judged_on_trust_not_rejected() {
         let sigs = [signature(Status::KeyExpired, Trust::Full)];
         assert_eq!(decide(&sigs, REQUIRED_TRUSTED), Verdict::Accepted { verified: true });
+    }
+
+    /// The trust GnuPG actually reports for an expired key is unknown, not full. So
+    /// `TrustedOnly` refuses the signature, and only a policy that accepts unknown trust takes
+    /// it.
+    #[test]
+    fn an_expired_key_with_the_trust_gnupg_reports_follows_the_unknown_trust_flag() {
+        let sigs = [signature(Status::KeyExpired, Trust::Unknown)];
+        assert!(matches!(
+            decide(&sigs, REQUIRED_TRUSTED),
+            Verdict::Rejected(Rejection::UnknownTrust { .. })
+        ));
+        let trust_all = Policy { marginal_ok: true, unknown_ok: true, ..REQUIRED_TRUSTED };
+        assert_eq!(decide(&sigs, trust_all), Verdict::Accepted { verified: true });
     }
 
     /// An expired signature is fatal, unlike an expired key. The two are one character apart
@@ -397,6 +436,24 @@ mod tests {
             decide(&sigs, REQUIRED_TRUSTED),
             Verdict::Rejected(Rejection::KeyUnknown { fingerprint: Some("ABC123".to_owned()) })
         );
+    }
+
+    /// A disabled or revoked key is refused however far it is trusted, and whatever the policy
+    /// relaxes. GnuPG reports both with the key's usual validity, often `Full`.
+    #[test]
+    fn a_disabled_or_revoked_key_is_refused_even_when_fully_trusted() {
+        let permissive =
+            Policy { check: true, optional: true, marginal_ok: true, unknown_ok: true };
+        let disabled = [signature(Status::KeyDisabled, Trust::Full)];
+        assert!(matches!(
+            decide(&disabled, permissive),
+            Verdict::Rejected(Rejection::KeyDisabled { .. })
+        ));
+        let revoked = [signature(Status::KeyRevoked, Trust::Full)];
+        assert!(matches!(
+            decide(&revoked, permissive),
+            Verdict::Rejected(Rejection::KeyRevoked { .. })
+        ));
     }
 
     /// `Optional` relaxes only absence. A signature that is present and bad is still fatal.

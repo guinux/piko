@@ -41,6 +41,7 @@ use piko_net::{
 use piko_sig::Policy;
 
 mod common;
+mod connection;
 
 use common::SyncDir;
 
@@ -88,7 +89,7 @@ fn serve(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<Vec<String
                 request.push_str(&line);
             }
             seen.push(request);
-            let _ = stream.write_all(&response);
+            connection::write_closing(&mut stream, &response);
             let _ = stream.flush();
         }
         seen

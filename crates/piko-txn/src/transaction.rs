@@ -30,7 +30,7 @@ use std::{
 };
 
 use alpm_pkginfo::PackageInfo;
-use alpm_types::{PackageFileName, PackageInstallReason};
+use alpm_types::{PackageFileName, PackageInstallReason, PackageValidation};
 use piko_db::{EntryName, LocalDatabase, LocalPackage};
 use piko_db_write::DbLock;
 use piko_sig::{Keyring, Policy, Verdict};
@@ -49,7 +49,12 @@ use crate::{
     scriptlet::{self, MAX_SCRIPTLET_BYTES},
 };
 
+mod expected;
+mod published;
 mod step;
+
+pub use expected::Expected;
+pub use published::Published;
 
 use step::{InstallStep, RemoveStep, install_step, remove_step};
 
@@ -163,11 +168,15 @@ pub struct Planned {
 
 /// How package signatures are checked.
 ///
-/// Defaulting to [`Verification::Disabled`] is a deliberate and uncomfortable choice. It keeps
-/// this crate usable without a keyring, and a chroot built from scratch has none. But it also
-/// means a caller who forgets to configure it installs unverified packages. The CLI therefore
-/// always passes a real policy, taken from `pacman.conf`'s `SigLevel`, rather than relying on
-/// this default.
+/// A transaction a solver planned takes its verification from its
+/// [`crate::TransactionPlan`], built from `pacman.conf`'s `SigLevel`. It cannot be set apart
+/// from that configuration: `SigLevel = Never` is how such a transaction checks nothing.
+///
+/// [`Transaction::new`] defaults to [`Verification::Disabled`], for steps no solver planned.
+/// That keeps this crate usable without a keyring, and a chroot built from scratch has none.
+/// It also means such a caller installs unverified packages unless it calls
+/// [`Transaction::verification`]. libalpm starts at the same place: its handle is zeroed
+/// (`handle.c:46`), so nothing is checked until the frontend sets a `SigLevel`.
 #[derive(Debug, Default)]
 pub enum Verification {
     /// Do not check signatures. `%VALIDATION%` will record `none`, truthfully.
@@ -182,11 +191,51 @@ pub enum Verification {
     },
 }
 
-/// Verifies one package's detached signature, returning whether it was actually checked.
+/// What a package's validation checked. `%VALIDATION%` records it.
 ///
 /// The distinction between "accepted having verified" and "accepted because the policy asked
 /// for nothing" is not cosmetic. It is exactly what `%VALIDATION%` records. Conflating them
 /// would write `pgp` into the database for a package nobody checked.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Validation {
+    /// The file's SHA-256 matched the one its repository database publishes.
+    pub sha256: bool,
+    /// A signature over the file was checked and accepted.
+    pub signature: bool,
+}
+
+impl Validation {
+    /// The `%VALIDATION%` values, in the order libalpm writes them (`be_local.c:1058`).
+    #[must_use]
+    pub fn recorded(self) -> Vec<PackageValidation> {
+        let mut recorded = Vec::new();
+        if self.sha256 {
+            recorded.push(PackageValidation::Sha256);
+        }
+        if self.signature {
+            recorded.push(PackageValidation::Pgp);
+        }
+        if recorded.is_empty() {
+            recorded.push(PackageValidation::None);
+        }
+        recorded
+    }
+}
+
+/// Validates one package file, as `_alpm_pkg_validate_internal` does (`be_package.c:279`).
+///
+/// `published` is what the package's repository database says about its file. It is `None` for
+/// a package file named on the command line, which has no repository. The checks are libalpm's:
+///
+/// - When the policy checks signatures and the database publishes a `%PGPSIG%`, the file is
+///   verified against that signature alone. The `.sig` beside the file is not read.
+/// - Otherwise, when the policy checks signatures, the `.sig` beside the file is verified.
+/// - When `published` is known, `%SHA256SUM%` is compared in every case except the first.
+///   So under `SigLevel = Never` a repository package is still compared with its database. A
+///   signature from the database covers the whole file, so the checksum adds nothing there.
+///
+/// A database signature binds the file to the database that planned it, as the checksum does.
+/// A `.sig` from the mirror binds the file to its signer only.
 ///
 /// The policy applied is `policy_overrides`' entry for `file_name`, keyed by cache file name —
 /// a repository's `SigLevel` can differ from another's. It falls back to
@@ -202,31 +251,58 @@ pub enum Verification {
 ///
 /// # Errors
 ///
+/// [`Error::ChecksumMismatch`] if the file is not the one the database publishes.
 /// [`Error::SignatureUncheckable`] if the keyring could not answer at all, or
 /// [`Error::SignatureRejected`] if it answered and the policy refuses the result.
-pub fn check_signature(
+pub fn validate_package(
     verification: &Verification,
     policy_overrides: &HashMap<String, Policy>,
+    published: Option<&Published>,
     file_name: &PackageFileName,
     package: &Path,
-) -> Result<bool> {
-    let Verification::Enabled { keyring, policy } = verification else {
-        return Ok(false);
+) -> Result<Validation> {
+    let checking = match verification {
+        Verification::Enabled { keyring, policy } => {
+            let policy = policy_overrides.get(&file_name.to_string()).copied().unwrap_or(*policy);
+            policy.check.then_some((keyring, policy))
+        }
+        Verification::Disabled => None,
     };
-    let policy = policy_overrides.get(&file_name.to_string()).copied().unwrap_or(*policy);
+    let from_database = checking.is_some() && published.is_some_and(Published::has_signature);
 
+    let mut validation = Validation::default();
+    if let Some(published) = published
+        && !from_database
+    {
+        published.check_checksum(package)?;
+        validation.sha256 = true;
+    }
+    let Some((keyring, policy)) = checking else { return Ok(validation) };
+
+    let embedded = match published {
+        Some(published) => published.decoded_signature(package)?,
+        None => None,
+    };
     // `Keyring::check` owns the rule that a missing `.sig` is the policy's problem, not an
     // error. The repository-database check shares it, so the two cannot drift.
-    let verdict = keyring.check(package, policy).map_err(|source| Error::SignatureUncheckable {
+    let verdict = match &embedded {
+        Some(signature) => keyring.check_bytes(package, signature, policy),
+        None => keyring.check(package, policy),
+    }
+    .map_err(|source| Error::SignatureUncheckable {
         package: package.to_path_buf(),
         reason: source.to_string(),
     })?;
 
     match verdict {
-        Verdict::Accepted { verified } => Ok(verified),
+        Verdict::Accepted { verified } => {
+            validation.signature = verified;
+            Ok(validation)
+        }
         Verdict::Rejected(rejection) => Err(Error::SignatureRejected {
             package: package.to_path_buf(),
             reason: rejection.to_string(),
+            unsigned: rejection == piko_sig::Rejection::MissingRequired,
         }),
     }
 }
@@ -256,11 +332,14 @@ struct Prepared {
     info: PackageInfo,
     /// Its `.PKGINFO` text, verbatim, which [`record::desc`] needs as well as the parse.
     raw: String,
-    /// Whether its signature was actually checked.
+    /// What its validation checked.
     ///
     /// Carried rather than recomputed. This is what `%VALIDATION%` records. Re-deriving it at
     /// write time would let the database claim a verification that never happened.
-    validated: bool,
+    validation: Validation,
+    /// The bounds its archive is read under, its declared size included. Extraction reads the
+    /// archive a second time, under the same bounds.
+    limits: PackageLimits,
     /// Its `.INSTALL`, if it ships one.
     script: Option<Vec<u8>>,
     /// Every path it ships, as its archive spells them.
@@ -434,6 +513,8 @@ pub struct Transaction<S> {
     walk_limits: WalkLimits,
     verification: Verification,
     policy_overrides: HashMap<String, Policy>,
+    expectations: HashMap<String, Expected>,
+    published: HashMap<String, Published>,
     patterns: Patterns,
     scriptlets: bool,
     hook_dirs: Vec<PathBuf>,
@@ -444,7 +525,37 @@ pub struct Transaction<S> {
 }
 
 impl Transaction<Planned> {
+    /// Plans a solved plan's steps against `root` and `dbpath`, with everything `verify`
+    /// compares the incoming packages with.
+    ///
+    /// This is the constructor for a transaction a solver planned. [`TransactionPlan`] carries
+    /// the steps, the fields each `.PKGINFO` must repeat, and each repository package's
+    /// `%SHA256SUM%` and `%PGPSIG%`, built together from one plan. See there for what each
+    /// adds.
+    ///
+    /// The signature check comes from `plan` too: the keyring, and each package's own policy,
+    /// the repository's `SigLevel` or a named file's `LocalFileSigLevel`/`RemoteFileSigLevel`.
+    /// So a caller cannot leave it off by forgetting it, or change it apart from the
+    /// configuration the plan was built from.
+    ///
+    /// [`TransactionPlan`]: crate::TransactionPlan
+    #[must_use]
+    pub fn from_plan(root: &Path, dbpath: &Path, plan: crate::plan::TransactionPlan) -> Self {
+        let parts = plan.into_parts();
+        Self::new(root, dbpath, parts.steps)
+            .verification(parts.verification)
+            .policy_overrides(parts.policies)
+            .expectations(parts.expectations)
+            .published(parts.published)
+    }
+
     /// Plans `steps` against `root` and `dbpath`.
+    ///
+    /// For steps that no solver planned. `verify` then checks each archive's name and version
+    /// against its step, and its signature against the `.sig` beside it. It compares no other
+    /// field, and no `%SHA256SUM%` or `%PGPSIG%`, because nothing here says what they should be.
+    /// Signatures are not checked unless [`Transaction::verification`] is called. See
+    /// [`Verification`]. A caller with a solved plan uses [`Transaction::from_plan`].
     #[must_use]
     pub fn new(root: &Path, dbpath: &Path, steps: Vec<Step>) -> Self {
         Self {
@@ -456,6 +567,8 @@ impl Transaction<Planned> {
             walk_limits: WalkLimits::default(),
             verification: Verification::Disabled,
             policy_overrides: HashMap::new(),
+            expectations: HashMap::new(),
+            published: HashMap::new(),
             patterns: Patterns::default(),
             // Off by default, unlike pacman, for the same reason `--root` has no default: this
             // runs vendor shell code with piko's privileges. The CLI turns it on, so `piko
@@ -540,8 +653,9 @@ impl Transaction<Planned> {
 
     /// Sets how package signatures are checked.
     ///
-    /// Without this, nothing is verified and `%VALIDATION%` records `none`. See
-    /// [`Verification`] for why that is the default, and why the CLI never relies on it.
+    /// On a [`Transaction::new`] without this, nothing is verified and `%VALIDATION%` records
+    /// `none`. See [`Verification`] for why that is the default there. A
+    /// [`Transaction::from_plan`] already holds the plan's own.
     #[must_use]
     pub fn verification(mut self, verification: Verification) -> Self {
         self.verification = verification;
@@ -559,6 +673,31 @@ impl Transaction<Planned> {
     #[must_use]
     pub fn policy_overrides(mut self, overrides: HashMap<String, Policy>) -> Self {
         self.policy_overrides = overrides;
+        self
+    }
+
+    /// What the plan says each incoming package is, keyed by cache file name.
+    ///
+    /// `verify` compares every archive's `.PKGINFO` with its entry: the installed size and the
+    /// five relation lists `check_pkg_matches_db` compares (`sync.c:1113`). The name and the
+    /// version are compared for every install, from the step's own file name. A file with no
+    /// entry here gets only that half. [`Transaction::from_plan`] sets it; the default is empty.
+    #[must_use]
+    pub(crate) fn expectations(mut self, expectations: HashMap<String, Expected>) -> Self {
+        self.expectations = expectations;
+        self
+    }
+
+    /// What each incoming package's repository database publishes about its file, keyed by
+    /// cache file name.
+    ///
+    /// `verify` checks every file with an entry here against its `%SHA256SUM%`, and against its
+    /// `%PGPSIG%` in place of the `.sig` beside it. See [`validate_package`] for which check
+    /// runs when. A file with no entry gets the `.sig` check alone, as a named file does.
+    /// [`Transaction::from_plan`] sets it; the default is empty.
+    #[must_use]
+    pub(crate) fn published(mut self, published: HashMap<String, Published>) -> Self {
+        self.published = published;
         self
     }
 
@@ -620,13 +759,19 @@ impl Transaction<Planned> {
         Ok(())
     }
 
-    /// Verifies one package's detached signature, returning whether it was actually checked.
+    /// Validates one package file, returning what was checked.
     ///
-    /// Delegates to [`check_signature`], which is a free function. So a caller with no
+    /// Delegates to [`validate_package`], which is a free function. So a caller with no
     /// `Transaction` checks a package by the same rule this does. `piko install -w` is that
     /// caller, and it installs nothing.
-    fn check_signature(&self, file_name: &PackageFileName, package: &Path) -> Result<bool> {
-        check_signature(&self.verification, &self.policy_overrides, file_name, package)
+    fn validate(&self, file_name: &PackageFileName, package: &Path) -> Result<Validation> {
+        validate_package(
+            &self.verification,
+            &self.policy_overrides,
+            self.published.get(&file_name.to_string()),
+            file_name,
+            package,
+        )
     }
 
     /// Locates and reads every package, verifies its signature, checks every entry to be
@@ -645,8 +790,10 @@ impl Transaction<Planned> {
     ///
     /// # Errors
     ///
-    /// [`Error::NotAvailable`] if a package cannot be supplied. [`Error::UnusableSource`] if an
-    /// entry to be removed is not installed, or a package's `.PKGINFO` cannot be read.
+    /// [`Error::UnfinishedTransaction`] or [`Error::JournalUnreadable`] if a previous transaction
+    /// left its journal. [`Error::NotAvailable`] if a package cannot be supplied.
+    /// [`Error::UnusableSource`] if an entry to be removed is not installed, or a package's
+    /// `.PKGINFO` cannot be read.
     /// [`Error::FileConflicts`] if the transaction would write a file it does not own.
     pub fn verify(
         self,
@@ -671,6 +818,9 @@ impl Transaction<Planned> {
         source: &dyn crate::source::PackageSource,
         progress: &mut dyn FnMut(VerifyEvent),
     ) -> Result<Transaction<Verified>> {
+        // First, before anything is downloaded or read. `stage` refuses again, under `db.lck`,
+        // when it writes the journal.
+        crate::journal::refuse_if_present(&self.dbpath)?;
         let local = LocalDatabase::open(self.dbpath.join("local"))
             .map_err(|error| Error::local_db(self.dbpath.join("local"), error))?;
 
@@ -708,11 +858,21 @@ impl Transaction<Planned> {
             self.stop_if_cancelled(total_steps)?;
             match step {
                 Step::Install { package, .. } => {
-                    let path = source.locate(package)?.path().to_path_buf();
+                    let location = source.locate(package)?;
                     // Runs before the archive is opened for any other purpose. A package that
                     // fails this is not read further, so a hostile archive gets no chance to
                     // exercise the extractor.
-                    located.push((path.clone(), self.check_signature(package, &path)?));
+                    let validation = match self.validate(package, location.path()) {
+                        Ok(validation) => validation,
+                        Err(
+                            refusal @ (Error::ChecksumMismatch { .. }
+                            | Error::SignatureRejected { unsigned: false, .. }),
+                        ) => {
+                            return Err(self::discard(source, &location, refusal));
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    located.push((package, location, validation));
                     signature_checked = signature_checked.saturating_add(1);
                     progress(VerifyEvent::SignatureChecked {
                         index: signature_checked,
@@ -747,10 +907,20 @@ impl Transaction<Planned> {
         let mut verified_installs = 0_usize;
         let mut targets = Vec::with_capacity(located.len());
         let mut packages = Vec::with_capacity(located.len());
-        for (path, validated) in located {
+        for (package, location, validation) in located {
             self.stop_if_cancelled(total_steps)?;
+            let path = location.path().to_path_buf();
+            let expected = self.expectations.get(&package.to_string());
+            // Bounded by the size the plan declares, so an archive that inflates past it is
+            // refused near that size, on this read and on the extraction's.
+            let limits = expected.map_or(self.limits, |expected| {
+                self.limits.with_declared_size(expected.installed_size())
+            });
             let conflict::LoadedPackage { target, info, raw, footprint } =
-                conflict::load_package(&path, &self.limits)?;
+                conflict::load_package(&path, &limits)?;
+            if let Err(refusal) = self::matches_plan(package, expected, &path, &info) {
+                return Err(self::discard(source, &location, refusal));
+            }
             let entry = self::entry_name(&path, &info)?;
 
             // The installed package of the same name, looked up once and used five ways. It
@@ -774,7 +944,8 @@ impl Transaction<Planned> {
                 entry,
                 info,
                 raw,
-                validated,
+                validation,
+                limits,
                 script: target.install_script.clone(),
                 files: target.files.clone(),
                 backups: target.backups.clone(),
@@ -825,6 +996,8 @@ impl Transaction<Planned> {
             walk_limits: self.walk_limits,
             verification: self.verification,
             policy_overrides: self.policy_overrides,
+            expectations: self.expectations,
+            published: self.published,
             patterns: self.patterns,
             scriptlets: self.scriptlets,
             hook_dirs: self.hook_dirs,
@@ -876,6 +1049,93 @@ impl Transaction<Planned> {
             &|path| self.patterns.skips(path),
         )
     }
+}
+
+/// Fails unless the archive at `path` holds the package the plan named: by name and version,
+/// and, when the plan supplied `expected`, by the fields `check_pkg_matches_db` compares.
+///
+/// The plan was built from a repository `desc`, or from a named file's `.PKGINFO` read before the
+/// confirmation prompt. The archive read here can hold something else: a cache file under a
+/// name it does not match, a mirror serving an older signed build under a newer file name, or a
+/// named file replaced after the plan was shown. Each is signed by a trusted key, so the
+/// signature check passes, and only this comparison refuses it.
+///
+/// This is `check_pkg_matches_db` (`sync.c:1113`): the name, the version, the installed size,
+/// and `depend`, `conflict`, `replaces`, `provides` and `group`. libalpm runs it on every
+/// repository package (`sync.c:1202`) and skips a named file, whose plan it built from that same
+/// file. piko checks a named file too: the plan read it before the confirmation prompt, and the
+/// transaction reads it again after.
+///
+/// # Errors
+///
+/// [`Error::UnusableSource`] naming what was planned and what the archive holds, or every
+/// field that differs from the plan.
+fn matches_plan(
+    planned: &PackageFileName,
+    expected: Option<&Expected>,
+    path: &Path,
+    info: &PackageInfo,
+) -> Result<()> {
+    let (name, version) = match info {
+        PackageInfo::V1(v1) => (&v1.pkgname, &v1.pkgver),
+        PackageInfo::V2(v2) => (&v2.pkgname, &v2.pkgver),
+    };
+    if name != planned.name() || version != planned.version() {
+        return Err(Error::UnusableSource {
+            path: path.to_path_buf(),
+            reason: format!(
+                "it holds {name} {version}, but the plan installs {} {}",
+                planned.name(),
+                planned.version()
+            ),
+        });
+    }
+    let Some(expected) = expected else { return Ok(()) };
+    let differences = expected.differences(&Expected::of_archive(info));
+    if differences.is_empty() {
+        return Ok(());
+    }
+    Err(Error::UnusableSource {
+        path: path.to_path_buf(),
+        reason: format!(
+            "its .PKGINFO does not match the plan for {name} {version}: {} differ",
+            differences.join(", ")
+        ),
+    })
+}
+
+/// Removes a cache file that was refused, through the source that served it, and says what
+/// happened in `refusal`'s reason.
+///
+/// Three refusals remove a file: a `.PKGINFO` that does not match the plan, a SHA-256 that does
+/// not match the database, and a signature that was read and refused. libalpm removes on all
+/// three (`sync.c:1202`, and `sync.c:1055` for the other two). A package with no signature at
+/// all is not removed, as libalpm's `ALPM_ERR_PKG_MISSING_SIG` is not. Neither is one whose
+/// signature could not be checked: the keyring is at fault, not the file. libalpm asks
+/// `ALPM_QUESTION_CORRUPTED_PKG` first (`sync.c:705`), and pacman answers yes by default. piko
+/// removes without asking, which is that default. A file left in place is served again by the
+/// next run and refused again, rather than downloaded afresh. A removal that fails is reported
+/// beside the refusal and never replaces it: the refusal is the answer. Any other error is
+/// returned as it is.
+pub(crate) fn discard(
+    source: &dyn crate::source::PackageSource,
+    location: &crate::source::Location,
+    mut refusal: Error,
+) -> Error {
+    if let Error::UnusableSource { reason, .. }
+    | Error::ChecksumMismatch { reason, .. }
+    | Error::SignatureRejected { reason, unsigned: false, .. } = &mut refusal
+    {
+        match source.discard(location) {
+            Ok(true) => reason
+                .push_str("; it was removed from the cache, so the next run downloads it again"),
+            Ok(false) => {}
+            Err(error) => {
+                reason.push_str(&format!("; it could not be removed from the cache: {error}"));
+            }
+        }
+    }
+    refusal
 }
 
 /// The database entry a package will become, from its `.PKGINFO`.
@@ -1019,6 +1279,7 @@ impl Transaction<Verified> {
     ///
     /// # Errors
     ///
+    /// [`Error::UnfinishedTransaction`] if a journal appeared since `verify` checked, and
     /// [`Error::Io`] if the journal cannot be written.
     pub fn stage(self, lock: &DbLock) -> Result<Transaction<Staged<'_>>> {
         let intents: Vec<Intent> = self.state.steps.iter().map(Step::intent).collect();
@@ -1035,6 +1296,8 @@ impl Transaction<Verified> {
             walk_limits: self.walk_limits,
             verification: self.verification,
             policy_overrides: self.policy_overrides,
+            expectations: self.expectations,
+            published: self.published,
             patterns: self.patterns,
             scriptlets: self.scriptlets,
             hook_dirs: self.hook_dirs,
@@ -1209,7 +1472,6 @@ impl Transaction<Staged<'_>> {
                             package,
                             reason: *reason,
                             ownership: self.ownership,
-                            limits: &self.limits,
                             skip_remove: &state.skip_remove,
                             patterns: &self.patterns,
                             runner: self.scriptlets.then_some(&runner),
@@ -2192,6 +2454,244 @@ mod tests {
         assert!(matches!(error, Error::SignatureRejected { .. }), "got {error:?}");
         assert!(!root.path().join("usr/bin/foo").exists(), "nothing should have been written");
         assert!(crate::journal::read(db.path()).unwrap().is_none(), "nothing was staged");
+        // A missing signature says nothing against the file, so it stays, as libalpm keeps a
+        // package refused with `ALPM_ERR_PKG_MISSING_SIG`.
+        assert!(cache.path().join(name).exists(), "an unsigned package was removed");
+    }
+
+    /// A named file is replaced after verification, before the commit. The commit installs the
+    /// bytes that were verified. The transaction reads a package three times by path, so a
+    /// source that served the user's own file would extract the replacement: unverified
+    /// bytes, installed by root.
+    #[test]
+    fn a_named_file_replaced_after_verification_does_not_reach_the_commit() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let downloads = cache_with_package(name, &[("usr/bin/foo", b"verified")]);
+        let named = downloads.path().join(name);
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+
+        let source = crate::source::FileSource::new(
+            HashMap::from([(name.to_owned(), named.clone())]),
+            cache.path(),
+            Box::new(CacheDirSource::new([cache.path().to_path_buf()]).unwrap()),
+        )
+        .unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let verified = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&source)
+            .unwrap();
+
+        // Same name, same version, other contents: what a swap after the check looks like.
+        let replacement = tempfile::tempdir().unwrap();
+        write_package(replacement.path(), name, "1.0.0-1", &[], &[("usr/bin/foo", b"swapped")]);
+        std::fs::rename(replacement.path().join(name), &named).unwrap();
+
+        verified.stage(&lock).unwrap().commit().unwrap();
+        assert_eq!(std::fs::read(root.path().join("usr/bin/foo")).unwrap(), b"verified");
+    }
+
+    /// An archive that holds another package than the plan named is refused before anything
+    /// is written. The file name says `2.0.0-1`; the `.PKGINFO` inside says `1.0.0-1`. That is
+    /// an older signed build served under a newer name, which a signature check alone accepts.
+    #[test]
+    fn an_archive_holding_another_version_than_planned_is_refused() {
+        let name = "foo-2.0.0-1-x86_64.pkg.tar";
+        let cache = tempfile::tempdir().unwrap();
+        write_package(cache.path(), name, "1.0.0-1", &[], &[("usr/bin/foo", b"older")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        let error = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&source)
+            .unwrap_err();
+
+        let Error::UnusableSource { reason, .. } = &error else {
+            panic!("expected the archive to be refused, got {error:?}");
+        };
+        assert!(reason.contains("foo 1.0.0-1") && reason.contains("foo 2.0.0-1"), "{reason}");
+        assert!(!root.path().join("usr/bin/foo").exists(), "nothing should have been written");
+
+        // The refused file leaves the cache, as `prompt_to_delete` removes it.
+        assert!(reason.contains("removed from the cache"), "{reason}");
+        assert!(!cache.path().join(name).exists(), "the refused file stayed in the cache");
+    }
+
+    /// A named file that is not the planned package is refused, and stays where the user put
+    /// it. Only a cache file is removed.
+    #[test]
+    fn a_refused_named_file_is_left_where_the_user_put_it() {
+        let name = "foo-2.0.0-1-x86_64.pkg.tar";
+        let downloads = tempfile::tempdir().unwrap();
+        write_package(downloads.path(), name, "1.0.0-1", &[], &[("usr/bin/foo", b"older")]);
+        let named = downloads.path().join(name);
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = crate::source::FileSource::new(
+            HashMap::from([(name.to_owned(), named.clone())]),
+            cache.path(),
+            Box::new(CacheDirSource::new([cache.path().to_path_buf()]).unwrap()),
+        )
+        .unwrap();
+
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        let error = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&source)
+            .unwrap_err();
+
+        let Error::UnusableSource { reason, .. } = &error else {
+            panic!("expected the archive to be refused, got {error:?}");
+        };
+        assert!(!reason.contains("removed"), "{reason}");
+        assert!(named.exists(), "the user's own file was removed");
+    }
+
+    /// Name and version agree, but the `.PKGINFO` declares another size and a dependency the
+    /// plan never saw. Every differing field is named, and nothing is written. The same
+    /// archive under an expectation it matches installs.
+    #[test]
+    fn an_archive_whose_fields_differ_from_the_plan_is_refused() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_raw_pkginfo(
+            name,
+            &format!("{}depend = glibc\n", pkginfo("1.0.0-1", &[])),
+            &[("usr/bin/foo", b"binary")],
+        );
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let (info, _) =
+            crate::conflict::load_pkginfo(&cache.path().join(name), &PackageLimits::default())
+                .unwrap();
+        let archive = std::fs::read(cache.path().join(name)).unwrap();
+        let step = || Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+
+        // What a repository entry with `%ISIZE% 124` and no `%DEPENDS%` would say.
+        let planned = {
+            let mut info = info.clone();
+            match &mut info {
+                PackageInfo::V1(v1) => {
+                    v1.size = 124;
+                    v1.depend.clear();
+                }
+                PackageInfo::V2(v2) => {
+                    v2.size = 124;
+                    v2.depend.clear();
+                }
+            }
+            Expected::of_archive(&info)
+        };
+        let error = Transaction::new(root.path(), db.path(), vec![step()])
+            .ownership(Ownership::Inherit)
+            .expectations(HashMap::from([(name.to_owned(), planned)]))
+            .verify(&source)
+            .unwrap_err();
+        let Error::UnusableSource { reason, .. } = &error else {
+            panic!("expected the archive to be refused, got {error:?}");
+        };
+        assert!(reason.contains("size, depend differ"), "{reason}");
+        assert!(!root.path().join("usr/bin/foo").exists(), "nothing should have been written");
+        assert!(!cache.path().join(name).exists(), "the refused file stayed in the cache");
+
+        // Put back, as a download would: the same archive under a matching expectation.
+        std::fs::write(cache.path().join(name), &archive).unwrap();
+        let lock = DbLock::acquire(db.path()).unwrap();
+        Transaction::new(root.path(), db.path(), vec![step()])
+            .ownership(Ownership::Inherit)
+            .expectations(HashMap::from([(name.to_owned(), Expected::of_archive(&info))]))
+            .verify(&source)
+            .unwrap()
+            .stage(&lock)
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(std::fs::read(root.path().join("usr/bin/foo")).unwrap(), b"binary");
+    }
+
+    /// An archive that inflates far past the size its plan declares is refused while it is read,
+    /// before anything is written. It stays in the cache: it passed its checksum and signature
+    /// checks, so a new download gives the same file.
+    #[test]
+    fn an_archive_inflating_past_its_declared_size_is_refused_while_read() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let payload = vec![b'x'; 3 * 1024 * 1024];
+        let cache = cache_with_raw_pkginfo(
+            name,
+            &pkginfo("1.0.0-1", &[]),
+            &[("usr/share/foo/big", payload.as_slice())],
+        );
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let (info, _) =
+            crate::conflict::load_pkginfo(&cache.path().join(name), &PackageLimits::default())
+                .unwrap();
+
+        let error = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Install {
+                package: name.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+        )
+        .ownership(Ownership::Inherit)
+        .expectations(HashMap::from([(name.to_owned(), Expected::of_archive(&info))]))
+        .verify(&source)
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                Error::PackageLimitExceeded { limit: "installed size the plan declares", .. }
+            ),
+            "got {error:?}"
+        );
+        assert!(!root.path().join("usr/share/foo/big").exists(), "nothing should be written");
+        assert!(cache.path().join(name).exists(), "a signed archive was removed from the cache");
+    }
+
+    /// The same holds for the name: `bar`'s file name over `foo`'s archive is refused.
+    #[test]
+    fn an_archive_holding_another_package_than_planned_is_refused() {
+        let name = "bar-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        let error = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&source)
+            .unwrap_err();
+
+        assert!(matches!(error, Error::UnusableSource { .. }), "got {error:?}");
+        assert!(!root.path().join("usr/bin/foo").exists(), "nothing should have been written");
     }
 
     /// The same package under `Optional` installs, and records `none` rather than claiming a
@@ -2764,5 +3264,271 @@ mod tests {
 
         let text = std::fs::read_to_string(db.path().join("local/foo-1.0.0-1/desc")).unwrap();
         assert!(text.contains("%REASON%\n1\n"), "{text}");
+    }
+
+    /// Installs the package `name` from `cache` under `verification` and `published`, and
+    /// returns its `%VALIDATION%` lines.
+    fn install_validated(
+        cache: &Path,
+        name: &str,
+        verification: Verification,
+        published: Option<Published>,
+    ) -> Result<Vec<String>> {
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.to_path_buf()]).unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        let published: HashMap<String, Published> =
+            published.into_iter().map(|published| (name.to_owned(), published)).collect();
+        let lock = DbLock::acquire(db.path()).unwrap();
+        Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verification(verification)
+            .published(published)
+            .verify(&source)?
+            .stage(&lock)?
+            .commit()?;
+
+        let desc = std::fs::read_to_string(db.path().join("local/foo-1.0.0-1/desc")).unwrap();
+        Ok(desc
+            .split("%VALIDATION%\n")
+            .nth(1)
+            .unwrap()
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// What a database publishes for the bytes of `file`, with `signature` if it has one.
+    fn published_for(file: &Path, signature: Option<&[u8]>) -> Published {
+        use base64::Engine as _;
+        let sha256 = alpm_types::Sha256Checksum::calculate_from(std::fs::read(file).unwrap());
+        let signature = signature.map(|bytes| {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+            alpm_types::Base64OpenPGPSignature::new(encoded).unwrap()
+        });
+        Published::new(sha256, signature)
+    }
+
+    /// A GnuPG home with one generated signing key, or `None` if `gpg` is unavailable.
+    ///
+    /// A key generated locally is ultimately trusted, so `TrustedOnly` accepts its signatures.
+    fn signing_keyring() -> Option<tempfile::TempDir> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().ok()?;
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).ok()?;
+        let output = std::process::Command::new("gpg")
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+            .args(["--quick-generate-key", "piko test <test@example.invalid>", "ed25519"])
+            .args(["sign", "never"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            eprintln!("skipping: no test key: {}", String::from_utf8_lossy(&output.stderr));
+            return None;
+        }
+        Some(home)
+    }
+
+    /// A detached signature of `file`, made with the key in `home`.
+    fn detached_signature(home: &Path, file: &Path) -> Vec<u8> {
+        let output = std::process::Command::new("gpg")
+            .arg("--homedir")
+            .arg(home)
+            .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+            .args(["--output", "-", "--detach-sign"])
+            .arg(file)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        output.stdout
+    }
+
+    /// Package signatures checked under `SigLevel = Required`, against the keyring in `home`.
+    fn required(home: &Path) -> Verification {
+        Verification::Enabled {
+            keyring: Keyring::open(home).unwrap(),
+            policy: Policy::for_package(piko_db::config::SigLevel::PACKAGE),
+        }
+    }
+
+    /// A repository package whose SHA-256 is not the one its database publishes is refused and
+    /// removed from the cache. Signature checking is off: libalpm compares `%SHA256SUM%` under
+    /// `SigLevel = Never` too.
+    #[test]
+    fn a_package_whose_checksum_differs_from_its_database_is_refused_and_removed() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let other = cache_with_package(name, &[("usr/bin/foo", b"another binary")]);
+        let published = published_for(&other.path().join(name), None);
+
+        let error = install_validated(cache.path(), name, Verification::Disabled, Some(published))
+            .unwrap_err();
+
+        let Error::ChecksumMismatch { reason, .. } = &error else {
+            panic!("expected a checksum mismatch, got {error:?}");
+        };
+        assert!(reason.contains("removed from the cache"), "{reason}");
+        assert!(!cache.path().join(name).exists(), "the refused file stayed in the cache");
+    }
+
+    /// A package that matches its database's checksum installs, and `%VALIDATION%` says what
+    /// was checked. A package with nothing published records `none`, as before.
+    #[test]
+    fn a_package_matching_its_database_checksum_records_sha256() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let published = published_for(&cache.path().join(name), None);
+
+        let validation =
+            install_validated(cache.path(), name, Verification::Disabled, Some(published)).unwrap();
+        assert_eq!(validation, ["sha256"]);
+
+        let validation = install_validated(cache.path(), name, Verification::Disabled, None);
+        assert_eq!(validation.unwrap(), ["none"]);
+    }
+
+    /// With signatures checked, the database's signature is checked in place of the `.sig`
+    /// beside the file, as `_alpm_pkg_validate_internal` does. A `.sig` that is not a signature
+    /// at all changes nothing. The checksum is not compared: the signature covers the file.
+    #[test]
+    fn a_database_signature_is_checked_in_place_of_the_sig_beside_the_file() {
+        let Some(keys) = signing_keyring() else { return };
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let file = cache.path().join(name);
+        let signature = detached_signature(keys.path(), &file);
+        std::fs::write(piko_sig::signature_path(&file), b"not a signature").unwrap();
+        let published = published_for(&file, Some(&signature));
+
+        let validation =
+            install_validated(cache.path(), name, required(keys.path()), Some(published));
+        assert_eq!(validation.unwrap(), ["pgp"]);
+    }
+
+    /// A database signature over other bytes refuses the package, although a good `.sig` sits
+    /// beside it. The file and its `.sig` are removed from the cache.
+    #[test]
+    fn a_database_signature_that_does_not_match_refuses_the_package() {
+        let Some(keys) = signing_keyring() else { return };
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let file = cache.path().join(name);
+        std::fs::write(piko_sig::signature_path(&file), detached_signature(keys.path(), &file))
+            .unwrap();
+        let other = cache_with_package(name, &[("usr/bin/foo", b"another binary")]);
+        let signature_of_other = detached_signature(keys.path(), &other.path().join(name));
+        let published = published_for(&file, Some(&signature_of_other));
+
+        let error = install_validated(cache.path(), name, required(keys.path()), Some(published))
+            .unwrap_err();
+        let Error::SignatureRejected { reason, .. } = &error else {
+            panic!("expected a signature refusal, got {error:?}");
+        };
+        assert!(reason.contains("removed from the cache"), "{reason}");
+        assert!(!file.exists(), "the refused file stayed in the cache");
+        assert!(!piko_sig::signature_path(&file).exists(), "its .sig stayed in the cache");
+    }
+
+    /// A `.sig` made by a key the keyring does not hold refuses the package, and the file and
+    /// its `.sig` are removed from the cache, as `prompt_to_delete` removes them.
+    #[test]
+    fn a_package_whose_sig_is_refused_is_removed_from_the_cache() {
+        let Some(keys) = signing_keyring() else { return };
+        let Some(stranger) = signing_keyring() else { return };
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let file = cache.path().join(name);
+        std::fs::write(piko_sig::signature_path(&file), detached_signature(stranger.path(), &file))
+            .unwrap();
+
+        let error = install_validated(cache.path(), name, required(keys.path()), None).unwrap_err();
+        let Error::SignatureRejected { reason, .. } = &error else {
+            panic!("expected a signature refusal, got {error:?}");
+        };
+        assert!(reason.contains("not in the keyring"), "{reason}");
+        assert!(reason.contains("removed from the cache"), "{reason}");
+        assert!(!file.exists(), "the refused file stayed in the cache");
+        assert!(!piko_sig::signature_path(&file).exists(), "its .sig stayed in the cache");
+    }
+
+    /// With no database signature, the `.sig` beside the file is checked, and the checksum is
+    /// compared too.
+    #[test]
+    fn without_a_database_signature_the_sig_and_the_checksum_are_both_checked() {
+        let Some(keys) = signing_keyring() else { return };
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let file = cache.path().join(name);
+        std::fs::write(piko_sig::signature_path(&file), detached_signature(keys.path(), &file))
+            .unwrap();
+        let published = published_for(&file, None);
+
+        let validation =
+            install_validated(cache.path(), name, required(keys.path()), Some(published));
+        assert_eq!(validation.unwrap(), ["sha256", "pgp"]);
+    }
+
+    /// A journal left by an unfinished transaction refuses the next one in `verify`, before any
+    /// package is read, and the journal is left as it was.
+    #[test]
+    fn a_leftover_journal_refuses_the_transaction_in_verify() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let leftover = [crate::journal::Intent::Remove { entry: "bar-1.0-1".to_owned() }];
+        std::mem::forget(
+            crate::journal::Journal::begin(db.path(), root.path(), &leftover).unwrap(),
+        );
+        let journal = std::fs::read(db.path().join(crate::journal::JOURNAL_FILE)).unwrap();
+
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        let error = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&source)
+            .unwrap_err();
+
+        assert!(matches!(error, Error::UnfinishedTransaction { .. }), "got {error:?}");
+        assert_eq!(std::fs::read(db.path().join(crate::journal::JOURNAL_FILE)).unwrap(), journal);
+    }
+
+    /// A journal that appears between `verify` and `stage` refuses `stage`, and is not written
+    /// over. `stage` runs under `db.lck`, so this is the refusal no race can pass.
+    #[test]
+    fn a_journal_written_after_verify_refuses_stage() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        let verified = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&source)
+            .unwrap();
+
+        let other = [crate::journal::Intent::Remove { entry: "bar-1.0-1".to_owned() }];
+        std::mem::forget(crate::journal::Journal::begin(db.path(), root.path(), &other).unwrap());
+        let journal = std::fs::read(db.path().join(crate::journal::JOURNAL_FILE)).unwrap();
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let error = verified.stage(&lock).unwrap_err();
+        assert!(matches!(error, Error::UnfinishedTransaction { .. }), "got {error:?}");
+        assert_eq!(std::fs::read(db.path().join(crate::journal::JOURNAL_FILE)).unwrap(), journal);
+        assert!(!root.path().join("usr/bin/foo").exists(), "files were written anyway");
     }
 }

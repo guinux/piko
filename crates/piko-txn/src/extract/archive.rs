@@ -16,11 +16,12 @@
 //! [`crate::rootfs`].
 
 use std::{
+    ffi::OsString,
     io::Read,
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, AtomicU64, Ordering},
     },
 };
 
@@ -34,17 +35,32 @@ use crate::{
 /// Bounds on what a single package may cost to read.
 ///
 /// Generous rather than tight. The purpose is that a hostile archive costs a *bounded* amount
-/// of work, not that a legitimate one is squeezed. Real packages reach hundreds of megabytes
-/// inflated, and `libreoffice-fresh` unpacks to roughly 700 MB. A limit tuned to the typical
-/// case would reject them.
+/// of work, not that a legitimate one is squeezed. The largest `%ISIZE%` in `core` and `extra`
+/// is 9.05 GiB (`intel-oneapi-toolkit`), so `inflated_bytes` leaves about 3.5 times that. A
+/// package the plan declares a size for gets a much tighter bound on top: see
+/// [`PackageLimits::with_declared_size`].
 #[derive(Clone, Copy, Debug)]
 pub struct PackageLimits {
     /// Largest package file that will be opened.
     pub compressed_bytes: u64,
     /// Largest total inflated size that will be read out of one package.
+    ///
+    /// The ceiling for every package, and the only bound for one with no declared size.
     pub inflated_bytes: u64,
     /// Largest number of members a package may contain.
     pub max_members: usize,
+    /// Largest number of extended attribute records one member may carry.
+    ///
+    /// A record, not an attribute: bsdtar writes each attribute under two spellings.
+    pub max_xattrs: usize,
+    /// Largest total size, names and values together, of one member's extended attributes.
+    pub max_xattr_bytes: usize,
+    /// The installed size the plan declares for this one package, its `%ISIZE%`.
+    ///
+    /// `None` for a caller with no plan, which gets `inflated_bytes` alone. Set through
+    /// [`PackageLimits::with_declared_size`] per package, never as a transaction-wide setting.
+    /// See that function for the bound it adds.
+    pub declared_size: Option<u64>,
 }
 
 impl Default for PackageLimits {
@@ -55,7 +71,51 @@ impl Default for PackageLimits {
             inflated_bytes: 32 * 1024 * 1024 * 1024,
             // `linux-firmware` and the texlive packages run to tens of thousands of files.
             max_members: 2_000_000,
+            // Real packages carry one, `security.capability`, on a handful of files. The kernel
+            // itself caps a value at 64 KiB (`XATTR_SIZE_MAX`).
+            max_xattrs: 64,
+            max_xattr_bytes: 256 * 1024,
+            declared_size: None,
         }
+    }
+}
+
+/// What the tar stream may add to a package's declared size, once per package.
+///
+/// `%ISIZE%` is `du --apparent-size` over the payload. It does not count `.PKGINFO`,
+/// `.BUILDINFO` or `.MTREE`, nor the zero blocks that end an archive. Measured over 1099
+/// packages: at most 64 KiB of these costs a member count does not explain.
+const DECLARED_SLACK_FIXED: u64 = 1024 * 1024;
+
+/// What the tar stream may add to a package's declared size, per member.
+///
+/// A member costs a 512-byte header, up to 511 bytes of padding, and a PAX header when it needs
+/// one: another header block and a body of one block or more. About 2 KiB in the worst ordinary
+/// case. Measured over 1099 packages, beyond [`DECLARED_SLACK_FIXED`]'s 64 KiB: at most
+/// 898 bytes per member (`systemd-libs`). This is per member and not a ratio of the size,
+/// because a package of symbolic links declares almost nothing and still has a header each.
+const DECLARED_SLACK_PER_MEMBER: u64 = 4 * 1024;
+
+impl PackageLimits {
+    /// These limits, with the stream also bounded by `size`, the package's declared `%ISIZE%`.
+    ///
+    /// The stream may inflate to `size`, plus 1 MiB (`DECLARED_SLACK_FIXED`), plus 4 KiB
+    /// (`DECLARED_SLACK_PER_MEMBER`) for each member read so far. `inflated_bytes` still
+    /// applies above that. The bound grows as members are read, since the member count is not
+    /// known in advance. So a package that inflates past what it declares is refused after about
+    /// that many bytes, not after `inflated_bytes`.
+    #[must_use]
+    pub const fn with_declared_size(self, size: u64) -> Self {
+        Self { declared_size: Some(size), ..self }
+    }
+
+    /// The declared bound once `members` members have been read. `u64::MAX` with no declared
+    /// size.
+    fn declared_bound(&self, members: usize) -> u64 {
+        self.declared_size.map_or(u64::MAX, |size| {
+            let per_member = DECLARED_SLACK_PER_MEMBER.saturating_mul(to_u64(members));
+            size.saturating_add(DECLARED_SLACK_FIXED).saturating_add(per_member)
+        })
     }
 }
 
@@ -94,6 +154,17 @@ pub struct Link {
     pub target: PathBuf,
 }
 
+/// One extended attribute the archive records for a member.
+///
+/// The value is raw bytes. `security.capability` is a binary structure, not text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Xattr {
+    /// The full name, namespace included: `security.capability`, `user.foo`.
+    pub name: OsString,
+    /// The value, verbatim.
+    pub value: Vec<u8>,
+}
+
 /// One member of a package archive, without its contents.
 #[derive(Clone, Debug)]
 pub struct Member {
@@ -115,6 +186,11 @@ pub struct Member {
     pub mtime: u64,
     /// The member's size in bytes.
     pub size: u64,
+    /// The extended attributes the archive records, in archive order.
+    ///
+    /// Read from the member's PAX `LIBARCHIVE.xattr.*` and `SCHILY.xattr.*` records. This is only what the archive
+    /// says. Which of them reach the disk is decided by [`fn@super::apply`].
+    pub xattrs: Vec<Xattr>,
 }
 
 impl Member {
@@ -201,16 +277,19 @@ pub fn walk_until(
     let decoder = CompressionDecoder::new(file, settings)
         .map_err(|source| Error::io(path, IoAction::Decompress, std::io::Error::other(source)))?;
 
-    let tripped = Arc::new(AtomicBool::new(false));
+    let budget = Arc::new(Budget {
+        declared: AtomicU64::new(limits.declared_bound(0)),
+        tripped: AtomicU8::new(Budget::CLEAR),
+    });
     let bounded = BoundedReader {
         inner: decoder,
         limit: limits.inflated_bytes,
         read_so_far: 0,
-        tripped: Arc::clone(&tripped),
+        budget: Arc::clone(&budget),
     };
     let mut archive = tar::Archive::new(bounded);
 
-    let classify = |source: std::io::Error| classify_io_error(path, source, &tripped, limits);
+    let classify = |source: std::io::Error| classify_io_error(path, source, &budget, limits);
     let entries = archive.entries().map_err(classify)?;
 
     let mut seen = 0_usize;
@@ -218,15 +297,22 @@ pub fn walk_until(
         let mut entry = entry.map_err(classify)?;
 
         seen = seen.saturating_add(1);
+        budget.declared.store(limits.declared_bound(seen), Ordering::Relaxed);
         if seen > limits.max_members {
             return Err(Error::PackageLimitExceeded {
                 path: path.to_path_buf(),
                 limit: "member count",
-                max: u64::try_from(limits.max_members).unwrap_or(u64::MAX),
+                max: to_u64(limits.max_members),
             });
         }
 
-        let member = describe(&entry).map_err(classify)?;
+        let mut member = describe(&entry).map_err(classify)?;
+        member.xattrs = match read_xattrs(&mut entry, limits).map_err(classify)? {
+            Ok(xattrs) => xattrs,
+            Err((limit, max)) => {
+                return Err(Error::PackageLimitExceeded { path: path.to_path_buf(), limit, max });
+            }
+        };
         if on_member(&member, &mut entry)? == Flow::Stop {
             break;
         }
@@ -276,7 +362,112 @@ fn describe<R: Read>(entry: &tar::Entry<'_, R>) -> std::io::Result<Member> {
         gid: header.gid()?,
         mtime: header.mtime()?,
         size: header.size()?,
+        xattrs: Vec::new(),
     })
+}
+
+/// The PAX prefix under which bsdtar records an extended attribute: the name URL-encoded,
+/// the value in base64.
+const LIBARCHIVE_XATTR: &[u8] = b"LIBARCHIVE.xattr.";
+
+/// The PAX prefix under which GNU tar and bsdtar record an extended attribute, both raw.
+const SCHILY_XATTR: &[u8] = b"SCHILY.xattr.";
+
+/// The extended attributes recorded for `entry`, bounded by `limits`.
+///
+/// bsdtar, which makepkg uses, writes every attribute twice: `LIBARCHIVE.xattr.` first, then
+/// `SCHILY.xattr.`. The `LIBARCHIVE` spelling is the one read. The `tar` crate splits a PAX
+/// header on every newline byte, not by each record's length. So a raw binary value, which a
+/// `security.capability` is, comes back as malformed fragments whenever it contains a `0x0a`.
+/// The encoded spelling contains no newline and always survives. A `SCHILY` record is used
+/// only for a name no `LIBARCHIVE` record gave, which is how GNU tar writes an archive.
+///
+/// A fragment the splitter broke off is skipped, as the `tar` crate skips it for its own
+/// fields. An encoded record that does not decode is a damaged archive.
+///
+/// The outer error is a damaged PAX header. The inner one names the bound that was exceeded,
+/// and its value. The bounds are checked before anything is copied out of the header.
+fn read_xattrs<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    limits: &PackageLimits,
+) -> std::io::Result<std::result::Result<Vec<Xattr>, (&'static str, u64)>> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let Some(extensions) = entry.pax_extensions()? else { return Ok(Ok(Vec::new())) };
+    let mut encoded: Vec<Xattr> = Vec::new();
+    let mut raw: Vec<Xattr> = Vec::new();
+    let mut bytes = 0_usize;
+    for extension in extensions {
+        let Ok(extension) = extension else { continue };
+        let key = extension.key_bytes();
+        let value = extension.value_bytes();
+        let (name, is_encoded) = if let Some(name) = key.strip_prefix(LIBARCHIVE_XATTR) {
+            (name, true)
+        } else if let Some(name) = key.strip_prefix(SCHILY_XATTR) {
+            (name, false)
+        } else {
+            continue;
+        };
+        if encoded.len().saturating_add(raw.len()) >= limits.max_xattrs {
+            return Ok(Err(("extended attribute count", to_u64(limits.max_xattrs))));
+        }
+        bytes = bytes.saturating_add(name.len()).saturating_add(value.len());
+        if bytes > limits.max_xattr_bytes {
+            return Ok(Err(("extended attribute size", to_u64(limits.max_xattr_bytes))));
+        }
+        if is_encoded {
+            encoded.push(Xattr {
+                name: std::ffi::OsStr::from_bytes(&url_decode(name)?).to_os_string(),
+                value: base64_decode(value)?,
+            });
+        } else {
+            raw.push(Xattr {
+                name: std::ffi::OsStr::from_bytes(name).to_os_string(),
+                value: value.to_vec(),
+            });
+        }
+    }
+    raw.retain(|xattr| !encoded.iter().any(|known| known.name == xattr.name));
+    encoded.append(&mut raw);
+    Ok(Ok(encoded))
+}
+
+/// Decodes libarchive's URL encoding of an attribute name: `%XX` for a byte, anything else
+/// as itself.
+fn url_decode(name: &[u8]) -> std::io::Result<Vec<u8>> {
+    let damaged = || std::io::Error::new(std::io::ErrorKind::InvalidData, "bad xattr name");
+    let digit = |byte: u8| char::from(byte).to_digit(16).and_then(|d| u8::try_from(d).ok());
+    let mut decoded = Vec::with_capacity(name.len());
+    let mut bytes = name.iter().copied();
+    while let Some(byte) = bytes.next() {
+        if byte != b'%' {
+            decoded.push(byte);
+            continue;
+        }
+        let high = bytes.next().and_then(digit).ok_or_else(damaged)?;
+        let low = bytes.next().and_then(digit).ok_or_else(damaged)?;
+        decoded.push(high.saturating_mul(16).saturating_add(low));
+    }
+    Ok(decoded)
+}
+
+/// Decodes libarchive's base64 value. libarchive writes it without padding; a padded one is
+/// accepted too.
+fn base64_decode(value: &[u8]) -> std::io::Result<Vec<u8>> {
+    use base64::Engine as _;
+    const ENGINE: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::GeneralPurposeConfig::new()
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+    );
+    ENGINE
+        .decode(value)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+/// A bound, as [`Error::PackageLimitExceeded`] reports it.
+fn to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 /// Identifies a compression format from the file's magic bytes.
@@ -314,25 +505,43 @@ fn sniff(header: &[u8]) -> Option<DecompressionSettings> {
 
 /// Tells a genuine bound violation apart from an unrelated I/O or tar-format failure.
 ///
-/// `tar` surfaces [`BoundedReader`]'s error as an opaque [`std::io::Error`]. The shared flag
-/// is what distinguishes the two. It is set only when the limit was actually exceeded.
+/// `tar` surfaces [`BoundedReader`]'s error as an opaque [`std::io::Error`]. The shared
+/// [`Budget`] is what distinguishes the two. Its flag is set only when a bound was actually
+/// exceeded, and says which one.
 fn classify_io_error(
     path: &Path,
     source: std::io::Error,
-    tripped: &Arc<AtomicBool>,
+    budget: &Budget,
     limits: &PackageLimits,
 ) -> Error {
-    if tripped.load(Ordering::Relaxed) {
-        return Error::PackageLimitExceeded {
-            path: path.to_path_buf(),
-            limit: "inflated size",
-            max: limits.inflated_bytes,
-        };
-    }
-    Error::io(path, IoAction::Read, source)
+    let (limit, max) = match budget.tripped.load(Ordering::Relaxed) {
+        Budget::INFLATED => ("inflated size", limits.inflated_bytes),
+        Budget::DECLARED => {
+            ("installed size the plan declares", budget.declared.load(Ordering::Relaxed))
+        }
+        _ => return Error::io(path, IoAction::Read, source),
+    };
+    Error::PackageLimitExceeded { path: path.to_path_buf(), limit, max }
 }
 
-/// A reader that refuses to yield more than `limit` bytes in total.
+/// The bounds [`BoundedReader`] shares with the walk that drives it.
+#[derive(Debug)]
+struct Budget {
+    /// The declared bound in force. The walk raises it as each member is read.
+    declared: AtomicU64,
+    /// Which bound was exceeded: [`Budget::CLEAR`], [`Budget::INFLATED`] or
+    /// [`Budget::DECLARED`].
+    tripped: AtomicU8,
+}
+
+impl Budget {
+    const CLEAR: u8 = 0;
+    const INFLATED: u8 = 1;
+    const DECLARED: u8 = 2;
+}
+
+/// A reader that refuses to yield more than `limit` bytes in total, or more than the
+/// declared bound in `budget`.
 ///
 /// A compressed archive can inflate to arbitrarily more than its own size. Without this, a
 /// few kilobytes on disk can exhaust memory or fill a filesystem.
@@ -341,18 +550,61 @@ struct BoundedReader<R> {
     inner: R,
     limit: u64,
     read_so_far: u64,
-    tripped: Arc<AtomicBool>,
+    budget: Arc<Budget>,
 }
 
 impl<R: Read> Read for BoundedReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buf)?;
         self.read_so_far = self.read_so_far.saturating_add(read as u64);
-        if self.read_so_far > self.limit {
-            self.tripped.store(true, Ordering::Relaxed);
-            return Err(std::io::Error::other("decompressed size limit exceeded"));
+        let tripped = if self.read_so_far > self.limit {
+            Budget::INFLATED
+        } else if self.read_so_far > self.budget.declared.load(Ordering::Relaxed) {
+            Budget::DECLARED
+        } else {
+            return Ok(read);
+        };
+        self.budget.tripped.store(tripped, Ordering::Relaxed);
+        Err(std::io::Error::other("decompressed size limit exceeded"))
+    }
+}
+
+/// Builds package archives for tests.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::arithmetic_side_effects,
+    reason = "test fixtures, over fixed small inputs"
+)]
+pub(crate) mod fixture {
+    /// Appends a PAX local header holding `records`, as full `key`/`value` pairs.
+    ///
+    /// The header applies to the next member appended. `tar` 0.4 writes no PAX header of its
+    /// own, so a test that needs one builds it here, the way bsdtar spells it.
+    pub(crate) fn pax(builder: &mut tar::Builder<Vec<u8>>, records: &[(&[u8], &[u8])]) {
+        let mut data = Vec::new();
+        for (key, value) in records {
+            // `<length> <key>=<value>\n`, where the length counts its own digits.
+            let body = key.len() + value.len() + 3;
+            let mut length = body + body.to_string().len();
+            if length.to_string().len() != body.to_string().len() {
+                length += 1;
+            }
+            data.extend_from_slice(format!("{length} ").as_bytes());
+            data.extend_from_slice(key);
+            data.push(b'=');
+            data.extend_from_slice(value);
+            data.push(b'\n');
         }
-        Ok(read)
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::XHeader);
+        header.set_mode(0o644);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_size(data.len() as u64);
+        header.set_cksum();
+        builder.append_data(&mut header, "PaxHeader", data.as_slice()).unwrap();
     }
 }
 
@@ -538,6 +790,50 @@ mod tests {
         );
     }
 
+    /// A package that inflates past its declared size is refused at that size plus the slack,
+    /// and says which bound it hit.
+    #[test]
+    fn refuses_a_package_that_inflates_past_its_declared_size() {
+        let path = tarball(|builder| {
+            file_entry(builder, "usr/share/big", &vec![b'x'; 2 * 1024 * 1024], 0o644);
+        });
+        let limits = PackageLimits::default().with_declared_size(1024);
+
+        let err = walk(&path, &limits, |_, reader| {
+            let mut sink = Vec::new();
+            let _ = reader.read_to_end(&mut sink);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::PackageLimitExceeded { limit: "installed size the plan declares", .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// The per-member slack is what lets a package of many empty members through: it declares
+    /// nothing, and its headers alone exceed the fixed slack.
+    #[test]
+    fn a_package_of_many_empty_members_fits_its_declared_size() {
+        let path = tarball(|builder| {
+            for index in 0..3000 {
+                file_entry(builder, &format!("usr/share/icons/i{index}"), b"", 0o644);
+            }
+        });
+        let limits = PackageLimits::default().with_declared_size(0);
+
+        let mut seen = 0_usize;
+        walk(&path, &limits, |_, _| {
+            seen += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, 3000);
+    }
+
     #[test]
     fn refuses_a_package_with_too_many_members() {
         let path = tarball(|builder| {
@@ -587,6 +883,85 @@ mod tests {
         })
         .unwrap();
         assert_eq!(names, [PathBuf::from("usr/share/a"), PathBuf::from("usr/share/b")]);
+    }
+
+    /// bsdtar writes every attribute twice, the encoded spelling first. The binary value holds a
+    /// newline byte, which breaks the raw record apart; the encoded one still yields it, once.
+    /// A raw record with no encoded twin is taken as it is, as GNU tar writes one.
+    #[test]
+    fn reads_extended_attributes_from_either_spelling_once() {
+        let capability =
+            b"\x01\x00\x00\x02\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let path = tarball(|builder| {
+            fixture::pax(
+                builder,
+                &[
+                    (b"LIBARCHIVE.xattr.security.capability", b"AQAAAgoAAAAAAAAAAAAAAAAAAAA"),
+                    (b"SCHILY.xattr.security.capability", capability),
+                    (b"LIBARCHIVE.xattr.user.a%3Db", b"cGlrbw=="),
+                    (b"SCHILY.xattr.user.gnu", b"raw"),
+                    (b"mtime", b"1"),
+                ],
+            );
+            file_entry(builder, "usr/bin/newuidmap", b"x", 0o755);
+            file_entry(builder, "usr/bin/plain", b"x", 0o755);
+        });
+
+        let members = collect(&path);
+        assert_eq!(
+            members.first().unwrap().0.xattrs,
+            [
+                Xattr { name: "security.capability".into(), value: capability.to_vec() },
+                Xattr { name: "user.a=b".into(), value: b"piko".to_vec() },
+                Xattr { name: "user.gnu".into(), value: b"raw".to_vec() },
+            ]
+        );
+        assert!(members.get(1).unwrap().0.xattrs.is_empty(), "a PAX header leaked forward");
+    }
+
+    /// The encoded spelling contains no newline, so a value that does not decode is damage,
+    /// not a splitting artefact.
+    #[test]
+    fn refuses_an_encoded_attribute_that_does_not_decode() {
+        let path = tarball(|builder| {
+            fixture::pax(builder, &[(b"LIBARCHIVE.xattr.user.a", b"not base64!")]);
+            file_entry(builder, "usr/share/f", b"x", 0o644);
+        });
+        let err = walk(&path, &PackageLimits::default(), |_, _| Ok(())).unwrap_err();
+        assert!(matches!(err, Error::Io { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn refuses_a_member_with_too_many_extended_attributes() {
+        let path = tarball(|builder| {
+            fixture::pax(
+                builder,
+                &[(b"SCHILY.xattr.user.a", b"1"), (b"SCHILY.xattr.user.b", b"2")],
+            );
+            file_entry(builder, "usr/share/f", b"x", 0o644);
+        });
+        let limits = PackageLimits { max_xattrs: 1, ..PackageLimits::default() };
+
+        let err = walk(&path, &limits, |_, _| Ok(())).unwrap_err();
+        assert!(
+            matches!(err, Error::PackageLimitExceeded { limit: "extended attribute count", .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_member_whose_extended_attributes_are_too_large() {
+        let path = tarball(|builder| {
+            fixture::pax(builder, &[(b"SCHILY.xattr.user.big", &[b'x'; 100])]);
+            file_entry(builder, "usr/share/f", b"x", 0o644);
+        });
+        let limits = PackageLimits { max_xattr_bytes: 64, ..PackageLimits::default() };
+
+        let err = walk(&path, &limits, |_, _| Ok(())).unwrap_err();
+        assert!(
+            matches!(err, Error::PackageLimitExceeded { limit: "extended attribute size", .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]

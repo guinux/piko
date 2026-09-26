@@ -14,7 +14,7 @@ use piko_sig::{Checked, Keyring, Policy, Verdict};
 use crate::{
     cancel::Cancel,
     concurrency::Concurrency,
-    error::{Error, Result},
+    error::{Error, Result, attempt_reason, with_causes},
     freshness::{Baseline, FreshnessNote, FreshnessPolicy, Refreshed},
     pool,
     progress::{Event, Kind},
@@ -589,7 +589,7 @@ impl Refresher {
             }
             Ok(Fetched::Body(database)) => database,
             Err(Error::Cancelled) => return Err(Error::Cancelled),
-            Err(error) => return Ok(Step::Failed(error.to_string())),
+            Err(error) => return Ok(Step::Failed(attempt_reason(url, &error))),
         };
 
         // The signature comes from the same server as the database. Taking it from another
@@ -609,7 +609,7 @@ impl Refresher {
             // the next server for *both*. Pairing this database with someone else's signature
             // is the thing that rule forbids. `database` is dropped uncommitted here, and
             // `AtomicFile` takes its temporary with it, so the live file is untouched.
-            Err(error) => return Ok(Step::Failed(error.to_string())),
+            Err(error) => return Ok(Step::Failed(attempt_reason(url, &error))),
         };
 
         // Past this point a signature failure is an answer, not a transport problem. `verify`
@@ -882,7 +882,7 @@ impl Refresher {
                 .verify_detached(database.path(), signature.path())
                 .map_err(|source| Error::SignatureUncheckable {
                     file: name.to_owned(),
-                    reason: source.to_string(),
+                    reason: with_causes(&source),
                 })?,
             Signature::NotRequested | Signature::Absent => Vec::new(),
         };
@@ -1063,7 +1063,8 @@ impl Refresher {
                         // signature loses both halves to the next server. `file` is dropped
                         // uncommitted, so nothing reaches the cache.
                         Err(error) => {
-                            attempts.push((url, error.to_string()));
+                            let reason = attempt_reason(&url, &error);
+                            attempts.push((url, reason));
                             continue;
                         }
                     };
@@ -1080,7 +1081,10 @@ impl Refresher {
                     return Ok(destination);
                 }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
-                Err(error) => attempts.push((url, error.to_string())),
+                Err(error) => {
+                    let reason = attempt_reason(&url, &error);
+                    attempts.push((url, reason));
+                }
             }
         }
         Err(Error::AllServersFailed { file: name, attempts })

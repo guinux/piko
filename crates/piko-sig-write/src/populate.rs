@@ -75,8 +75,14 @@ pub struct PopulateSummary {
 }
 
 impl KeyringAdmin {
-    /// Imports `<keyrings_dir>/<name>.gpg`, then locally signs and trusts every fingerprint
-    /// `<name>-trusted` lists, then disables every fingerprint `<name>-revoked` lists.
+    /// Imports `<keyrings_dir>/<name>.gpg`, then disables every fingerprint `<name>-revoked`
+    /// lists, then locally signs and trusts every fingerprint `<name>-trusted` lists.
+    ///
+    /// Revocations come first. The final state is the same in either order, since signing a
+    /// key does not re-enable it. But an error stops the call where it happens, and a call
+    /// that stops half-way must leave the keyring no more trusting than before: a key the
+    /// vendor revoked stays enabled only if the call never reached it, and then no key was
+    /// newly trusted either. `pacman-key --populate` runs the two in the other order.
     ///
     /// Either side file being absent is not an error. Plenty of real keyrings ship no
     /// revocations.
@@ -106,32 +112,6 @@ impl KeyringAdmin {
         let mut summary =
             PopulateSummary { imported: self.import(&gpg_path)?, ..PopulateSummary::default() };
 
-        let trusted_path = keyrings_dir.join(format!("{name}-trusted"));
-        if let Some(contents) = read_side_file(&trusted_path)? {
-            for (index, line) in contents.lines().enumerate() {
-                let line_number = index.saturating_add(1);
-                let mut skip = |reason: String| {
-                    summary.skipped.push(SkippedLine {
-                        file: SideFile::Trusted,
-                        line: line_number,
-                        reason,
-                    });
-                };
-                match parse_trusted_line(line) {
-                    Ok(None) => {}
-                    Err(reason) => skip(reason.to_owned()),
-                    Ok(Some(entry)) => match self.populate_trusted_entry(&entry)? {
-                        Some((lsigned, trust_set)) => {
-                            summary.lsigned = summary.lsigned.saturating_add(usize::from(lsigned));
-                            summary.trust_set =
-                                summary.trust_set.saturating_add(usize::from(trust_set));
-                        }
-                        None => skip(not_in_keyring(&entry.fingerprint)),
-                    },
-                }
-            }
-        }
-
         let revoked_path = keyrings_dir.join(format!("{name}-revoked"));
         if let Some(contents) = read_side_file(&revoked_path)? {
             for (index, line) in contents.lines().enumerate() {
@@ -153,6 +133,32 @@ impl KeyringAdmin {
                         }
                         Err(Error::KeyNotFound { .. }) => skip(not_in_keyring(&fingerprint)),
                         Err(other) => return Err(other),
+                    },
+                }
+            }
+        }
+
+        let trusted_path = keyrings_dir.join(format!("{name}-trusted"));
+        if let Some(contents) = read_side_file(&trusted_path)? {
+            for (index, line) in contents.lines().enumerate() {
+                let line_number = index.saturating_add(1);
+                let mut skip = |reason: String| {
+                    summary.skipped.push(SkippedLine {
+                        file: SideFile::Trusted,
+                        line: line_number,
+                        reason,
+                    });
+                };
+                match parse_trusted_line(line) {
+                    Ok(None) => {}
+                    Err(reason) => skip(reason.to_owned()),
+                    Ok(Some(entry)) => match self.populate_trusted_entry(&entry)? {
+                        Some((lsigned, trust_set)) => {
+                            summary.lsigned = summary.lsigned.saturating_add(usize::from(lsigned));
+                            summary.trust_set =
+                                summary.trust_set.saturating_add(usize::from(trust_set));
+                        }
+                        None => skip(not_in_keyring(&entry.fingerprint)),
                     },
                 }
             }
@@ -232,14 +238,19 @@ struct TrustedLine {
 /// file into `gpg --import-ownertrust`, which takes a key rather than a pattern. The hex-only
 /// rule restores that contract.
 ///
-/// A short key ID still parses. GnuPG resolves it as a key ID, not as a text search, and
-/// rejects an ambiguous one as [`Error::KeyNotFound`].
+/// The hex must also be a full fingerprint: 40 digits for a v4 key, 64 for a v5 or v6 one.
+/// `gpg --import-ownertrust` refuses anything shorter. A short key ID is 8 or 16 digits, and a
+/// key colliding with an 8-digit one can be generated in seconds. If the vendor's key were
+/// ever absent from `<name>.gpg` and such a key present, a short ID would sign and trust it.
 fn parse_key_reference(line: &str) -> std::result::Result<&str, &'static str> {
     if line.is_empty() {
         return Err("missing fingerprint field");
     }
     if !line.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("not a hex fingerprint");
+    }
+    if !matches!(line.len(), 40 | 64) {
+        return Err("not a full fingerprint (40 or 64 hex digits)");
     }
     Ok(line)
 }
@@ -249,7 +260,7 @@ fn parse_key_reference(line: &str) -> std::result::Result<&str, &'static str> {
 /// `/usr/share/pacman/keyrings/archlinux-trusted`).
 ///
 /// `Ok(None)` for a blank or comment line. `Err` for a line that is neither blank, a comment,
-/// nor a well-formed entry.
+/// nor a well-formed entry, and for a well-formed entry whose level piko cannot assign.
 fn parse_trusted_line(line: &str) -> std::result::Result<Option<TrustedLine>, &'static str> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
@@ -260,6 +271,11 @@ fn parse_trusted_line(line: &str) -> std::result::Result<Option<TrustedLine>, &'
     let level = fields.next().ok_or("missing trust-level field")?;
     let level: u8 = level.parse().map_err(|_| "trust level is not a number")?;
     let level = OwnerTrust::from_file_code(level).ok_or("trust level out of range 1..=6")?;
+    // Rejected here, before the line reaches `lsign`. `set_owner_trust` cannot assign either
+    // level, and a line that fails there has already signed its key and stopped the call.
+    if matches!(level, OwnerTrust::Unknown | OwnerTrust::Undefined) {
+        return Err("trust level 1 or 2 cannot be assigned through GnuPG's trust menu");
+    }
     Ok(Some(TrustedLine { fingerprint: fingerprint.to_owned(), level }))
 }
 
@@ -407,12 +423,12 @@ mod tests {
             summary.skipped,
             vec![
                 SkippedLine {
-                    file: SideFile::Trusted,
+                    file: SideFile::Revoked,
                     line: 1,
                     reason: "not a hex fingerprint".to_owned(),
                 },
                 SkippedLine {
-                    file: SideFile::Revoked,
+                    file: SideFile::Trusted,
                     line: 1,
                     reason: "not a hex fingerprint".to_owned(),
                 },
@@ -436,7 +452,7 @@ mod tests {
         assert_eq!(summary.disabled, 0);
         assert_eq!(
             summary.skipped.iter().map(|entry| entry.file).collect::<Vec<_>>(),
-            vec![SideFile::Trusted, SideFile::Revoked],
+            vec![SideFile::Revoked, SideFile::Trusted],
         );
         for entry in &summary.skipped {
             assert_eq!(entry.reason, not_in_keyring(&absent), "{entry:?}");
@@ -524,6 +540,36 @@ mod tests {
         let fingerprint =
             parse_revoked_line("0A9DDABB64B993D82AD45E4F32EAB0A976938292").unwrap().unwrap();
         assert_eq!(fingerprint, "0A9DDABB64B993D82AD45E4F32EAB0A976938292");
+    }
+
+    /// Only a full fingerprint names one key. A short key ID can be collided with.
+    #[test]
+    fn refuses_a_short_key_id_and_accepts_both_fingerprint_lengths() {
+        for short in ["76938292", "32EAB0A976938292"] {
+            assert!(parse_trusted_line(&format!("{short}:4:")).is_err(), "{short}");
+            assert!(parse_revoked_line(short).is_err(), "{short}");
+        }
+        let v6 = "A".repeat(64);
+        assert!(parse_trusted_line(&format!("{v6}:4:")).unwrap().is_some());
+        assert!(parse_revoked_line(&v6).unwrap().is_some());
+    }
+
+    /// A level `set_owner_trust` cannot assign is skipped before the key is signed. It must not
+    /// stop the call either: the vendor's revocations still apply.
+    #[test]
+    fn an_unassignable_trust_level_is_skipped_and_revocations_still_apply() {
+        let Some((admin, keyrings_dir, fingerprint)) = populate_fixture("levels") else { return };
+        std::fs::write(keyrings_dir.path().join("levels-trusted"), format!("{fingerprint}:2:\n"))
+            .unwrap();
+        std::fs::write(keyrings_dir.path().join("levels-revoked"), format!("{fingerprint}\n"))
+            .unwrap();
+
+        let summary = admin.populate(keyrings_dir.path(), "levels").unwrap();
+
+        assert_eq!(summary.lsigned, 0, "a skipped line must not sign its key");
+        assert_eq!(summary.disabled, 1, "the revocation must still apply");
+        assert_eq!(summary.skipped.len(), 1, "{:?}", summary.skipped);
+        assert_eq!(summary.skipped.first().map(|entry| entry.file), Some(SideFile::Trusted));
     }
 
     #[test]

@@ -423,6 +423,11 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
         } => {
             let root = root.clone().unwrap_or_else(|| resolve_root_dir(cli, &config));
             require_transaction_root("remove", cli, &config, &root)?;
+            // After the privilege check, which runs before anything is opened. A removal reads
+            // `HoldPkg`, `NoUpgrade`, `HookDir` and `LogFile` from the config. With their empty
+            // fallbacks, a broken config would remove a held package without asking, as pacman,
+            // which refuses to run at all, never does.
+            require_pacman_config(cli, &config)?;
             let record = recording(cli, &config, &resolve_dbpath(cli, &config), offset);
             cmd::txn::note(
                 &record,
@@ -709,7 +714,7 @@ fn sync(
         report_stale_repos(cli, config, opened.iter().map(|(_, db)| db), args.max_age, args.offset);
     }
     let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
-    let signing = signing_policy(cli, config);
+    let signing = signing_policy(parsed);
     Ok(cmd::txn::install(
         args.root,
         &dbpath,

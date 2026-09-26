@@ -1,7 +1,9 @@
 //! Creating a keyring, importing keys into it, and granting or revoking their trust.
 
 use std::{
-    os::unix::fs::PermissionsExt as _,
+    fs::File,
+    io::{Read as _, Write as _},
+    os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -155,8 +157,13 @@ impl From<gpgme::ImportResult> for ImportSummary {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InitOutcome {
     /// Whether a new master signing key was generated. `false` means an existing one (from an
-    /// earlier `init`) was left alone.
+    /// earlier `init`) was kept.
     pub master_key_created: bool,
+    /// Whether an existing master key carried an expiry date that this call removed.
+    ///
+    /// Always `false` when [`Self::master_key_created`] is `true`: a new key is generated
+    /// without one.
+    pub master_key_expiry_removed: bool,
 }
 
 /// Administers a GnuPG keyring: creates it, imports keys, and grants or revokes their trust.
@@ -202,11 +209,14 @@ impl KeyringAdmin {
         Error::Gpgme { path: self.home.clone(), action, message }
     }
 
-    /// Creates `home` (mode `0700`) if it does not exist yet. It then generates piko's local
+    /// Creates `home` (mode `0755`) if it does not exist yet. It then generates piko's local
     /// master signing key inside it, if none exists yet.
     ///
     /// Idempotent: calling this again against an already-initialized keyring changes nothing and
-    /// reports `InitOutcome { master_key_created: false }`.
+    /// reports `master_key_created: false`. The one exception is an existing master key that
+    /// carries an expiry date, which this call removes, and reports in
+    /// [`InitOutcome::master_key_expiry_removed`]. An expired master key leaves every key it
+    /// signed without a trust path.
     ///
     /// This call sets the mode only on a directory it created itself. An existing keyring keeps its
     /// current mode.
@@ -232,33 +242,70 @@ impl KeyringAdmin {
         let admin = Self { home };
         let mut context = admin.context()?;
 
-        let master_key_created = match admin.find_master_key(&mut context)? {
-            Some(_) => false,
-            None => {
-                context
-                    .create_key_with_flags(
-                        MASTER_KEY_USERID,
-                        "rsa4096",
-                        Duration::ZERO,
-                        gpgme::CreateKeyFlags::CERT | gpgme::CreateKeyFlags::NOPASSWD,
-                    )
-                    .map_err(|source| admin.agent_error("generate the master key", &source))?;
-                true
-            }
-        };
+        let (master_key_created, master_key_expiry_removed) =
+            match admin.find_master_key(&mut context)? {
+                Some(master) => (false, admin.clear_master_expiry(&mut context, &master)?),
+                None => {
+                    // `NOEXPIRE` is required, not implied by the zero duration.
+                    // `gpgme_op_createkey` reads an expiry of zero as "GnuPG's default", three
+                    // years in GnuPG 2.4, and only the flag asks for none.
+                    context
+                        .create_key_with_flags(
+                            MASTER_KEY_USERID,
+                            "rsa4096",
+                            Duration::ZERO,
+                            gpgme::CreateKeyFlags::CERT
+                                | gpgme::CreateKeyFlags::NOPASSWD
+                                | gpgme::CreateKeyFlags::NOEXPIRE,
+                        )
+                        .map_err(|source| admin.agent_error("generate the master key", &source))?;
+                    (true, false)
+                }
+            };
 
         // `pacman-key` runs `gpg --update-trustdb` for the same reason. `check_keyring` refuses
         // a keyring whose `trustdb.gpg` it cannot read, and a fresh home has none until
         // something writes trust.
         let trustdb = admin.home.join(TRUSTDB);
-        if !trustdb.exists() {
+        if !piko_db::fs_util::exists_no_follow(&trustdb) {
             admin.update_trustdb()?;
         }
-        if trustdb.exists() {
+        if piko_db::fs_util::exists_no_follow(&trustdb) {
             set_mode(&trustdb, READABLE_MODE, "set the trust database's permissions")?;
         }
 
-        Ok((admin, InitOutcome { master_key_created }))
+        Ok((admin, InitOutcome { master_key_created, master_key_expiry_removed }))
+    }
+
+    /// Removes `master`'s expiry date, if it has one. Returns whether it had one.
+    ///
+    /// The master key is the root of every trust path in the keyring. Past its expiry date,
+    /// GnuPG stops using it as an ultimately trusted key. Every key it locally signed then falls
+    /// to unknown validity, and `TrustedOnly` refuses every package. Measured against GnuPG
+    /// 2.4: `gpg --faked-system-time` past the date reports "ultimately trusted key … expired",
+    /// and `TRUST_UNDEFINED` for a packager key that verified as `TRUST_FULLY` before it.
+    ///
+    /// A key created with an expiry of zero and without `GPGME_CREATE_NOEXPIRE` carries GnuPG's
+    /// default expiry. So an existing master key is checked here, not assumed to be permanent.
+    /// `pacman-key --init` generates its own master key with `Expire-Date: 0`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Gpgme`] if GnuPG refuses to change the expiry date.
+    fn clear_master_expiry(
+        &self,
+        context: &mut gpgme::Context,
+        master: &gpgme::Key,
+    ) -> Result<bool> {
+        if master.primary_key().is_none_or(|primary| primary.never_expires()) {
+            return Ok(false);
+        }
+        // Zero means "never" to `gpgme_op_setexpire`. No subkey is named, so only the primary
+        // key changes; `init` generates a master key with no subkeys.
+        context
+            .set_expire(master, Duration::ZERO, std::iter::empty::<&str>())
+            .map_err(|source| self.agent_error("remove the master key's expiry date", &source))?;
+        Ok(true)
     }
 
     /// Opens an already-initialized keyring for administration.
@@ -321,11 +368,15 @@ impl KeyringAdmin {
     /// [`Error::Gpgme`] if `path` cannot be read or does not hold key material GnuPG accepts.
     pub fn import(&self, path: &Path) -> Result<ImportSummary> {
         let mut context = self.context()?;
-        let data = gpgme::Data::load(path_arg(path)).map_err(|source| Error::Gpgme {
-            path: path.to_path_buf(),
-            action: "read",
-            message: source.to_string(),
-        })?;
+        // Streamed, not loaded: `gpgme::Data::load` allocates the whole file up front, and the
+        // path is whatever the caller names. The open refuses a FIFO or device node rather
+        // than blocking on it or reading it without end.
+        let describe =
+            |message: String| Error::Gpgme { path: path.to_path_buf(), action: "read", message };
+        let file = piko_db::fs_util::open_following_symlinks(path)
+            .map_err(|source| describe(source.to_string()))?;
+        let data = gpgme::Data::from_seekable_reader(file)
+            .map_err(|wrapped| describe(wrapped.error().to_string()))?;
         let result = context.import(data).map_err(|source| Error::Gpgme {
             path: path.to_path_buf(),
             action: "import",
@@ -681,8 +732,10 @@ const GPG_AGENT_CONF_OPTIONS: &[&str] = &["disable-scdaemon"];
 fn write_layout(home: &Path) -> Result<()> {
     for (name, mode) in LAYOUT_FILES {
         let path = home.join(name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => set_mode(&path, *mode, "set a keyring file's permissions")?,
+        // `create_new` is `O_EXCL`, which never follows a symlink. The mode is then set on the
+        // descriptor just created, not on the path, which could be swapped in between.
+        match no_follow(File::options().write(true).create_new(true)).open(&path) {
+            Ok(file) => fchmod(&file, &path, *mode, "set a keyring file's permissions")?,
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(source) => {
                 return Err(Error::Gpgme {
@@ -698,11 +751,24 @@ fn write_layout(home: &Path) -> Result<()> {
     ensure_conf_options(&home.join("gpg-agent.conf"), GPG_AGENT_CONF_OPTIONS)
 }
 
+/// The largest `gpg.conf` or `gpg-agent.conf` [`ensure_conf_options`] reads.
+///
+/// Both files hold a handful of short option lines. A file past this size is not one GnuPG
+/// wrote or a user edited, and reading it whole is how an unbounded read starts.
+const MAX_CONF_BYTES: u64 = 1024 * 1024;
+
 /// Appends every option of `options` that `path` does not already carry.
 ///
 /// This is `add_gpg_conf_option` (`pacman-key.sh.in:173`). It matches an option already present
 /// in any of three shapes: bare, commented out, or followed by a value. So a user who wrote
 /// `# no-greeting` or changed a timeout keeps their line, and a repeated `init` appends nothing.
+///
+/// The file is read and appended through one descriptor, opened `O_NOFOLLOW | O_NONBLOCK` and
+/// `fstat`-checked, the properties `piko_db::fs_util` enforces for a read. That module opens
+/// read-only, and a second open for the append could land on a different file. A symlink is
+/// refused rather than followed, unlike `pacman-key`: `init` runs as root, and a link planted
+/// in a keyring directory another user can write to would otherwise create or extend any file
+/// on the system.
 fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
     let describe = |action: &'static str| {
         move |source: std::io::Error| Error::Gpgme {
@@ -712,12 +778,30 @@ fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
         }
     };
 
-    let existed = path.exists();
-    let current = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(source) => return Err(describe("read a keyring configuration file")(source)),
+    let (mut file, created) = match no_follow(File::options().read(true).append(true)).open(path) {
+        Ok(file) => (file, false),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            let file = no_follow(File::options().read(true).append(true).create_new(true))
+                .open(path)
+                .map_err(describe("create a keyring configuration file"))?;
+            (file, true)
+        }
+        Err(source) => return Err(describe("open a keyring configuration file")(source)),
     };
+    ensure_regular(&file, path)?;
+
+    let mut current = String::new();
+    (&file)
+        .take(MAX_CONF_BYTES.saturating_add(1))
+        .read_to_string(&mut current)
+        .map_err(describe("read a keyring configuration file"))?;
+    if current.len() as u64 > MAX_CONF_BYTES {
+        return Err(Error::Gpgme {
+            path: path.to_path_buf(),
+            action: "read a keyring configuration file",
+            message: format!("it is larger than {MAX_CONF_BYTES} bytes"),
+        });
+    }
 
     let mut appended = String::new();
     for option in options {
@@ -728,19 +812,9 @@ fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
         appended.push('\n');
     }
 
-    if appended.is_empty() && existed {
-        return Ok(());
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(describe("open a keyring configuration file"))?;
-    std::io::Write::write_all(&mut file, appended.as_bytes())
-        .map_err(describe("write a keyring configuration file"))?;
-    if !existed {
-        set_mode(path, READABLE_MODE, "set a keyring configuration file's permissions")?;
+    file.write_all(appended.as_bytes()).map_err(describe("write a keyring configuration file"))?;
+    if created {
+        fchmod(&file, path, READABLE_MODE, "set a keyring configuration file's permissions")?;
     }
     Ok(())
 }
@@ -759,10 +833,54 @@ fn carries_option(line: &str, option: &str) -> bool {
     }
 }
 
-/// Sets `path`'s mode, naming `action` if that fails.
+/// Adds `O_NOFOLLOW | O_NONBLOCK` to `options`: a final symlink is refused, and a FIFO does not
+/// block the open.
+fn no_follow(options: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+}
+
+/// Fails unless `file`, opened from `path`, is a regular file.
+fn ensure_regular(file: &File, path: &Path) -> Result<()> {
+    let is_file = file.metadata().is_ok_and(|metadata| metadata.is_file());
+    if is_file {
+        return Ok(());
+    }
+    Err(Error::Gpgme {
+        path: path.to_path_buf(),
+        action: "use a keyring file",
+        message: "it is not a regular file".to_owned(),
+    })
+}
+
+/// Sets `path`'s mode through a descriptor, never through the path.
+///
+/// `chmod(2)` follows a final symlink. `init` runs as root, so a `trustdb.gpg -> /etc/shadow`
+/// link in a keyring directory another user can write to would make that file world-readable.
+/// The path is opened `O_NOFOLLOW`, and the mode goes to the descriptor with `fchmod(2)`.
+/// Only a regular file or a directory is changed.
 fn set_mode(path: &Path, mode: u32, action: &'static str) -> Result<()> {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|source| {
-        Error::Gpgme { path: path.to_path_buf(), action, message: source.to_string() }
+    let file = no_follow(File::options().read(true)).open(path).map_err(|source| Error::Gpgme {
+        path: path.to_path_buf(),
+        action,
+        message: source.to_string(),
+    })?;
+    let usable = file.metadata().is_ok_and(|metadata| metadata.is_file() || metadata.is_dir());
+    if !usable {
+        return Err(Error::Gpgme {
+            path: path.to_path_buf(),
+            action,
+            message: "it is neither a regular file nor a directory".to_owned(),
+        });
+    }
+    fchmod(&file, path, mode, action)
+}
+
+/// Sets the mode of the open `file`, naming `path` and `action` if that fails.
+fn fchmod(file: &File, path: &Path, mode: u32, action: &'static str) -> Result<()> {
+    file.set_permissions(std::fs::Permissions::from_mode(mode)).map_err(|source| Error::Gpgme {
+        path: path.to_path_buf(),
+        action,
+        message: source.to_string(),
     })
 }
 
@@ -798,12 +916,6 @@ fn create_keyring_dir(home: &Path) -> Result<bool> {
         }
         Err(source) => Err(describe(source)),
     }
-}
-
-/// GPGME takes a NUL-terminated path. A Rust path may legitimately not be UTF-8.
-fn path_arg(path: &Path) -> std::ffi::CString {
-    std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-        .unwrap_or_else(|_| c"/nonexistent".to_owned())
 }
 
 #[cfg(test)]
@@ -1134,6 +1246,112 @@ mod tests {
         assert!(!outcome.master_key_created, "{outcome:?}");
     }
 
+    /// A symlink planted as a keyring configuration file is refused. Nothing outside the
+    /// keyring is created, extended, or re-moded, whether the link dangles or names an existing
+    /// file. `init` runs as root; followed, either link writes wherever its owner points it.
+    #[test]
+    fn init_refuses_a_symlinked_configuration_file_and_touches_nothing_outside() {
+        let Some(admin) = fast_admin() else { return };
+        let home = admin.home().to_path_buf();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, "secret\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let dangling = outside.path().join("created-by-init");
+
+        for (name, target) in [("gpg.conf", &dangling), ("gpg-agent.conf", &victim)] {
+            for file in ["gpg.conf", "gpg-agent.conf"] {
+                std::fs::remove_file(home.join(file)).ok();
+            }
+            std::os::unix::fs::symlink(target, home.join(name)).unwrap();
+
+            let err = KeyringAdmin::init(&home).unwrap_err();
+            assert!(matches!(err, Error::Gpgme { .. }), "{name}: {err:?}");
+            std::fs::remove_file(home.join(name)).unwrap();
+        }
+
+        assert!(!dangling.exists(), "init created a file through a dangling link");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "secret\n");
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    /// `trustdb.gpg` is re-moded on every `init`, including one over an existing keyring. A
+    /// link planted there must not carry the `0644` to the file it names.
+    #[test]
+    fn init_does_not_remode_the_target_of_a_symlinked_trust_database() {
+        let Some(admin) = fast_admin() else { return };
+        let home = admin.home().to_path_buf();
+        KeyringAdmin::init(&home).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("trustdb.gpg");
+        // A copy of the real trust database, so GnuPG itself can still read through the link.
+        std::fs::copy(home.join(TRUSTDB), &victim).unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::remove_file(home.join(TRUSTDB)).unwrap();
+        std::os::unix::fs::symlink(&victim, home.join(TRUSTDB)).unwrap();
+
+        assert!(KeyringAdmin::init(&home).is_err(), "a symlinked trust database was accepted");
+
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "init changed the mode of a file outside the keyring");
+    }
+
+    /// `set_mode` refuses a symlink rather than changing what it names.
+    #[test]
+    fn set_mode_does_not_follow_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        assert!(set_mode(&link, READABLE_MODE, "test").is_err());
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    /// Whether the keyring's master key has no expiry date.
+    fn master_never_expires(admin: &KeyringAdmin) -> bool {
+        let mut context = admin.context().unwrap();
+        let master = admin.find_master_key(&mut context).unwrap().unwrap();
+        master.primary_key().unwrap().never_expires()
+    }
+
+    /// `fast_admin` generates its key the way a zero duration without `NOEXPIRE` does, so it
+    /// carries GnuPG's default expiry. `init` must remove it once, and report that it did.
+    #[test]
+    fn init_removes_an_expiry_date_from_an_existing_master_key() {
+        let Some(admin) = fast_admin() else { return };
+        assert!(!master_never_expires(&admin), "the fixture must start with an expiring key");
+
+        let (_, first) = KeyringAdmin::init(admin.home()).unwrap();
+        assert!(first.master_key_expiry_removed, "{first:?}");
+        assert!(master_never_expires(&admin), "the master key still expires after init");
+
+        let (_, second) = KeyringAdmin::init(admin.home()).unwrap();
+        assert!(!second.master_key_expiry_removed, "a second init must change nothing");
+    }
+
+    /// `import` streams its file through the audited door. A FIFO is refused rather than
+    /// opened for a read that blocks until a writer appears.
+    #[test]
+    fn import_refuses_a_fifo_without_blocking() {
+        let Some(admin) = fast_admin() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("keys.gpg");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|status| status.success());
+        if !made {
+            return;
+        }
+        let err = admin.import(&fifo).unwrap_err();
+        assert!(matches!(err, Error::Gpgme { .. }), "{err:?}");
+    }
+
     /// `init` reports an existing keyring as unchanged. It must therefore leave the mode
     /// alone. The default keyring is pacman's own, at mode `0755`. See [`create_keyring_dir`].
     #[test]
@@ -1147,17 +1365,17 @@ mod tests {
         assert_eq!(mode, 0o755, "an existing keyring's mode is its owner's business");
     }
 
+    /// `init` sets the directory's mode only when this answer says the directory is new. The
+    /// mode itself is `a_keyring_piko_creates_is_readable_by_everyone`'s subject, and leaving
+    /// an existing keyring's mode alone is `init_does_not_remode_an_existing_keyring`'s.
     #[test]
-    fn init_creates_a_new_keyring_at_0700() {
+    fn create_keyring_dir_reports_whether_it_created_the_directory() {
         let parent = tempfile::tempdir().unwrap();
         // Two levels deep, so this exercises the `create_dir_all` branch.
         let home = parent.path().join("missing").join("gnupg");
         assert!(create_keyring_dir(&home).unwrap(), "a fresh directory must report as created");
-        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
-
+        assert!(home.is_dir());
         assert!(!create_keyring_dir(&home).unwrap(), "the second call must report as existing");
-        let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700);
     }
 
     /// `describe_key` must resolve every identifier GnuPG resolves. The CLI's confirmation

@@ -51,6 +51,7 @@ use piko_net::{
 use piko_sig::Policy;
 
 mod common;
+mod connection;
 
 use common::SyncDir;
 
@@ -139,9 +140,14 @@ fn serve_one(mut stream: std::net::TcpStream, seen: &Seen) {
         out.extend_from_slice(&body);
         out
     };
-    let _ = stream.write_all(&response);
-    let _ = stream.flush();
+    // The transfer stops counting as live before its response is written. The client can dial
+    // its next connection as soon as it reads the last byte, before this thread runs again. A
+    // decrement after the write can then count one worker's two transfers as two connections
+    // open at once. A transfer is still live for the whole of `HOLD`, which is where two
+    // workers overlap.
     seen.live.fetch_sub(1, Ordering::SeqCst);
+    connection::write_closing(&mut stream, &response);
+    let _ = stream.flush();
 }
 
 /// When every served archive was published: Wed, 26 Aug 2026 08:31:27 GMT, its

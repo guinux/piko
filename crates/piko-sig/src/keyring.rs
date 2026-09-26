@@ -111,9 +111,17 @@ impl Keyring {
 
     /// Verifies `signature` over the contents of `path`.
     ///
-    /// Both are streamed from disk rather than buffered. A package archive runs to hundreds
-    /// of megabytes. Reading one into memory to hash it would undo the care taken everywhere
-    /// else in piko to keep reads bounded.
+    /// Both are streamed from disk rather than buffered. GnuPG pulls bytes through a file
+    /// descriptor as it hashes them, so memory stays flat whatever the file's size. A package
+    /// archive runs to gigabytes, and a mirror decides how large the file it serves is. A buffer
+    /// sized to the file would let a mirror exhaust memory before the signature is ever
+    /// checked. `gpgme::Data::load` is that buffer: it `stat`s the file and allocates its whole
+    /// size. libalpm streams for the same reason (`gpgme_data_new_from_stream`,
+    /// `signing.c:586`).
+    ///
+    /// Both files are opened through `piko_db::fs_util::open_following_symlinks`: a final
+    /// symlink is followed, as for a repository archive, but a FIFO or device node is refused
+    /// rather than read.
     ///
     /// An empty result means GnuPG found no signature at all. This is
     /// [`crate::decision::decide`]'s "missing" case, not an error here. Whether that is fatal
@@ -121,20 +129,42 @@ impl Keyring {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Gpgme`] if GnuPG could not be run, or the files could not be opened.
+    /// Returns [`Error::Gpgme`] if GnuPG could not be run, the files could not be opened or are
+    /// not regular files, or a signing key could not be looked up.
     pub fn verify_detached(&self, path: &Path, signature: &Path) -> Result<Vec<SignatureOutcome>> {
-        let mut context = self.context()?;
+        self.verify_against(path, stream(signature, "read the signature")?)
+    }
 
-        let signed = gpgme::Data::load(path_arg(path)).map_err(|source| Error::Gpgme {
+    /// Verifies `signature`, held in memory, over the contents of `path`.
+    ///
+    /// As [`Keyring::verify_detached`], for a signature that is not a file: a repository
+    /// database's `%PGPSIG%`, decoded. libalpm hands GPGME the decoded bytes the same way
+    /// (`gpgme_data_new_from_mem`, `signing.c:598`). `path` is still streamed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Keyring::verify_detached`].
+    pub fn verify_detached_bytes(
+        &self,
+        path: &Path,
+        signature: &[u8],
+    ) -> Result<Vec<SignatureOutcome>> {
+        let detached = gpgme::Data::from_bytes(signature).map_err(|source| Error::Gpgme {
             path: path.to_path_buf(),
-            action: "read the signed file",
+            action: "read the signature of",
             message: source.to_string(),
         })?;
-        let detached = gpgme::Data::load(path_arg(signature)).map_err(|source| Error::Gpgme {
-            path: signature.to_path_buf(),
-            action: "read the signature",
-            message: source.to_string(),
-        })?;
+        self.verify_against(path, detached)
+    }
+
+    /// Verifies `detached` over the contents of `path`, streamed.
+    fn verify_against(
+        &self,
+        path: &Path,
+        detached: gpgme::Data<'_>,
+    ) -> Result<Vec<SignatureOutcome>> {
+        let mut context = self.context()?;
+        let signed = stream(path, "read the signed file")?;
 
         let result = context.verify_detached(detached, signed).map_err(|source| Error::Gpgme {
             path: path.to_path_buf(),
@@ -142,7 +172,7 @@ impl Keyring {
             message: source.to_string(),
         })?;
 
-        Ok(result.signatures().map(describe).collect())
+        result.signatures().map(|signature| describe(&mut context, path, &signature)).collect()
     }
 
     /// Verifies `path` against the `.sig` beside it and applies `policy`.
@@ -175,9 +205,33 @@ impl Keyring {
         }
 
         let signature = signature_path(path);
-        let outcomes =
-            if signature.is_file() { self.verify_detached(path, &signature)? } else { Vec::new() };
+        // Only an absent `.sig` is "unsigned". Anything else at that path — a directory, a
+        // FIFO, a file that cannot be opened — is handed to `verify_detached`, which refuses
+        // it as an error. Under `Optional`, reading such a path as "no signature" would accept
+        // the file unverified.
+        let outcomes = match std::fs::metadata(&signature) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            _ => self.verify_detached(path, &signature)?,
+        };
         Ok(Checked::from_outcomes(&outcomes, policy))
+    }
+
+    /// Verifies `path` against `signature`, held in memory, and applies `policy`.
+    ///
+    /// The caller has a signature from somewhere other than the file system: a repository
+    /// database's `%PGPSIG%`. The `.sig` beside `path` is not read, whatever it holds. This is
+    /// `_alpm_pkg_validate_internal` (`be_package.c:332`): a package with a database signature
+    /// is verified against it alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Gpgme`] if GnuPG could not be run over the signature.
+    pub fn check_bytes(&self, path: &Path, signature: &[u8], policy: Policy) -> Result<Verdict> {
+        if !policy.check {
+            return Ok(Verdict::Accepted { verified: false });
+        }
+        let outcomes = self.verify_detached_bytes(path, signature)?;
+        Ok(crate::decision::decide(&outcomes, policy))
     }
 }
 
@@ -248,25 +302,35 @@ pub fn verify_database_dated(
     Keyring::open(gpg_dir)?.check_dated(archive, policy)
 }
 
-/// GPGME takes a NUL-terminated path. A Rust path may legitimately not be UTF-8.
-fn path_arg(path: &Path) -> std::ffi::CString {
-    // A path containing an interior NUL cannot name a real file. So only a path that would
-    // fail to open anyway ever reaches the lossy fallback.
-    std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-        .unwrap_or_else(|_| c"/nonexistent".to_owned())
+/// Opens `path` as a GPGME data object that GnuPG reads from as it hashes.
+fn stream(path: &Path, action: &'static str) -> Result<gpgme::Data<'static>> {
+    let describe = |message: String| Error::Gpgme { path: path.to_path_buf(), action, message };
+    let file = piko_db::fs_util::open_following_symlinks(path)
+        .map_err(|source| describe(source.to_string()))?;
+    gpgme::Data::from_seekable_reader(file).map_err(|wrapped| describe(wrapped.error().to_string()))
 }
 
 /// Translates one GPGME signature into piko's own vocabulary.
 ///
-/// The mapping is `signing.c:537`'s, which reads the same summary bits.
-fn describe(signature: gpgme::Signature<'_>) -> SignatureOutcome {
+/// The status mapping is `signing.c:675`'s, and so is the disabled-key test after it.
+///
+/// # Errors
+///
+/// [`Error::Gpgme`] if the signing key is in the keyring but GnuPG cannot list it. The
+/// disabled flag lives on that listing, so a key that cannot be listed cannot be accepted.
+fn describe(
+    context: &mut gpgme::Context,
+    path: &Path,
+    signature: &gpgme::Signature<'_>,
+) -> Result<SignatureOutcome> {
     let fingerprint = signature.fingerprint().ok().map(str::to_owned);
+    let summary = signature.summary();
 
     let status = match signature.status() {
         Ok(()) => {
             // A good signature whose key has since expired is reported through the summary,
             // not through an error, and must stay distinguishable. See `decision`.
-            if signature.summary().contains(gpgme::SignatureSummary::KEY_EXPIRED) {
+            if summary.contains(gpgme::SignatureSummary::KEY_EXPIRED) {
                 Status::KeyExpired
             } else {
                 Status::Valid
@@ -282,20 +346,30 @@ fn describe(signature: gpgme::Signature<'_>) -> SignatureOutcome {
                 Status::KeyExpired
             } else if code == gpgme::Error::NO_PUBKEY.code() {
                 Status::KeyUnknown
+            } else if code == gpgme::Error::CERT_REVOKED.code() {
+                Status::KeyRevoked
             } else {
                 Status::Invalid
             }
         }
     };
 
-    // A disabled key outranks whatever else the summary says about it.
-    let status = if signature.summary().contains(gpgme::SignatureSummary::KEY_MISSING) {
-        Status::KeyUnknown
-    } else if signature.summary().contains(gpgme::SignatureSummary::KEY_REVOKED) {
-        Status::KeyDisabled
-    } else {
-        status
-    };
+    let status =
+        if status == Status::KeyUnknown || summary.contains(gpgme::SignatureSummary::KEY_MISSING) {
+            Status::KeyUnknown
+        } else if is_disabled(context, path, fingerprint.as_deref())? {
+            // GnuPG reports a signature from a disabled key as good, with the key's usual
+            // validity: a disabled key is only noted, never refused, by `gpg --verify`. So the
+            // flag is read off the key itself, as `signing.c:695` does. This is what gives
+            // `piko key populate`'s `-revoked` list, and any manual `disable`, an effect.
+            Status::KeyDisabled
+        } else if summary.contains(gpgme::SignatureSummary::KEY_REVOKED) {
+            // GnuPG can report a revocation through the validity reason alone, with a status of
+            // `NO_ERROR`. The summary bit covers both routes.
+            Status::KeyRevoked
+        } else {
+            status
+        };
 
     let trust = match signature.validity() {
         gpgme::Validity::Full | gpgme::Validity::Ultimate => Trust::Full,
@@ -304,7 +378,29 @@ fn describe(signature: gpgme::Signature<'_>) -> SignatureOutcome {
         _ => Trust::Unknown,
     };
 
-    SignatureOutcome { status, trust, fingerprint, created: signature.creation_time() }
+    Ok(SignatureOutcome { status, trust, fingerprint, created: signature.creation_time() })
+}
+
+/// Whether the key that made a signature is disabled in the keyring.
+///
+/// `gpgme_get_key` resolves a subkey's fingerprint to the key holding it, and the disabled
+/// flag belongs to that whole key. `EOF` means no key holds it, which the signature's own
+/// status already reports.
+fn is_disabled(
+    context: &mut gpgme::Context,
+    path: &Path,
+    fingerprint: Option<&str>,
+) -> Result<bool> {
+    let Some(fingerprint) = fingerprint else { return Ok(false) };
+    match context.get_key(fingerprint) {
+        Ok(key) => Ok(key.is_disabled()),
+        Err(error) if error.code() == gpgme::Error::EOF.code() => Ok(false),
+        Err(error) => Err(Error::Gpgme {
+            path: path.to_path_buf(),
+            action: "look up the signing key of",
+            message: error.to_string(),
+        }),
+    }
 }
 
 /// The conventional location of a detached signature: the file's own name plus `.sig`.

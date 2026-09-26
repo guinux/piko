@@ -30,7 +30,7 @@ use crate::{
     error::Result,
     extract::{
         Ownership,
-        apply::{Applied, apply},
+        apply::{Applied, XattrProblem, apply},
         archive::{self, Member, MemberKind, PackageLimits},
         backup::{self, BackupOutcome},
         decision::{Disposition, EntryContext, Existing, PacnewReason, SkipReason, decide},
@@ -119,6 +119,12 @@ pub struct Extraction {
     pub metadata: BTreeMap<String, MetadataMember>,
     /// Paths whose hash could not be computed during backup resolution.
     pub unreadable: Vec<PathBuf>,
+    /// Extended attributes the archive recorded and the disk does not have, in archive order.
+    ///
+    /// Returned rather than raised, as libalpm warns on libarchive's `ARCHIVE_WARN` and goes
+    /// on. A missing `security.capability` is still worth a line: the program it belonged to
+    /// now lacks a privilege it was shipped with.
+    pub xattr_problems: Vec<XattrProblem>,
 }
 
 impl Extraction {
@@ -224,7 +230,7 @@ pub fn install(
             create_parents(root, &member.path)?;
         }
 
-        match apply(root, member, contents, &disposition, ownership)? {
+        match apply(root, member, contents, &disposition, ownership, &mut result.xattr_problems)? {
             Applied::Written => {
                 result.outcomes.push((member.path.clone(), Outcome::Written));
                 claim(&mut result, &mut claimed, &member.path);
@@ -483,6 +489,31 @@ mod tests {
     ///
     /// The bytes alone are not enough. A member is copied into the database entry, and the
     /// `ALPM-MTREE` data that describes it records a time. See [`MetadataMember`].
+    /// The extended attribute an archive records reaches the installed file.
+    #[test]
+    fn installs_a_file_with_the_extended_attribute_its_archive_records() {
+        let (_keep, pkg) = package(|b| {
+            crate::extract::archive::fixture::pax(
+                b,
+                &[
+                    (b"LIBARCHIVE.xattr.user.origin", b"cGlrbw"),
+                    (b"SCHILY.xattr.user.origin", b"piko"),
+                ],
+            );
+            file(b, "usr/bin/foo", b"binary");
+        });
+        let (dir, root) = root();
+
+        let result = run(&pkg, &root, &Filters::default());
+
+        let mut value = [0_u8; 16];
+        let length =
+            rustix::fs::getxattr(dir.path().join("usr/bin/foo"), "user.origin", &mut value[..])
+                .unwrap();
+        assert_eq!(value.get(..length).unwrap(), b"piko");
+        assert!(result.xattr_problems.is_empty(), "{:?}", result.xattr_problems);
+    }
+
     #[test]
     fn a_captured_metadata_member_carries_its_archive_time() {
         let (_keep, pkg) = package(|b| {

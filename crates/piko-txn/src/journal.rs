@@ -259,12 +259,17 @@ impl Journal {
     /// Writes the intent and fsyncs it, returning a journal that can record progress.
     ///
     /// This must complete before the first mutation. The write is atomic: a temporary file is
-    /// written, fsynced, renamed over the target, and the directory is fsynced. So a crash
+    /// written, fsynced, linked to the target, and the directory is fsynced. So a crash
     /// during the write leaves either no journal or a complete one, never a half-written one
     /// that recovery would misread.
     ///
+    /// A journal already there is never replaced. The link fails when the target exists, so
+    /// the refusal and the write are one step: no other writer can put a journal there between
+    /// a check and the write.
+    ///
     /// # Errors
     ///
+    /// [`Error::UnfinishedTransaction`] if a journal is already there, readable or not.
     /// [`Error::Io`] if the journal cannot be written.
     pub fn begin(dbpath: &Path, root: &Path, steps: &[Intent]) -> Result<Self> {
         let path = dbpath.join(JOURNAL_FILE);
@@ -281,7 +286,7 @@ impl Journal {
         }
         let _ = writeln!(text, "begin");
 
-        atomic_write(&path, text.as_bytes())?;
+        write_new(&path, text.as_bytes())?;
 
         // Reopened for appending: progress lines extend the file rather than rewriting it.
         // A crash mid-append then truncates at a line boundary at worst.
@@ -439,11 +444,18 @@ fn parse(text: &str) -> std::result::Result<Record, Unreadable> {
     Ok(record)
 }
 
-/// Writes `contents` to `path` so that `path` is never observed partially written.
+/// Writes `contents` to `path`, which must not exist, so that `path` is never observed partially
+/// written.
 ///
-/// Uses the same sequence as `piko-db-write`'s writer, for the same reasons. `O_EXCL` on the
-/// temporary rather than `O_TRUNC` means a planted symlink there cannot be written through.
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+/// The temporary is written and fsynced, then hard-linked to `path`. `link` fails with `EEXIST`
+/// when `path` is there, which a rename would replace. `O_EXCL` on the temporary rather than
+/// `O_TRUNC` means a planted symlink there cannot be written through. A temporary left by a
+/// crash is removed and written again.
+///
+/// # Errors
+///
+/// [`Error::UnfinishedTransaction`] if `path` exists. [`Error::Io`] otherwise.
+fn write_new(path: &Path, contents: &[u8]) -> Result<()> {
     let directory = path.parent().unwrap_or(Path::new("."));
     let mut temp = path.as_os_str().to_os_string();
     temp.push(".new");
@@ -478,14 +490,39 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     }
     drop(file);
 
-    if let Err(source) = std::fs::rename(&temp, path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(Error::io(path, IoAction::Rename, source));
+    // The temporary goes whether or not the link succeeded. A failed removal leaves a second
+    // name for the same file, which the next write removes before it starts.
+    let linked = std::fs::hard_link(&temp, path);
+    let _ = std::fs::remove_file(&temp);
+    match linked {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(Error::UnfinishedTransaction { path: path.to_path_buf() });
+        }
+        Err(source) => return Err(Error::io(path, IoAction::Create, source)),
     }
 
     std::fs::File::open(directory)
         .and_then(|handle| handle.sync_all())
         .map_err(|source| Error::io(directory, IoAction::Sync, source))
+}
+
+/// Fails if `dbpath` holds a transaction journal, readable or not.
+///
+/// A journal is removed when its transaction finishes, so a journal that is there records a
+/// transaction that did not. [`crate::Transaction::verify`] asks this first, so a run stops
+/// before it downloads or reads anything. [`Journal::begin`] refuses again when it writes,
+/// under `db.lck`, which is the refusal no race can pass.
+///
+/// # Errors
+///
+/// [`Error::UnfinishedTransaction`] if a readable journal is there, [`Error::JournalUnreadable`]
+/// if one is there that this build cannot read, and [`Error::Io`] if the check itself fails.
+pub fn refuse_if_present(dbpath: &Path) -> Result<()> {
+    match read(dbpath)? {
+        Some(_) => Err(Error::UnfinishedTransaction { path: dbpath.join(JOURNAL_FILE) }),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -783,22 +820,42 @@ mod tests {
         }
     }
 
-    /// Beginning a transaction twice must replace the journal, not append to a stale one.
+    /// Beginning a transaction over an abandoned journal is refused, and the journal is left as
+    /// it was. It is the only record of what the abandoned transaction did.
     #[test]
-    fn beginning_again_replaces_an_abandoned_journal() {
+    fn beginning_again_refuses_and_keeps_an_abandoned_journal() {
         let dir = tempfile::tempdir().unwrap();
         let first = Journal::begin(dir.path(), Path::new("/"), &steps()).unwrap();
         std::mem::forget(first);
+        let written = std::fs::read(dir.path().join(JOURNAL_FILE)).unwrap();
 
-        let second = Journal::begin(
+        let error = Journal::begin(
             dir.path(),
             Path::new("/"),
             &[Intent::Remove { entry: "only-1-1".to_owned() }],
         )
-        .unwrap();
-        std::mem::forget(second);
+        .unwrap_err();
 
-        let record = read(dir.path()).unwrap().unwrap();
-        assert_eq!(record.steps, [Intent::Remove { entry: "only-1-1".to_owned() }]);
+        assert!(matches!(error, Error::UnfinishedTransaction { .. }), "got {error:?}");
+        assert_eq!(std::fs::read(dir.path().join(JOURNAL_FILE)).unwrap(), written);
+        assert!(!dir.path().join("piko-journal.new").exists(), "the temporary was left behind");
+    }
+
+    /// A journal this build cannot read is refused as well, and left as it was.
+    #[test]
+    fn beginning_over_an_unreadable_journal_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(JOURNAL_FILE), "piko-journal 99\n").unwrap();
+
+        assert!(matches!(
+            refuse_if_present(dir.path()).unwrap_err(),
+            Error::JournalUnreadable { .. }
+        ));
+        let error = Journal::begin(dir.path(), Path::new("/"), &steps()).unwrap_err();
+        assert!(matches!(error, Error::UnfinishedTransaction { .. }), "got {error:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(JOURNAL_FILE)).unwrap(),
+            "piko-journal 99\n"
+        );
     }
 }

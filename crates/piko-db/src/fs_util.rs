@@ -62,7 +62,7 @@ pub(crate) fn ensure_regular_file(file: &File, path: &Path) -> Result<std::fs::M
 
 /// Opens `path` for reading, following a final symlink but never blocking.
 ///
-/// Unlike [`open_no_follow`], this **does** follow a symlink. It exists for repository
+/// Unlike `open_no_follow`, this **does** follow a symlink. It exists for repository
 /// archives. The path is a single file the caller names explicitly (e.g. `core.db`), not one
 /// of many enumerated directory entries. The [alpm-repo-db] spec itself documents
 /// `repo.db -> repo.db.tar.gz` as the normal server-side layout. Refusing to follow it would
@@ -70,8 +70,17 @@ pub(crate) fn ensure_regular_file(file: &File, path: &Path) -> Result<std::fs::M
 /// check still applies. A FIFO or device node named like an archive still cannot hang the
 /// process, or be read as if it were one.
 ///
+/// It is public for a caller that must stream a file rather than read it into memory:
+/// `piko-sig` hands the open descriptor to GPGME, which hashes a package archive of any size
+/// in bounded memory. No bound on the length applies here; the caller reads in chunks.
+///
 /// [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
-pub(crate) fn open_following_symlinks(path: &Path) -> Result<File> {
+///
+/// # Errors
+///
+/// - [`Error::Io`] if the path cannot be opened or stat'ed.
+/// - [`Error::NotARegularFile`] if it is a directory, FIFO, socket or device node.
+pub fn open_following_symlinks(path: &Path) -> Result<File> {
     let mut options = File::options();
     options.read(true);
 

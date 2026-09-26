@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alpm_types::{PackageInstallReason, PackageValidation};
+use alpm_types::PackageInstallReason;
 use piko_db::{EntryName, Limits};
 use piko_db_write::{DbLock, LocalDbWriter};
 
@@ -23,7 +23,7 @@ use super::{BackupProblem, Doomed, Patterns, Prepared, Replacement, Report, Scri
 use crate::{
     error::Result,
     exec::Runner,
-    extract::{Ownership, PackageLimits},
+    extract::Ownership,
     hash::MAX_BACKUP_BYTES,
     history::now,
     install::{Extraction, Filters},
@@ -42,7 +42,6 @@ pub(super) struct InstallStep<'a> {
     pub(super) package: &'a Prepared,
     pub(super) reason: PackageInstallReason,
     pub(super) ownership: Ownership,
-    pub(super) limits: &'a PackageLimits,
     /// Paths the fake removal must leave alone because another step now owns them.
     pub(super) skip_remove: &'a BTreeSet<PathBuf>,
     /// `NoExtract`/`NoUpgrade`, obeyed by both the fake removal and the extraction.
@@ -121,7 +120,7 @@ pub(super) fn install_step(
         step.root,
         &filters,
         step.ownership,
-        step.limits,
+        &step.package.limits,
     )?;
 
     // The one place a `.pacnew` is collected. The recorder, the terminal and the transaction's
@@ -137,11 +136,7 @@ pub(super) fn install_step(
         reason: step.reason,
         // This records what was actually done, not what was configured. A package accepted
         // because the policy asked for nothing gets `none`, same as one nobody checked.
-        validation: vec![if step.package.validated {
-            PackageValidation::Pgp
-        } else {
-            PackageValidation::None
-        }],
+        validation: step.package.validation.recorded(),
     };
 
     let writer = LocalDbWriter::new(step.dbpath, step.lock, Limits::default())?;

@@ -12,8 +12,12 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+piko-db.workspace = true
 piko-sig.workspace = true
-gpgme.workspace = true
+# `v1_15` exposes `gpgme_op_setexpire`, which `init` uses to clear the master key's expiry
+# date. GPGME 1.15 dates from 2020; the flag is a compile-time gate in the bindings only.
+gpgme = { workspace = true, features = ["v1_15"] }
+libc.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

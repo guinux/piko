@@ -15,6 +15,8 @@ workspace = true
 alpm-compress.workspace = true
 alpm-pkginfo.workspace = true
 alpm-types.workspace = true
+# `%PGPSIG%`, which a repository database spells in base64.
+base64.workspace = true
 # `O_NOFOLLOW` on the journal's temporary file; see `journal::atomic_write`.
 libc.workspace = true
 piko-db.workspace = true
@@ -22,7 +24,12 @@ piko-db-write.workspace = true
 piko-net.workspace = true
 piko-sig.workspace = true
 rustix.workspace = true
+# The `%SHA256SUM%` check. See `transaction::published`.
+sha2.workspace = true
 tar.workspace = true
+# The private staging directory `FileSource` copies a named package file into: mode `0700`,
+# a random name, and removal on drop.
+tempfile.workspace = true
 thiserror.workspace = true
 # Timestamps for `pacman.log` and the transaction history. Formatting is done by hand;
 # only the calendar arithmetic and the local UTC offset come from here.
@@ -32,4 +39,3 @@ time.workspace = true
 # The local-database side of conflict detection needs a database to ask, and `DbFixture`
 # builds throwaway ones. Tests use fixtures in a tempdir, never real system paths.
 piko-db = { workspace = true, features = ["fixture"] }
-tempfile.workspace = true

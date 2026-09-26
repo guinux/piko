@@ -17,8 +17,8 @@ pub mod archive;
 pub mod backup;
 pub mod decision;
 
-pub use apply::{Applied, Ownership, apply};
-pub use archive::{Member, MemberKind, PackageLimits, walk};
+pub use apply::{Applied, Ownership, XattrProblem, XattrRefusal, apply};
+pub use archive::{Member, MemberKind, PackageLimits, Xattr, walk};
 pub use backup::{BackupOutcome, Resolution};
 pub use decision::{
     BackupAction, Disposition, EntryContext, EntryKind, Existing, PacnewReason, RefuseReason,

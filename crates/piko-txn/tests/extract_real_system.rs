@@ -25,7 +25,7 @@
 )]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -51,6 +51,11 @@ const SAMPLE: usize = 40;
 
 /// Installed packages whose exact version is in the cache, smallest first.
 fn installed_and_cached() -> Option<Vec<(PathBuf, Vec<PathBuf>)>> {
+    every_installed_and_cached().map(|found| found.into_iter().take(SAMPLE).collect())
+}
+
+/// Every installed package whose exact version is in the cache, smallest first.
+fn every_installed_and_cached() -> Option<Vec<(PathBuf, Vec<PathBuf>)>> {
     if !Path::new(LOCAL_DB).is_dir() || !Path::new(CACHE).is_dir() {
         eprintln!("skipping: needs both {LOCAL_DB} and {CACHE}");
         return None;
@@ -75,7 +80,7 @@ fn installed_and_cached() -> Option<Vec<(PathBuf, Vec<PathBuf>)>> {
         found.push((metadata.len(), path, files.to_vec()));
     }
     found.sort_by_key(|(size, path, _)| (*size, path.clone()));
-    Some(found.into_iter().map(|(_, path, files)| (path, files)).take(SAMPLE).collect())
+    Some(found.into_iter().map(|(_, path, files)| (path, files)).collect())
 }
 
 /// What piko extracts must be exactly what pacman recorded.
@@ -106,7 +111,14 @@ fn extracted_paths_match_what_pacman_recorded() {
             if let Some(parent) = member.path.parent().filter(|p| p.components().next().is_some()) {
                 root.create_dir_all(&parent.join("placeholder"))?;
             }
-            apply(&root, member, contents, &Disposition::Extract, Ownership::Inherit)?;
+            apply(
+                &root,
+                member,
+                contents,
+                &Disposition::Extract,
+                Ownership::Inherit,
+                &mut Vec::new(),
+            )?;
 
             // Record the path the way pacman's `files` list spells it. Directories carry a
             // trailing slash.
@@ -183,7 +195,14 @@ fn extracted_files_have_the_right_contents_and_modes() {
         // Keep a copy to compare against. `apply` consumes the reader.
         let mut expected = Vec::new();
         std::io::Read::read_to_end(contents, &mut expected).unwrap();
-        apply(&root, member, &mut expected.as_slice(), &Disposition::Extract, Ownership::Inherit)?;
+        apply(
+            &root,
+            member,
+            &mut expected.as_slice(),
+            &Disposition::Extract,
+            Ownership::Inherit,
+            &mut Vec::new(),
+        )?;
 
         let written = target.path().join(&member.path);
         if member.is_symlink() {
@@ -293,4 +312,202 @@ fn install_reports_the_same_files_pacman_recorded() {
     }
     assert!(disagreements.is_empty(), "{} packages disagreed", disagreements.len());
     assert!(checked > 0);
+}
+
+/// The attribute that carries a file capability.
+const CAPABILITY: &str = "security.capability";
+
+/// A file's `security.capability`, without following a symlink, or `None` if it has none.
+fn capability_of(path: &Path) -> Option<Vec<u8>> {
+    let mut buffer = [0_u8; 64];
+    let length = rustix::fs::lgetxattr(path, CAPABILITY, &mut buffer[..]).ok()?;
+    buffer.get(..length).map(<[u8]>::to_vec)
+}
+
+/// Every `security.capability` an archive records, by member path, and whether the package's
+/// `.INSTALL` runs `setcap` itself.
+fn archive_capabilities(package: &Path) -> (BTreeMap<PathBuf, Vec<u8>>, bool) {
+    let mut found = BTreeMap::new();
+    let mut runs_setcap = false;
+    archive::walk(package, &PackageLimits::default(), |member, contents| {
+        if member.path == Path::new(".INSTALL") {
+            let mut script = String::new();
+            std::io::Read::read_to_string(contents, &mut script).unwrap();
+            runs_setcap = script.contains("setcap");
+        }
+        for xattr in &member.xattrs {
+            if xattr.name == CAPABILITY {
+                found.insert(member.path.clone(), xattr.value.clone());
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    (found, runs_setcap)
+}
+
+/// The reader yields exactly the capabilities libalpm installed, in both directions.
+///
+/// Unprivileged, so it runs anywhere. The oracle is the running system: libalpm extracted each
+/// installed file from the same cached archive, with `ARCHIVE_EXTRACT_XATTR`. Every capability
+/// on disk must come out of the archive with the same bytes, and every capability in an archive
+/// must be on disk. A capability an administrator set by hand with `setcap` fails the first
+/// direction, correctly: it is not what the package shipped.
+///
+/// A package whose `.INSTALL` runs `setcap` is left out. Its scriptlet decides the value on
+/// disk after extraction, and measured, it differs from the archive's: `gstreamer` ships
+/// `cap_sys_nice` on `gst-ptp-helper` and its `post_upgrade` sets a narrower set. `gvfs-nfs`
+/// ships none and gets one from its scriptlet.
+///
+/// The binary value is what makes this worth running. The `tar` crate splits a PAX header at
+/// every newline byte, so a raw value holding `0x0a` survives only through the encoded
+/// spelling.
+#[test]
+#[ignore = "requires a real pacman cache and local database"]
+fn every_installed_capability_is_read_from_its_archive() {
+    let Some(packages) = every_installed_and_cached() else { return };
+
+    let mut checked = 0_usize;
+    let mut capabilities = 0_usize;
+    let mut scriptlet_owned = Vec::new();
+    let mut disagreements = Vec::new();
+    for (package, recorded) in &packages {
+        let (in_archive, runs_setcap) = archive_capabilities(package);
+        if runs_setcap {
+            scriptlet_owned.push(package.file_name().unwrap().to_string_lossy().into_owned());
+            continue;
+        }
+        let on_disk: BTreeMap<PathBuf, Vec<u8>> = recorded
+            .iter()
+            .filter(|path| !path.as_os_str().to_string_lossy().ends_with('/'))
+            .filter_map(|path| capability_of(&Path::new("/").join(path)).map(|v| (path.clone(), v)))
+            .collect();
+        if on_disk != in_archive {
+            disagreements.push(format!(
+                "{}: on disk {:?}, in the archive {:?}",
+                package.file_name().unwrap().to_string_lossy(),
+                on_disk.keys().collect::<Vec<_>>(),
+                in_archive.keys().collect::<Vec<_>>()
+            ));
+        }
+        capabilities += in_archive.len();
+        checked += 1;
+    }
+
+    println!(
+        "{checked} packages read, {capabilities} capabilities, {} disagreements; \
+         left out for running setcap: {scriptlet_owned:?}",
+        disagreements.len()
+    );
+    for entry in disagreements.iter().take(10) {
+        println!("  {entry}");
+    }
+    assert!(disagreements.is_empty(), "{} packages disagreed", disagreements.len());
+    if capabilities == 0 {
+        eprintln!("vacuous: no installed and cached package ships a capability");
+    }
+}
+
+/// As root, `install` restores the same attributes as `bsdtar --xattrs`, libalpm's extractor.
+///
+/// Setting `security.capability` needs `CAP_SETFCAP`, so this is skipped for any other user.
+/// Both extractions go into a `tempfile::TempDir`.
+#[test]
+#[ignore = "requires root, bsdtar, and a real pacman cache"]
+fn root_install_restores_the_attributes_bsdtar_restores() {
+    if !rustix::process::geteuid().is_root() {
+        eprintln!("skipping: setting a capability needs root");
+        return;
+    }
+    let Some(packages) = every_installed_and_cached() else { return };
+    let with_capabilities: Vec<_> = packages
+        .iter()
+        .filter_map(|(package, _)| {
+            let (found, _) = archive_capabilities(package);
+            (!found.is_empty()).then_some((package, found))
+        })
+        .collect();
+    if with_capabilities.is_empty() {
+        eprintln!("skipping: no installed and cached package ships a capability");
+        return;
+    }
+
+    for (package, capabilities) in with_capabilities {
+        let piko = tempfile::tempdir().unwrap();
+        let root = RootDir::open(piko.path()).unwrap();
+        let extraction = install(
+            package,
+            &root,
+            &Filters::default(),
+            Ownership::FromArchive,
+            &PackageLimits::default(),
+        )
+        .unwrap();
+        assert!(extraction.xattr_problems.is_empty(), "{:?}", extraction.xattr_problems);
+
+        let bsdtar = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("bsdtar")
+            .arg("--xattrs")
+            .arg("-xpf")
+            .arg(package)
+            .arg("-C")
+            .arg(bsdtar.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "bsdtar failed on {}", package.display());
+
+        for path in capabilities.keys() {
+            let ours = capability_of(&piko.path().join(path));
+            let theirs = capability_of(&bsdtar.path().join(path));
+            assert!(ours.is_some(), "{}: piko restored no capability", path.display());
+            assert_eq!(ours, theirs, "{}: piko and bsdtar disagree", path.display());
+        }
+        println!(
+            "{}: {} capabilities match bsdtar",
+            package.file_name().unwrap().to_string_lossy(),
+            capabilities.len()
+        );
+    }
+}
+
+/// Every cached package reads through under the bound its own declared size sets.
+///
+/// The per-package bound refuses an archive that inflates past its `size` plus a slack. A slack
+/// too tight for a real package would refuse that package on every install, so this reads every
+/// package in the cache, not a sample. The declared size is the `.PKGINFO`'s `size`, which
+/// `Transaction::verify` requires to equal the repository's `%ISIZE%`.
+#[test]
+#[ignore = "requires a real pacman cache"]
+fn every_cached_package_fits_its_declared_size() {
+    let Ok(entries) = std::fs::read_dir(CACHE) else {
+        eprintln!("skipping: {CACHE} is not readable");
+        return;
+    };
+    let packages: Vec<PathBuf> = entries
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().contains(".pkg.tar"))
+        .filter(|path| !path.to_string_lossy().ends_with(".sig"))
+        .collect();
+
+    let mut refused = Vec::new();
+    for package in &packages {
+        let Ok((info, _)) = piko_txn::conflict::load_pkginfo(package, &PackageLimits::default())
+        else {
+            continue;
+        };
+        let size = match &info {
+            alpm_pkginfo::PackageInfo::V1(v1) => v1.size,
+            alpm_pkginfo::PackageInfo::V2(v2) => v2.size,
+        };
+        let limits = PackageLimits::default().with_declared_size(size);
+        if let Err(error) = archive::walk(package, &limits, |_, _| Ok(())) {
+            refused.push(format!("{}: {error}", package.display()));
+        }
+    }
+
+    println!("{} packages read, {} refused", packages.len(), refused.len());
+    for entry in refused.iter().take(10) {
+        println!("  {entry}");
+    }
+    assert!(refused.is_empty(), "{} packages were refused", refused.len());
 }

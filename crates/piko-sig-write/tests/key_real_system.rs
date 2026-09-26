@@ -34,6 +34,12 @@ fn init_generates_a_usable_rsa4096_master_key() {
     assert!(!master.is_revoked);
     assert!(!master.is_expired);
 
+    // No expiry date at all, not merely one in the future. The master key roots every trust
+    // path in the keyring, so its expiry would make every package unverifiable.
+    let mut context = piko_sig::open_context(home.path()).unwrap();
+    let secret = context.find_secret_keys(["piko@localhost"]).unwrap().next().unwrap().unwrap();
+    assert!(secret.primary_key().unwrap().never_expires(), "the master key must never expire");
+
     // Idempotent against the key it just generated.
     let (_, second) = KeyringAdmin::init(home.path()).unwrap();
     assert!(!second.master_key_created, "a second init must find the existing master key");

@@ -14,8 +14,10 @@
 use std::{
     collections::HashMap,
     fmt,
+    io::Read as _,
     os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use alpm_types::PackageFileName;
@@ -153,6 +155,38 @@ pub trait PackageSource: fmt::Debug + Send + Sync {
     /// [`Error::MountTableUnreadable`], and nothing else.
     fn prefetch(&self, _file_names: &[PackageFileName]) -> Result<()> {
         Ok(())
+    }
+
+    /// Removes a package file this source served, and the `.sig` beside it, after the
+    /// transaction found the archive is not the package the plan named.
+    ///
+    /// This is `prompt_to_delete` (`sync.c:705`), which libalpm runs on every cache file that
+    /// fails `check_pkg_matches_db`. A file left in place is served again by the next run, which
+    /// then refuses it again, rather than downloading the package the plan wants.
+    ///
+    /// Only a file this source found in one of its own cache directories is removed. A file
+    /// the user named on the command line is theirs, never the cache's. Returns whether a file
+    /// was removed.
+    ///
+    /// The default removes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if a file that is there cannot be removed.
+    fn discard(&self, _location: &Location) -> Result<bool> {
+        Ok(false)
+    }
+}
+
+/// Removes `path` if it is there. Returns whether it was.
+///
+/// `unlink` removes a symlink itself, never what it points to. A cache entry that is a link
+/// into shared storage loses the link, and the shared file stays.
+fn remove_if_present(path: &Path) -> Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(Error::io(path, IoAction::Remove, source)),
     }
 }
 
@@ -353,6 +387,12 @@ impl CacheDirSource {
     pub fn directories(&self) -> &[PathBuf] {
         &self.directories
     }
+
+    /// Whether `path` is a file directly inside one of this source's directories: the only
+    /// kind of path [`PackageSource::locate`] returns.
+    fn serves(&self, path: &Path) -> bool {
+        path.parent().is_some_and(|parent| self.directories.iter().any(|dir| dir == parent))
+    }
 }
 
 impl PackageSource for CacheDirSource {
@@ -378,6 +418,15 @@ impl PackageSource for CacheDirSource {
         }
 
         Err(Error::NotAvailable { file_name: name, searched: self.directories.clone(), skipped })
+    }
+
+    fn discard(&self, location: &Location) -> Result<bool> {
+        if !self.serves(location.path()) {
+            return Ok(false);
+        }
+        let removed = remove_if_present(location.path())?;
+        remove_if_present(&piko_sig::signature_path(location.path()))?;
+        Ok(removed)
     }
 }
 
@@ -422,7 +471,7 @@ pub fn open(location: &Location) -> Result<std::fs::File> {
 ///
 /// A `pacman -U` target is not in any cache directory, and has no repository to download from. It
 /// is addressed the same way every other package is, by [`alpm_types::PackageFileName`] built from
-/// its own `.PKGINFO`. This source is what turns that name back into the path the user typed.
+/// its own `.PKGINFO`. This source is what turns that name back into a file.
 ///
 /// # Why a wrapper rather than a step in `Transaction`
 ///
@@ -435,41 +484,218 @@ pub fn open(location: &Location) -> Result<std::fs::File> {
 /// precedence [`piko_db::solve::UniverseOptions::files`] gives it when solving. It must be the
 /// same in both places. A plan that chose the file, and a source that served the cache copy,
 /// would install something the user was never shown.
+///
+/// # A named file is served from a private copy
+///
+/// The transaction reads a package three times by path: the signature check, the `.PKGINFO` and
+/// member walk, and the extraction. A named file usually sits in a directory its owner can
+/// write, such as `~/Downloads`. Read in place, any process of that user could replace it after
+/// the signature check and before the extraction, and root would install bytes nobody verified.
+/// The owner can also write into the file itself, which no open descriptor protects against.
+///
+/// So [`PackageSource::locate`] copies the file, and its `.sig` when one is there, into a
+/// staging directory this process creates with mode `0700` under a cache directory. The
+/// [`Location`] it returns names the copy, so every later read sees the same bytes. The copy
+/// gets the protection a downloaded package already has, and no more: both sit in a directory
+/// only the transaction's own user can write.
+///
+/// Each call makes a new copy in a directory of its own, so a second lookup of the same file
+/// never reuses bytes another call wrote. The staging directory is removed when this source is
+/// dropped. A process that is killed leaves it behind, under a name starting with
+/// `piko-staging.`, and nothing reads it again.
 #[derive(Debug)]
 pub struct FileSource {
-    files: HashMap<String, PathBuf>,
+    named: Option<Named>,
     inner: Box<dyn PackageSource>,
 }
 
+/// The named files, and the private directory their copies are served from.
+#[derive(Debug)]
+struct Named {
+    files: HashMap<String, PathBuf>,
+    staging: tempfile::TempDir,
+    copies: AtomicUsize,
+}
+
+/// The package source a planned transaction reads from: the named files, each served from a
+/// private copy, in front of the cache directories, which download a miss.
+///
+/// [`crate::TransactionPlan::source`] builds it. It must outlive the commit, because the staged
+/// copies of the named files are removed when it is dropped.
+#[derive(Debug)]
+pub struct PlanSource {
+    files: FileSource,
+    download_dir: DownloadDir,
+}
+
+impl PlanSource {
+    /// Puts `files` in front of `downloading`, and stages the named files under the directory
+    /// downloads go to.
+    pub(crate) fn new(
+        named: HashMap<String, PathBuf>,
+        downloading: DownloadingSource,
+    ) -> Result<Self> {
+        let download_dir = downloading.download_dir().clone();
+        let files = FileSource::new(named, download_dir.path(), Box::new(downloading))?;
+        Ok(Self { files, download_dir })
+    }
+
+    /// Where a download will be written, and what was passed over to get there.
+    #[must_use]
+    pub const fn download_dir(&self) -> &DownloadDir {
+        &self.download_dir
+    }
+}
+
+impl PackageSource for PlanSource {
+    fn locate(&self, file_name: &PackageFileName) -> Result<Location> {
+        self.files.locate(file_name)
+    }
+
+    fn contains(&self, file_name: &PackageFileName) -> bool {
+        self.files.contains(file_name)
+    }
+
+    fn discard(&self, location: &Location) -> Result<bool> {
+        self.files.discard(location)
+    }
+
+    fn prefetch(&self, file_names: &[PackageFileName]) -> Result<()> {
+        self.files.prefetch(file_names)
+    }
+}
+
+/// The prefix of the staging directory a [`FileSource`] creates under a cache directory.
+pub const STAGING_PREFIX: &str = "piko-staging.";
+
+/// The largest `.sig` a [`FileSource`] copies.
+///
+/// A detached signature is a few hundred bytes. The download path refuses a larger one at the
+/// same bound.
+const MAX_SIGNATURE_BYTES: u64 = 1024 * 1024;
+
 impl FileSource {
     /// Wraps `inner`, serving `files` — keyed by the name each one is addressed by — ahead of
-    /// it.
-    #[must_use]
-    pub fn new(files: HashMap<String, PathBuf>, inner: Box<dyn PackageSource>) -> Self {
-        Self { files, inner }
+    /// it. Copies of `files` are staged under `staging_parent`, which should be the directory
+    /// downloads go to.
+    ///
+    /// No staging directory is created when `files` is empty. The source is then a
+    /// pass-through.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the staging directory cannot be created.
+    pub fn new(
+        files: HashMap<String, PathBuf>,
+        staging_parent: &Path,
+        inner: Box<dyn PackageSource>,
+    ) -> Result<Self> {
+        if files.is_empty() {
+            return Ok(Self { named: None, inner });
+        }
+        // A random name, created by `mkdir`, which fails on any existing path: a name another
+        // process chose first is never reused. The mode goes to `mkdir` itself, so the
+        // directory is never reachable by another user, not even before a `chmod`. The umask
+        // can only narrow it further.
+        let staging = tempfile::Builder::new()
+            .prefix(STAGING_PREFIX)
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(staging_parent)
+            .map_err(|source| Error::io(staging_parent, IoAction::CreateDir, source))?;
+        Ok(Self { named: Some(Named { files, staging, copies: AtomicUsize::new(0) }), inner })
     }
+
+    /// The files named on the command line, keyed by package file name.
+    fn files(&self) -> Option<&HashMap<String, PathBuf>> {
+        self.named.as_ref().map(|named| &named.files)
+    }
+}
+
+impl Named {
+    /// Copies `original`, and its `.sig` when one is there, into a new directory under the
+    /// staging directory. Returns the copy's location.
+    fn stage(&self, original: &Path, name: &str) -> Result<Location> {
+        // Stat'ed first, so a file that has gone is reported against the path the user typed.
+        let metadata = std::fs::metadata(original)
+            .map_err(|source| Error::io(original, IoAction::Metadata, source))?;
+        if !metadata.is_file() {
+            return Err(Error::UnusableSource {
+                path: original.to_path_buf(),
+                reason: "not a regular file".to_owned(),
+            });
+        }
+
+        let index = self.copies.fetch_add(1, Ordering::Relaxed);
+        let directory = self.staging.path().join(index.to_string());
+        std::fs::create_dir(&directory)
+            .map_err(|source| Error::io(&directory, IoAction::CreateDir, source))?;
+        let staged = directory.join(name);
+        let package_limit = crate::extract::PackageLimits::default().compressed_bytes;
+        let size = copy_bounded(original, &staged, package_limit, "compressed size")?;
+
+        let signature = piko_sig::signature_path(original);
+        match std::fs::metadata(&signature) {
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            // Anything else at the `.sig` path is copied, or refused by the copy. Only an absent
+            // `.sig` means "unsigned", as the signature check itself decides.
+            _ => {
+                copy_bounded(
+                    &signature,
+                    &piko_sig::signature_path(&staged),
+                    MAX_SIGNATURE_BYTES,
+                    "signature size",
+                )?;
+            }
+        }
+        Ok(Location { path: staged, size, skipped: Vec::new() })
+    }
+}
+
+/// Copies `from` to the new file `to`, refusing a source larger than `max` bytes.
+///
+/// `from` is opened through `piko_db::fs_util::open_following_symlinks`: a path the user named
+/// may be a symlink, but a FIFO or a device node is refused rather than read. `to` is created
+/// with `O_EXCL` inside a directory this process just created, so nothing else can have put a
+/// file or a symlink there.
+fn copy_bounded(from: &Path, to: &Path, max: u64, limit: &'static str) -> Result<u64> {
+    let source = piko_db::fs_util::open_following_symlinks(from).map_err(|error| {
+        Error::UnusableSource { path: from.to_path_buf(), reason: error.to_string() }
+    })?;
+    let mut destination = std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(to)
+        .map_err(|error| Error::io(to, IoAction::Create, error))?;
+    let copied = std::io::copy(&mut source.take(max.saturating_add(1)), &mut destination)
+        .map_err(|error| Error::io(from, IoAction::Read, error))?;
+    if copied > max {
+        return Err(Error::PackageLimitExceeded { path: from.to_path_buf(), limit, max });
+    }
+    Ok(copied)
 }
 
 impl PackageSource for FileSource {
     fn locate(&self, file_name: &PackageFileName) -> Result<Location> {
-        let Some(path) = self.files.get(&file_name.to_string()) else {
-            return self.inner.locate(file_name);
-        };
-        // Stat'ed rather than trusted. The file was read once at planning time and can have
-        // been replaced since, exactly as a cache entry can. See `Location`.
-        let metadata = std::fs::metadata(path)
-            .map_err(|source| Error::io(path, IoAction::Metadata, source))?;
-        if !metadata.is_file() {
-            return Err(Error::UnusableSource {
-                path: path.clone(),
-                reason: "not a regular file".to_owned(),
-            });
-        }
-        Ok(Location { path: path.clone(), size: metadata.len(), skipped: Vec::new() })
+        let name = file_name.to_string();
+        let Some(named) = &self.named else { return self.inner.locate(file_name) };
+        let Some(original) = named.files.get(&name) else { return self.inner.locate(file_name) };
+        named.stage(original, &name)
     }
 
     fn contains(&self, file_name: &PackageFileName) -> bool {
-        self.files.contains_key(&file_name.to_string()) || self.inner.contains(file_name)
+        self.files().is_some_and(|files| files.contains_key(&file_name.to_string()))
+            || self.inner.contains(file_name)
+    }
+
+    /// Removes nothing this source staged: the copy goes with the staging directory, and the
+    /// user's own file is never the cache's to remove. Anything else is the inner source's.
+    fn discard(&self, location: &Location) -> Result<bool> {
+        if let Some(named) = &self.named
+            && location.path().starts_with(named.staging.path())
+        {
+            return Ok(false);
+        }
+        self.inner.discard(location)
     }
 
     /// Fetches only what this source does not already hold.
@@ -480,7 +706,9 @@ impl PackageSource for FileSource {
     fn prefetch(&self, file_names: &[PackageFileName]) -> Result<()> {
         let remaining: Vec<PackageFileName> = file_names
             .iter()
-            .filter(|file_name| !self.files.contains_key(&file_name.to_string()))
+            .filter(|file_name| {
+                !self.files().is_some_and(|files| files.contains_key(&file_name.to_string()))
+            })
             .cloned()
             .collect();
         if remaining.is_empty() {
@@ -718,6 +946,11 @@ impl PackageSource for DownloadingSource {
         }
         Ok(())
     }
+
+    /// A download lands in one of the cache's own directories, so the cache decides.
+    fn discard(&self, location: &Location) -> Result<bool> {
+        self.cache.discard(location)
+    }
 }
 
 #[cfg(test)]
@@ -747,25 +980,27 @@ mod tests {
         std::fs::write(&named, b"the build the user named").unwrap();
 
         let inner = CacheDirSource::new([cache_dir.path().to_path_buf()]).unwrap();
-        let source =
-            FileSource::new(HashMap::from([(PACKAGE.to_owned(), named.clone())]), Box::new(inner));
+        let source = named_source(&named, cache_dir.path(), inner);
 
         let located = source.locate(&file_name()).unwrap();
-        assert_eq!(located.path(), named);
+        assert_eq!(std::fs::read(located.path()).unwrap(), b"the build the user named");
         assert!(source.contains(&file_name()));
     }
 
     /// Anything not named falls through unchanged, so wrapping a source costs nothing when no
-    /// file was named.
+    /// file was named. Nothing is staged either.
     #[test]
     fn an_unnamed_package_falls_through_to_the_inner_source() {
         let cache_dir = tempfile::tempdir().unwrap();
         std::fs::write(cache_dir.path().join(PACKAGE), b"the cached build").unwrap();
+        let staging_parent = tempfile::tempdir().unwrap();
 
         let inner = CacheDirSource::new([cache_dir.path().to_path_buf()]).unwrap();
-        let source = FileSource::new(HashMap::new(), Box::new(inner));
+        let source =
+            FileSource::new(HashMap::new(), staging_parent.path(), Box::new(inner)).unwrap();
 
         assert_eq!(source.locate(&file_name()).unwrap().path(), cache_dir.path().join(PACKAGE));
+        assert_eq!(std::fs::read_dir(staging_parent.path()).unwrap().count(), 0);
     }
 
     /// A named file that has since been deleted is reported against its own path. It is not
@@ -775,14 +1010,151 @@ mod tests {
         let cache_dir = tempfile::tempdir().unwrap();
         let inner = CacheDirSource::new([cache_dir.path().to_path_buf()]).unwrap();
         let gone = cache_dir.path().join("gone.pkg.tar.zst");
-        let source =
-            FileSource::new(HashMap::from([(PACKAGE.to_owned(), gone.clone())]), Box::new(inner));
+        let source = named_source(&gone, cache_dir.path(), inner);
 
         let error = source.locate(&file_name()).unwrap_err();
         let Error::Io { path, .. } = &error else {
             panic!("expected an I/O error naming the file, got {error:?}");
         };
         assert_eq!(path, &gone);
+    }
+
+    /// A `FileSource` serving `named` as [`PACKAGE`], staging under `staging_parent`.
+    fn named_source(named: &Path, staging_parent: &Path, inner: CacheDirSource) -> FileSource {
+        FileSource::new(
+            HashMap::from([(PACKAGE.to_owned(), named.to_path_buf())]),
+            staging_parent,
+            Box::new(inner),
+        )
+        .unwrap()
+    }
+
+    /// The located file is a private copy. The user's file can be rewritten in place or
+    /// replaced after the lookup, and the bytes the transaction goes on to read do not change.
+    #[test]
+    fn a_named_file_is_served_from_a_private_copy_later_changes_do_not_reach() {
+        let staging_parent = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let named = downloads.path().join("foo.pkg.tar.zst");
+        std::fs::write(&named, b"the bytes that were verified").unwrap();
+        let inner = CacheDirSource::new([staging_parent.path().to_path_buf()]).unwrap();
+        let source = named_source(&named, staging_parent.path(), inner);
+
+        let located = source.locate(&file_name()).unwrap();
+        assert_ne!(located.path(), named);
+        assert!(located.path().starts_with(staging_parent.path()));
+        assert_eq!(located.path().file_name().unwrap(), PACKAGE);
+        assert_eq!(located.size(), 28);
+
+        // Rewritten in place, then replaced by a rename: both leave the copy alone.
+        std::fs::write(&named, b"something else").unwrap();
+        let replacement = downloads.path().join("replacement");
+        std::fs::write(&replacement, b"something else again").unwrap();
+        std::fs::rename(&replacement, &named).unwrap();
+        assert_eq!(std::fs::read(located.path()).unwrap(), b"the bytes that were verified");
+
+        // Only this process's user can reach the copy.
+        let staging = located.path().parent().unwrap().parent().unwrap();
+        assert!(staging.file_name().unwrap().to_str().unwrap().starts_with(STAGING_PREFIX));
+        let mode = std::fs::metadata(staging).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    /// The `.sig` beside the named file is copied beside the staged one, where the signature
+    /// check looks for it. A file with no `.sig` gets none.
+    #[test]
+    fn the_signature_is_staged_beside_the_copy() {
+        let staging_parent = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let named = downloads.path().join("foo.pkg.tar.zst");
+        std::fs::write(&named, b"package").unwrap();
+        let inner = CacheDirSource::new([staging_parent.path().to_path_buf()]).unwrap();
+        let source = named_source(&named, staging_parent.path(), inner);
+
+        let unsigned = source.locate(&file_name()).unwrap();
+        assert!(!piko_sig::signature_path(unsigned.path()).exists());
+
+        std::fs::write(piko_sig::signature_path(&named), b"signature").unwrap();
+        let signed = source.locate(&file_name()).unwrap();
+        assert_ne!(signed.path(), unsigned.path(), "each lookup makes a copy of its own");
+        assert_eq!(std::fs::read(piko_sig::signature_path(signed.path())).unwrap(), b"signature");
+    }
+
+    /// A directory where the `.sig` should be is refused, not read as "unsigned".
+    #[test]
+    fn a_signature_path_that_is_not_a_file_is_refused() {
+        let staging_parent = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let named = downloads.path().join("foo.pkg.tar.zst");
+        std::fs::write(&named, b"package").unwrap();
+        std::fs::create_dir(piko_sig::signature_path(&named)).unwrap();
+        let inner = CacheDirSource::new([staging_parent.path().to_path_buf()]).unwrap();
+        let source = named_source(&named, staging_parent.path(), inner);
+
+        let error = source.locate(&file_name()).unwrap_err();
+        assert!(matches!(error, Error::UnusableSource { .. }), "{error:?}");
+    }
+
+    /// The staging directory goes with the source, copies and all.
+    #[test]
+    fn the_staging_directory_is_removed_with_the_source() {
+        let staging_parent = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let named = downloads.path().join("foo.pkg.tar.zst");
+        std::fs::write(&named, b"package").unwrap();
+        let inner = CacheDirSource::new([staging_parent.path().to_path_buf()]).unwrap();
+        let source = named_source(&named, staging_parent.path(), inner);
+        source.locate(&file_name()).unwrap();
+        assert_eq!(std::fs::read_dir(staging_parent.path()).unwrap().count(), 1);
+
+        drop(source);
+        assert_eq!(std::fs::read_dir(staging_parent.path()).unwrap().count(), 0);
+    }
+
+    /// A refused cache file goes, with its `.sig`, so the next run downloads it again.
+    #[test]
+    fn a_cache_source_discards_the_file_it_served_and_its_signature() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        std::fs::write(cache_dir.path().join(PACKAGE), b"refused").unwrap();
+        std::fs::write(cache_dir.path().join(format!("{PACKAGE}.sig")), b"sig").unwrap();
+        let source = CacheDirSource::new([cache_dir.path().to_path_buf()]).unwrap();
+
+        let located = source.locate(&file_name()).unwrap();
+        assert!(source.discard(&located).unwrap());
+        assert!(!cache_dir.path().join(PACKAGE).exists());
+        assert!(!cache_dir.path().join(format!("{PACKAGE}.sig")).exists());
+        assert!(!source.discard(&located).unwrap(), "nothing is left to remove");
+    }
+
+    /// A path outside the source's own directories is never removed.
+    #[test]
+    fn a_cache_source_removes_nothing_outside_its_directories() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let foreign = elsewhere.path().join(PACKAGE);
+        std::fs::write(&foreign, b"not the cache's").unwrap();
+        let source = CacheDirSource::new([cache_dir.path().to_path_buf()]).unwrap();
+
+        let location = Location { path: foreign.clone(), size: 0, skipped: Vec::new() };
+        assert!(!source.discard(&location).unwrap());
+        assert!(foreign.exists());
+    }
+
+    /// A named file is the user's. Discarding its staged copy removes neither the copy early
+    /// nor the user's file.
+    #[test]
+    fn a_file_source_never_discards_a_named_file() {
+        let staging_parent = tempfile::tempdir().unwrap();
+        let downloads = tempfile::tempdir().unwrap();
+        let named = downloads.path().join("foo.pkg.tar.zst");
+        std::fs::write(&named, b"the user's").unwrap();
+        let inner = CacheDirSource::new([staging_parent.path().to_path_buf()]).unwrap();
+        let source = named_source(&named, staging_parent.path(), inner);
+
+        let located = source.locate(&file_name()).unwrap();
+        assert!(!source.discard(&located).unwrap());
+        assert!(named.exists());
+        assert!(located.path().exists());
     }
 
     /// Sets `path`'s mode, so a test can build a directory the selection must pass over.
@@ -1134,6 +1506,10 @@ mod tests {
 
     /// Like `conditional.rs`/`package.rs` in `piko-net`, this is the crudest HTTP server that
     /// works: one response per connection.
+    ///
+    /// Each response says `Connection: close`. Without it, HTTP/1.1 lets the client keep the
+    /// connection for its next request, which this server never reads. The client then gets a
+    /// reset rather than a refused connection, and only on a loaded machine.
     fn serve(response: Vec<u8>) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1150,8 +1526,11 @@ mod tests {
     }
 
     fn ok_response(body: &[u8]) -> Vec<u8> {
-        let mut out =
-            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        let mut out = format!(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
         out.extend_from_slice(body);
         out
     }

@@ -273,6 +273,11 @@ pub enum Error {
         package: PathBuf,
         /// Which rule refused it, and which key was involved.
         reason: String,
+        /// Whether the refusal is that the package has no signature at all.
+        ///
+        /// libalpm's `ALPM_ERR_PKG_MISSING_SIG`, set apart from a signature that was read and
+        /// refused. The second removes a cache file; the first does not.
+        unsigned: bool,
     },
 
     /// A package's signature could not be checked at all.
@@ -286,6 +291,18 @@ pub enum Error {
         /// The package file that could not be checked.
         package: PathBuf,
         /// What went wrong.
+        reason: String,
+    },
+
+    /// A package file's SHA-256 is not the one its repository database publishes.
+    ///
+    /// libalpm's `ALPM_ERR_PKG_INVALID_CHECKSUM`. The file is damaged, or it is not the build
+    /// the database describes. Either way, it is not installed.
+    #[error("{}: {reason}", package.display())]
+    ChecksumMismatch {
+        /// The package file that was refused.
+        package: PathBuf,
+        /// Both digests, and what became of the file.
         reason: String,
     },
 
@@ -385,7 +402,7 @@ pub enum Error {
     /// A [`piko_db::solve::Plan`] named a package the `Universe` it was solved against does not
     /// know about.
     ///
-    /// [`crate::plan::install_steps`] runs immediately after the plan was assembled over the
+    /// [`crate::plan::TransactionPlan::new`] runs immediately after the plan was assembled over the
     /// same `Universe`, so this is not a normal, expected failure mode. It exists so a caller
     /// fails loudly instead of building a transaction that names garbage.
     #[error("the plan names a package the universe does not know (id {id:?}) — this is a bug")]
@@ -481,7 +498,7 @@ pub enum Error {
     /// The keyring a verification policy needs could not be opened.
     ///
     /// This is raised only when something actually asks for checking — see
-    /// [`crate::plan::verification_from`]. A system with no usable keyring can still run a
+    /// [`crate::plan::TransactionPlan::new`]. A system with no usable keyring can still run a
     /// transaction whose effective policy needs nothing from it.
     #[error("cannot open the GnuPG keyring at {}", path.display())]
     KeyringUnusable {
@@ -503,6 +520,31 @@ pub enum Error {
         path: PathBuf,
         /// Why it cannot be read.
         reason: crate::journal::Unreadable,
+    },
+
+    /// A planned package has no configured source to take its download servers and signature
+    /// policy from.
+    ///
+    /// Its repository is not among the configured ones, or it is a package file that is not
+    /// among the named files. Refused rather than checked under `[options]`' `SigLevel`, which
+    /// may check nothing where the repository's own policy asks for a signature.
+    #[error("{package} has no configured source: {reason}")]
+    UnconfiguredSource {
+        /// The package's name.
+        package: String,
+        /// What is missing.
+        reason: String,
+    },
+
+    /// A transaction journal is there, so a previous transaction did not finish.
+    ///
+    /// A new transaction is refused rather than written over it. What state the system is in
+    /// is unknown, and the journal is the only record of which steps ran and which one was
+    /// half applied. [`crate::journal::read`] reads it.
+    #[error("{} records an unfinished transaction", path.display())]
+    UnfinishedTransaction {
+        /// The journal file.
+        path: PathBuf,
     },
 
     /// An owner query was given an empty path.

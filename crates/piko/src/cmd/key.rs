@@ -39,6 +39,8 @@ fn init(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
         Ok((_, outcome)) => {
             if outcome.master_key_created {
                 emit!(out, "Generated a new master signing key in {}", gpgdir.display());
+            } else if outcome.master_key_expiry_removed {
+                emit!(out, "Removed the expiry date of the master key in {}", gpgdir.display());
             } else {
                 emit!(out, "{} is already initialized", gpgdir.display());
             }
