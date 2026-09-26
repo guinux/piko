@@ -112,6 +112,25 @@ pub enum Error {
         skipped: Vec<crate::source::Skipped>,
     },
 
+    /// A package member is neither a regular file, a directory, a symbolic link nor a hard
+    /// link.
+    ///
+    /// The extraction writes those four kinds only. A device node, a FIFO, a contiguous or
+    /// sparse file, or a pax global header would otherwise reach the disk as a regular file.
+    #[error(
+        "{}: {} is a {kind}; piko installs regular files, directories and links only",
+        path.display(),
+        member.display()
+    )]
+    UnsupportedMemberType {
+        /// The package archive.
+        path: PathBuf,
+        /// The member's path, as the archive spells it.
+        member: PathBuf,
+        /// What the member's type byte names.
+        kind: &'static str,
+    },
+
     /// An archive named a path that could escape the installation root.
     ///
     /// This is refused on the path alone, before any filesystem access — see
@@ -157,13 +176,34 @@ pub enum Error {
         max: u64,
     },
 
-    /// A package archive uses a compression format `alpm-compress` does not implement.
+    /// A package archive uses a compression format piko does not decode.
     ///
-    /// This is determined by sniffing the magic bytes, not by the file name.
-    #[error("{} does not use a supported compression format", path.display())]
+    /// This is determined by sniffing the magic bytes, not by the file name. See
+    /// [`piko_db::compression`] for which formats are decoded and why.
+    #[error(
+        "{} uses {format}; piko reads gzip, zstd and uncompressed packages only",
+        path.display()
+    )]
     UnsupportedCompression {
-        /// The archive that could not be identified.
+        /// The archive that was refused.
         path: PathBuf,
+        /// What its leading bytes identify it as.
+        format: piko_db::compression::Unsupported,
+    },
+
+    /// A planned package's file name declares a compression format piko does not decode.
+    ///
+    /// Raised by [`crate::plan::check_compression`] from the `%FILENAME%` a repository
+    /// publishes, or from the last component of a package URL, so the package is refused
+    /// before it is downloaded. Each entry is the file name and the format it declares.
+    #[error(
+        "cannot install {}: piko reads gzip, zstd and uncompressed packages only",
+        packages.iter().map(|(name, format)| format!("{name} ({format})"))
+            .collect::<Vec<_>>().join(", ")
+    )]
+    UnsupportedPackageCompression {
+        /// Every refused file name, with the format its suffix declares.
+        packages: Vec<(String, piko_db::compression::Unsupported)>,
     },
 
     /// An archive member cannot be extracted, and the transaction must stop.

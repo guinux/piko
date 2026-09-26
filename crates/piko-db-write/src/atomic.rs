@@ -100,20 +100,24 @@ impl AtomicFile {
             return Err(Error::io(&self.temp, IoAction::Sync, source));
         }
         // This runs after the write and the fsync. Setting the mtime earlier would let a
-        // later write move it forward again. The chmod and rename below do not touch mtime;
-        // it travels with the inode.
+        // later write move it forward again. The mode change and the rename below do not touch
+        // the mtime; it travels with the inode.
         if let Some(source) = self.modified.and_then(|time| file.set_modified(time).err()) {
             drop(file);
             let _ = std::fs::remove_file(&self.temp);
             return Err(Error::io(&self.temp, IoAction::Metadata, source));
         }
-        drop(file);
-
-        // The caller's umask masks the mode set at open time, so this sets it explicitly.
-        if let Err(error) = crate::local::set_file_mode(&self.temp) {
+        // The caller's umask masks the mode set at open time, so this sets it explicitly,
+        // through the descriptor. Then the temporary must still be the file written through
+        // it: the caller verified the file at `path`, and that is the one to rename.
+        if let Err(error) = crate::local::set_file_mode(&file, &self.temp)
+            .and_then(|()| crate::local::ensure_unreplaced(&file, &self.temp))
+        {
+            drop(file);
             let _ = std::fs::remove_file(&self.temp);
             return Err(error);
         }
+        drop(file);
 
         if let Err(source) = std::fs::rename(&self.temp, &self.destination) {
             let _ = std::fs::remove_file(&self.temp);
@@ -266,5 +270,64 @@ mod tests {
             "the write followed a planted symlink"
         );
         assert_eq!(std::fs::read(&dest).unwrap(), b"downloaded");
+    }
+
+    /// A file this process must never touch, with a mode it must keep.
+    #[cfg(unix)]
+    fn victim(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let victim = dir.join("secret");
+        std::fs::write(&victim, b"private").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        victim
+    }
+
+    /// Anyone who can write into the directory can swap the temporary for a symbolic link while
+    /// it is written. The mode change must not reach the link's target, which would make a root
+    /// process `chmod 644` any file it names. And the link must not be renamed over the
+    /// destination.
+    #[cfg(unix)]
+    #[test]
+    fn a_temporary_swapped_for_a_symlink_is_neither_followed_nor_installed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = victim(dir.path());
+        let dest = dir.path().join("core.db");
+        std::fs::write(&dest, b"old").unwrap();
+
+        let mut file = AtomicFile::create(&dest).unwrap();
+        file.write_all(b"downloaded").unwrap();
+        let temp = file.path().to_path_buf();
+        std::fs::remove_file(&temp).unwrap();
+        std::os::unix::fs::symlink(&victim, &temp).unwrap();
+
+        let err = file.commit().unwrap_err();
+        assert!(matches!(err, Error::TemporaryReplaced { .. }), "got {err:?}");
+
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the mode change followed the planted symlink");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"private");
+        assert!(!std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old", "the destination must stay as it was");
+    }
+
+    /// A regular file swapped in is refused too. The caller verified the file at `path()`, and
+    /// only that file may reach the destination.
+    #[test]
+    fn a_temporary_swapped_for_another_file_is_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("core.db");
+        std::fs::write(&dest, b"old").unwrap();
+
+        let mut file = AtomicFile::create(&dest).unwrap();
+        file.write_all(b"verified").unwrap();
+        let temp = file.path().to_path_buf();
+        std::fs::remove_file(&temp).unwrap();
+        std::fs::write(&temp, b"forged").unwrap();
+
+        let err = file.commit().unwrap_err();
+        assert!(matches!(err, Error::TemporaryReplaced { .. }), "got {err:?}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old");
     }
 }

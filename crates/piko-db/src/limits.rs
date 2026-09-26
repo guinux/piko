@@ -30,6 +30,19 @@
 //! | one archive member (`repo_entry_bytes`) | 12.7 MB (largest `files`) | 64 MiB |
 //! | packages (`repo_max_packages`)       | 14 885 (`extra`)        | 1 << 20 |
 //!
+//! A byte bound does not bound what a parse builds from those bytes. A relation line of two
+//! bytes (`a` and a newline) becomes an 88-byte `RelationOrSoname` plus its own allocation. So
+//! a `desc` member at the 64 MiB member bound parses into 3.7 GiB, measured, from an archive of
+//! 59 KiB. The compressed bound cannot catch this, because a repetitive member compresses at
+//! more than 1000:1. The entries a parse builds are therefore counted too, across the whole
+//! archive, and a file list's length is checked before its parse:
+//!
+//! | count                                   | largest observed               | default limit |
+//! |------------------------------------------|--------------------------------|---------------|
+//! | relation entries (`repo_max_relations`) | 86 910 (`extra`)               | 1 << 21 |
+//! | file-list paths (`repo_max_paths`)      | 7 720 161 (`extra.files`)      | 1 << 25 |
+//! | one member's lines (`repo_entry_paths`) | 140 183 (`gstreamer-docs`)     | 1 << 20 |
+//!
 //! `pacman.conf` (and every file it `Include`s) is small system configuration, not
 //! attacker-influenced package data. Its limit is sized generously rather than tightly:
 //!
@@ -186,8 +199,7 @@ pub struct Limits {
     pub repo_compressed_bytes: u64,
     /// Maximum total size in bytes of a repository database archive after decompression.
     ///
-    /// `alpm-compress` has no size cap of its own, verified by inspection of
-    /// `CompressionDecoder` and every `DecompressionSettings` variant. So this is the bound
+    /// The decoder in [`crate::compression`] has no size cap of its own. So this is the bound
     /// that makes a decompression bomb in a repository archive harmless. A counting reader
     /// wrapped around the decoder enforces it; see `repo::archive::BoundedReader`.
     ///
@@ -205,6 +217,51 @@ pub struct Limits {
     /// detected **during** the archive walk rather than after it. The bound exists to stop
     /// the allocation, so it must fire before every `desc` in an oversized archive is parsed.
     pub repo_max_packages: usize,
+    /// Maximum number of relation entries a repository database archive may carry, across all
+    /// its packages.
+    ///
+    /// A relation entry is one value line of `%DEPENDS%`, `%PROVIDES%`, `%CONFLICTS%`,
+    /// `%REPLACES%` or `%GROUPS%`. Each one becomes a parsed value of about 100 bytes, from as
+    /// little as two bytes of text. So [`Limits::repo_entry_bytes`] and
+    /// [`Limits::repo_inflated_bytes`] do not bound the memory these values take, and
+    /// [`Limits::repo_compressed_bytes`] bounds it even less.
+    ///
+    /// Each entry is counted before it is parsed, so the bound stops the allocation rather than
+    /// reporting it. `%DEPENDS%` is counted at open time too, although its parse is deferred: the
+    /// count then covers every value the database can ever build.
+    ///
+    /// Exceeding this is a hard error ([`crate::Error::TooManyRelations`]), for the same reason
+    /// as [`Limits::repo_max_packages`].
+    ///
+    /// Measured on the machine this was developed against: 86 910 entries in `extra`, and 1654
+    /// in its largest package (`texlive-latexextra`). The default leaves a headroom of 24 and
+    /// bounds the parsed values to about 250 MiB.
+    pub repo_max_relations: usize,
+    /// Maximum number of file-list paths a repository database archive may carry, across all
+    /// its packages.
+    ///
+    /// The files arena stores each path's bytes once, plus 8 bytes of offsets that
+    /// [`Limits::repo_inflated_bytes`] does not count. A path of one byte then costs nine. This
+    /// bound caps the offsets at 256 MiB.
+    ///
+    /// Exceeding this is a hard error ([`crate::Error::TooManyPaths`]).
+    ///
+    /// Measured on the machine this was developed against: 7 720 161 paths in `extra.files`.
+    /// The default leaves a headroom of 4. It must stay at or below [`u32::MAX`], the most
+    /// paths the arena can address.
+    pub repo_max_paths: usize,
+    /// Maximum number of lines in a single `files` member of a repository archive.
+    ///
+    /// `alpm-repo-db` parses a member into one `PathBuf` per line, about 56 bytes each, before
+    /// piko copies the paths into the files arena. The lines are counted before that parse, so
+    /// the bound stops the allocation. The count includes the `%FILES%` header line.
+    ///
+    /// Exceeding this is a hard error ([`crate::Error::TooManyEntryPaths`]).
+    ///
+    /// Measured on the machine this was developed against: 140 183 lines in the largest member
+    /// (`gstreamer-docs`). The default leaves a headroom of 7 and bounds that parse to about
+    /// 56 MiB.
+    pub repo_entry_paths: usize,
     /// Maximum size in bytes of a `pacman.conf` file, or any file it `Include`s.
     pub pacman_conf_bytes: u64,
     /// Maximum size in bytes of an alpm `.hook` file.
@@ -332,6 +389,9 @@ impl Default for Limits {
             repo_inflated_bytes: u64::from(u32::MAX),
             repo_entry_bytes: 64 * MIB,
             repo_max_packages: 1 << 20,
+            repo_max_relations: 1 << 21,
+            repo_max_paths: 1 << 25,
+            repo_entry_paths: 1 << 20,
             pacman_conf_bytes: MIB,
             hook_bytes: MIB,
             mount_table_bytes: 4 * MIB,
@@ -399,6 +459,16 @@ mod tests {
             "largest observed archive member (gstreamer-docs) is 12.7 MB"
         );
         assert!(limits.repo_max_packages > 14_885, "extra.db has 14 885 packages");
+        assert!(limits.repo_max_relations > 86_910, "extra.db has 86 910 relation entries");
+        assert!(limits.repo_max_paths > 7_720_161, "extra.files has 7 720 161 paths");
+        assert!(
+            u32::try_from(limits.repo_max_paths).is_ok(),
+            "the files arena addresses paths with u32 indices"
+        );
+        assert!(
+            limits.repo_entry_paths > 140_183,
+            "the largest files member (gstreamer-docs) has 140 183 lines"
+        );
         assert!(limits.pacman_conf_bytes > 3 * KIB, "largest observed pacman.conf is 2.8 KB");
         assert!(
             limits.glob_max_expansion > 283,

@@ -25,7 +25,7 @@ use alpm_types::PackageFileName;
 use crate::error::{Error, IoAction, Result};
 
 /// Why a candidate package file was not usable.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SkipReason {
     /// The path exists but is a directory, FIFO, socket or device node.
@@ -36,16 +36,43 @@ pub enum SkipReason {
     NotARegularFile,
     /// The path could not be stat'ed for a reason other than not existing.
     Unreadable,
+    /// The path is a symbolic link. A cached package is used only as a regular file in its
+    /// cache directory, so that only the directories on the way to that one directory decide
+    /// who can change it. libalpm follows the link (`util.c:868`).
+    SymbolicLink,
+    /// The file, or a directory on the way to it, can be changed by a user other than this
+    /// process's own and root. See [`Distrust`] and
+    /// [`piko_db::fs_util::ensure_trusted_directory`].
+    Untrusted {
+        /// The file, directory or link that failed the test.
+        path: PathBuf,
+        /// Why.
+        distrust: Distrust,
+    },
 }
 
 impl fmt::Display for SkipReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::NotARegularFile => "not a regular file",
-            Self::Unreadable => "unreadable",
-        })
+        match self {
+            Self::NotARegularFile => f.write_str("not a regular file"),
+            Self::Unreadable => f.write_str("unreadable"),
+            Self::SymbolicLink => f.write_str("a symbolic link"),
+            Self::Untrusted { path, distrust } => {
+                write!(f, "untrusted: {} is {distrust}", path.display())
+            }
+        }
     }
 }
+
+/// Why a cache directory or a cached package file is not trusted.
+///
+/// A transaction reads a cached package by its path several times: for the signature, the
+/// checksum, the `.PKGINFO` and member walk, and the extraction. That is safe only if no one
+/// but this process's user and root can change the file or the directory holding it between
+/// two reads. Under `SigLevel = Never` nothing checks the bytes at all, so whoever can write
+/// the cache chooses what root installs. The rule itself is [`piko_db::fs_util::distrust`],
+/// shared with the configuration, the hooks and the keyring.
+pub use piko_db::fs_util::{Distrust, distrust};
 
 /// A candidate package file that existed but could not be used.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,8 +207,7 @@ pub trait PackageSource: fmt::Debug + Send + Sync {
 
 /// Removes `path` if it is there. Returns whether it was.
 ///
-/// `unlink` removes a symlink itself, never what it points to. A cache entry that is a link
-/// into shared storage loses the link, and the shared file stays.
+/// `unlink` removes a symlink itself, never what it points to.
 fn remove_if_present(path: &Path) -> Result<bool> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(true),
@@ -191,7 +217,7 @@ fn remove_if_present(path: &Path) -> Result<bool> {
 }
 
 /// Why a configured cache directory cannot receive a download.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum RejectionReason {
     /// The path exists and is not a directory.
@@ -202,6 +228,16 @@ pub enum RejectionReason {
     NoWriteBits,
     /// The path did not exist and could not be created.
     CreateFailed(std::io::ErrorKind),
+    /// Another user could change what is downloaded into it: the directory, or one on the
+    /// way to it. See [`Distrust`] and [`piko_db::fs_util::ensure_trusted_directory`].
+    Untrusted {
+        /// The directory or link that failed the test.
+        path: PathBuf,
+        /// Why.
+        distrust: Distrust,
+    },
+    /// The directory, or a component on the way to it, could not be tested.
+    Untestable,
 }
 
 impl fmt::Display for RejectionReason {
@@ -211,6 +247,10 @@ impl fmt::Display for RejectionReason {
             Self::NotWritable => f.write_str("not writable"),
             Self::NoWriteBits => f.write_str("no write bits set"),
             Self::CreateFailed(kind) => write!(f, "could not be created: {kind}"),
+            Self::Untrusted { path, distrust } => {
+                write!(f, "untrusted: {} is {distrust}", path.display())
+            }
+            Self::Untestable => f.write_str("its path could not be tested"),
         }
     }
 }
@@ -265,7 +305,9 @@ impl DownloadDir {
 ///
 /// This transcribes `_alpm_filecache_setup` (`util.c:904`). `directories` is walked in order, and
 /// the first usable entry wins. An absent one is created. A non-directory is passed over, as is
-/// one this process may not write into, and one with no write bit set.
+/// one this process may not write into, and one with no write bit set. So is one another user
+/// could write into ([`Distrust`]), which libalpm does not check: [`CacheDirSource`] would
+/// refuse to serve what was downloaded there.
 ///
 /// The *search* list is a different question, and stays complete. [`CacheDirSource`] reads every
 /// configured directory, including the ones passed over here. So a read-only cache is still read,
@@ -283,9 +325,8 @@ pub fn select_download_dir(directories: &[PathBuf]) -> Result<DownloadDir> {
     let mut rejected = Vec::new();
 
     for directory in directories {
-        // The stat follows a final symlink, as libalpm's does, and for the reason
-        // `CacheDirSource` documents. The path comes from configuration, not from an untrusted
-        // directory entry.
+        // The stat follows a final symlink, as libalpm's does. The path comes from
+        // configuration, not from an untrusted directory entry.
         let metadata = match std::fs::metadata(directory) {
             Ok(metadata) => metadata,
             // libalpm does not separate "absent" from "unstatable" here either. Both mean
@@ -321,6 +362,19 @@ pub fn select_download_dir(directories: &[PathBuf]) -> Result<DownloadDir> {
             rejected.push(RejectedCacheDir { path: directory.clone(), reason });
             continue;
         }
+        match piko_db::fs_util::ensure_trusted_directory(directory) {
+            Ok(()) => {}
+            Err(piko_db::Error::Untrusted { path, distrust }) => {
+                let reason = RejectionReason::Untrusted { path, distrust };
+                rejected.push(RejectedCacheDir { path: directory.clone(), reason });
+                continue;
+            }
+            Err(_) => {
+                let reason = RejectionReason::Untestable;
+                rejected.push(RejectedCacheDir { path: directory.clone(), reason });
+                continue;
+            }
+        }
 
         return Ok(DownloadDir { path: directory.clone(), created: false, rejected });
     }
@@ -348,13 +402,16 @@ fn create_cache_dir(directory: &Path) -> std::io::Result<()> {
 /// searched in order, and the first regular file wins. A candidate that exists but is not a
 /// regular file does not stop the search.
 ///
-/// # Symlinks are followed
+/// Neither does one another user could change, or one in a directory another user could write
+/// ([`Distrust`]). It is reported as [`SkipReason::Untrusted`], and the search goes on, so a
+/// [`DownloadingSource`] fetches a fresh copy into a directory that passes the same test.
 ///
-/// The stat follows a final symlink, as libalpm's does. This matches the judgment made for
-/// repository archives in `piko-db` (see `fs_util::open_following_symlinks`). The path comes from
-/// configuration, not an untrusted directory entry. And a cache directory of symlinks into shared
-/// storage is a real deployment, not an attack. What the symlink resolves to must still be a
-/// regular file.
+/// # A symbolic link is skipped
+///
+/// A candidate that is a symbolic link is reported as [`SkipReason::SymbolicLink`], and the
+/// search goes on. libalpm follows it. A link can lead to any directory, and every directory on
+/// the way to the target would then decide who can change the package. A cache directory that
+/// is itself a link is followed, and tested with its ancestors.
 #[derive(Clone, Debug)]
 pub struct CacheDirSource {
     directories: Vec<PathBuf>,
@@ -402,8 +459,15 @@ impl PackageSource for CacheDirSource {
 
         for directory in &self.directories {
             let candidate = directory.join(&name);
-            match std::fs::metadata(&candidate) {
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) if metadata.is_symlink() => {
+                    skipped.push(Skipped { path: candidate, reason: SkipReason::SymbolicLink });
+                }
                 Ok(metadata) if metadata.is_file() => {
+                    if let Err(reason) = check_trusted(directory, &candidate, &metadata) {
+                        skipped.push(Skipped { path: candidate, reason });
+                        continue;
+                    }
                     return Ok(Location { path: candidate, size: metadata.len(), skipped });
                 }
                 Ok(_) => {
@@ -427,6 +491,28 @@ impl PackageSource for CacheDirSource {
         let removed = remove_if_present(location.path())?;
         remove_if_present(&piko_sig::signature_path(location.path()))?;
         Ok(removed)
+    }
+}
+
+/// Fails unless no user other than root and this process's own could change the package file
+/// `candidate` found in `directory`, whose `metadata` has been read.
+///
+/// The file itself, and every directory on the way to it: `directory` and its ancestors. A user
+/// who can write any of them can swap the file between two reads.
+fn check_trusted(
+    directory: &Path,
+    candidate: &Path,
+    metadata: &std::fs::Metadata,
+) -> std::result::Result<(), SkipReason> {
+    if let Some(distrust) = distrust(metadata) {
+        return Err(SkipReason::Untrusted { path: candidate.to_path_buf(), distrust });
+    }
+    match piko_db::fs_util::ensure_trusted_directory(directory) {
+        Ok(()) => Ok(()),
+        Err(piko_db::Error::Untrusted { path, distrust }) => {
+            Err(SkipReason::Untrusted { path, distrust })
+        }
+        Err(_) => Err(SkipReason::Unreadable),
     }
 }
 
@@ -746,12 +832,10 @@ pub struct DownloadTarget {
     pub policy: piko_sig::Policy,
     /// `%CSIZE%`: what the download is expected to weigh.
     ///
-    /// Two readers. The scheduler downloads the largest packages first, and — when
-    /// [`DownloadingSource::check_space`] is on — the disk-space check sums it over the batch.
-    ///
-    /// This is never a bound. A repository's claimed size is only a claim.
-    /// `piko_net::refresh::Limits` still enforces against the bytes that actually arrive, so a
-    /// wrong value here only costs a worse download schedule.
+    /// Three readers. The download is refused once it goes past this size. The scheduler
+    /// downloads the largest packages first. And, when [`DownloadingSource::check_space`] is
+    /// on, the disk-space check sums it over the batch. The first reader is what makes that sum
+    /// the most a mirror can write, rather than an estimate.
     pub size: u64,
 }
 
@@ -870,10 +954,13 @@ impl PackageSource for DownloadingSource {
             .refresher
             .fetch_package_with_progress(
                 self.download_dir.path(),
-                file_name,
-                &target.repo_name,
-                &target.servers,
-                target.policy,
+                piko_net::PackageFetch {
+                    file_name,
+                    repo_name: &target.repo_name,
+                    servers: &target.servers,
+                    policy: target.policy,
+                    size: Some(target.size),
+                },
                 &self.cancel,
                 self.progress.as_ref(),
             )
@@ -915,7 +1002,7 @@ impl PackageSource for DownloadingSource {
                     repo_name: &target.repo_name,
                     servers: &target.servers,
                     policy: target.policy,
-                    size: target.size,
+                    size: Some(target.size),
                 })
             })
             .collect();
@@ -931,7 +1018,7 @@ impl PackageSource for DownloadingSource {
         if self.check_space {
             crate::space::check_download(
                 self.download_dir.path(),
-                wanted.iter().map(|fetch| fetch.size),
+                wanted.iter().filter_map(|fetch| fetch.size),
             )?;
         }
 
@@ -1256,7 +1343,7 @@ mod tests {
         assert_eq!(chosen.path(), good.path());
         assert_eq!(chosen.rejected().len(), 1);
         assert!(matches!(
-            chosen.rejected().first().map(|r| r.reason),
+            chosen.rejected().first().map(|r| r.reason.clone()),
             Some(RejectionReason::CreateFailed(_))
         ));
         chmod(parent.path(), 0o700);
@@ -1426,6 +1513,124 @@ mod tests {
         );
     }
 
+    /// A package in a directory others can write is skipped, and the search goes on. Anyone
+    /// who can write there could replace it between the signature check and the extraction.
+    #[test]
+    fn a_package_in_a_directory_others_can_write_is_skipped() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        write(first.path(), PACKAGE, b"planted");
+        write(second.path(), PACKAGE, b"second");
+        for mode in [0o777, 0o1777, 0o775] {
+            chmod(first.path(), mode);
+
+            let source =
+                CacheDirSource::new([first.path().to_path_buf(), second.path().to_path_buf()])
+                    .unwrap();
+            let location = source.locate(&file_name()).unwrap();
+            assert_eq!(location.path(), second.path().join(PACKAGE), "mode {mode:o}");
+            assert_eq!(
+                location.skipped(),
+                [Skipped {
+                    path: first.path().join(PACKAGE),
+                    reason: SkipReason::Untrusted {
+                        path: first.path().to_path_buf(),
+                        distrust: Distrust::GroupOrOtherWritable { mode },
+                    },
+                }]
+            );
+        }
+        chmod(first.path(), 0o700);
+    }
+
+    /// A package in a trusted directory below one others can write is skipped too: that user
+    /// could rename the cache directory away between two reads.
+    #[test]
+    fn a_package_below_a_directory_others_can_write_is_skipped() {
+        let top = tempfile::tempdir().unwrap();
+        let cache = top.path().join("shared").join("pkg");
+        std::fs::create_dir_all(&cache).unwrap();
+        write(&cache, PACKAGE, b"planted");
+        chmod(&top.path().join("shared"), 0o777);
+
+        let source = CacheDirSource::new([cache.clone()]).unwrap();
+        let err = source.locate(&file_name()).unwrap_err();
+        chmod(&top.path().join("shared"), 0o755);
+        let Error::NotAvailable { skipped, .. } = &err else { panic!("got {err:?}") };
+        assert_eq!(
+            skipped,
+            &[Skipped {
+                path: cache.join(PACKAGE),
+                reason: SkipReason::Untrusted {
+                    path: top.path().join("shared"),
+                    distrust: Distrust::GroupOrOtherWritable { mode: 0o777 },
+                },
+            }]
+        );
+    }
+
+    /// A package file others can write is skipped, in a directory that is itself trusted.
+    #[test]
+    fn a_package_file_others_can_write_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), PACKAGE, b"planted");
+        chmod(&path, 0o666);
+
+        let source = CacheDirSource::new([dir.path().to_path_buf()]).unwrap();
+        let err = source.locate(&file_name()).unwrap_err();
+        let Error::NotAvailable { skipped, .. } = &err else { panic!("got {err:?}") };
+        assert_eq!(
+            skipped,
+            &[Skipped {
+                path: path.clone(),
+                reason: SkipReason::Untrusted {
+                    path,
+                    distrust: Distrust::GroupOrOtherWritable { mode: 0o666 },
+                },
+            }]
+        );
+        assert!(err.to_string().contains("writable by its group or others (mode 0666)"), "{err}");
+    }
+
+    /// A directory others can write is not chosen for a download either, or the fresh copy
+    /// would be skipped as soon as it landed.
+    #[test]
+    fn a_cache_directory_others_can_write_is_passed_over_for_downloads() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        chmod(first.path(), 0o1777);
+
+        let chosen =
+            select_download_dir(&[first.path().to_path_buf(), second.path().to_path_buf()])
+                .unwrap();
+        assert_eq!(chosen.path(), second.path());
+        assert_eq!(
+            chosen.rejected(),
+            [RejectedCacheDir {
+                path: first.path().to_path_buf(),
+                reason: RejectionReason::Untrusted {
+                    path: first.path().to_path_buf(),
+                    distrust: Distrust::GroupOrOtherWritable { mode: 0o1777 },
+                },
+            }]
+        );
+        chmod(first.path(), 0o700);
+    }
+
+    /// Root and this process's own user are trusted owners; the mode is what decides.
+    #[test]
+    fn distrust_reads_the_owner_and_the_group_and_other_write_bits() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(distrust(&std::fs::metadata(dir.path()).unwrap()), None);
+        assert_eq!(distrust(&std::fs::metadata("/").unwrap()), None, "root owns /");
+        chmod(dir.path(), 0o720);
+        assert_eq!(
+            distrust(&std::fs::metadata(dir.path()).unwrap()),
+            Some(Distrust::GroupOrOtherWritable { mode: 0o720 })
+        );
+        chmod(dir.path(), 0o700);
+    }
+
     #[test]
     fn a_non_regular_candidate_alone_is_not_found_but_is_explained() {
         let dir = tempfile::tempdir().unwrap();
@@ -1436,20 +1641,29 @@ mod tests {
         assert!(err.to_string().contains("not a regular file"), "{err}");
     }
 
-    /// This matches libalpm, which stats rather than lstats.
+    /// A link to a real package is skipped, and the next directory serves the package. libalpm
+    /// follows the link.
     #[cfg(unix)]
     #[test]
-    fn follows_a_symlink_to_a_real_package() {
+    fn a_symlink_to_a_real_package_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
         let target = write(store.path(), "real.pkg.tar.zst", b"payload");
         std::os::unix::fs::symlink(&target, dir.path().join(PACKAGE)).unwrap();
+        write(second.path(), PACKAGE, b"second");
 
-        let source = CacheDirSource::new([dir.path().to_path_buf()]).unwrap();
-        assert_eq!(source.locate(&file_name()).unwrap().size(), 7);
+        let source =
+            CacheDirSource::new([dir.path().to_path_buf(), second.path().to_path_buf()]).unwrap();
+        let location = source.locate(&file_name()).unwrap();
+        assert_eq!(location.path(), second.path().join(PACKAGE));
+        assert_eq!(
+            location.skipped(),
+            [Skipped { path: dir.path().join(PACKAGE), reason: SkipReason::SymbolicLink }]
+        );
     }
 
-    /// A dangling symlink is absence, not a usable file.
+    /// A dangling symlink is skipped as a link, not taken for absence.
     #[cfg(unix)]
     #[test]
     fn a_dangling_symlink_is_not_a_package() {
@@ -1457,7 +1671,22 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("nowhere"), dir.path().join(PACKAGE)).unwrap();
 
         let source = CacheDirSource::new([dir.path().to_path_buf()]).unwrap();
-        assert!(source.locate(&file_name()).is_err());
+        let err = source.locate(&file_name()).unwrap_err();
+        assert!(err.to_string().contains("a symbolic link"), "{err}");
+    }
+
+    /// A cache directory that is a link is followed, as a configured path.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_cache_directory_is_followed() {
+        let store = tempfile::tempdir().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        write(store.path(), PACKAGE, b"payload");
+        let link = links.path().join("pkg");
+        std::os::unix::fs::symlink(store.path(), &link).unwrap();
+
+        let source = CacheDirSource::new([link.clone()]).unwrap();
+        assert_eq!(source.locate(&file_name()).unwrap().path(), link.join(PACKAGE));
     }
 
     /// An empty source would report every package missing with an error naming nothing.
@@ -1539,9 +1768,10 @@ mod tests {
         out
     }
 
+    /// A target declaring 1 MiB, above every body these tests serve.
     fn target(url: String) -> DownloadTarget {
         DownloadTarget {
-            size: 0,
+            size: 1024 * 1024,
             repo_name: "core".to_owned(),
             servers: vec![url],
             policy: piko_sig::Policy::for_package(piko_db::config::SigLevel::default()),
@@ -1591,6 +1821,30 @@ mod tests {
         assert_eq!(location.path(), first.path().join(PACKAGE));
         assert_eq!(std::fs::read(location.path()).unwrap(), b"downloaded just now");
         assert!(!second.path().join(PACKAGE).exists());
+    }
+
+    /// A download is bounded by the `%CSIZE%` its target declares. A mirror that sends more is
+    /// refused, and nothing reaches the cache.
+    #[test]
+    fn a_download_past_its_declared_size_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = serve(ok_response(b"more than four bytes"));
+
+        let targets =
+            HashMap::from([(PACKAGE.to_owned(), DownloadTarget { size: 4, ..target(url) })]);
+        let source = DownloadingSource::new(
+            [dir.path().to_path_buf()],
+            targets,
+            piko_net::Cancel::new(),
+            piko_net::Concurrency::default(),
+            piko_net::Sandbox::disabled(),
+            |_| {},
+        )
+        .unwrap();
+
+        let error = source.locate(&file_name()).unwrap_err();
+        assert!(error.to_string().contains("larger than the 4 bytes"), "{error}");
+        assert!(!dir.path().join(PACKAGE).exists(), "the oversized download reached the cache");
     }
 
     /// `prefetch` fills the cache, so the `locate` that follows never touches the network.

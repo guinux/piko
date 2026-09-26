@@ -18,7 +18,7 @@
 
 use std::{
     collections::HashSet,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use alpm_common::InputPath;
@@ -117,9 +117,16 @@ impl LocalPackage {
     /// patterns are ([`resolve::matches_any`]). A missing file matching one of these
     /// patterns is not reported at all, mirroring `alpm_option_match_noextract`.
     ///
+    /// No mtree entry leads the check outside `root`. An entry with a component other than a
+    /// plain name, a `..` say, fails the whole check. And a symbolic link where the entry names
+    /// a file or a directory is reported, never followed, both under `root` and in the database
+    /// entry. Intermediate components are resolved as the kernel resolves them: a package
+    /// legitimately ships `lib -> usr/lib`, and `pacman -Qkk` follows it too.
+    ///
     /// # Errors
     ///
-    /// If the `mtree` file cannot be read or parsed, or if `root` is not an absolute path.
+    /// - If the `mtree` file cannot be read or parsed, or if `root` is not an absolute path.
+    /// - [`Error::UnsafeMtreePath`] if an entry is not a path beneath `root`.
     pub fn verify_files(
         &self,
         root: &Path,
@@ -143,6 +150,15 @@ impl LocalPackage {
                 // here instead of duplicating its error reporting.
                 continue;
             };
+            // `root.join` keeps a `..`, and `InputPath` accepts any relative path. So a `..`
+            // would stat and hash a file outside the root, and report on it.
+            if !normalized.components().all(|component| matches!(component, Component::Normal(_))) {
+                return Err(Error::UnsafeMtreePath {
+                    mtree: self.path().join("mtree"),
+                    entry: normalized.to_path_buf(),
+                }
+                .into());
+            }
 
             if normalized == Path::new(INSTALL_MTREE_NAME)
                 || normalized == Path::new(CHANGELOG_MTREE_NAME)
@@ -187,6 +203,10 @@ impl LocalPackage {
             v2::Path::Link(link) => link.path = mtree_path,
         }
 
+        if let Some(error) = symlink_in_place_of(&rewritten, &self.path().join(name)) {
+            problems.push(FileProblem { path: PathBuf::from(name), error, backup: false });
+            return Ok(());
+        }
         let input = InputPath::new(self.path(), Path::new(name)).map_err(|source| {
             Error::InvalidVerifyRoot { path: self.path().to_path_buf(), source }
         })?;
@@ -210,22 +230,7 @@ impl LocalPackage {
         backups: &HashSet<&Path>,
         problems: &mut Vec<FileProblem>,
     ) -> std::result::Result<(), SharedError> {
-        let on_disk = root.join(normalized);
-
-        // A symlink where mtree expects a directory or a regular file must never be followed.
-        // `Directory`/`File::equals_path` resolve metadata with `Path::metadata`, which
-        // follows a symlink. A `File` match would then open and hash whatever the symlink
-        // points at. Reporting the type mismatch here, without ever calling
-        // `equals_path`, keeps piko from reading a file it was never asked to.
-        if !matches!(entry, v2::Path::Link(_))
-            && let Ok(metadata) = std::fs::symlink_metadata(&on_disk)
-            && metadata.file_type().is_symlink()
-        {
-            let error = if matches!(entry, v2::Path::Directory(_)) {
-                PathValidationError::PathNotADir { mtree_path: entry.to_path_buf(), path: on_disk }
-            } else {
-                PathValidationError::PathNotAFile { mtree_path: entry.to_path_buf(), path: on_disk }
-            };
+        if let Some(error) = symlink_in_place_of(entry, &root.join(normalized)) {
             problems.push(FileProblem { path: normalized.to_path_buf(), error, backup: false });
             return Ok(());
         }
@@ -259,6 +264,29 @@ impl LocalPackage {
         }
         Ok(())
     }
+}
+
+/// The problem to report when `on_disk` is a symbolic link and `entry` names a file or a
+/// directory, or `None` when it is not.
+///
+/// Such a link must never be followed. `Directory`/`File::equals_path` resolve metadata with
+/// `Path::metadata`, which follows a symlink. A `File` match would then open and hash whatever
+/// the symlink points at. Reporting the type mismatch instead, without ever calling
+/// `equals_path`, keeps piko from reading a file it was never asked to.
+fn symlink_in_place_of(entry: &v2::Path, on_disk: &Path) -> Option<PathValidationError> {
+    if matches!(entry, v2::Path::Link(_)) {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(on_disk).ok()?;
+    if !metadata.file_type().is_symlink() {
+        return None;
+    }
+    let (mtree_path, path) = (entry.to_path_buf(), on_disk.to_path_buf());
+    Some(if matches!(entry, v2::Path::Directory(_)) {
+        PathValidationError::PathNotADir { mtree_path, path }
+    } else {
+        PathValidationError::PathNotAFile { mtree_path, path }
+    })
 }
 
 #[cfg(test)]
@@ -581,5 +609,56 @@ etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e
 
         let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
         assert!(report.problems.is_empty(), "got {:?}", report.problems);
+    }
+
+    /// `root.join` keeps a `..`, so an mtree entry `./../x` would stat and hash a file outside
+    /// the root. The whole check is refused instead, naming the entry.
+    #[test]
+    fn an_entry_outside_the_root_fails_the_check_rather_than_reaching_it() {
+        let parent = TempDir::new().unwrap();
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let meta = write_file(parent.path(), "outside", CONTENT);
+        let stanza = file_stanza("../outside", &meta, CONTENT.len() as u64, CONTENT_SHA256);
+        let (_db, pkg) = package_with_mtree("foo-1.0.0-1", &stanza);
+
+        let error = pkg.verify_files(&root, &[]).unwrap_err();
+        assert!(
+            matches!(&*error, Error::UnsafeMtreePath { entry, .. } if entry == Path::new("../outside")),
+            "got {error:?}"
+        );
+    }
+
+    /// The database entry's `install` gets the same symlink rule as a file under the root: a
+    /// link there is a type mismatch, never a followed read.
+    #[test]
+    fn a_symlinked_install_scriptlet_is_a_type_mismatch_not_a_followed_read() {
+        let db = DbFixture::new();
+        let pkg_dir = db.path().join("foo-1.0.0-1");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        let secret = db.path().join("secret");
+        std::fs::write(&secret, "true\n").unwrap();
+        symlink(&secret, pkg_dir.join("install")).unwrap();
+        let meta = std::fs::metadata(&secret).unwrap();
+        // sha256("true\n"): it would match, if the link were followed.
+        let sha256 = "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74";
+        let stanza = file_stanza(".INSTALL", &meta, 5, sha256);
+        db.package("foo-1.0.0-1")
+            .desc(MINIMAL_DESC_V1)
+            .files(MINIMAL_FILES)
+            .mtree(&format!("#mtree\n{stanza}"))
+            .build();
+        let pkg = package_at(&db, "foo-1.0.0-1");
+        let root = TempDir::new().unwrap();
+
+        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| matches!(p.error, PathValidationError::PathNotAFile { .. })),
+            "got {:?}",
+            report.problems
+        );
     }
 }

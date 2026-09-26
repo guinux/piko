@@ -189,7 +189,7 @@ fn work_is_spread_so_no_mirror_sees_more_than_the_per_host_cap() {
             repo_name: "core",
             servers: &servers,
             policy: unsigned_package(),
-            size: 0,
+            size: None,
         })
         .collect();
 
@@ -231,7 +231,7 @@ fn parallel_downloads_of_one_never_opens_a_second_connection() {
             repo_name: "core",
             servers: &servers,
             policy: unsigned_package(),
-            size: 0,
+            size: None,
         })
         .collect();
 
@@ -254,7 +254,8 @@ fn packages_are_fetched_largest_first_but_reported_in_input_order() {
     let servers = vec![url];
 
     let names: Vec<PackageFileName> = (0..4).map(package_name).collect();
-    // Ascending sizes, so largest-first is the exact reverse of input order.
+    // Ascending sizes, so largest-first is the exact reverse of input order. Each is above the
+    // body the mirror serves, since a declared size also bounds the download.
     let wanted: Vec<PackageFetch<'_>> = names
         .iter()
         .enumerate()
@@ -263,7 +264,7 @@ fn packages_are_fetched_largest_first_but_reported_in_input_order() {
             repo_name: "core",
             servers: &servers,
             policy: unsigned_package(),
-            size: index as u64,
+            size: Some(1024 * 1024 + index as u64),
         })
         .collect();
 
@@ -365,7 +366,7 @@ fn a_cancelled_batch_stops_and_reports_what_it_never_claimed() {
             repo_name: "core",
             servers: &servers,
             policy: unsigned_package(),
-            size: 0,
+            size: None,
         })
         .collect();
 
@@ -415,7 +416,7 @@ fn a_batch_refuses_a_duplicate_rather_than_racing_for_one_temporary() {
             repo_name: "core",
             servers: &servers,
             policy: unsigned_package(),
-            size: 0,
+            size: None,
         })
         .collect();
 
@@ -530,7 +531,7 @@ fn progress_deltas_sum_to_the_bytes_actually_received() {
             repo_name: "core",
             servers: &servers,
             policy: unsigned_package(),
-            size: 0,
+            size: None,
         })
         .collect();
 

@@ -37,7 +37,7 @@ use alpm_types::Architecture;
 
 use self::ini::Line;
 pub use self::{sig_level::SigLevel, usage::DbUsage};
-use crate::{Error, Limits, Result, fs_util::read_capped_utf8, limits::Limit, repo::RepoName};
+use crate::{Error, Limits, Result, fs_util::read_trusted_utf8, limits::Limit, repo::RepoName};
 
 /// pacman's default `RootDir`. `pub` for the same reason as [`DEFAULT_DB_PATH`].
 pub const DEFAULT_ROOT_DIR: &str = "/";
@@ -242,7 +242,9 @@ impl PacmanConfig {
     /// # Errors
     ///
     /// [`Error::Io`] (and friends from [`crate::fs_util`]) if `path` or a file it
-    /// `Include`s cannot be read. A malformed file raises one of
+    /// `Include`s cannot be read. [`Error::Untrusted`] if another user could change one of
+    /// those files, or the directory holding it (see [`crate::fs_util::Distrust`]). A
+    /// malformed file raises one of
     /// [`Error::ConfigDirectiveOutsideSection`], [`Error::ConfigInvalidDirective`],
     /// [`Error::ConfigIncludeDepthExceeded`] or [`Error::ConfigInvalidRepoName`].
     pub fn open_with(path: impl AsRef<Path>, limits: &Limits) -> Result<Self> {
@@ -412,7 +414,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_file(&mut self, path: &Path, depth: u8) -> Result<()> {
-        let text = read_capped_utf8(path, Limit::PacmanConf, self.limits.pacman_conf_bytes)?;
+        let text = read_trusted_utf8(path, Limit::PacmanConf, self.limits.pacman_conf_bytes)?;
 
         for token in ini::tokenize(&text) {
             match token.content {

@@ -8,6 +8,7 @@ use std::io::Read;
 
 use crate::{
     cancel::Cancel,
+    error::printable,
     sandbox::{Failure, Fetch, Sandbox, Timeouts, protocol::Header},
 };
 
@@ -37,7 +38,10 @@ pub(crate) enum Body {
 impl Read for Body {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         match self {
-            Self::Direct(reader) => reader.read(buffer),
+            // ureq's own messages can quote a header the server sent.
+            Self::Direct(reader) => reader
+                .read(buffer)
+                .map_err(|error| std::io::Error::new(error.kind(), printable(&error.to_string()))),
             Self::Sandboxed(fetch) => fetch.read(buffer),
         }
     }
@@ -56,14 +60,18 @@ impl Transport {
         if_modified_since: Option<&str>,
         cancel: &Cancel,
     ) -> Result<Response, Failure> {
+        if !is_permitted(url) {
+            return Err(Failure::Request(format!(
+                "refusing {}: piko downloads over https only, or over http from this machine's \
+                 loopback",
+                printable(url)
+            )));
+        }
         match self {
             Self::Direct(agent) => {
-                let mut request = agent.get(url);
-                if let Some(value) = if_modified_since {
-                    request = request.header("If-Modified-Since", value);
-                }
-                let response =
-                    request.call().map_err(|error| Failure::Request(error.to_string()))?;
+                let response = request(agent, url, if_modified_since)
+                    .call()
+                    .map_err(|error| Failure::Request(printable(&error.to_string())))?;
                 let Header { status, last_modified, content_length } = header(&response);
                 let body = Body::Direct(response.into_body().into_reader());
                 Ok(Response { status, last_modified, content_length, body })
@@ -78,6 +86,64 @@ impl Transport {
             }
         }
     }
+}
+
+/// The `GET` for `url`, in this process or in the helper.
+///
+/// A URL configured as `https` is followed only to other `https` URLs, at every redirect. A
+/// redirect to `http` would hand the transfer to anyone on the path of that second connection.
+/// A repository database is usually unsigned, and then TLS is all that authenticates it. An
+/// `http` URL, which [`is_permitted`] allows only on the loopback, follows no redirect at all:
+/// one could lead off the machine, and ureq cannot limit it to the loopback.
+pub(crate) fn request(
+    agent: &ureq::Agent,
+    url: &str,
+    if_modified_since: Option<&str>,
+) -> ureq::RequestBuilder<ureq::typestate::WithoutBody> {
+    let mut request = agent.get(url);
+    if is_https(url) {
+        request = request.config().https_only(true).build();
+    } else {
+        request = request.config().max_redirects(0).build();
+    }
+    if let Some(value) = if_modified_since {
+        request = request.header("If-Modified-Since", value);
+    }
+    request
+}
+
+/// Whether `url`'s scheme is `https`.
+pub(crate) fn is_https(url: &str) -> bool {
+    url.split_once("://").is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
+}
+
+/// Whether `url` may be requested at all: `https`, or `http` to this machine's loopback.
+///
+/// Arch publishes its databases unsigned, so for a database TLS is the only thing between a
+/// mirror and the network: over `http`, anyone on the path can hold a database back or serve
+/// one of their choosing that is not older (the rollback check refuses only an older one), and
+/// see every package this machine installs. libalpm accepts an `http` server; piko refuses it
+/// before any connection, and the mirror loop moves on to the next server.
+///
+/// The loopback is kept, spelled `localhost`, `127.0.0.0/8` or `[::1]`: a caching proxy on this
+/// machine is common, and no one else is on that path. The host is read after the last `@` of
+/// the authority, so a user name cannot pass for the host.
+pub(crate) fn is_permitted(url: &str) -> bool {
+    if is_https(url) {
+        return true;
+    }
+    let Some((scheme, rest)) = url.split_once("://") else { return false };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_and_port = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = match host_and_port.strip_prefix('[') {
+        Some(bracketed) => bracketed.split_once(']').map_or("", |(host, _)| host),
+        None => host_and_port.split(':').next().unwrap_or_default(),
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok_and(|address| address.is_loopback())
 }
 
 /// The agent every request uses, in this process or in the helper.
@@ -117,5 +183,44 @@ pub(crate) fn header(response: &ureq::http::Response<ureq::Body>) -> Header {
         status: response.status().as_u16(),
         last_modified: text("last-modified").map(str::to_owned),
         content_length: text("content-length").and_then(|value| value.parse::<u64>().ok()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn https_and_the_loopback_are_permitted() {
+        for url in [
+            "https://geo.mirror.pkgbuild.com/core/os/x86_64",
+            "HTTPS://example.org/",
+            "http://127.0.0.1:8080/core",
+            "http://127.1.2.3/core",
+            "http://localhost:9129/repo/archlinux/core",
+            "http://LOCALHOST/core",
+            "http://[::1]:8080/core",
+        ] {
+            assert!(is_permitted(url), "{url} was refused");
+        }
+    }
+
+    /// Plain `http` to anything but the loopback is refused, however the host is dressed up.
+    #[test]
+    fn http_off_the_loopback_is_refused() {
+        for url in [
+            "http://mirror.example.org/core",
+            "http://192.168.1.10/core",
+            "http://[2001:db8::1]/core",
+            "http://127.0.0.1@evil.example/core",
+            "http://localhost.evil.example/core",
+            "http://evil.example#@127.0.0.1/core",
+            "http://127.0.0.1\\@evil.example/core",
+            "ftp://127.0.0.1/core",
+            "file:///var/cache/pacman/pkg",
+            "127.0.0.1/core",
+        ] {
+            assert!(!is_permitted(url), "{url} was permitted");
+        }
     }
 }

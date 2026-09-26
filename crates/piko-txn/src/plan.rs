@@ -13,6 +13,7 @@ use std::{
 
 use alpm_types::{PackageFileName, PackageInstallReason};
 use piko_db::EntryName;
+use piko_db::compression;
 use piko_db::config::RepositoryConfig;
 use piko_db::repo::RepoName;
 use piko_db::solve::{Origin, Plan, SolvableId, Step as SolveStep, Universe};
@@ -119,7 +120,7 @@ impl TransactionPlan {
     /// `universe` disagree about what a step names. This should not happen, since `built` was
     /// assembled from `universe`. It is checked rather than assumed.
     /// [`Error::RepositoryPackageUnreadable`] also if a candidate's `desc` or `%DEPENDS%` cannot
-    /// be read. [`Error::UnconfiguredSource`] if a package comes from a repository `origins` does
+    /// be read. [`Error::UnsupportedPackageCompression`] as [`check_compression`]. [`Error::UnconfiguredSource`] if a package comes from a repository `origins` does
     /// not configure, or is a named file `origins` does not list. [`Error::KeyringUnusable`] if
     /// a policy asks for a signature check and the keyring at `origins.gpg_dir` cannot be
     /// opened.
@@ -140,6 +141,7 @@ impl TransactionPlan {
         reasons: ReasonPolicy,
         origins: PackageOrigins<'_>,
     ) -> Result<Self> {
+        check_compression(universe, built)?;
         let Sources { downloads, policies, named } = sources(universe, built, origins)?;
         let steps = install_steps(universe, built, targets, reasons)?;
         let expectations = expectations(universe, built)?;
@@ -372,6 +374,45 @@ fn reason_for(
         ReasonPolicy::AllExplicit => PackageInstallReason::Explicit,
         ReasonPolicy::AsResolved if targets.contains(&candidate) => PackageInstallReason::Explicit,
         ReasonPolicy::AsResolved => previous.unwrap_or(PackageInstallReason::Depend),
+    }
+}
+
+/// Refuses a plan that installs a repository package whose `%FILENAME%` declares a
+/// compression format piko does not decode.
+///
+/// The archive's own bytes decide how it is decoded (`extract::archive`). This check reads the
+/// name the repository publishes instead, so the refusal comes before the download rather than
+/// after it. Every refused package is named, not only the first. A package file named on the
+/// command line is skipped: [`crate::file_target::load`] already sniffed its bytes, and its
+/// name is only the one rendered from its path.
+///
+/// [`TransactionPlan::new`] runs it. A frontend that previews a plan without building a
+/// [`TransactionPlan`] runs it too, so the preview refuses what the install refuses.
+///
+/// # Errors
+///
+/// [`Error::UnsupportedPackageCompression`] naming every refused file. As [`TransactionPlan::new`]
+/// if `built` and `universe` disagree about what a step names.
+pub fn check_compression(universe: &Universe<'_>, built: &Plan) -> Result<()> {
+    let mut refused = Vec::new();
+    for step in built.steps() {
+        let id = match step {
+            SolveStep::Install { candidate, .. } => *candidate,
+            SolveStep::Change { to, .. } => *to,
+            SolveStep::Remove { .. } => continue,
+        };
+        if universe.get(id).is_some_and(|candidate| candidate.as_file().is_some()) {
+            continue;
+        }
+        let file_name = file_name_of(universe, id)?;
+        if let Err(format) = compression::from_extension(file_name.compression()) {
+            refused.push((file_name.to_string(), format));
+        }
+    }
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::UnsupportedPackageCompression { packages: refused })
     }
 }
 
@@ -656,14 +697,17 @@ mod tests {
     /// Solves `app`, which needs `lib`, both in `core`, and builds the transaction plan with
     /// `repos` configured, `[options]`' `SigLevel = Never`, and the keyring at `gpg_dir`.
     fn app_plan(repos: &[RepositoryConfig], gpg_dir: &Path) -> Result<TransactionPlan> {
+        app_plan_with(repos, gpg_dir, PackageSpec::new("lib", "1.0.0-1"))
+    }
+
+    /// [`app_plan`], with `lib` given by the caller.
+    fn app_plan_with(
+        repos: &[RepositoryConfig],
+        gpg_dir: &Path,
+        lib: PackageSpec,
+    ) -> Result<TransactionPlan> {
         let scenario = Scenario::new()
-            .repo(
-                "core",
-                [
-                    PackageSpec::new("app", "1.0.0-1").depends(["lib"]),
-                    PackageSpec::new("lib", "1.0.0-1"),
-                ],
-            )
+            .repo("core", [PackageSpec::new("app", "1.0.0-1").depends(["lib"]), lib])
             .build();
         let universe = Universe::build(
             scenario.local(),
@@ -692,6 +736,25 @@ mod tests {
             gpg_dir,
         };
         TransactionPlan::new(&universe, &built, &[app], ReasonPolicy::AsResolved, origins)
+    }
+
+    /// A dependency published as `.pkg.tar.xz` refuses the plan before anything is
+    /// downloaded, and the error names the file and the format.
+    #[test]
+    fn a_package_published_in_xz_is_refused_before_the_download() {
+        let lib = PackageSpec::new("lib", "1.0.0-1").extension("xz");
+        let repos = [core_config(piko_db::config::SigLevel::default())];
+        let Err(err) = app_plan_with(&repos, &no_keyring(), lib) else {
+            panic!("an xz package must refuse the plan");
+        };
+        let Error::UnsupportedPackageCompression { packages } = &err else {
+            panic!("got {err:?}");
+        };
+        assert_eq!(
+            packages,
+            &[("lib-1.0.0-1-x86_64.pkg.tar.xz".to_owned(), compression::Unsupported::Xz)]
+        );
+        assert!(err.to_string().contains("lib-1.0.0-1-x86_64.pkg.tar.xz (xz compression)"));
     }
 
     /// The cache file names a plan installs.

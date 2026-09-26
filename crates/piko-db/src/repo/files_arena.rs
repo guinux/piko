@@ -74,10 +74,13 @@ impl FilesArena {
     ///
     /// # Errors
     ///
-    /// [`Error::LimitExceeded`] if appending would exceed `max_bytes`, or would need more
-    /// than [`u32::MAX`] path entries or bytes to address. The arena is left exactly as it
-    /// was before the call. A package is appended whole or not at all. So no path bytes are
-    /// ever left behind with no index entry pointing at them.
+    /// - [`Error::TooManyPaths`] if appending would hold more than `max_paths` paths. Checked
+    ///   before any path is appended.
+    /// - [`Error::LimitExceeded`] if appending would exceed `max_bytes`, or would need more
+    ///   than [`u32::MAX`] path entries or bytes to address.
+    ///
+    /// The arena is left exactly as it was before the call. A package is appended whole or not
+    /// at all. So no path bytes are ever left behind with no index entry pointing at them.
     pub(crate) fn insert(
         &mut self,
         archive_path: &Path,
@@ -85,9 +88,16 @@ impl FilesArena {
         version: FullVersion,
         paths: &[std::path::PathBuf],
         max_bytes: u64,
+        max_paths: usize,
     ) -> Result<Inserted> {
         if let Some((kept, _)) = self.index.get(&name) {
             return Ok(Inserted::Duplicate { kept: kept.clone() });
+        }
+
+        // The byte bound does not count the 8 bytes of offsets each path adds, so a list of
+        // one-byte paths would cost nine times what `max_bytes` allows. This bound counts them.
+        if self.starts.len().saturating_add(paths.len()) > max_paths {
+            return Err(Error::TooManyPaths { path: archive_path.to_path_buf(), max: max_paths });
         }
 
         let range_start = self.path_count_as_u32(archive_path, max_bytes)?;
@@ -270,6 +280,7 @@ mod tests {
                 version("1.0.0-1"),
                 &paths(&["usr/", "usr/bin/", "usr/bin/foo"]),
                 1024,
+                usize::MAX,
             )
             .unwrap();
 
@@ -296,6 +307,7 @@ mod tests {
                 version("6.18.42-1"),
                 &paths(&["boot/vmlinuz"]),
                 1024,
+                usize::MAX,
             )
             .unwrap();
 
@@ -315,9 +327,18 @@ mod tests {
     fn multiple_packages_do_not_overlap() {
         let mut arena = FilesArena::new();
         arena
-            .insert(Path::new("x"), name("foo"), version("1-1"), &paths(&["a", "b"]), 1024)
+            .insert(
+                Path::new("x"),
+                name("foo"),
+                version("1-1"),
+                &paths(&["a", "b"]),
+                1024,
+                usize::MAX,
+            )
             .unwrap();
-        arena.insert(Path::new("x"), name("bar"), version("1-1"), &paths(&["c"]), 1024).unwrap();
+        arena
+            .insert(Path::new("x"), name("bar"), version("1-1"), &paths(&["c"]), 1024, usize::MAX)
+            .unwrap();
 
         let foo: Vec<_> = arena.file_list(&name("foo"), &version("1-1")).unwrap().collect();
         let bar: Vec<_> = arena.file_list(&name("bar"), &version("1-1")).unwrap().collect();
@@ -328,7 +349,7 @@ mod tests {
     #[test]
     fn a_package_with_no_paths_is_an_empty_iterator() {
         let mut arena = FilesArena::new();
-        arena.insert(Path::new("x"), name("foo"), version("1-1"), &[], 1024).unwrap();
+        arena.insert(Path::new("x"), name("foo"), version("1-1"), &[], 1024, usize::MAX).unwrap();
 
         let found = arena.file_list(&name("foo"), &version("1-1")).unwrap();
         assert_eq!(found.len(), 0);
@@ -341,10 +362,10 @@ mod tests {
     fn a_duplicate_name_keeps_the_first_and_signals_it() {
         let mut arena = FilesArena::new();
         let first = arena
-            .insert(Path::new("x"), name("foo"), version("1-1"), &paths(&["a"]), 1024)
+            .insert(Path::new("x"), name("foo"), version("1-1"), &paths(&["a"]), 1024, usize::MAX)
             .unwrap();
         let second = arena
-            .insert(Path::new("x"), name("foo"), version("2-1"), &paths(&["b"]), 1024)
+            .insert(Path::new("x"), name("foo"), version("2-1"), &paths(&["b"]), 1024, usize::MAX)
             .unwrap();
 
         assert_eq!(first, Inserted::Yes, "the first insert must succeed");
@@ -365,11 +386,25 @@ mod tests {
     fn a_duplicate_reports_the_kept_version_not_the_discarded_one() {
         let mut arena = FilesArena::new();
         arena
-            .insert(Path::new("x"), name("foo"), version("1.0.0-1"), &paths(&["a"]), 1024)
+            .insert(
+                Path::new("x"),
+                name("foo"),
+                version("1.0.0-1"),
+                &paths(&["a"]),
+                1024,
+                usize::MAX,
+            )
             .unwrap();
 
         let second = arena
-            .insert(Path::new("x"), name("foo"), version("2.0.0-1"), &paths(&["b"]), 1024)
+            .insert(
+                Path::new("x"),
+                name("foo"),
+                version("2.0.0-1"),
+                &paths(&["b"]),
+                1024,
+                usize::MAX,
+            )
             .unwrap();
 
         let Inserted::Duplicate { kept } = second else {
@@ -383,13 +418,29 @@ mod tests {
     #[test]
     fn a_partial_append_is_rolled_back_when_the_limit_trips() {
         let mut arena = FilesArena::new();
-        arena.insert(Path::new("x"), name("first"), version("1-1"), &paths(&["aaaa"]), 64).unwrap();
+        arena
+            .insert(
+                Path::new("x"),
+                name("first"),
+                version("1-1"),
+                &paths(&["aaaa"]),
+                64,
+                usize::MAX,
+            )
+            .unwrap();
 
         // "bbbb" fits, the 100-byte path that follows does not — so the whole of `second` is
         // discarded, "bbbb" included.
         let huge = "x".repeat(100);
         let err = arena
-            .insert(Path::new("x"), name("second"), version("1-1"), &paths(&["bbbb", &huge]), 64)
+            .insert(
+                Path::new("x"),
+                name("second"),
+                version("1-1"),
+                &paths(&["bbbb", &huge]),
+                64,
+                usize::MAX,
+            )
             .unwrap_err();
         assert!(matches!(&err, Error::LimitExceeded { .. }), "got {err:?}");
 
@@ -398,7 +449,16 @@ mod tests {
         assert_eq!(arena.ends.len(), 1);
 
         // The arena must still be usable, and a later insert must land at the right offset.
-        arena.insert(Path::new("x"), name("third"), version("1-1"), &paths(&["cccc"]), 64).unwrap();
+        arena
+            .insert(
+                Path::new("x"),
+                name("third"),
+                version("1-1"),
+                &paths(&["cccc"]),
+                64,
+                usize::MAX,
+            )
+            .unwrap();
         let first: Vec<_> = arena.file_list(&name("first"), &version("1-1")).unwrap().collect();
         let third: Vec<_> = arena.file_list(&name("third"), &version("1-1")).unwrap().collect();
         assert_eq!(first, [Path::new("aaaa")]);
@@ -411,7 +471,14 @@ mod tests {
         let mut arena = FilesArena::new();
         let huge = "x".repeat(100);
         let err = arena
-            .insert(Path::new("extra.files"), name("foo"), version("1-1"), &paths(&[&huge]), 64)
+            .insert(
+                Path::new("extra.files"),
+                name("foo"),
+                version("1-1"),
+                &paths(&[&huge]),
+                64,
+                usize::MAX,
+            )
             .unwrap_err();
         assert!(
             matches!(&err, Error::LimitExceeded { limit: Limit::RepoInflated, max: 64, .. }),
@@ -423,11 +490,39 @@ mod tests {
     fn an_iterator_reports_an_accurate_length() {
         let mut arena = FilesArena::new();
         arena
-            .insert(Path::new("x"), name("foo"), version("1-1"), &paths(&["a", "b", "c"]), 1024)
+            .insert(
+                Path::new("x"),
+                name("foo"),
+                version("1-1"),
+                &paths(&["a", "b", "c"]),
+                1024,
+                usize::MAX,
+            )
             .unwrap();
 
         let iter = arena.file_list(&name("foo"), &version("1-1")).unwrap();
         assert_eq!(iter.len(), 3);
         assert_eq!(iter.count(), 3);
+    }
+
+    /// The offsets each path adds are not counted by the byte bound, so the path count has a
+    /// bound of its own. It fires before any path is appended, and leaves the arena usable.
+    #[test]
+    fn a_package_past_the_path_bound_is_refused_whole() {
+        let mut arena = FilesArena::new();
+        arena
+            .insert(Path::new("x"), name("first"), version("1-1"), &paths(&["a", "b"]), 1024, 3)
+            .unwrap();
+
+        let err = arena
+            .insert(Path::new("x"), name("second"), version("1-1"), &paths(&["c", "d"]), 1024, 3)
+            .unwrap_err();
+        assert!(matches!(err, Error::TooManyPaths { max: 3, .. }), "got {err:?}");
+
+        arena
+            .insert(Path::new("x"), name("third"), version("1-1"), &paths(&["e"]), 1024, 3)
+            .unwrap();
+        let found: Vec<_> = arena.file_list(&name("third"), &version("1-1")).unwrap().collect();
+        assert_eq!(found, [Path::new("e")], "the refused package left nothing behind");
     }
 }

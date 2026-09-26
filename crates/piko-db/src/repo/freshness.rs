@@ -116,7 +116,8 @@ impl Comparison {
 /// Compares a `candidate` database with the `installed` one.
 ///
 /// This reads no clock. A rollback is refused on the two dates alone, so a wrong system clock
-/// cannot make piko accept an older database, nor refuse a newer one.
+/// cannot make piko refuse a newer database. A caller first drops an `installed` date that
+/// [`disqualified_baseline`] rejects, which is the one way a clock relaxes this check.
 #[must_use]
 pub fn compare(candidate: Option<Publication>, installed: Option<Publication>) -> Comparison {
     let Some(installed) = installed else { return Comparison::NoBaseline };
@@ -130,6 +131,30 @@ pub fn compare(candidate: Option<Publication>, installed: Option<Publication>) -
             std::cmp::Ordering::Less => Comparison::Older,
         },
     }
+}
+
+/// How far ahead of `now` the installed database is dated, when that date cannot be the
+/// baseline [`compare`] measures a candidate against. `None` when it can.
+///
+/// Only an unauthenticated date is disqualified, and only past [`FUTURE_TOLERANCE`]. The mirror
+/// chose that date. Kept as a baseline, a date in the future makes every honest database look
+/// older until the local clock reaches it. One mirror, or one mirror's wrong clock, then freezes
+/// the client, and the freeze outlives that mirror's place in the list. A mirror that is merely
+/// behind, which is all this tier can catch, never produces a date in the future, so dropping
+/// one costs the check nothing.
+///
+/// An authenticated date stays a baseline whatever the clock says. Only the key holder can make
+/// one.
+///
+/// `now` is read only to relax [`compare`], never to refuse. A local clock more than
+/// [`FUTURE_TOLERANCE`] behind turns the unauthenticated check off. [`staleness`] then reports
+/// every database as [`Staleness::FromTheFuture`], so the loss is not silent.
+#[must_use]
+pub fn disqualified_baseline(installed: Publication, now: SystemTime) -> Option<Duration> {
+    if installed.tier == Tier::Authenticated {
+        return None;
+    }
+    installed.time().duration_since(now).ok().filter(|ahead| *ahead > FUTURE_TOLERANCE)
 }
 
 /// What the age of a database says, judged against the local clock.
@@ -223,6 +248,23 @@ mod tests {
 
     fn at(seconds: u64) -> SystemTime {
         UNIX_EPOCH.checked_add(Duration::from_secs(seconds)).unwrap()
+    }
+
+    /// An unsigned date past the tolerance is no baseline. A signed one always is, and so is an
+    /// unsigned one within the tolerance or in the past.
+    #[test]
+    fn only_an_unsigned_date_from_the_future_is_disqualified() {
+        let now = 1_000_000;
+        let limit = now + FUTURE_TOLERANCE.as_secs();
+        let publication = |date: Option<Publication>| date.unwrap();
+
+        assert_eq!(
+            disqualified_baseline(publication(unsigned(limit + 1)), at(now)),
+            Some(FUTURE_TOLERANCE + Duration::from_secs(1))
+        );
+        assert_eq!(disqualified_baseline(publication(unsigned(limit)), at(now)), None);
+        assert_eq!(disqualified_baseline(publication(unsigned(now - 1)), at(now)), None);
+        assert_eq!(disqualified_baseline(publication(signed(limit + 1)), at(now)), None);
     }
 
     #[test]

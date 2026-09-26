@@ -12,7 +12,6 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-alpm-compress.workspace = true
 alpm-pkginfo.workspace = true
 alpm-types.workspace = true
 # `%PGPSIG%`, which a repository database spells in base64.

@@ -4,14 +4,13 @@
 //! [`crate::fs_util`] is the single audited door for the local database. This module enforces
 //! three properties:
 //!
-//! 1. **Magic-byte sniffing, not extension detection.** `alpm-compress`'s own
-//!    `TryFrom<&Path>` reads the file *extension*. The real files are named `core.db` —
+//! 1. **Magic-byte sniffing, not extension detection.** The real files are named `core.db` —
 //!    extension `"db"`, which is not a compression suffix at all. Sniffing the header is both
-//!    necessary and stronger than trusting the name.
-//! 2. **Bounded decompression.** `alpm-compress` has no size cap anywhere. Inspection of
-//!    `CompressionDecoder` and every `DecompressionSettings` variant confirms this.
-//!    [`BoundedReader`] wraps the decoder and trips a shared flag on overrun. That flag is
-//!    what tells a limit violation apart from a genuinely corrupt archive after `tar` fails.
+//!    necessary and stronger than trusting the name. [`crate::compression`] does it, and
+//!    decodes gzip and zstd only.
+//! 2. **Bounded decompression.** The decoder caps nothing but zstd's window.
+//!    [`BoundedReader`] wraps it and trips a shared flag on overrun. That flag is what tells a
+//!    limit violation apart from a genuinely corrupt archive after `tar` fails.
 //! 3. **`tar::Archive` driven directly, not through `alpm-compress::TarballReader`.**
 //!    `TarballReader`'s field is concretely `Archive<CompressionDecoder>`, not generic over
 //!    `Read`. So a bounding wrapper cannot be inserted into it. Its `read_entry` also re-calls
@@ -23,16 +22,13 @@ use std::{
     collections::HashSet,
     io::Read as _,
     path::{Component, Path},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, OnceLock},
 };
 
-use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
 use alpm_types::Name;
 
 use crate::{
+    compression::{self, Decoder},
     entry_name::{EntryName, EntryNameError},
     error::{Error, IoAction, Result},
     fs_util,
@@ -87,8 +83,8 @@ pub(crate) struct Skipped {
 ///
 /// # Errors
 ///
-/// - [`Error::UnsupportedCompression`] if the archive's header does not match gzip, zstd, xz,
-///   bzip2 or an uncompressed tar.
+/// - [`Error::UnsupportedCompression`] if the archive's header does not match gzip, zstd or
+///   an uncompressed tar.
 /// - [`Error::LimitExceeded`] if the archive's compressed size, its total inflated size, or a
 ///   single member's size exceeds the configured [`Limits`].
 /// - [`Error::Io`] for any other read failure, including a malformed tar stream.
@@ -178,6 +174,10 @@ pub(crate) fn walk(
             source: error.utf8_error(),
         })?;
 
+        if member == Member::Files {
+            check_file_list_length(path, &entry_name, &text, limits)?;
+        }
+
         on_item(match member {
             Member::Desc => ArchiveItem::Desc { entry: entry_name, text },
             Member::Files => ArchiveItem::Files { entry: entry_name, text },
@@ -236,12 +236,9 @@ impl NewestMember {
 /// Opens `path`, checks its compressed size, sniffs its compression, and wraps the decoder in
 /// a [`BoundedReader`].
 ///
-/// Returns the tar reader and the flag the bounded reader trips on overrun, which
-/// `classify_io_error` reads to tell a limit violation apart from a corrupt archive.
-fn open_bounded(
-    path: &Path,
-    limits: &Limits,
-) -> Result<(tar::Archive<BoundedReader<CompressionDecoder<'static>>>, Arc<AtomicBool>)> {
+/// Returns the tar reader and the flag a decoding bound trips on overrun. `classify_io_error`
+/// reads that flag to tell a limit violation apart from a corrupt archive.
+fn open_bounded(path: &Path, limits: &Limits) -> Result<(tar::Archive<BoundedReader>, Tripped)> {
     let mut file = fs_util::open_following_symlinks(path)?;
 
     let compressed_len =
@@ -254,11 +251,11 @@ fn open_bounded(
         });
     }
 
-    let settings = sniff_file(&mut file, path)?;
-    let decoder = CompressionDecoder::new(file, settings)
-        .map_err(|source| Error::io(path, IoAction::Decompress, std::io::Error::other(source)))?;
+    let format = sniff_file(&mut file, path)?;
+    let decoder = Decoder::new(file, format)
+        .map_err(|source| Error::io(path, IoAction::Decompress, source))?;
 
-    let tripped = Arc::new(AtomicBool::new(false));
+    let tripped: Tripped = Arc::new(OnceLock::new());
     let bounded = BoundedReader {
         inner: decoder,
         limit: limits.repo_inflated_bytes,
@@ -267,6 +264,9 @@ fn open_bounded(
     };
     Ok((tar::Archive::new(bounded), tripped))
 }
+
+/// Which decoding bound an archive overran, set by whichever reader detects it.
+type Tripped = Arc<OnceLock<Limit>>;
 
 /// Which of an entry directory's two metadata members a tar member is.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -434,6 +434,7 @@ pub(crate) fn walk_matching(
             source: error.utf8_error(),
         })?;
 
+        check_file_list_length(path, &entry_name, &text, limits)?;
         on_item(entry_name, text)?;
 
         if still_wanted.is_empty() {
@@ -441,6 +442,35 @@ pub(crate) fn walk_matching(
         }
     }
 
+    Ok(())
+}
+
+/// Refuses a `files` member with more lines than [`Limits::repo_entry_paths`].
+///
+/// Runs before the caller parses the member. `alpm-repo-db` builds one `PathBuf` per line, about
+/// 56 bytes each, so a member of one-byte lines at the [`Limits::repo_entry_bytes`] bound would
+/// parse into 1.8 GiB. A line count is an upper bound on the paths, and costs one pass over bytes
+/// already in memory.
+///
+/// # Errors
+///
+/// [`Error::TooManyEntryPaths`] if `text` has more lines than the limit.
+fn check_file_list_length(
+    path: &Path,
+    entry: &EntryName,
+    text: &str,
+    limits: &Limits,
+) -> Result<()> {
+    let newlines = text.bytes().filter(|&byte| byte == b'\n').count();
+    // A last line with no newline is a line too.
+    let lines = newlines.saturating_add(usize::from(!text.is_empty() && !text.ends_with('\n')));
+    if lines > limits.repo_entry_paths {
+        return Err(Error::TooManyEntryPaths {
+            path: path.to_path_buf(),
+            entry: entry.as_str().to_owned(),
+            max: limits.repo_entry_paths,
+        });
+    }
     Ok(())
 }
 
@@ -466,43 +496,11 @@ fn two_components_of(raw_path: &Path) -> Option<(&str, &str)> {
     Some((dir.to_str()?, member.to_str()?))
 }
 
-/// Reads enough of `file` to identify its compression, then rewinds it.
-fn sniff_file(file: &mut std::fs::File, path: &Path) -> Result<DecompressionSettings> {
-    use std::io::Seek as _;
-
-    // Long enough to see every magic below, plus the "ustar" tag at offset 257 that
-    // identifies an uncompressed tar.
-    let mut header = [0_u8; 262];
-    let read = file.read(&mut header).map_err(|source| Error::io(path, IoAction::Read, source))?;
-    file.rewind().map_err(|source| Error::io(path, IoAction::Read, source))?;
-
-    header
-        .get(..read)
-        .and_then(sniff)
-        .ok_or_else(|| Error::UnsupportedCompression { path: path.to_path_buf() })
-}
-
-/// Identifies a compression format from its magic bytes.
-///
-/// The [alpm-repo-db] spec also allows `.Z`, `.lrz`, `.lz`, `.lz4` and `.lzo` suffixes.
-/// `alpm-compress` implements none of them. Confirmed: its `DecompressionSettings` has no variant
-/// for any of the five. So archives using them are read by nothing in this crate.
-///
-/// [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
-fn sniff(header: &[u8]) -> Option<DecompressionSettings> {
-    if header.starts_with(&[0x1f, 0x8b]) {
-        Some(DecompressionSettings::Gzip)
-    } else if header.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-        Some(DecompressionSettings::Zstd)
-    } else if header.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
-        Some(DecompressionSettings::Xz)
-    } else if header.starts_with(&[0x42, 0x5a, 0x68]) {
-        Some(DecompressionSettings::Bzip2)
-    } else if header.get(257..262) == Some(b"ustar".as_slice()) {
-        Some(DecompressionSettings::None)
-    } else {
-        None
-    }
+/// Identifies the compression of `file`, and rewinds it.
+fn sniff_file(file: &mut std::fs::File, path: &Path) -> Result<compression::Format> {
+    compression::sniff_file(file)
+        .map_err(|source| Error::io(path, IoAction::Read, source))?
+        .map_err(|format| Error::UnsupportedCompression { path: path.to_path_buf(), format })
 }
 
 /// Tells a genuine bound violation apart from an unrelated I/O or tar-format failure.
@@ -513,17 +511,14 @@ fn sniff(header: &[u8]) -> Option<DecompressionSettings> {
 fn classify_io_error(
     path: &Path,
     source: std::io::Error,
-    tripped: &AtomicBool,
+    tripped: &OnceLock<Limit>,
     limits: &Limits,
 ) -> Error {
-    if tripped.load(Ordering::Relaxed) {
-        Error::LimitExceeded {
-            path: path.to_path_buf(),
-            limit: Limit::RepoInflated,
-            max: limits.repo_inflated_bytes,
+    match tripped.get() {
+        Some(&limit) => {
+            Error::LimitExceeded { path: path.to_path_buf(), limit, max: limits.get(limit) }
         }
-    } else {
-        Error::io(path, IoAction::Read, source)
+        None => Error::io(path, IoAction::Read, source),
     }
 }
 
@@ -533,19 +528,19 @@ fn classify_io_error(
 /// `alpm-compress::tarball::TarballReader` cannot be bounded this way: its field is
 /// concretely `Archive<CompressionDecoder>`, not generic over `Read`. Driving `tar::Archive`
 /// directly over this wrapper is why this module exists instead of using that type.
-struct BoundedReader<R> {
-    inner: R,
+struct BoundedReader {
+    inner: Decoder,
     limit: u64,
     read_so_far: u64,
-    tripped: Arc<AtomicBool>,
+    tripped: Tripped,
 }
 
-impl<R: std::io::Read> std::io::Read for BoundedReader<R> {
+impl std::io::Read for BoundedReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
         self.read_so_far = self.read_so_far.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
         if self.read_so_far > self.limit {
-            self.tripped.store(true, Ordering::Relaxed);
+            let _ = self.tripped.set(Limit::RepoInflated);
             return Err(std::io::Error::other("decompressed size exceeded the configured limit"));
         }
         Ok(n)
@@ -562,6 +557,7 @@ mod tests {
     use std::{io::Write as _, path::PathBuf};
 
     use super::*;
+    use crate::compression::Unsupported;
 
     fn gzip_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
@@ -617,44 +613,6 @@ mod tests {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&tar_bytes).unwrap();
         encoder.finish().unwrap()
-    }
-
-    #[test]
-    fn sniffs_gzip() {
-        assert!(matches!(sniff(&[0x1f, 0x8b, 0, 0]), Some(DecompressionSettings::Gzip)));
-    }
-
-    #[test]
-    fn sniffs_zstd() {
-        assert!(matches!(sniff(&[0x28, 0xb5, 0x2f, 0xfd]), Some(DecompressionSettings::Zstd)));
-    }
-
-    #[test]
-    fn sniffs_xz() {
-        assert!(matches!(
-            sniff(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]),
-            Some(DecompressionSettings::Xz)
-        ));
-    }
-
-    #[test]
-    fn sniffs_bzip2() {
-        assert!(matches!(sniff(&[0x42, 0x5a, 0x68]), Some(DecompressionSettings::Bzip2)));
-    }
-
-    #[test]
-    fn sniffs_an_uncompressed_tar_by_the_ustar_magic_at_offset_257() {
-        let mut header = vec![0_u8; 262];
-        if let Some(slot) = header.get_mut(257..262) {
-            slot.copy_from_slice(b"ustar");
-        }
-        assert!(matches!(sniff(&header), Some(DecompressionSettings::None)));
-    }
-
-    #[test]
-    fn rejects_unrecognised_headers() {
-        assert!(sniff(&[0, 0, 0, 0]).is_none());
-        assert!(sniff(&[]).is_none());
     }
 
     #[test]
@@ -770,7 +728,28 @@ mod tests {
         let path = write_archive(dir.path(), "core.db", b"not an archive at all");
 
         let err = walk(&path, &Limits::default(), |_| Ok(()), |_| {}).unwrap_err();
-        assert!(matches!(err, Error::UnsupportedCompression { .. }), "got {err:?}");
+        assert!(
+            matches!(err, Error::UnsupportedCompression { format: Unsupported::Unrecognized, .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// xz and bzip2 are refused by name, before any decoder runs, so the rest of the file
+    /// need not be a valid stream.
+    #[test]
+    fn an_xz_or_bzip2_archive_is_refused_and_named() {
+        let dir = tempfile::tempdir().unwrap();
+        for (magic, expected) in [
+            (&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00][..], Unsupported::Xz),
+            (b"BZh9".as_slice(), Unsupported::Bzip2),
+        ] {
+            let path = write_archive(dir.path(), "core.db", magic);
+            let err = walk(&path, &Limits::default(), |_| Ok(()), |_| {}).unwrap_err();
+            assert!(
+                matches!(err, Error::UnsupportedCompression { format, .. } if format == expected),
+                "got {err:?}"
+            );
+        }
     }
 
     #[test]

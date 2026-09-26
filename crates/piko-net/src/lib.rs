@@ -106,7 +106,7 @@
 //!
 //! The code that parses a mirror's answer runs before the signature check. So a [`Refresher`]
 //! given a [`Sandbox`] makes each request in a helper process that cannot write a file, start a
-//! program, or reach an unexpected port, and runs as `DownloadUser` under root. The helper sends
+//! program, or reach an unexpected port, and runs as `DownloadUser`, or `nobody`, under root. The helper sends
 //! the body back on a pipe, and everything above happens in the caller's process. See
 //! [`sandbox`].
 //!

@@ -155,8 +155,17 @@ pub(super) fn install_step(
     // visible until every member's data is durable. So an interruption cannot leave a new
     // `desc` beside an old `files`.
     let mut staged = writer.entry_write(entry);
-    staged.record(&record::desc(&step.package.info, &step.package.raw, &facts))?;
-    staged.record(&record::files(&extraction))?;
+    // `verify` already refused a package whose entry cannot be written (`record::check`), so
+    // these two fail only if that check and these builders disagree.
+    let unwritable = |kind: &str, source| piko_db_write::Error::Record {
+        path: writer.entry_path(entry).join(kind),
+        source,
+    };
+    let desc = record::desc(&step.package.info, &step.package.raw, &facts)
+        .map_err(|source| unwritable("desc", source))?;
+    let files = record::files(&extraction).map_err(|source| unwritable("files", source))?;
+    staged.record(&desc)?;
+    staged.record(&files)?;
 
     // `.MTREE`, `.INSTALL` and `.CHANGELOG` belong in the entry under their libalpm names
     // (`add.c:194`), not in the root. These three are the whole list `extract_db_file`

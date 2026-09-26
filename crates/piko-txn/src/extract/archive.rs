@@ -4,13 +4,18 @@
 //! same reasons.
 //!
 //! 1. **Magic-byte sniffing, not extension detection.** A package is usually named
-//!    `.pkg.tar.zst`. But the name is not a guarantee, and `alpm-compress`'s own
-//!    `TryFrom<&Path>` trusts it anyway.
-//! 2. **Bounded decompression.** `alpm-compress` caps nothing anywhere. A bounded reader
-//!    wraps the decoder and trips a shared flag on overrun. This flag is what tells a bound
-//!    violation apart from a corrupt archive, after `tar` fails.
-//! 3. **`tar::Archive` driven directly**, because `TarballReader` is concretely
-//!    `Archive<CompressionDecoder>` and cannot take a bounding wrapper.
+//!    `.pkg.tar.zst`, but the name is not a guarantee. [`piko_db::compression`] reads the
+//!    bytes, and decodes gzip and zstd only.
+//! 2. **Bounded decompression.** The decoder caps nothing but zstd's window. A bounded reader
+//!    wraps it and trips a shared flag on overrun. This flag is what tells a bound violation
+//!    apart from a corrupt archive, after `tar` fails.
+//! 3. **`tar::Archive` driven directly**, over the bounded reader.
+//!
+//! A member must be a regular file, a directory, a symbolic link or a hard link. Any other
+//! type refuses the whole package: a device node, a FIFO, a contiguous or GNU sparse file, a
+//! pax global header, or a type byte `tar` does not name. The extraction writes those four
+//! kinds only, so a fifth would reach the disk as something the archive did not say it was.
+//! No Arch package carries one.
 //!
 //! Nothing here writes. [`super::decision`] makes the decisions; the caller writes, through
 //! [`crate::rootfs`].
@@ -25,7 +30,7 @@ use std::{
     },
 };
 
-use alpm_compress::decompression::{CompressionDecoder, DecompressionSettings};
+use piko_db::compression::{self, Decoder};
 
 use crate::{
     error::{Error, IoAction, Result},
@@ -188,7 +193,7 @@ pub struct Member {
     pub size: u64,
     /// The extended attributes the archive records, in archive order.
     ///
-    /// Read from the member's PAX `LIBARCHIVE.xattr.*` and `SCHILY.xattr.*` records. This is only what the archive
+    /// Read from the member's PAX `LIBARCHIVE.xattr.*` records. This is only what the archive
     /// says. Which of them reach the disk is decided by [`fn@super::apply`].
     pub xattrs: Vec<Xattr>,
 }
@@ -219,6 +224,8 @@ impl Member {
 /// - [`Error::Io`] if the file cannot be opened or read.
 /// - [`Error::UnsupportedCompression`] if the magic bytes match no supported format.
 /// - [`Error::PackageLimitExceeded`] if a bound is exceeded.
+/// - [`Error::UnsupportedMemberType`] if a member is not a regular file, a directory or a
+///   link.
 /// - Whatever `on_member` returns.
 pub fn walk(
     path: &Path,
@@ -273,9 +280,9 @@ pub fn walk_until(
         });
     }
 
-    let settings = sniff_file(&mut file, path)?;
-    let decoder = CompressionDecoder::new(file, settings)
-        .map_err(|source| Error::io(path, IoAction::Decompress, std::io::Error::other(source)))?;
+    let format = sniff_file(&mut file, path)?;
+    let decoder = Decoder::new(file, format)
+        .map_err(|source| Error::io(path, IoAction::Decompress, source))?;
 
     let budget = Arc::new(Budget {
         declared: AtomicU64::new(limits.declared_bound(0)),
@@ -307,6 +314,13 @@ pub fn walk_until(
         }
 
         let mut member = describe(&entry).map_err(classify)?;
+        if let Some(kind) = unsupported_type(entry.header().entry_type()) {
+            return Err(Error::UnsupportedMemberType {
+                path: path.to_path_buf(),
+                member: member.path,
+                kind,
+            });
+        }
         member.xattrs = match read_xattrs(&mut entry, limits).map_err(classify)? {
             Ok(xattrs) => xattrs,
             Err((limit, max)) => {
@@ -319,6 +333,30 @@ pub fn walk_until(
     }
 
     Ok(())
+}
+
+/// What a member type piko refuses is called, or `None` for the four types it extracts.
+///
+/// `tar` has already consumed the extension headers that describe the next member (GNU long
+/// name and long link, pax local), so they never reach this test. A pax global header is
+/// yielded as a member, and is refused like any other type.
+fn unsupported_type(entry_type: tar::EntryType) -> Option<&'static str> {
+    if entry_type.is_file()
+        || entry_type.is_dir()
+        || entry_type.is_symlink()
+        || entry_type.is_hard_link()
+    {
+        return None;
+    }
+    Some(match entry_type {
+        tar::EntryType::Char => "character device",
+        tar::EntryType::Block => "block device",
+        tar::EntryType::Fifo => "FIFO",
+        tar::EntryType::Continuous => "contiguous file",
+        tar::EntryType::GNUSparse => "GNU sparse file",
+        tar::EntryType::XGlobalHeader => "pax global header",
+        _ => "member of an unknown type",
+    })
 }
 
 /// Builds a [`Member`] from a tar header.
@@ -376,14 +414,16 @@ const SCHILY_XATTR: &[u8] = b"SCHILY.xattr.";
 /// The extended attributes recorded for `entry`, bounded by `limits`.
 ///
 /// bsdtar, which makepkg uses, writes every attribute twice: `LIBARCHIVE.xattr.` first, then
-/// `SCHILY.xattr.`. The `LIBARCHIVE` spelling is the one read. The `tar` crate splits a PAX
-/// header on every newline byte, not by each record's length. So a raw binary value, which a
+/// `SCHILY.xattr.`. Only the `LIBARCHIVE` spelling is read. The `tar` crate splits a PAX header
+/// on every newline byte, not by each record's length. So a raw binary value, which a
 /// `security.capability` is, comes back as malformed fragments whenever it contains a `0x0a`.
-/// The encoded spelling contains no newline and always survives. A `SCHILY` record is used
-/// only for a name no `LIBARCHIVE` record gave, which is how GNU tar writes an archive.
+/// The encoded spelling contains no newline and always survives.
 ///
-/// A fragment the splitter broke off is skipped, as the `tar` crate skips it for its own
-/// fields. An encoded record that does not decode is a damaged archive.
+/// A `SCHILY` record is only compared by name with the `LIBARCHIVE` records before it. A name
+/// no `LIBARCHIVE` record gave, which is how GNU tar writes an archive, is a damaged archive:
+/// the attribute is not dropped in silence. A fragment the splitter broke off is skipped, as
+/// the `tar` crate skips it for its own fields. An encoded record that does not decode is a
+/// damaged archive.
 ///
 /// The outer error is a damaged PAX header. The inner one names the bound that was exceeded,
 /// and its value. The bounds are checked before anything is copied out of the header.
@@ -394,42 +434,46 @@ fn read_xattrs<R: Read>(
     use std::os::unix::ffi::OsStrExt as _;
 
     let Some(extensions) = entry.pax_extensions()? else { return Ok(Ok(Vec::new())) };
-    let mut encoded: Vec<Xattr> = Vec::new();
-    let mut raw: Vec<Xattr> = Vec::new();
+    let mut xattrs: Vec<Xattr> = Vec::new();
     let mut bytes = 0_usize;
     for extension in extensions {
         let Ok(extension) = extension else { continue };
         let key = extension.key_bytes();
-        let value = extension.value_bytes();
-        let (name, is_encoded) = if let Some(name) = key.strip_prefix(LIBARCHIVE_XATTR) {
-            (name, true)
-        } else if let Some(name) = key.strip_prefix(SCHILY_XATTR) {
-            (name, false)
-        } else {
+        if let Some(name) = key.strip_prefix(SCHILY_XATTR) {
+            // A PAX key ends at its first `=`, so a raw name holding one arrives cut there.
+            let twin = |known: &Xattr| {
+                let known = known.name.as_bytes();
+                known
+                    .strip_prefix(name)
+                    .is_some_and(|rest| matches!(rest.first(), None | Some(b'=')))
+            };
+            if !xattrs.iter().any(twin) {
+                let name = std::ffi::OsStr::from_bytes(name);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "extended attribute {} is recorded only in the raw SCHILY.xattr form",
+                        name.to_string_lossy()
+                    ),
+                ));
+            }
             continue;
-        };
-        if encoded.len().saturating_add(raw.len()) >= limits.max_xattrs {
+        }
+        let Some(name) = key.strip_prefix(LIBARCHIVE_XATTR) else { continue };
+        let value = extension.value_bytes();
+        if xattrs.len() >= limits.max_xattrs {
             return Ok(Err(("extended attribute count", to_u64(limits.max_xattrs))));
         }
         bytes = bytes.saturating_add(name.len()).saturating_add(value.len());
         if bytes > limits.max_xattr_bytes {
             return Ok(Err(("extended attribute size", to_u64(limits.max_xattr_bytes))));
         }
-        if is_encoded {
-            encoded.push(Xattr {
-                name: std::ffi::OsStr::from_bytes(&url_decode(name)?).to_os_string(),
-                value: base64_decode(value)?,
-            });
-        } else {
-            raw.push(Xattr {
-                name: std::ffi::OsStr::from_bytes(name).to_os_string(),
-                value: value.to_vec(),
-            });
-        }
+        xattrs.push(Xattr {
+            name: std::ffi::OsStr::from_bytes(&url_decode(name)?).to_os_string(),
+            value: base64_decode(value)?,
+        });
     }
-    raw.retain(|xattr| !encoded.iter().any(|known| known.name == xattr.name));
-    encoded.append(&mut raw);
-    Ok(Ok(encoded))
+    Ok(Ok(xattrs))
 }
 
 /// Decodes libarchive's URL encoding of an attribute name: `%XX` for a byte, anything else
@@ -470,37 +514,11 @@ fn to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-/// Identifies a compression format from the file's magic bytes.
-fn sniff_file(file: &mut std::fs::File, path: &Path) -> Result<DecompressionSettings> {
-    use std::io::Seek as _;
-
-    // Long enough for every magic below, plus the "ustar" tag at offset 257 that marks an
-    // uncompressed tar.
-    let mut header = [0_u8; 262];
-    let read = file.read(&mut header).map_err(|source| Error::io(path, IoAction::Read, source))?;
-    file.rewind().map_err(|source| Error::io(path, IoAction::Read, source))?;
-
-    header
-        .get(..read)
-        .and_then(sniff)
-        .ok_or_else(|| Error::UnsupportedCompression { path: path.to_path_buf() })
-}
-
-/// Identifies a compression format from its magic bytes.
-fn sniff(header: &[u8]) -> Option<DecompressionSettings> {
-    if header.starts_with(&[0x1f, 0x8b]) {
-        Some(DecompressionSettings::Gzip)
-    } else if header.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-        Some(DecompressionSettings::Zstd)
-    } else if header.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
-        Some(DecompressionSettings::Xz)
-    } else if header.starts_with(&[0x42, 0x5a, 0x68]) {
-        Some(DecompressionSettings::Bzip2)
-    } else if header.get(257..262) == Some(b"ustar".as_slice()) {
-        Some(DecompressionSettings::None)
-    } else {
-        None
-    }
+/// Identifies a compression format from the file's magic bytes, and rewinds it.
+fn sniff_file(file: &mut std::fs::File, path: &Path) -> Result<compression::Format> {
+    compression::sniff_file(file)
+        .map_err(|source| Error::io(path, IoAction::Read, source))?
+        .map_err(|format| Error::UnsupportedCompression { path: path.to_path_buf(), format })
 }
 
 /// Tells a genuine bound violation apart from an unrelated I/O or tar-format failure.
@@ -723,6 +741,34 @@ mod tests {
         assert_eq!(symlink.link.as_ref().map(|link| link.target.as_path()), Some(Path::new("foo")));
     }
 
+    /// Each type the extraction does not write refuses the package, and the error names the
+    /// member and its type.
+    #[test]
+    fn a_member_of_an_unsupported_type_refuses_the_package() {
+        for (entry_type, kind) in [
+            (tar::EntryType::Char, "character device"),
+            (tar::EntryType::Block, "block device"),
+            (tar::EntryType::Fifo, "FIFO"),
+            (tar::EntryType::Continuous, "contiguous file"),
+            (tar::EntryType::XGlobalHeader, "pax global header"),
+            (tar::EntryType::new(b'Z'), "member of an unknown type"),
+        ] {
+            let path = tarball(|builder| {
+                file_entry(builder, "usr/bin/foo", b"x", 0o755);
+                let mut special = header(0o644);
+                special.set_entry_type(entry_type);
+                special.set_cksum();
+                builder.append_data(&mut special, "dev/node", &[][..]).unwrap();
+            });
+            let err = walk(&path, &PackageLimits::default(), |_, _| Ok(())).unwrap_err();
+            assert!(
+                matches!(&err, Error::UnsupportedMemberType { member, kind: found, .. }
+                    if member == Path::new("dev/node") && *found == kind),
+                "{kind}: got {err:?}"
+            );
+        }
+    }
+
     /// `tar` reports a target for a hard link through the same `link_name()` as a symlink.
     /// Conflating them would create a symlink where the package asked for a hard link.
     /// `glibc` really ships three of these.
@@ -754,7 +800,33 @@ mod tests {
         std::fs::write(&path, b"this is not a package").unwrap();
 
         let err = walk(&path, &PackageLimits::default(), |_, _| Ok(())).unwrap_err();
-        assert!(matches!(err, Error::UnsupportedCompression { .. }), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                Error::UnsupportedCompression {
+                    format: compression::Unsupported::Unrecognized,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// An xz package is refused by its bytes and named, whatever its file name says.
+    #[test]
+    fn refuses_an_xz_package_and_names_the_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("foo-1-1-any.pkg.tar.zst");
+        std::fs::write(&path, [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0, 0]).unwrap();
+
+        let err = walk(&path, &PackageLimits::default(), |_, _| Ok(())).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::UnsupportedCompression { format: compression::Unsupported::Xz, .. }
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -887,9 +959,8 @@ mod tests {
 
     /// bsdtar writes every attribute twice, the encoded spelling first. The binary value holds a
     /// newline byte, which breaks the raw record apart; the encoded one still yields it, once.
-    /// A raw record with no encoded twin is taken as it is, as GNU tar writes one.
     #[test]
-    fn reads_extended_attributes_from_either_spelling_once() {
+    fn reads_extended_attributes_from_the_encoded_spelling_once() {
         let capability =
             b"\x01\x00\x00\x02\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
         let path = tarball(|builder| {
@@ -899,7 +970,7 @@ mod tests {
                     (b"LIBARCHIVE.xattr.security.capability", b"AQAAAgoAAAAAAAAAAAAAAAAAAAA"),
                     (b"SCHILY.xattr.security.capability", capability),
                     (b"LIBARCHIVE.xattr.user.a%3Db", b"cGlrbw=="),
-                    (b"SCHILY.xattr.user.gnu", b"raw"),
+                    (b"SCHILY.xattr.user.a=b", b"piko"),
                     (b"mtime", b"1"),
                 ],
             );
@@ -913,7 +984,6 @@ mod tests {
             [
                 Xattr { name: "security.capability".into(), value: capability.to_vec() },
                 Xattr { name: "user.a=b".into(), value: b"piko".to_vec() },
-                Xattr { name: "user.gnu".into(), value: b"raw".to_vec() },
             ]
         );
         assert!(members.get(1).unwrap().0.xattrs.is_empty(), "a PAX header leaked forward");
@@ -931,12 +1001,28 @@ mod tests {
         assert!(matches!(err, Error::Io { .. }), "got {err:?}");
     }
 
+    /// A raw record with no encoded twin, as GNU tar writes one, refuses the package rather than
+    /// dropping the attribute.
+    #[test]
+    fn refuses_an_attribute_recorded_only_in_the_raw_spelling() {
+        let path = tarball(|builder| {
+            fixture::pax(
+                builder,
+                &[(b"LIBARCHIVE.xattr.user.a", b"MQ"), (b"SCHILY.xattr.user.gnu", b"raw")],
+            );
+            file_entry(builder, "usr/share/f", b"x", 0o644);
+        });
+        let err = walk(&path, &PackageLimits::default(), |_, _| Ok(())).unwrap_err();
+        assert!(matches!(err, Error::Io { .. }), "got {err:?}");
+        assert!(format!("{err:?}").contains("user.gnu is recorded only in the raw"), "{err:?}");
+    }
+
     #[test]
     fn refuses_a_member_with_too_many_extended_attributes() {
         let path = tarball(|builder| {
             fixture::pax(
                 builder,
-                &[(b"SCHILY.xattr.user.a", b"1"), (b"SCHILY.xattr.user.b", b"2")],
+                &[(b"LIBARCHIVE.xattr.user.a", b"MQ"), (b"LIBARCHIVE.xattr.user.b", b"Mg")],
             );
             file_entry(builder, "usr/share/f", b"x", 0o644);
         });
@@ -952,7 +1038,7 @@ mod tests {
     #[test]
     fn refuses_a_member_whose_extended_attributes_are_too_large() {
         let path = tarball(|builder| {
-            fixture::pax(builder, &[(b"SCHILY.xattr.user.big", &[b'x'; 100])]);
+            fixture::pax(builder, &[(b"LIBARCHIVE.xattr.user.big", &[b'A'; 100])]);
             file_entry(builder, "usr/share/f", b"x", 0o644);
         });
         let limits = PackageLimits { max_xattr_bytes: 64, ..PackageLimits::default() };
@@ -962,17 +1048,5 @@ mod tests {
             matches!(err, Error::PackageLimitExceeded { limit: "extended attribute size", .. }),
             "got {err:?}"
         );
-    }
-
-    #[test]
-    fn sniffs_every_supported_format() {
-        assert!(matches!(sniff(&[0x1f, 0x8b, 0, 0]), Some(DecompressionSettings::Gzip)));
-        assert!(matches!(sniff(&[0x28, 0xb5, 0x2f, 0xfd]), Some(DecompressionSettings::Zstd)));
-        assert!(matches!(
-            sniff(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]),
-            Some(DecompressionSettings::Xz)
-        ));
-        assert!(matches!(sniff(b"BZh9"), Some(DecompressionSettings::Bzip2)));
-        assert!(sniff(b"nonsense").is_none());
     }
 }

@@ -16,6 +16,8 @@
 
 use std::io::{self, Read, Write};
 
+use crate::error::printable;
+
 /// The first line of a request. It changes whenever the format does.
 const REQUEST_MAGIC: &str = "piko-fetch 1";
 
@@ -319,7 +321,7 @@ impl<R: Read> Reader<R> {
     /// Reads the first frame.
     pub(crate) fn opening(&mut self) -> io::Result<Opening> {
         let (tag, payload) = self.frame()?;
-        let text = || String::from_utf8_lossy(&payload).into_owned();
+        let text = || printable(&String::from_utf8_lossy(&payload));
         match tag {
             Tag::Setup => Ok(Opening::Setup(text())),
             Tag::Failure => Ok(Opening::Failure(text())),
@@ -345,7 +347,7 @@ impl<R: Read> Read for Reader<R> {
                 }
                 Tag::End => self.finished = true,
                 Tag::Failure => {
-                    return Err(io::Error::other(String::from_utf8_lossy(&payload).into_owned()));
+                    return Err(io::Error::other(printable(&String::from_utf8_lossy(&payload))));
                 }
                 Tag::Data | Tag::Setup | Tag::Header => {
                     return Err(invalid("a frame out of order"));
@@ -487,6 +489,28 @@ mod tests {
         Writer::new(&mut out).body(&b"early"[..]).unwrap();
 
         assert!(Reader::new(out.as_slice()).opening().is_err());
+    }
+
+    /// A helper that a mirror took over writes whatever it likes in a message. The parent
+    /// prints it, so what could drive a terminal is escaped on the way in.
+    #[test]
+    fn a_message_cannot_drive_the_terminal() {
+        let mut out = Vec::new();
+        let mut writer = Writer::new(&mut out);
+        writer.message(Tag::Failure, "reset\u{1b}[2J").unwrap();
+
+        let mut reader = Reader::new(out.as_slice());
+        let Opening::Failure(text) = reader.opening().unwrap() else { panic!("no failure") };
+        assert_eq!(text, "reset\\u{1b}[2J");
+
+        let mut header = Vec::new();
+        let mut writer = Writer::new(&mut header);
+        writer.header(&Header { status: 200, last_modified: None, content_length: None }).unwrap();
+        writer.message(Tag::Failure, "late\u{1b}[2J").unwrap();
+        let mut reader = Reader::new(header.as_slice());
+        reader.opening().unwrap();
+        let error = reader.read(&mut [0; 16]).unwrap_err();
+        assert_eq!(error.to_string(), "late\\u{1b}[2J");
     }
 
     #[test]

@@ -272,19 +272,34 @@ fn sha256_of(bytes: &[u8]) -> String {
     alpm_types::Sha256Checksum::calculate_from(bytes).to_string()
 }
 
+/// What a repository publishes about a package file: its `%SHA256SUM%` and its `%CSIZE%`.
+///
+/// piko compares every repository package with the checksum, and refuses a download that goes
+/// past the size. So both must describe the bytes the test installs.
+/// [`Sandbox::published`] computes them.
+#[derive(Clone, Debug)]
+struct Published {
+    sha256: String,
+    size: u64,
+}
+
+impl Published {
+    fn of(bytes: &[u8]) -> Self {
+        Self { sha256: sha256_of(bytes), size: u64::try_from(bytes.len()).unwrap() }
+    }
+}
+
 /// A minimal, valid repository `desc` for `name` at `version`, naming exactly the file
 /// [`write_package_with`] writes (no compression suffix) so `CacheDirSource` finds it.
-///
-/// `sha256` is the file's `%SHA256SUM%`. piko compares every repository package with it, so it
-/// must be the checksum of the bytes the test installs. [`Sandbox::write_repo`] computes it.
-fn repo_desc(name: &str, version: &str, depends: &[&str], sha256: &str) -> String {
+fn repo_desc(name: &str, version: &str, depends: &[&str], published: &Published) -> String {
+    let Published { sha256, size } = published;
     let mut desc = format!(
         "%FILENAME%\n{name}-{version}-x86_64.pkg.tar\n\n\
          %NAME%\n{name}\n\n\
          %BASE%\n{name}\n\n\
          %VERSION%\n{version}\n\n\
          %DESC%\nAn example package\n\n\
-         %CSIZE%\n4\n\n\
+         %CSIZE%\n{size}\n\n\
          %ISIZE%\n4\n\n\
          %SHA256SUM%\n{sha256}\n\n\
          %URL%\nhttps://example.org/\n\n\
@@ -316,9 +331,9 @@ fn repo_desc_with_relations(
     depends: &[&str],
     replaces: &[&str],
     conflicts: &[&str],
-    sha256: &str,
+    published: &Published,
 ) -> String {
-    let mut desc = repo_desc(name, version, depends, sha256);
+    let mut desc = repo_desc(name, version, depends, published);
     for (key, values) in [("REPLACES", replaces), ("CONFLICTS", conflicts)] {
         if values.is_empty() {
             continue;
@@ -549,10 +564,10 @@ impl Sandbox {
         let bodies: Vec<(String, Vec<u8>)> = packages
             .iter()
             .map(|(name, version, depends)| {
-                let sha256 = self.published_sha256(name, version);
+                let published = self.published(name, version);
                 (
                     format!("{name}-{version}/desc"),
-                    repo_desc(name, version, depends, &sha256).into_bytes(),
+                    repo_desc(name, version, depends, &published).into_bytes(),
                 )
             })
             .collect();
@@ -561,17 +576,17 @@ impl Sandbox {
         std::fs::write(self.path("db/sync/test.db"), piko_db::fixture::gzip_tar(&entries)).unwrap();
     }
 
-    /// The `%SHA256SUM%` to publish for `name` at `version`.
+    /// The `%SHA256SUM%` and `%CSIZE%` to publish for `name` at `version`.
     ///
-    /// The checksum of the file in the cache, when the test put one there first. Otherwise the
-    /// checksum of [`package_tar`]'s default archive, which is what a download test serves. A
-    /// test that writes another archive after the repository publishes a checksum it does not
-    /// match, and piko refuses the archive.
-    fn published_sha256(&self, name: &str, version: &str) -> String {
+    /// Those of the file in the cache, when the test put one there first. Otherwise those of
+    /// [`package_tar`]'s default archive, which is what a download test serves. A test that
+    /// writes another archive after the repository publishes a checksum it does not match, and
+    /// piko refuses the archive.
+    fn published(&self, name: &str, version: &str) -> Published {
         let cached = self.path(&format!("cache/{name}-{version}-x86_64.pkg.tar"));
         match std::fs::read(cached) {
-            Ok(bytes) => sha256_of(&bytes),
-            Err(_) => sha256_of(&package_tar(name, version, None, &[])),
+            Ok(bytes) => Published::of(&bytes),
+            Err(_) => Published::of(&package_tar(name, version, None, &[])),
         }
     }
 
@@ -580,11 +595,13 @@ impl Sandbox {
         let bodies: Vec<(String, Vec<u8>)> = packages
             .iter()
             .map(|(name, version, depends, replaces, conflicts)| {
-                let sha256 = self.published_sha256(name, version);
+                let published = self.published(name, version);
                 (
                     format!("{name}-{version}/desc"),
-                    repo_desc_with_relations(name, version, depends, replaces, conflicts, &sha256)
-                        .into_bytes(),
+                    repo_desc_with_relations(
+                        name, version, depends, replaces, conflicts, &published,
+                    )
+                    .into_bytes(),
                 )
             })
             .collect();
@@ -1663,7 +1680,7 @@ fn update_removes_a_conflicting_package() {
 fn update_refreshes_repositories_by_default() {
     let body = piko_db::fixture::gzip_tar(&[(
         "foo-1.0.0-1/desc",
-        repo_desc("foo", "1.0.0-1", &[], &sha256_of(b"")).as_bytes(),
+        repo_desc("foo", "1.0.0-1", &[], &Published::of(b"")).as_bytes(),
     )]);
     let sandbox = Sandbox::with_server(&serve_once(body));
 

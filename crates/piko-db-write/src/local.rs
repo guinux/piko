@@ -69,9 +69,14 @@ const TEMP_SUFFIX: &str = ".new";
 /// libalpm calls `umask(0022)` before writing and restores it afterwards (`be_local.c:984`,
 /// `be_local.c:1113`), and `umask(0000)` around `mkdir` (`be_local.c:940`). piko does not.
 /// `umask` is process-global, so mutating it makes an unrelated thread's file creation depend
-/// on when it happened to run. Modes are set explicitly with `set_permissions` after creation
-/// instead. That produces the same `0755`/`0644` that libalpm produces, independent of the
-/// caller's umask and of what any other thread is doing.
+/// on when it happened to run. Modes are set explicitly after creation instead. That produces
+/// the same `0755`/`0644` that libalpm produces, independent of the caller's umask and of what
+/// any other thread is doing.
+///
+/// Each mode is set through an open descriptor (`fchmod`), never through a path. `chmod(2)`
+/// follows a symbolic link. Anyone who can write into the directory could put one at the path
+/// between the creation and the `chmod`, and a writer running as root would then change the
+/// mode of any file on the system: `/etc/shadow` made readable, say.
 #[derive(Debug)]
 pub struct LocalDbWriter<'lock> {
     /// `<dbpath>/local`.
@@ -189,7 +194,7 @@ impl<'lock> LocalDbWriter<'lock> {
         let path = self.entry_path(entry);
         std::fs::create_dir(&path)
             .map_err(|source| Error::io(&path, IoAction::CreateDir, source))?;
-        set_mode(&path, DIR_MODE)
+        set_dir_mode(&path)
     }
 
     /// Begins a staged write of one entry's files, to be made durable together.
@@ -256,7 +261,12 @@ impl<'lock> LocalDbWriter<'lock> {
             RecordKind::Desc => Limit::Desc,
             RecordKind::Files => Limit::Files,
         };
-        let text = fs_util::read_capped_utf8(&path, limit, self.limits.get(limit))?;
+        let text = fs_util::read_capped_utf8_in(
+            &self.entry_path(entry),
+            name,
+            limit,
+            self.limits.get(limit),
+        )?;
         Record::parse(kind, &text).map_err(|source| Error::Record { path, source })
     }
 
@@ -312,7 +322,12 @@ impl<'lock> LocalDbWriter<'lock> {
             PackageInstallReason::Explicit => {
                 record.remove("REASON");
             }
-            other => record.set("REASON", vec![other.to_string()]),
+            other => {
+                record.set("REASON", vec![other.to_string()]).map_err(|source| Error::Record {
+                    path: self.entry_path(entry).join(file_name(RecordKind::Desc)),
+                    source,
+                })?
+            }
         }
         self.write_record(entry, &record)
     }
@@ -415,7 +430,7 @@ impl EntryWrite {
 
         // `mode` on the open above is masked by the caller's umask. So it is set explicitly
         // too, for the same reason `atomic_write` does it.
-        if let Err(error) = set_mode(&temp, FILE_MODE) {
+        if let Err(error) = set_file_mode(&file, &temp) {
             drop(file);
             let _ = std::fs::remove_file(&temp);
             return Err(error);
@@ -447,6 +462,10 @@ impl EntryWrite {
             // error path. This uses `get` rather than `[]` because the lint wall forbids
             // indexing.
             let Some(entry) = self.staged.get(index) else { continue };
+            if let Err(error) = ensure_unreplaced(&entry.file, &entry.temp) {
+                self.discard();
+                return Err(error);
+            }
             if let Err(source) = std::fs::rename(&entry.temp, &entry.destination) {
                 let error = Error::io(&entry.destination, IoAction::Rename, source);
                 self.discard();
@@ -530,30 +549,91 @@ const fn file_name(kind: RecordKind) -> &'static str {
 }
 
 /// Creates a directory and its parents, then fixes its mode.
+///
+/// A symbolic link at `path` is refused, not followed: `set_dir_mode` opens it `O_NOFOLLOW`.
 fn create_dir(path: &Path) -> Result<()> {
     if fs_util::is_real_directory(path)? {
         return Ok(());
     }
     std::fs::create_dir_all(path).map_err(|source| Error::io(path, IoAction::CreateDir, source))?;
-    set_mode(path, DIR_MODE)
+    set_dir_mode(path)
 }
 
-/// Sets a file to the standard mode, for a caller outside this module.
-pub(crate) fn set_file_mode(path: &Path) -> Result<()> {
-    set_mode(path, FILE_MODE)
-}
-
-/// Sets a path's permission bits explicitly, rather than relying on the process umask.
-fn set_mode(path: &Path, mode: u32) -> Result<()> {
+/// Sets an open file to [`FILE_MODE`] through its descriptor (`fchmod`).
+///
+/// `path` names the file in an error. It is never used to reach the file, because a path can
+/// name a symbolic link planted since the file was opened.
+pub(crate) fn set_file_mode(file: &File, path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        file.set_permissions(std::fs::Permissions::from_mode(FILE_MODE))
             .map_err(|source| Error::io(path, IoAction::Metadata, source))?;
     }
     #[cfg(not(unix))]
     {
-        let _ = (path, mode);
+        let _ = (file, path);
+    }
+    Ok(())
+}
+
+/// Sets a directory to [`DIR_MODE`] through a descriptor opened `O_DIRECTORY | O_NOFOLLOW`.
+///
+/// Something else can replace the directory between its creation and this call. A symbolic
+/// link is refused by the open (`ELOOP`), so no mode lands on its target. A directory put there
+/// by someone else gets the mode, which changes nothing outside the directory they could
+/// already write into.
+fn set_dir_mode(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let directory = File::options()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|source| Error::io(path, IoAction::Open, source))?;
+        directory
+            .set_permissions(std::fs::Permissions::from_mode(DIR_MODE))
+            .map_err(|source| Error::io(path, IoAction::Metadata, source))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+/// Refuses to rename `temp` unless it still names the file this process wrote through `file`.
+///
+/// Anyone who can write into the directory can unlink the temporary and put a file or a
+/// symbolic link of their own at its path, at any point while it is being written. `rename`
+/// works on the name, so it would move theirs over the destination: content nobody verified,
+/// or a link the next reader of the destination follows. The descriptor still holds the file
+/// this process wrote. Its device and inode must match what `temp` names now.
+///
+/// This leaves a window between the comparison and the `rename`, which no call on a name can
+/// close. It catches a replacement made while the file was written, which is the long window.
+///
+/// # Errors
+///
+/// - [`Error::TemporaryReplaced`] if `temp` names another file, or nothing.
+/// - [`Error::Io`] if the descriptor cannot be stat'ed.
+pub(crate) fn ensure_unreplaced(file: &File, temp: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let written =
+            file.metadata().map_err(|source| Error::io(temp, IoAction::Metadata, source))?;
+        let named = std::fs::symlink_metadata(temp).ok();
+        let same =
+            named.is_some_and(|named| named.dev() == written.dev() && named.ino() == written.ino());
+        if !same {
+            return Err(Error::TemporaryReplaced { path: temp.to_path_buf() });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, temp);
     }
     Ok(())
 }
@@ -580,28 +660,29 @@ fn atomic_write_at(path: &Path, contents: &[u8], modified: Option<SystemTime>) -
     let directory = path.parent().unwrap_or(Path::new("."));
     let temp = temp_path(path);
 
+    let mut file = create_temp(&temp)?;
+
+    // A failed write must not leave the temporary file behind for some other code path to
+    // rename later. So each failure cleans up before returning.
+    if let Err(error) = file
+        .write_all(contents)
+        .and_then(|()| modified.map_or(Ok(()), |time| file.set_modified(time)))
+        .and_then(|()| file.sync_all())
+        .map_err(|source| Error::io(&temp, IoAction::Write, source))
     {
-        let mut file = create_temp(&temp)?;
-
-        // A failed write must not leave the temporary file behind for some other code path to
-        // rename later. So each failure cleans up before returning.
-        if let Err(error) = file
-            .write_all(contents)
-            .and_then(|()| modified.map_or(Ok(()), |time| file.set_modified(time)))
-            .and_then(|()| file.sync_all())
-            .map_err(|source| Error::io(&temp, IoAction::Write, source))
-        {
-            drop(file);
-            let _ = std::fs::remove_file(&temp);
-            return Err(error);
-        }
-    }
-
-    // `mode` on the open above is masked by the caller's umask, so it is also set explicitly.
-    if let Err(error) = set_mode(&temp, FILE_MODE) {
+        drop(file);
         let _ = std::fs::remove_file(&temp);
         return Err(error);
     }
+
+    // `mode` on the open above is masked by the caller's umask, so it is also set explicitly.
+    // The descriptor stays open through the identity check, which needs it.
+    if let Err(error) = set_file_mode(&file, &temp).and_then(|()| ensure_unreplaced(&file, &temp)) {
+        drop(file);
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    drop(file);
 
     if let Err(source) = std::fs::rename(&temp, path) {
         let _ = std::fs::remove_file(&temp);
@@ -1148,5 +1229,56 @@ mod tests {
             DbLock::acquire(harness.dbpath()).is_err(),
             "the database must stay locked while a writer exists"
         );
+    }
+
+    /// A staged member's temporary swapped for a symbolic link is refused at commit. Its mode
+    /// was set through the descriptor at staging, so it never reached the link's target.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_temporary_swapped_for_a_symlink_is_neither_followed_nor_installed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let harness = Harness::new();
+        let lock = harness.lock();
+        let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
+        let name = entry("foo-1.0.0-1");
+        writer.create_entry(&name).unwrap();
+
+        let victim = harness.dbpath().join("secret");
+        std::fs::write(&victim, b"private").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut staged = writer.entry_write(&name);
+        staged.raw("install", b"post_install() { :; }", None).unwrap();
+        let temp = temp_path(&writer.entry_path(&name).join("install"));
+        std::fs::remove_file(&temp).unwrap();
+        std::os::unix::fs::symlink(&victim, &temp).unwrap();
+
+        let err = staged.commit().unwrap_err();
+        assert!(matches!(err, Error::TemporaryReplaced { .. }), "got {err:?}");
+        let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the mode change followed the planted symlink");
+        assert!(!writer.entry_path(&name).join("install").exists());
+    }
+
+    /// `<dbpath>/local` as a symbolic link is refused. Following it would give the link's target
+    /// the database's `0755`, and write the database there.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_local_directory_is_refused_and_its_target_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let harness = Harness::new();
+        let target = harness.dbpath().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&target, harness.dbpath().join(LOCAL_DIR)).unwrap();
+
+        let lock = harness.lock();
+        let err = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap_err();
+        assert!(matches!(err, Error::Io { action: IoAction::Open, .. }), "got {err:?}");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "the mode change followed the symlinked local directory");
+        assert!(!target.join(ALPM_DB_VERSION_FILE).exists());
     }
 }

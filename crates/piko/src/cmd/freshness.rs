@@ -84,6 +84,12 @@ pub fn render_note(file: &str, note: &FreshnessNote, offset: piko_txn::LocalOffs
         FreshnessNote::FromTheFuture { publication, ahead } => {
             future(file, *publication, *ahead, offset)
         }
+        FreshnessNote::FutureBaselineIgnored { installed, ahead } => format!(
+            "Warning: The installed {file} is dated {} in the future ({}) and is not signed. \
+             Piko did not use that date to refuse an older {file}. Check the system clock.",
+            human_age(*ahead),
+            describe(Some(*installed), offset)
+        ),
         // `FreshnessNote` is non-exhaustive. A kind this build does not know is still worth a
         // line, rather than silence.
         other => format!("Note: {file}: {other:?}"),
@@ -241,5 +247,19 @@ mod tests {
         assert!(line.contains("16 days old"), "{line}");
         assert!(line.contains("3 other servers"), "{line}");
         assert!(line.contains("The limit is 14 days"), "{line}");
+    }
+
+    /// An ignored baseline changes what the rollback check did, so it is a warning, and it
+    /// points at the clock.
+    #[test]
+    fn an_ignored_future_baseline_warns_and_names_the_clock() {
+        let note = FreshnessNote::FutureBaselineIgnored {
+            installed: Publication { at: 40 * DAY, tier: Tier::Unauthenticated },
+            ahead: Duration::from_secs(30 * DAY),
+        };
+        let line = render_note("core.db", &note, utc());
+        assert!(line.starts_with("Warning: "), "{line}");
+        assert!(line.contains("30 days in the future"), "{line}");
+        assert!(line.contains("Check the system clock"), "{line}");
     }
 }

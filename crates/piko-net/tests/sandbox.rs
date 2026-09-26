@@ -9,15 +9,16 @@
 //! when asked, exactly as `piko`'s own `main` does. It also becomes a probe: a process that
 //! confines itself and then tries what the confinement forbids.
 //!
-//! These test the sandbox's security claims: the helper writes no file, starts no program and
-//! no process, and reaches only the ports it was given, while it can still read files and start
-//! the thread its resolver uses. They also test that a transfer through the helper arrives byte
+//! These test the sandbox's security claims: the helper writes no file, changes no file's
+//! metadata, reads only what a request needs, starts no program and no process, and reaches only
+//! the ports it was given, while it can still read the resolver's configuration and start the
+//! thread its resolver uses. They also test that a transfer through the helper arrives byte
 //! for byte, and that a cancellation stops a helper that is waiting on a silent server.
 //!
 //! Only one test needs root: a download user is used only by root. It reports itself skipped
 //! otherwise. To run it as root without building as root, build with
 //! `cargo test -p piko-net --test sandbox --no-run`. That command prints the test binary's path.
-//! Run that path under `sudo`, with the argument `download_user`.
+//! Run that path under `sudo`, with the argument `as_root`.
 //!
 //! It switches to `alpm`, or to the user named by `PIKO_TEST_DOWNLOAD_USER`.
 
@@ -38,7 +39,7 @@ use std::{
 };
 
 use alpm_types::PackageFileName;
-use piko_net::{Cancel, Error, Refresher, Sandbox, refresh::Limits};
+use piko_net::{Cancel, Error, PackageFetch, Refresher, Sandbox, refresh::Limits};
 use piko_sig::Policy;
 
 mod connection;
@@ -60,15 +61,19 @@ fn main() -> ExitCode {
     let tests: &[(&str, fn())] = &[
         ("a_package_arrives_byte_for_byte_through_the_helper", arrives_byte_for_byte),
         ("a_failing_server_falls_through_to_the_next", failing_server_falls_through),
+        ("the_helper_refuses_an_inherited_descriptor", refuses_an_inherited_descriptor),
         ("a_missing_signature_is_absent_through_the_helper", missing_signature_is_absent),
         ("a_cancellation_stops_a_helper_waiting_on_a_silent_server", cancellation_stops_helper),
         ("the_helper_cannot_write_a_file", cannot_write),
+        ("the_helper_cannot_read_outside_what_a_request_needs", cannot_read_elsewhere),
+        ("the_helper_cannot_change_a_files_metadata", cannot_change_metadata),
         ("the_helper_cannot_start_a_program", cannot_start_a_program),
         ("the_system_call_filter_alone_refuses_a_new_process", filter_alone_refuses_a_process),
         ("the_helper_cannot_connect_to_a_port_it_was_not_given", cannot_connect_elsewhere),
         ("the_helper_can_connect_to_a_port_it_was_given", can_connect_to_its_port),
         ("the_helper_can_read_a_file_and_start_a_thread", can_read_and_start_a_thread),
         ("as_root_the_helper_runs_as_the_download_user", runs_as_the_download_user),
+        ("as_root_without_a_download_user_the_helper_runs_as_nobody", runs_as_nobody),
     ];
     let filter = arguments.iter().skip(1).find(|argument| !argument.starts_with('-'));
     let mut failed = 0_usize;
@@ -110,6 +115,19 @@ fn probe(arguments: &[String]) -> ExitCode {
     };
     match action.as_str() {
         "write" => refused(std::fs::write(Path::new(target).join("escaped"), b"x")),
+        "read" => refused(std::fs::read(target).map(drop)),
+        "metadata" => {
+            let allowed: Vec<&str> = change_metadata(Path::new(target))
+                .into_iter()
+                .filter_map(|(change, result)| result.is_ok().then_some(change))
+                .collect();
+            if allowed.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("allowed: {allowed:?}");
+                ExitCode::FAILURE
+            }
+        }
         "exec" | "spawn-without-landlock" => refused(Command::new(target).status().map(drop)),
         "connect" => refused(TcpStream::connect(("127.0.0.1", port.unwrap_or(1))).map(drop)),
         "connect-allowed" => match TcpStream::connect(("127.0.0.1", port.unwrap_or(1))) {
@@ -154,6 +172,61 @@ fn cannot_write() {
     assert!(!dir.path().join("escaped").exists());
 }
 
+/// Changes `path`'s mode, owner, extended attributes and times, and says how each went.
+///
+/// Landlock covers none of these, so only the system call filter can refuse them.
+fn change_metadata(path: &Path) -> Vec<(&'static str, std::io::Result<()>)> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    vec![
+        ("chmod", std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o4755))),
+        ("chown", std::os::unix::fs::chown(path, None, None)),
+        (
+            "setxattr",
+            rustix::fs::setxattr(path, "user.piko", b"x", rustix::fs::XattrFlags::empty())
+                .map_err(Into::into),
+        ),
+        (
+            "utimensat",
+            std::fs::File::open(path).and_then(|file| file.set_modified(std::time::UNIX_EPOCH)),
+        ),
+    ]
+}
+
+fn cannot_change_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let (target, control) = (dir.path().join("target"), dir.path().join("control"));
+    for path in [&target, &control] {
+        std::fs::write(path, b"x").unwrap();
+    }
+    // Every change works outside the sandbox, so a refusal inside it is the filter's.
+    for (change, result) in change_metadata(&control) {
+        assert!(result.is_ok(), "{change} fails even unconfined: {result:?}");
+    }
+
+    let before = std::fs::metadata(&target).unwrap();
+    run_probe("metadata", target.to_str().unwrap());
+    let after = std::fs::metadata(&target).unwrap();
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&before.permissions()),
+        std::os::unix::fs::PermissionsExt::mode(&after.permissions())
+    );
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+}
+
+/// A file the helper's user can read is still out of reach when no request needs it: one in a
+/// temporary directory, and `/etc/passwd`, which every user can read.
+fn cannot_read_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("secret");
+    std::fs::write(&secret, b"a secret").unwrap();
+    std::fs::read(&secret).unwrap();
+    run_probe("read", secret.to_str().unwrap());
+
+    std::fs::read("/etc/passwd").unwrap();
+    run_probe("read", "/etc/passwd");
+}
+
 fn cannot_start_a_program() {
     run_probe("exec", "/usr/bin/true");
 }
@@ -172,8 +245,14 @@ fn can_connect_to_its_port() {
     run_probe("connect-allowed", &listener.local_addr().unwrap().port().to_string());
 }
 
+/// `/etc/hosts` is read by every name lookup, and `ca-certificates.crt` is Arch's certificate
+/// store, a link into `/etc/ca-certificates`.
 fn can_read_and_start_a_thread() {
-    run_probe("read-and-thread", "/etc/os-release");
+    run_probe("read-and-thread", "/etc/hosts");
+    let store = "/etc/ssl/certs/ca-certificates.crt";
+    if Path::new(store).exists() {
+        run_probe("read-and-thread", store);
+    }
 }
 
 /// As `package.rs`'s `serve`: one canned response per connection.
@@ -219,7 +298,9 @@ fn fetch(
     cancel: &Cancel,
 ) -> piko_net::Result<std::path::PathBuf> {
     let file_name = PackageFileName::from_str(NAME).unwrap();
-    refresher.fetch_package(cache, &file_name, "core", servers, policy, cancel)
+    let wanted =
+        PackageFetch { file_name: &file_name, repo_name: "core", servers, policy, size: None };
+    refresher.fetch_package(cache, wanted, cancel)
 }
 
 fn unsigned() -> Policy {
@@ -236,6 +317,25 @@ fn arrives_byte_for_byte() {
 
     assert_eq!(std::fs::read(path).unwrap(), body);
     drop(server.join());
+}
+
+/// A descriptor the parent inherited without `O_CLOEXEC` reaches the helper, and Landlock does
+/// not look at a file already open. The helper refuses to run, names it, and no server is
+/// tried: every one would meet the same helper.
+fn refuses_an_inherited_descriptor() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = std::fs::File::create(dir.path().join("inherited")).unwrap();
+    // `dup` clears `FD_CLOEXEC`, the way a descriptor from whatever started piko arrives.
+    let inherited = rustix::io::dup(&file).unwrap();
+    let (url, _server) = serve(vec![ok_response(b"never sent")]);
+
+    let error = fetch(&sandboxed(), dir.path(), &[url], unsigned(), &Cancel::new()).unwrap_err();
+    drop(inherited);
+
+    let Error::Sandbox { reason } = &error else { panic!("{error:?}") };
+    assert!(reason.contains("inherited open descriptors"), "{reason}");
+    assert!(reason.contains("inherited)"), "the descriptor is not named: {reason}");
+    assert!(!dir.path().join(NAME).exists());
 }
 
 fn failing_server_falls_through() {
@@ -297,9 +397,24 @@ fn runs_as_the_download_user() {
         return;
     }
     let user = std::env::var("PIKO_TEST_DOWNLOAD_USER").unwrap_or_else(|_| "alpm".to_owned());
+    assert_helper_runs_as(Some(&user), &user);
+}
+
+/// With no `DownloadUser`, a helper started by root still leaves root, and every capability.
+fn runs_as_nobody() {
+    if !rustix::process::geteuid().is_root() {
+        println!("  skipped: needs root");
+        return;
+    }
+    assert_helper_runs_as(None, piko_net::sandbox::FALLBACK_USER);
+}
+
+/// Starts a helper with `download_user`, and asserts it runs as `expected`, with no
+/// supplementary group, no capability, and `no_new_privs`.
+fn assert_helper_runs_as(download_user: Option<&str>, expected: &str) {
     let id = |flag: &str| {
-        let output = Command::new("id").args([flag, &user]).output().unwrap();
-        assert!(output.status.success(), "no user {user}");
+        let output = Command::new("id").args([flag, expected]).output().unwrap();
+        assert!(output.status.success(), "no user {expected}");
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     };
     let (uid, gid) = (id("-u"), id("-g"));
@@ -314,7 +429,7 @@ fn runs_as_the_download_user() {
     });
     let dir = tempfile::tempdir().unwrap();
     let refresher =
-        Refresher::new(Limits::default()).with_sandbox(Sandbox::new(Some(&user), true, true));
+        Refresher::new(Limits::default()).with_sandbox(Sandbox::new(download_user, true, true));
     let cache = dir.path().to_path_buf();
     let fetching = std::thread::spawn(move || {
         fetch(&refresher, &cache, &[url], unsigned(), &Cancel::new()).map(drop)
@@ -336,6 +451,7 @@ fn runs_as_the_download_user() {
     assert_eq!(field("Gid:").split_whitespace().next(), Some(gid.as_str()), "{status}");
     assert_eq!(field("Groups:"), "", "{status}");
     assert_eq!(field("NoNewPrivs:"), "1", "{status}");
+    assert_eq!(field("CapEff:"), "0000000000000000", "{status}");
 }
 
 /// `/proc/<pid>/status` of this process's helper child, once one appears.

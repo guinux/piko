@@ -88,6 +88,24 @@ pub enum Problem {
         /// Why it could not be read.
         reason: String,
     },
+    /// A hook directory could be written by a user other than root and this process's own.
+    /// None of its hooks run: a hook is a command root runs.
+    #[error("not running the hooks in {}: {reason}", path.display())]
+    UntrustedDirectory {
+        /// The directory.
+        path: PathBuf,
+        /// Why it is not trusted.
+        reason: piko_db::fs_util::Distrust,
+    },
+    /// A `.hook` file could be changed by a user other than root and this process's own. It
+    /// does not run.
+    #[error("not running the hook {}: {reason}", path.display())]
+    UntrustedHook {
+        /// The file.
+        path: PathBuf,
+        /// Why it is not trusted.
+        reason: piko_db::fs_util::Distrust,
+    },
     /// A `.hook` file did not parse.
     #[error("{0}")]
     Invalid(#[from] ParseError),
@@ -176,6 +194,21 @@ fn stem(name: &str) -> &str {
 /// Returns `Err(None)` when the directory is simply not there. That is ordinary:
 /// `/etc/pacman.d/hooks` does not exist until someone puts a hook in it.
 fn read_directory(directory: &Path) -> std::result::Result<Vec<String>, Option<Problem>> {
+    match piko_db::fs_util::ensure_trusted_directory(directory) {
+        Ok(()) => {}
+        Err(piko_db::Error::Untrusted { path, distrust }) => {
+            return Err(Some(Problem::UntrustedDirectory { path, reason: distrust }));
+        }
+        Err(piko_db::Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(None);
+        }
+        Err(error) => {
+            return Err(Some(Problem::UnreadableDirectory {
+                path: directory.to_path_buf(),
+                reason: error.to_string(),
+            }));
+        }
+    }
     let reader = match std::fs::read_dir(directory) {
         Ok(reader) => reader,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(None),
@@ -218,6 +251,9 @@ fn read_directory(directory: &Path) -> std::result::Result<Vec<String>, Option<P
 ///   resolves a final symlink. It is the same door repository archives use, instead of the
 ///   `O_NOFOLLOW` one the local database uses. A hook directory is host configuration named by
 ///   `pacman.conf`, not a package-controlled directory of entries.
+/// - The door is the trusted variant: a hook file another user could change, or one in a
+///   directory another user could write, is [`Problem::UntrustedHook`] and does not run. A
+///   hook is a command root runs.
 /// - `/dev/null` is a character device, which that door still refuses. Rather than loosen the
 ///   check, a non-regular file is treated as **empty**. That parses into an inert masking
 ///   hook — exactly what reading `/dev/null` would have produced. It also means a FIFO planted
@@ -235,13 +271,16 @@ fn read_hook(path: &Path, name: &str) -> std::result::Result<Option<Hook>, Probl
         }
     }
 
-    let text = match piko_db::fs_util::read_capped_utf8_following(
+    let text = match piko_db::fs_util::read_trusted_utf8_following(
         path,
         piko_db::Limit::Hook,
         max_hook_bytes(),
     ) {
         Ok(text) => text,
         Err(piko_db::Error::NotARegularFile { .. }) => String::new(),
+        Err(piko_db::Error::Untrusted { path, distrust }) => {
+            return Err(Problem::UntrustedHook { path, reason: distrust });
+        }
         Err(error) => {
             return Err(Problem::UnreadableHook {
                 path: path.to_path_buf(),
@@ -487,6 +526,50 @@ Exec = /bin/true
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(hooks.all().len(), 1);
         assert!(!hooks.all().first().unwrap().is_active());
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// A hook file another user could change does not run, and does not take the name: the
+    /// lower-priority hook of that name runs instead.
+    #[test]
+    fn a_hook_file_others_can_write_does_not_run() {
+        let system = tempfile::tempdir().unwrap();
+        let custom = tempfile::tempdir().unwrap();
+        write(system.path(), "same.hook", &BODY.replace("/bin/true", "/bin/system"));
+        write(custom.path(), "same.hook", &BODY.replace("/bin/true", "/bin/planted"));
+        chmod(&custom.path().join("same.hook"), 0o666);
+
+        let (hooks, problems) =
+            Hooks::collect(&[system.path().to_path_buf(), custom.path().to_path_buf()]);
+        assert!(
+            matches!(problems.as_slice(), [Problem::UntrustedHook { path, .. }]
+                if path == &custom.path().join("same.hook")),
+            "{problems:?}"
+        );
+        assert_eq!(
+            hooks.all().first().unwrap().exec.first().unwrap(),
+            std::ffi::OsStr::new("/bin/system")
+        );
+    }
+
+    /// No hook in a directory others can write runs, sticky or not.
+    #[test]
+    fn no_hook_in_a_directory_others_can_write_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.hook", BODY);
+        chmod(dir.path(), 0o1777);
+
+        let (hooks, problems) = Hooks::collect(&[dir.path().to_path_buf()]);
+        chmod(dir.path(), 0o700);
+        assert!(hooks.all().is_empty());
+        assert!(
+            matches!(problems.as_slice(), [Problem::UntrustedDirectory { .. }]),
+            "{problems:?}"
+        );
     }
 
     /// A missing directory is ordinary — `/etc/pacman.d/hooks` does not exist by default.

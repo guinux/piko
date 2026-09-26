@@ -251,6 +251,8 @@ pub fn check_duplicates(targets: &[FileTarget]) -> Result<()> {
 /// # Errors
 ///
 /// [`Error::InvalidPackageUrl`] if the URL has no usable last component.
+/// [`Error::UnsupportedPackageCompression`] if that component's suffix declares a compression
+/// piko does not decode.
 /// [`Error::NoWritableCacheDir`] if the download has nowhere to go.
 /// [`Error::Download`] if no server could supply it, or the download was cancelled.
 pub fn fetch_url(
@@ -269,6 +271,12 @@ pub fn fetch_url(
         url: url.to_owned(),
         reason: format!("{last:?} is not a package file name: {error}"),
     })?;
+    // Refused before the download, as `plan::check_compression` refuses a repository package.
+    if let Err(format) = piko_db::compression::from_extension(file_name.compression()) {
+        return Err(Error::UnsupportedPackageCompression {
+            packages: vec![(file_name.to_string(), format)],
+        });
+    }
 
     if let Ok(location) = cache.locate(&file_name)
         && (!policy.check || piko_sig::signature_path(location.path()).is_file())
@@ -281,10 +289,14 @@ pub fn fetch_url(
         .with_sandbox(sandbox)
         .fetch_package_with_progress(
             download_dir.path(),
-            &file_name,
-            url,
-            std::slice::from_ref(&server.to_owned()),
-            policy,
+            // No repository describes a URL target, so `max_package_bytes` alone bounds it.
+            piko_net::PackageFetch {
+                file_name: &file_name,
+                repo_name: url,
+                servers: std::slice::from_ref(&server.to_owned()),
+                policy,
+                size: None,
+            },
             cancel,
             progress,
         )
@@ -444,6 +456,26 @@ mod tests {
                     .unwrap_err();
             assert!(matches!(error, Error::InvalidPackageUrl { .. }), "{url}: got {error:?}");
         }
+    }
+
+    /// A URL naming an xz package is refused before the download, even when a copy is
+    /// already cached: the bytes would be refused after it anyway.
+    #[test]
+    fn a_url_naming_an_xz_package_is_refused_before_any_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "foo-1.0.0-1-x86_64.pkg.tar.xz";
+        std::fs::write(dir.path().join(name), b"cached").unwrap();
+        let cache = CacheDirSource::new([dir.path().to_path_buf()]).unwrap();
+        let cancel = piko_net::Cancel::new();
+
+        let url = format!("https://host.invalid/{name}");
+        let error =
+            fetch_url(&url, &cache, policy(), piko_net::Sandbox::disabled(), &cancel, &|_| {})
+                .unwrap_err();
+        let Error::UnsupportedPackageCompression { packages } = &error else {
+            panic!("got {error:?}");
+        };
+        assert_eq!(packages, &[(name.to_owned(), piko_db::compression::Unsupported::Xz)]);
     }
 
     /// `alpm_fetch_pkgurl`'s cache rule: a cached copy is used, but only if the signature the

@@ -23,7 +23,7 @@ use std::{
 };
 
 use alpm_types::PackageFileName;
-use piko_net::{Cancel, Refresher};
+use piko_net::{Cancel, PackageFetch, Refresher};
 use piko_sig::Policy;
 
 mod connection;
@@ -81,13 +81,30 @@ fn unsigned() -> Policy {
     Policy::for_package(piko_db::config::SigLevel::default())
 }
 
+/// A fetch of [`NAME`] from `servers`, declaring `size` bytes.
+fn wanted<'a>(
+    file_name: &'a PackageFileName,
+    servers: &'a [String],
+    policy: Policy,
+    size: Option<u64>,
+) -> PackageFetch<'a> {
+    PackageFetch { file_name, repo_name: "core", servers, policy, size }
+}
+
 fn fetch(cache: &Path, url: &str, policy: Policy) -> piko_net::Result<std::path::PathBuf> {
+    fetch_declared(cache, url, policy, None)
+}
+
+fn fetch_declared(
+    cache: &Path,
+    url: &str,
+    policy: Policy,
+    size: Option<u64>,
+) -> piko_net::Result<std::path::PathBuf> {
+    let (file_name, servers) = (file_name(), [url.to_owned()]);
     Refresher::default().fetch_package(
         cache,
-        &file_name(),
-        "core",
-        &[url.to_owned()],
-        policy,
+        wanted(&file_name, &servers, policy, size),
         &Cancel::new(),
     )
 }
@@ -102,6 +119,42 @@ fn a_missing_package_downloads_and_lands_in_the_cache() {
     assert_eq!(path, dir.path().join(NAME));
     assert_eq!(std::fs::read(&path).unwrap(), b"a real package");
     drop(server.join());
+}
+
+/// A plain `http` mirror off this machine is refused before any connection, and the next
+/// mirror serves the package. With no other mirror, the refusal is what the error reports.
+#[test]
+fn a_plain_http_mirror_is_refused_and_the_next_one_serves() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, server) = serve(vec![ok_response(b"a real package")]);
+    let (file_name, servers) =
+        (file_name(), ["http://mirror.example.invalid/core".to_owned(), url]);
+    let path = Refresher::default()
+        .fetch_package(dir.path(), wanted(&file_name, &servers, unsigned(), None), &Cancel::new())
+        .unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"a real package");
+    drop(server.join());
+
+    let error = fetch(dir.path(), "http://mirror.example.invalid/core", unsigned()).unwrap_err();
+    assert!(error.to_string().contains("https only"), "{error}");
+}
+
+/// An `http` URL on the loopback follows no redirect: one could lead off the machine.
+#[test]
+fn a_loopback_http_mirror_follows_no_redirect() {
+    let dir = tempfile::tempdir().unwrap();
+    let (target, target_server) = serve(vec![ok_response(b"a real package")]);
+    let redirect =
+        format!("HTTP/1.1 302 Found\r\nLocation: {target}/{NAME}\r\nContent-Length: 0\r\n\r\n");
+    let (url, server) = serve(vec![redirect.into_bytes()]);
+
+    let error = fetch(dir.path(), &url, unsigned()).unwrap_err();
+    assert!(error.to_string().contains("302"), "{error}");
+    assert!(!dir.path().join(NAME).exists());
+    drop(server.join());
+    // Unblock the target's accept, and check it was never asked.
+    drop(std::net::TcpStream::connect(target.trim_start_matches("http://")));
+    assert!(target_server.join().unwrap().iter().all(|request| request.is_empty()));
 }
 
 /// When the policy checks signatures, the package's own detached `.sig` is fetched alongside
@@ -148,8 +201,9 @@ fn a_missing_signature_is_not_an_error() {
 #[test]
 fn no_servers_is_refused_before_any_io() {
     let dir = tempfile::tempdir().unwrap();
+    let file_name = file_name();
     let error = Refresher::default()
-        .fetch_package(dir.path(), &file_name(), "core", &[], unsigned(), &Cancel::new())
+        .fetch_package(dir.path(), wanted(&file_name, &[], unsigned(), None), &Cancel::new())
         .unwrap_err();
     assert!(matches!(error, piko_net::Error::NoServers { .. }), "{error:?}");
 }
@@ -174,11 +228,45 @@ fn an_oversized_body_is_refused() {
     let (url, server) = serve(vec![ok_response(&big)]);
 
     let limits = piko_net::refresh::Limits { max_package_bytes: 100, ..Default::default() };
+    let (file_name, servers) = (file_name(), [url]);
+    // A declared size above the ceiling does not lift it.
     let error = Refresher::new(limits)
-        .fetch_package(dir.path(), &file_name(), "core", &[url], unsigned(), &Cancel::new())
+        .fetch_package(
+            dir.path(),
+            wanted(&file_name, &servers, unsigned(), Some(1000)),
+            &Cancel::new(),
+        )
         .unwrap_err();
     assert!(matches!(error, piko_net::Error::AllServersFailed { .. }), "{error:?}");
+    assert!(error.to_string().contains("100 byte download limit"), "{error}");
     assert!(!dir.path().join(NAME).exists(), "an oversized download left a file behind");
+    drop(server.join());
+}
+
+/// A package is bounded by the `%CSIZE%` its repository declares, well below the ceiling. A
+/// mirror that sends more is refused while it sends, and nothing reaches the cache.
+#[test]
+fn a_body_past_its_declared_size_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, server) = serve(vec![ok_response(&[0_u8; 200])]);
+
+    let error = fetch_declared(dir.path(), &url, unsigned(), Some(100)).unwrap_err();
+    assert!(matches!(error, piko_net::Error::AllServersFailed { .. }), "{error:?}");
+    assert!(error.to_string().contains("larger than the 100 bytes"), "{error}");
+    assert!(!dir.path().join(NAME).exists(), "a download past its size left a file behind");
+    drop(server.join());
+}
+
+/// A body of exactly its declared size is the ordinary case, and downloads.
+#[test]
+fn a_body_of_exactly_its_declared_size_downloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = b"a real package";
+    let (url, server) = serve(vec![ok_response(body)]);
+
+    let size = u64::try_from(body.len()).unwrap();
+    let path = fetch_declared(dir.path(), &url, unsigned(), Some(size)).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), body);
     drop(server.join());
 }
 
@@ -196,8 +284,9 @@ fn a_cancelled_download_leaves_nothing_behind() {
 
     let cancel = Cancel::new();
     cancel.request();
+    let (file_name, servers) = (file_name(), [url]);
     let error = Refresher::default()
-        .fetch_package(dir.path(), &file_name(), "core", &[url], unsigned(), &cancel)
+        .fetch_package(dir.path(), wanted(&file_name, &servers, unsigned(), None), &cancel)
         .unwrap_err();
     assert!(matches!(error, piko_net::Error::Cancelled), "{error:?}");
     assert!(error.to_string().contains("cancelled"), "{error}");

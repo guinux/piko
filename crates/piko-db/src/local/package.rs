@@ -285,7 +285,7 @@ impl LocalPackage {
     /// nothing to parse, so caching would only save a `stat` call.
     #[must_use]
     pub fn has_install_scriptlet(&self) -> bool {
-        fs_util::exists_no_follow(&fs_util::join(&self.dir, INSTALL_FILE))
+        fs_util::exists_in(&self.dir, INSTALL_FILE)
     }
 
     /// The paths owned by this package, relative to the installation root.
@@ -412,7 +412,12 @@ impl LocalPackage {
 
     fn read_eager(&self) -> Result<LoadedEager> {
         let path = fs_util::join(&self.dir, DESC_FILE);
-        let text = fs_util::read_capped_utf8(&path, Limit::Desc, self.limits.get(Limit::Desc))?;
+        let text = fs_util::read_capped_utf8_in(
+            &self.dir,
+            DESC_FILE,
+            Limit::Desc,
+            self.limits.get(Limit::Desc),
+        )?;
 
         let (text, unknown_sections) = match self.policy {
             UnknownSectionPolicy::Reject => (text, Vec::new()),
@@ -427,26 +432,37 @@ impl LocalPackage {
         // fallback for a malformed file. A malformed value is still an error.
         let mut install_reason = PackageInstallReason::Explicit;
         let mut installed_size = 0;
-        let relations = crate::eager::scan(&text, crate::eager::Depends::Eager, |keyword, line| {
-            match keyword.as_bytes() {
-                b"REASON" => {
-                    install_reason = match crate::eager::scalar::<u8>(line, "REASON")? {
-                        0 => PackageInstallReason::Explicit,
-                        1 => PackageInstallReason::Depend,
-                        _ => {
-                            return Err(crate::eager::DescFieldError::InvalidSize {
-                                section: "REASON",
-                                value: line.to_owned(),
-                            });
-                        }
-                    };
+        // No relation budget. A local `desc` is read uncompressed and capped by
+        // `Limits::desc_bytes`, so its text bounds what its parse builds. A repository archive
+        // needs the budget because compression breaks that ratio.
+        let relations =
+            crate::eager::scan(&text, crate::eager::Depends::Eager, None, |keyword, line| {
+                match keyword.as_bytes() {
+                    b"REASON" => {
+                        install_reason = match crate::eager::scalar::<u8>(line, "REASON")? {
+                            0 => PackageInstallReason::Explicit,
+                            1 => PackageInstallReason::Depend,
+                            _ => {
+                                return Err(crate::eager::DescFieldError::InvalidSize {
+                                    section: "REASON",
+                                    value: line.to_owned(),
+                                });
+                            }
+                        };
+                    }
+                    b"SIZE" => installed_size = crate::eager::scalar(line, "SIZE")?,
+                    _ => {}
                 }
-                b"SIZE" => installed_size = crate::eager::scalar(line, "SIZE")?,
-                _ => {}
-            }
-            Ok(())
-        })
-        .map_err(|source| Error::DescFields { path: path.clone(), source: Box::new(source) })?;
+                Ok(())
+            })
+            .map_err(|error| match error {
+                crate::eager::ScanError::Field(source) => {
+                    Error::DescFields { path: path.clone(), source: Box::new(source) }
+                }
+                crate::eager::ScanError::Budget { max } => {
+                    Error::TooManyRelations { path: path.clone(), max }
+                }
+            })?;
 
         Ok(LoadedEager {
             text: text.into_boxed_str(),
@@ -461,7 +477,12 @@ impl LocalPackage {
         use alpm_common::MetadataFile as _;
 
         let path = fs_util::join(&self.dir, FILES_FILE);
-        let text = fs_util::read_capped_utf8(&path, Limit::Files, self.limits.get(Limit::Files))?;
+        let text = fs_util::read_capped_utf8_in(
+            &self.dir,
+            FILES_FILE,
+            Limit::Files,
+            self.limits.get(Limit::Files),
+        )?;
 
         DbFiles::from_str_with_schema(&text, None).map_err(|source| Error::Files { path, source })
     }
@@ -475,12 +496,13 @@ impl LocalPackage {
         use std::str::FromStr as _;
 
         let path = fs_util::join(&self.dir, MTREE_FILE);
-        if !fs_util::exists_no_follow(&path) {
+        if !fs_util::exists_in(&self.dir, MTREE_FILE) {
             return Ok(None);
         }
 
-        let raw = fs_util::read_capped(
-            &path,
+        let raw = fs_util::read_capped_in(
+            &self.dir,
+            MTREE_FILE,
             Limit::MtreeCompressed,
             self.limits.get(Limit::MtreeCompressed),
         )?;

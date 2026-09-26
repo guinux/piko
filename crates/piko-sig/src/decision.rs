@@ -57,6 +57,15 @@ pub enum Status {
     /// apart here because the remedy differs: a revoked key needs a new key, while an invalid
     /// signature suggests a corrupt or tampered file.
     KeyRevoked,
+    /// The signature verifies, but over a digest too weak to bind it to the file: MD5, SHA-1,
+    /// RIPEMD-160, or another GnuPG names as such, or none at all.
+    ///
+    /// A collision in the digest lets one signature cover two files, so a good status proves
+    /// less than it says. GnuPG accepts a SHA-1 data signature, and libalpm reads no digest.
+    WeakDigest {
+        /// The digest's name, as GnuPG spells it.
+        algorithm: &'static str,
+    },
     /// The signature does not verify.
     Invalid,
 }
@@ -185,6 +194,13 @@ pub enum Rejection {
         /// The key.
         fingerprint: Option<String>,
     },
+    /// The signature is made over a digest too weak to trust. See [`Status::WeakDigest`].
+    WeakDigest {
+        /// The key.
+        fingerprint: Option<String>,
+        /// The digest's name, as GnuPG spells it.
+        algorithm: &'static str,
+    },
     /// The signature does not verify.
     Invalid,
 }
@@ -220,6 +236,11 @@ impl std::fmt::Display for Rejection {
             Self::KeyRevoked { fingerprint } => {
                 write!(f, "the signing key {} has been revoked", key(fingerprint.as_ref()))
             }
+            Self::WeakDigest { fingerprint, algorithm } => write!(
+                f,
+                "the signature from {} uses the weak digest {algorithm}",
+                key(fingerprint.as_ref())
+            ),
             Self::Invalid => f.write_str("the signature is invalid"),
         }
     }
@@ -287,6 +308,9 @@ pub fn decide(signatures: &[SignatureOutcome], policy: Policy) -> Verdict {
             Status::KeyRevoked => {
                 return Verdict::Rejected(Rejection::KeyRevoked { fingerprint });
             }
+            Status::WeakDigest { algorithm } => {
+                return Verdict::Rejected(Rejection::WeakDigest { fingerprint, algorithm });
+            }
             Status::Invalid => return Verdict::Rejected(Rejection::Invalid),
         }
     }
@@ -332,6 +356,24 @@ mod tests {
 
     fn signature(status: Status, trust: Trust) -> SignatureOutcome {
         SignatureOutcome { status, trust, fingerprint: Some("ABC123".to_owned()), created: None }
+    }
+
+    /// A weak digest refuses the file whatever the trust and the policy, and names the digest.
+    #[test]
+    fn a_weak_digest_is_refused_whatever_the_trust() {
+        let sigs = [signature(Status::WeakDigest { algorithm: "SHA1" }, Trust::Full)];
+        let trust_all = Policy { marginal_ok: true, unknown_ok: true, ..REQUIRED_TRUSTED };
+        let optional = Policy { optional: true, ..trust_all };
+        for policy in [REQUIRED_TRUSTED, trust_all, optional] {
+            assert_eq!(
+                decide(&sigs, policy),
+                Verdict::Rejected(Rejection::WeakDigest {
+                    fingerprint: Some("ABC123".to_owned()),
+                    algorithm: "SHA1",
+                })
+            );
+        }
+        assert_eq!(newest_creation(&[made_at(Status::WeakDigest { algorithm: "MD5" }, 9)]), None);
     }
 
     #[test]

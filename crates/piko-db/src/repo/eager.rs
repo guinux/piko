@@ -6,7 +6,7 @@
 
 use alpm_types::{CompressedSize, Group, InstalledSize, PackageRelation, RelationOrSoname};
 
-use crate::eager::{self, DescFieldError};
+use crate::eager::{self, DescFieldError, RelationBudget, ScanError};
 
 /// The `desc` sections parsed for every package at open time.
 ///
@@ -55,15 +55,19 @@ impl EagerFields {
 /// [`crate::desc_compat::filter_unknown_sections`]. So an unrecognised `%KEYWORD%` here is
 /// simply one this module does not read, not one this build does not know.
 ///
+/// `budget` is the archive's, shared by every `desc` it holds.
+///
 /// # Errors
 ///
-/// [`DescFieldError`] if `%CSIZE%` or `%ISIZE%` is absent or malformed, or if any entry of a
-/// relation section fails to parse. The caller drops the package and reports the diagnostic.
-pub(crate) fn parse(text: &str) -> Result<EagerFields, DescFieldError> {
+/// - [`ScanError::Field`] if `%CSIZE%` or `%ISIZE%` is absent or malformed, or if any entry of
+///   a relation section fails to parse. The caller drops the package and reports the
+///   diagnostic.
+/// - [`ScanError::Budget`] if `budget` runs out. The caller fails the open.
+pub(crate) fn parse(text: &str, budget: &mut RelationBudget) -> Result<EagerFields, ScanError> {
     let mut compressed_size = None;
     let mut installed_size = None;
 
-    let relations = eager::scan(text, eager::Depends::Deferred, |keyword, line| {
+    let relations = eager::scan(text, eager::Depends::Deferred, Some(budget), |keyword, line| {
         match keyword.as_bytes() {
             b"CSIZE" => compressed_size = Some(eager::scalar(line, "CSIZE")?),
             b"ISIZE" => installed_size = Some(eager::scalar(line, "ISIZE")?),
@@ -89,6 +93,11 @@ pub(crate) fn parse(text: &str) -> Result<EagerFields, DescFieldError> {
 )]
 mod tests {
     use super::*;
+
+    /// [`super::parse`] with a budget that cannot run out, for the tests about `desc` content.
+    fn parse(text: &str) -> Result<EagerFields, ScanError> {
+        super::parse(text, &mut RelationBudget::new(usize::MAX))
+    }
 
     /// Every real `desc` shape this module reads, in one entry.
     const DESC: &str = "\
@@ -165,7 +174,7 @@ ancientfoo
         let text = DESC.replace("%CSIZE%\n1234\n", "");
         let error = parse(&text).unwrap_err();
         assert!(
-            matches!(error, DescFieldError::MissingSection { section: "CSIZE" }),
+            matches!(error, ScanError::Field(DescFieldError::MissingSection { section: "CSIZE" })),
             "got {error:?}"
         );
     }
@@ -175,7 +184,7 @@ ancientfoo
         let text = DESC.replace("1234", "twelve");
         let error = parse(&text).unwrap_err();
         assert!(
-            matches!(error, DescFieldError::InvalidSize { section: "CSIZE", .. }),
+            matches!(error, ScanError::Field(DescFieldError::InvalidSize { section: "CSIZE", .. })),
             "got {error:?}"
         );
     }
@@ -185,7 +194,10 @@ ancientfoo
         let text = DESC.replace("%CONFLICTS%\noldfoo", "%CONFLICTS%\noldfoo>=");
         let error = parse(&text).unwrap_err();
         assert!(
-            matches!(&error, DescFieldError::InvalidEntry { section: "CONFLICTS", .. }),
+            matches!(
+                &error,
+                ScanError::Field(DescFieldError::InvalidEntry { section: "CONFLICTS", .. })
+            ),
             "got {error:?}"
         );
     }
@@ -223,5 +235,37 @@ ancientfoo
         assert!(crate::eager::parse_depends(text, fields.depends_text()).unwrap().is_empty());
         assert!(fields.provides().is_empty());
         assert!(fields.groups().is_empty());
+    }
+
+    /// [`DESC`] holds nine relation entries: two groups, three dependencies, two provides, one
+    /// conflict and one replacement. The deferred `%DEPENDS%` counts, although nothing parses it
+    /// here. Otherwise a flood of dependencies would pass the open and be built later, by the
+    /// planner, with no bound at all.
+    #[test]
+    fn every_relation_entry_is_charged_including_the_deferred_dependencies() {
+        let mut budget = RelationBudget::new(9);
+        super::parse(DESC, &mut budget).unwrap();
+
+        let error = super::parse(DESC, &mut RelationBudget::new(8)).unwrap_err();
+        assert!(matches!(error, ScanError::Budget { max: 8 }), "got {error:?}");
+    }
+
+    /// The budget is the archive's, not one `desc`'s: a second package spends what the first
+    /// left.
+    #[test]
+    fn the_budget_is_shared_by_every_desc_that_spends_it() {
+        let mut budget = RelationBudget::new(12);
+        super::parse(DESC, &mut budget).unwrap();
+
+        let error = super::parse(DESC, &mut budget).unwrap_err();
+        assert!(matches!(error, ScanError::Budget { max: 12 }), "got {error:?}");
+    }
+
+    /// Only relation sections are charged. `%CSIZE%`, `%ISIZE%` and every other section build
+    /// no value that grows with its line count.
+    #[test]
+    fn other_sections_cost_nothing() {
+        let text = format!("{}\n%DESC%\n{}", "%CSIZE%\n1\n\n%ISIZE%\n2\n", "text\n".repeat(100));
+        super::parse(&text, &mut RelationBudget::new(0)).unwrap();
     }
 }

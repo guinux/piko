@@ -469,6 +469,7 @@ pub struct PackageSpec {
     reason: alpm_types::PackageInstallReason,
     installed_size: u64,
     compressed_size: u64,
+    extension: String,
 }
 
 impl PackageSpec {
@@ -490,6 +491,7 @@ impl PackageSpec {
             reason: alpm_types::PackageInstallReason::Explicit,
             installed_size: 123,
             compressed_size: 45,
+            extension: "zst".to_owned(),
         }
     }
 
@@ -559,6 +561,16 @@ impl PackageSpec {
         self
     }
 
+    /// Sets the compression suffix of `%FILENAME%`, `zst` by default. Repository-only.
+    ///
+    /// Only the name changes. The fixture writes no package file, so nothing checks that the
+    /// suffix matches any bytes.
+    #[must_use]
+    pub fn extension(mut self, extension: &str) -> Self {
+        extension.clone_into(&mut self.extension);
+        self
+    }
+
     /// The entry directory name this package is stored under, in both database layouts.
     #[must_use]
     pub fn entry(&self) -> String {
@@ -603,7 +615,7 @@ impl PackageSpec {
     /// distinguishes the two schemas. See [`crate::repo::RepoDescView::md5_checksum`].
     #[must_use]
     pub fn repo_desc(&self) -> String {
-        let file_name = format!("{}-{}-x86_64.pkg.tar.zst", self.name, self.version);
+        let file_name = format!("{}-{}-x86_64.pkg.tar.{}", self.name, self.version, self.extension);
         let mut desc = String::new();
         desc.push_str(&section("FILENAME", std::slice::from_ref(&file_name)));
         desc.push_str(&section("NAME", std::slice::from_ref(&self.name)));

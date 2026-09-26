@@ -103,14 +103,14 @@ mod tests {
         super::{eager, package::FilesSource, repo_name::RepoName},
         *,
     };
-    use crate::{entry_name::EntryName, limits::Limits};
+    use crate::{eager::RelationBudget, entry_name::EntryName, limits::Limits};
 
     /// Builds a package the way [`super::super::database`] does: eager fields parsed now, and
     /// the text retained for the deferred parse. Going through the real path keeps these tests
     /// honest about which accessor is free and which one loads.
     fn package(name: &str, desc_text: &str) -> RepoPackage {
         let entry = EntryName::parse(&format!("{name}-1.0.0-1")).unwrap();
-        let eager = eager::parse(desc_text).unwrap();
+        let eager = eager::parse(desc_text, &mut RelationBudget::new(usize::MAX)).unwrap();
         let files =
             Arc::new(FilesSource::unavailable(RepoName::parse("test").unwrap(), Limits::default()));
         RepoPackage::new(entry, eager, desc_text.into(), files)

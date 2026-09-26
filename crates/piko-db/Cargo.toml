@@ -20,7 +20,6 @@ fixture = ["dep:tempfile"]
 
 [dependencies]
 alpm-common.workspace = true
-alpm-compress.workspace = true
 alpm-db.workspace = true
 alpm-mtree.workspace = true
 alpm-repo-db.workspace = true
@@ -32,10 +31,15 @@ glob.workspace = true
 tar.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
+# The zstd half of `compression`; flate2 above is the gzip half.
+zstd.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # Only for the `O_NOFOLLOW | O_NONBLOCK` open flags, whose values are platform-specific.
 libc.workspace = true
+# `openat`, so a read inside a database entry follows no symbolic link at any level.
+# `unsafe_code = "forbid"` rules out calling `libc::openat` directly.
+rustix.workspace = true
 
 [dev-dependencies]
 flate2.workspace = true

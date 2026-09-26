@@ -200,6 +200,26 @@ fn a_signed_database_is_accepted_and_reports_that_it_verified() {
     assert_eq!(keyring.check(&db, required()).unwrap(), Verdict::Accepted { verified: true });
 }
 
+/// A good signature over a SHA-1 digest is refused and named, although GnuPG reports it good:
+/// SHA-1 collisions let one signature cover two files. The same key over SHA-256 is accepted.
+#[test]
+fn a_signature_over_a_weak_digest_is_refused() {
+    let Some(signer) = Signer::new() else { return };
+    let work = tempfile::tempdir().unwrap();
+    let db = database(work.path(), b"%FILES%\nnot really a database\n");
+    let keyring = Keyring::open(signer.path()).unwrap();
+
+    assert!(signer.sign_with(&db, &["--digest-algo", "SHA1"]), "signing failed");
+    let verdict = keyring.check(&db, required()).unwrap();
+    assert!(
+        matches!(&verdict, Verdict::Rejected(Rejection::WeakDigest { algorithm: "SHA1", .. })),
+        "got {verdict:?}"
+    );
+
+    assert!(signer.sign_with(&db, &["--digest-algo", "SHA256"]), "signing failed");
+    assert_eq!(keyring.check(&db, required()).unwrap(), Verdict::Accepted { verified: true });
+}
+
 /// The case that matters: a mirror serving a modified database with the original signature.
 #[test]
 fn a_tampered_database_is_rejected() {

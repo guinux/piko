@@ -31,6 +31,7 @@ use std::{
 
 use alpm_types::{FullVersion, Name, PackageFileName};
 
+use crate::source::distrust;
 use crate::{
     error::{Error, IoAction, Result},
     extract::{
@@ -80,6 +81,11 @@ impl Default for BaseLimits {
 /// resolve to the first one, as [`crate::source::CacheDirSource`] resolves a package file.
 /// Nothing is created: this reads the directories it is given, and passes over one it cannot.
 ///
+/// A directory or a file another user could change is passed over too
+/// ([`crate::source::Distrust`]), and so is a directory with an ancestor another user could
+/// write ([`piko_db::fs_util::ensure_trusted_directory`]). No signature is checked on an ancestor, and its bytes become
+/// part of what a merge writes into a configuration file.
+///
 /// # Errors
 ///
 /// This does not fail on a cache directory it cannot read. Such a directory contributes
@@ -94,6 +100,9 @@ pub fn find_base(
     let mut best: Option<BaseCandidate> = None;
 
     for directory in directories {
+        if piko_db::fs_util::ensure_trusted_directory(directory).is_err() {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(directory) else {
             continue;
         };
@@ -124,7 +133,10 @@ pub fn find_base(
             if file_name.version() >= installed {
                 continue;
             }
-            if !entry.metadata().is_ok_and(|metadata| metadata.is_file()) {
+            if !entry
+                .metadata()
+                .is_ok_and(|metadata| metadata.is_file() && distrust(&metadata).is_none())
+            {
                 continue;
             }
             // A later directory only wins by being strictly newer, so the first directory
@@ -305,6 +317,29 @@ mod tests {
     fn never_picks_the_installed_version() {
         let dir = cache(&["foo-2.0.0-1-x86_64.pkg.tar.zst"]);
         assert_eq!(base(&[dir.path().to_path_buf()], "foo", "2.0.0-1"), None);
+    }
+
+    /// An ancestor is never signature-checked, and its bytes reach the merged file. So a build
+    /// another user could have planted is passed over: in a directory others can write, or as a
+    /// file others can write.
+    #[test]
+    fn an_ancestor_another_user_could_change_is_passed_over() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let chmod = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        let shared = cache(&["foo-2.0.0-1-x86_64.pkg.tar.zst"]);
+        let trusted = cache(&["foo-1.0.0-1-x86_64.pkg.tar.zst", "foo-2.5.0-1-x86_64.pkg.tar.zst"]);
+        chmod(shared.path(), 0o1777);
+        chmod(&trusted.path().join("foo-2.5.0-1-x86_64.pkg.tar.zst"), 0o646);
+
+        let dirs = vec![shared.path().to_path_buf(), trusted.path().to_path_buf()];
+        assert_eq!(
+            base(&dirs, "foo", "3.0.0-1").as_deref(),
+            Some("foo-1.0.0-1-x86_64.pkg.tar.zst")
+        );
+        chmod(shared.path(), 0o700);
     }
 
     #[test]

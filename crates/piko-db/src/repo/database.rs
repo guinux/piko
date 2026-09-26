@@ -21,6 +21,7 @@ use super::{
 use crate::{
     desc_compat::{UnknownSection, UnknownSectionPolicy},
     diagnostics::Sink,
+    eager::{RelationBudget, ScanError},
     entry_name::EntryNameError,
     error::{Error, IoAction, Result, SharedError},
     limits::Limits,
@@ -258,13 +259,18 @@ impl RepoDatabase {
     ///
     /// - [`Error::UnrecognisedArchiveName`] if `path`'s file name is not `<repo>.db` or
     ///   `<repo>.files`.
-    /// - [`Error::UnsupportedCompression`] if the archive's compression is not gzip, zstd, xz,
-    ///   bzip2 or uncompressed.
+    /// - [`Error::UnsupportedCompression`] if the archive's compression is not gzip, zstd or
+    ///   none.
     /// - [`Error::LimitExceeded`] if the archive, or any one member, exceeds the configured
     ///   [`Limits`].
     /// - [`Error::TooManyEntries`] if the archive holds more packages than
     ///   [`Limits::repo_max_packages`] allows. Detected during the walk, so the rest of an
     ///   oversized archive is never decompressed or parsed.
+    /// - [`Error::TooManyRelations`] if the archive's `desc` members together hold more
+    ///   relation entries than [`Limits::repo_max_relations`] allows. Each entry is counted
+    ///   before it is parsed.
+    /// - [`Error::TooManyPaths`] or [`Error::TooManyEntryPaths`] if its `files` members exceed
+    ///   [`Limits::repo_max_paths`] or [`Limits::repo_entry_paths`].
     /// - [`Error::Io`] if the archive cannot be opened or read.
     ///
     /// Problems with individual entries are reported through
@@ -352,6 +358,8 @@ impl RepoDatabase {
         // both need to push diagnostics. They cannot both hold a `&mut Sink` at once. They can
         // both hold a `&RefCell<Sink<_>>`, and borrow it mutably only for the push.
         let diagnostics = RefCell::new(Sink::new(&options.limits));
+        // One budget for the whole archive, because the bound is on the sum over its packages.
+        let mut relations = RelationBudget::new(options.limits.repo_max_relations);
 
         let newest_member_time = archive::walk(
             path,
@@ -362,6 +370,7 @@ impl RepoDatabase {
                     options,
                     &mut entries,
                     &mut arena,
+                    &mut relations,
                     &diagnostics,
                     &mut saw_files_member,
                     path,
@@ -594,6 +603,7 @@ fn handle_item(
     options: RepoOpenOptions,
     entries: &mut Vec<StagedDesc>,
     arena: &mut FilesArena,
+    relations: &mut RelationBudget,
     diagnostics: &RefCell<Sink<RepoDiagnostic>>,
     saw_files_member: &mut bool,
     archive_path: &Path,
@@ -625,7 +635,7 @@ fn handle_item(
             // and are parsed on first access to `RepoPackage::desc`. That split accounts for
             // 67% of this open's cost on a real repository. See `super::eager` for the
             // measurement, and for why deferring *everything* would not have worked.
-            match super::eager::parse(&filtered) {
+            match super::eager::parse(&filtered, relations) {
                 Ok(eager) => {
                     let mut diagnostics = diagnostics.borrow_mut();
                     for section in unknown {
@@ -637,11 +647,16 @@ fn handle_item(
                     drop(diagnostics);
                     entries.push(StagedDesc { entry, eager, raw: filtered.into_boxed_str() });
                 }
-                Err(source) => {
+                Err(ScanError::Field(source)) => {
                     diagnostics.borrow_mut().push(|| RepoDiagnostic::InvalidDesc {
                         entry: entry.as_str().to_owned(),
                         source,
                     });
+                }
+                // Not a diagnostic: the budget is the archive's, so the next `desc` would parse
+                // past it. The open fails, as it does for `repo_max_packages`.
+                Err(ScanError::Budget { max }) => {
+                    return Err(Error::TooManyRelations { path: archive_path.to_path_buf(), max });
                 }
             }
         }
@@ -655,6 +670,7 @@ fn handle_item(
                         entry.version().clone(),
                         parsed.as_ref(),
                         options.limits.repo_inflated_bytes,
+                        options.limits.repo_max_paths,
                     )?;
                     if let Inserted::Duplicate { kept } = inserted {
                         // `kept` comes back from the arena because only the arena knows which

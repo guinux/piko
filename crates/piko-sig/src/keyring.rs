@@ -67,6 +67,60 @@ pub fn open_context(home: &Path) -> Result<gpgme::Context> {
     Ok(context)
 }
 
+/// The most entries [`ensure_trusted`] reads from a keyring directory. `pacman-key --init`
+/// writes about twenty.
+const MAX_KEYRING_ENTRIES: usize = 4096;
+
+/// Fails if a user other than root and this process's own could change the keyring at `home`:
+/// the directory, a directory on the way to it
+/// ([`piko_db::fs_util::ensure_trusted_directory`]), or anything directly in it.
+///
+/// The keyring decides which signature is trusted. `pubring.gpg` and `trustdb.gpg` say which
+/// keys are valid, and `gpg.conf` and `gpg-agent.conf` configure the programs GPGME runs. A
+/// user who can change any of them can make every package verify. The rule is
+/// [`piko_db::fs_util::distrust`]. An entry that is a symbolic link is refused: GnuPG creates
+/// none, and a link would put a directory outside `home` in charge of what GnuPG reads. GnuPG
+/// itself only warns about unsafe permissions, and libalpm checks none.
+///
+/// # Errors
+///
+/// [`Error::KeyringUnusable`] naming the entry and why, or when the directory cannot be listed,
+/// holds a symbolic link, or holds more than [`MAX_KEYRING_ENTRIES`] entries.
+fn ensure_trusted(home: &Path) -> Result<()> {
+    let unusable = |reason: String| Error::KeyringUnusable { home: home.to_path_buf(), reason };
+    let untrusted = |path: &Path, distrust: piko_db::fs_util::Distrust| {
+        unusable(format!("{} is {distrust}, so another user could change it", path.display()))
+    };
+
+    match piko_db::fs_util::ensure_trusted_directory(home) {
+        Ok(()) => {}
+        Err(piko_db::Error::Untrusted { path, distrust }) => {
+            return Err(untrusted(&path, distrust));
+        }
+        Err(error) => return Err(unusable(error.to_string())),
+    }
+    let entries = std::fs::read_dir(home).map_err(|error| unusable(error.to_string()))?;
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_KEYRING_ENTRIES {
+            return Err(unusable(format!("more than {MAX_KEYRING_ENTRIES} entries")));
+        }
+        let path = entry.map_err(|error| unusable(error.to_string()))?.path();
+        // An entry removed since the listing, such as an agent's socket, is not read either.
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(unusable(format!("{}: {error}", path.display()))),
+        };
+        if metadata.is_symlink() {
+            return Err(unusable(format!("{} is a symbolic link", path.display())));
+        }
+        if let Some(distrust) = piko_db::fs_util::distrust(&metadata) {
+            return Err(untrusted(&path, distrust));
+        }
+    }
+    Ok(())
+}
+
 /// A GnuPG keyring directory — pacman's is `/etc/pacman.d/gnupg`.
 ///
 /// Holds only the path. A GPGME context is created per verification rather than cached. A
@@ -83,15 +137,22 @@ impl Keyring {
     /// The check runs here rather than at the first verification. That way a broken or
     /// missing keyring is reported before a transaction starts, not part-way through one.
     ///
+    /// The keyring must also be one no other user could change: not the directory, and not
+    /// anything directly in it, by [`piko_db::fs_util::distrust`]'s rule. Nothing directly in it
+    /// may be a symbolic link. The keyring decides which signature is trusted, and `gpg.conf`
+    /// configures what GPGME runs.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::KeyringUnusable`] if `home` is not a directory, or if a GPGME context
+    /// Returns [`Error::KeyringUnusable`] if `home` is not a directory, if another user could
+    /// change it or anything directly in it, if it holds a symbolic link, or if a GPGME context
     /// cannot be created for it.
     pub fn open(home: impl AsRef<Path>) -> Result<Self> {
         let home = home.as_ref().to_path_buf();
         if !home.is_dir() {
             return Err(Error::KeyringUnusable { home, reason: "not a directory".to_owned() });
         }
+        ensure_trusted(&home)?;
         let keyring = Self { home };
         // Constructed and dropped purely to prove it can be.
         drop(keyring.context()?);
@@ -371,6 +432,13 @@ fn describe(
             status
         };
 
+    // Last, and only over a signature that verified: a bad one stays bad, whatever it hashed.
+    let status = match status {
+        Status::Valid | Status::KeyExpired => weak_digest(signature.hash_algorithm())
+            .map_or(status, |algorithm| Status::WeakDigest { algorithm }),
+        other => other,
+    };
+
     let trust = match signature.validity() {
         gpgme::Validity::Full | gpgme::Validity::Ultimate => Trust::Full,
         gpgme::Validity::Marginal => Trust::Marginal,
@@ -379,6 +447,27 @@ fn describe(
     };
 
     Ok(SignatureOutcome { status, trust, fingerprint, created: signature.creation_time() })
+}
+
+/// The name of `algorithm` when it is too weak to sign with, or `None` when it is strong enough.
+///
+/// A denylist rather than an allowlist: GPGME's list ends at SHA-512, so a digest newer than
+/// it (an OpenPGP v6 SHA3) must not read as weak. MD2, MD4 and MD5 are broken, SHA-1 has
+/// chosen-prefix collisions (SHA-mbles, 2020), RIPEMD-160, Tiger and Haval are 160 bits or
+/// less and unmaintained, and a signature reporting no digest at all cannot be judged.
+fn weak_digest(algorithm: gpgme::HashAlgorithm) -> Option<&'static str> {
+    use gpgme::HashAlgorithm as Hash;
+    let weak = [
+        Hash::None,
+        Hash::Md2,
+        Hash::Md4,
+        Hash::Md5,
+        Hash::Sha1,
+        Hash::RipeMd160,
+        Hash::Tiger,
+        Hash::Haval,
+    ];
+    weak.contains(&algorithm).then(|| algorithm.name().unwrap_or("an unnamed digest"))
 }
 
 /// Whether the key that made a signature is disabled in the keyring.
@@ -437,6 +526,54 @@ mod tests {
     fn a_signature_path_does_not_replace_the_existing_extension() {
         let signed = signature_path(Path::new("core.db"));
         assert_eq!(signed, PathBuf::from("core.db.sig"));
+    }
+
+    /// A keyring another user could change is refused before GnuPG reads it: the directory,
+    /// or any file directly in it.
+    #[test]
+    fn a_keyring_another_user_could_change_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let chmod = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let home = tempfile::tempdir().unwrap();
+        let conf = home.path().join("gpg.conf");
+        std::fs::write(&conf, "").unwrap();
+
+        chmod(&conf, 0o666);
+        let error = Keyring::open(home.path()).unwrap_err();
+        assert!(
+            matches!(&error, Error::KeyringUnusable { reason, .. } if reason.contains("gpg.conf")),
+            "{error:?}"
+        );
+
+        chmod(&conf, 0o644);
+        chmod(home.path(), 0o777);
+        let error = Keyring::open(home.path()).unwrap_err();
+        chmod(home.path(), 0o700);
+        assert!(
+            matches!(&error, Error::KeyringUnusable { reason, .. }
+                if reason.contains("writable by its group or others")),
+            "{error:?}"
+        );
+    }
+
+    /// A symbolic link directly in the keyring is refused, even to a trusted file: the link
+    /// would put another directory in charge of what GnuPG reads.
+    #[test]
+    fn a_keyring_holding_a_symbolic_link_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let conf = elsewhere.path().join("gpg.conf");
+        std::fs::write(&conf, "").unwrap();
+        std::os::unix::fs::symlink(&conf, home.path().join("gpg.conf")).unwrap();
+
+        let error = Keyring::open(home.path()).unwrap_err();
+        assert!(
+            matches!(&error, Error::KeyringUnusable { reason, .. }
+                if reason.ends_with("gpg.conf is a symbolic link")),
+            "{error:?}"
+        );
     }
 
     #[test]

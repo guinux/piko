@@ -97,7 +97,45 @@ impl Default for Limits {
 #[derive(Clone, Copy)]
 struct Target {
     kind: Kind,
-    max_bytes: u64,
+    bound: Bound,
+}
+
+/// The most bytes a download may deliver, and where that number comes from.
+#[derive(Clone, Copy, Debug)]
+enum Bound {
+    /// One of [`Limits`]' ceilings.
+    Limit(u64),
+    /// The size a repository database declares for the file, `%CSIZE%`.
+    Declared(u64),
+}
+
+impl Bound {
+    /// The bound for a package that declares `declared` bytes, under a ceiling of `limit`.
+    ///
+    /// A declared size is a claim, and only ever makes the bound tighter. A size above the
+    /// ceiling leaves the ceiling in place.
+    fn package(declared: Option<u64>, limit: u64) -> Self {
+        match declared {
+            Some(size) if size <= limit => Self::Declared(size),
+            _ => Self::Limit(limit),
+        }
+    }
+
+    const fn bytes(self) -> u64 {
+        match self {
+            Self::Limit(bytes) | Self::Declared(bytes) => bytes,
+        }
+    }
+
+    /// The error for a download of `name` that went past this bound.
+    fn exceeded(self, name: &str) -> Error {
+        match self {
+            Self::Limit(max) => Error::TooLarge { file: name.to_owned(), max },
+            Self::Declared(declared) => {
+                Error::LargerThanDeclared { file: name.to_owned(), declared }
+            }
+        }
+    }
 }
 
 /// The cancellation flag and progress sink shared by everything a download call does.
@@ -141,11 +179,28 @@ struct LocalCopy<'a> {
     equal_is_current: bool,
     /// Whether a `200` whose `Last-Modified` is older than `stamp` is passed over.
     older_is_behind: bool,
+    /// The latest `Last-Modified` stamped onto the download, in seconds since the Unix epoch.
+    ///
+    /// `Some` for a database, whose file time is the next refresh's `stamp`. Every file time
+    /// must then be a date a server issued, because the next refresh passes over a server whose
+    /// `Last-Modified` is older. A later one than this, a missing one, and one that does not
+    /// parse all stamp the epoch instead, which [`local_stamp`] reads as no stamp at all. The
+    /// time the file was written would pass over every server that published before it, and a
+    /// date in the future every server until the clock reached it.
+    ///
+    /// `None` for a package, whose file time nothing reads. It gets the server's date when there
+    /// is one, and keeps the time it was written otherwise.
+    latest_stamp: Option<u64>,
 }
 
 impl LocalCopy<'_> {
-    const NONE: Self =
-        Self { since: None, stamp: None, equal_is_current: false, older_is_behind: false };
+    const NONE: Self = Self {
+        since: None,
+        stamp: None,
+        equal_is_current: false,
+        older_is_behind: false,
+        latest_stamp: None,
+    };
 }
 
 /// What a request produced.
@@ -185,6 +240,8 @@ struct Attempt<'a> {
     keyring: Option<&'a Keyring>,
     policy: Policy,
     accept_older: bool,
+    /// The latest `Last-Modified` stamped onto a download, and trusted on the installed file.
+    latest_stamp: u64,
     controls: Controls<'a>,
 }
 
@@ -258,12 +315,20 @@ pub struct PackageFetch<'a> {
     pub servers: &'a [String],
     /// Whether a detached `.sig` is worth fetching alongside it.
     pub policy: Policy,
-    /// `%CSIZE%`, used only to schedule the largest downloads first.
+    /// `%CSIZE%`, the size the repository database declares for the file.
     ///
-    /// Never a bound. What a repository database claims about a package's size is a claim, and
-    /// [`Limits::max_package_bytes`] is still enforced against the bytes that arrive. A wrong
-    /// value here costs nothing but a worse schedule.
-    pub size: u64,
+    /// It bounds the download, as libalpm bounds it (`sync.c:848`): a transfer that goes past
+    /// it is refused while it arrives, with [`Error::LargerThanDeclared`], and nothing reaches
+    /// the cache. Without it, a mirror could write [`Limits::max_package_bytes`] for every
+    /// package in a batch before the checksum refused a single one, and a `CheckSpace` that
+    /// weighed `%CSIZE%` would have weighed the wrong number. A declared size only makes the
+    /// bound tighter: [`Limits::max_package_bytes`] still applies above it.
+    ///
+    /// A batch also downloads the largest packages first by it.
+    ///
+    /// `None` for a file no repository describes, such as a package URL named on the command
+    /// line. [`Limits::max_package_bytes`] alone bounds it.
+    pub size: Option<u64>,
 }
 
 /// The first name that appears twice, if any.
@@ -459,9 +524,15 @@ impl Refresher {
             keyring,
             policy,
             accept_older: freshness.accept_older,
+            latest_stamp: freshness
+                .now
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs())
+                .saturating_add(dating::FUTURE_TOLERANCE.as_secs()),
             controls: Controls { cancel, progress },
         };
-        let mut baseline = Baseline::new(&destination, keyring, policy, self.limits.archive);
+        let mut baseline =
+            Baseline::new(&destination, keyring, policy, self.limits.archive, freshness.now);
 
         let order: Vec<&String> = concurrency.servers_for(servers, worker).collect();
         let mut notes = Vec::new();
@@ -492,6 +563,8 @@ impl Refresher {
             None if !notes.is_empty() => Outcome::Kept,
             None => return Err(Error::AllServersFailed { file: name, attempts }),
         };
+        // After the outcome, which counts only what the servers answered.
+        notes.extend(baseline.take_note());
 
         // The age check covers the package metadata only. A `.files` archive installs
         // nothing, and its lag already shows as a version-skew error when it is read.
@@ -530,6 +603,7 @@ impl Refresher {
                             Step::PassedOver(note) => notes.push(note),
                             Step::Current | Step::Failed(_) => {}
                         }
+                        notes.extend(baseline.take_note());
                     }
                 }
             }
@@ -551,8 +625,16 @@ impl Refresher {
         force: bool,
         baseline: &mut Baseline<'_>,
     ) -> Result<Step> {
-        let Attempt { name, destination, sig_destination, keyring, policy, accept_older, controls } =
-            *attempt;
+        let Attempt {
+            name,
+            destination,
+            sig_destination,
+            keyring,
+            policy,
+            accept_older,
+            latest_stamp,
+            controls,
+        } = *attempt;
 
         // A conditional request uses the local file's mtime, which `fetch` stamped with the
         // server's own `Last-Modified` when it downloaded the file. Sending back the exact
@@ -560,15 +642,21 @@ impl Refresher {
         // date later than its `Last-Modified` gets a full 200, even though RFC 7232 §3.3 asks
         // for 304. The exact value gets 304 (3/3, at -1h/exact/+1h/+1d). Sending piko's own
         // download time instead never saves a transfer.
-        let since = if force { None } else { last_modified(destination) };
+        //
+        // A stamp later than the clock allows is not the server's answer to anything this client
+        // can use. Trusted, it would pass over every honest server until the clock reached it,
+        // and `force` would not help. So it is ignored, and the request is unconditional.
+        let stamp = local_stamp(destination).filter(|stamp| *stamp <= latest_stamp);
+        let since = if force { None } else { stamp.map(http_date) };
         let local = LocalCopy {
             since: since.as_deref(),
-            stamp: local_stamp(destination),
+            stamp,
             // `force` asks for the download even when nothing changed.
             equal_is_current: !force,
             // `force` does not turn this off. Only `accept_older` does, because it is the one
             // option that says an older database is wanted.
             older_is_behind: !accept_older,
+            latest_stamp: Some(latest_stamp),
         };
 
         let database = match self.fetch(
@@ -576,7 +664,7 @@ impl Refresher {
             destination,
             local,
             name,
-            Target { kind: Kind::Database, max_bytes: self.limits.max_bytes },
+            Target { kind: Kind::Database, bound: Bound::Limit(self.limits.max_bytes) },
             controls,
         ) {
             Ok(Fetched::NotModified) => return Ok(Step::Current),
@@ -632,7 +720,7 @@ impl Refresher {
             None
         };
         let candidate = Publication::new(signed_at, newest_member);
-        let installed = baseline.get();
+        let installed = baseline.reference();
         let comparison = dating::compare(candidate, installed);
 
         let note = if comparison.is_acceptable() {
@@ -674,7 +762,7 @@ impl Refresher {
         target: Target,
         controls: Controls<'_>,
     ) -> Result<Fetched> {
-        let Target { kind, max_bytes } = target;
+        let Target { kind, bound } = target;
         let Controls { cancel, progress } = controls;
         // Checked before the request, not only inside the stream. A worker that was just
         // told to stop should not open one more connection first.
@@ -732,14 +820,14 @@ impl Refresher {
             }
         }
 
-        // Display-only, per this module's documentation. Never fed into `max_bytes`.
+        // Display-only, per this module's documentation. Never fed into `bound`.
         let total = response.content_length;
 
         progress(Event::Started { file: name.to_owned(), kind, total });
 
         let mut file = AtomicFile::create(destination)?;
         let mut reader = response.body;
-        let written = stream_bounded(&mut reader, &mut file, max_bytes, name, cancel, |bytes| {
+        let written = stream_bounded(&mut reader, &mut file, bound, name, cancel, |bytes| {
             progress(Event::Progress { kind, bytes });
         })?;
 
@@ -754,10 +842,19 @@ impl Refresher {
 
         // Stamping the server's own timestamp onto the file is what makes the next
         // conditional request effective. See the note at the `If-Modified-Since` call site.
-        if let Some(time) =
-            stamp.and_then(|secs| std::time::UNIX_EPOCH.checked_add(Duration::from_secs(secs)))
-        {
-            file.set_modified(time);
+        let served =
+            stamp.and_then(|secs| std::time::UNIX_EPOCH.checked_add(Duration::from_secs(secs)));
+        match local.latest_stamp {
+            Some(latest) => file.set_modified(
+                served
+                    .filter(|_| stamp.is_some_and(|secs| secs <= latest))
+                    .unwrap_or(std::time::UNIX_EPOCH),
+            ),
+            None => {
+                if let Some(time) = served {
+                    file.set_modified(time);
+                }
+            }
         }
         Ok(Fetched::Body(file))
     }
@@ -824,9 +921,16 @@ impl Refresher {
         let mut file = AtomicFile::create(destination)?;
         let mut reader = response.body;
         // A signature is a few hundred bytes. Anything larger is not one.
-        let written = stream_bounded(&mut reader, &mut file, 1024 * 1024, name, cancel, |bytes| {
-            progress(Event::Progress { kind: Kind::Signature, bytes });
-        })?;
+        let written = stream_bounded(
+            &mut reader,
+            &mut file,
+            Bound::Limit(1024 * 1024),
+            name,
+            cancel,
+            |bytes| {
+                progress(Event::Progress { kind: Kind::Signature, bytes });
+            },
+        )?;
         // An empty body is not "unsigned": the server said it had one. Reporting it here,
         // rather than letting the verifier fail on nothing, keeps the two apart.
         if written == 0 {
@@ -913,7 +1017,7 @@ impl Refresher {
         Ok(())
     }
 
-    /// Downloads `file_name` into `cache_dir`, with default bounds and no progress reporting.
+    /// Downloads one package into `cache_dir`, with no progress reporting.
     ///
     /// # Errors
     ///
@@ -921,24 +1025,13 @@ impl Refresher {
     pub fn fetch_package(
         &self,
         cache_dir: &Path,
-        file_name: &PackageFileName,
-        repo_name: &str,
-        servers: &[String],
-        policy: Policy,
+        wanted: PackageFetch<'_>,
         cancel: &Cancel,
     ) -> Result<PathBuf> {
-        self.fetch_package_with_progress(
-            cache_dir,
-            file_name,
-            repo_name,
-            servers,
-            policy,
-            cancel,
-            &|_| {},
-        )
+        self.fetch_package_with_progress(cache_dir, wanted, cancel, &|_| {})
     }
 
-    /// Downloads `file_name` into `cache_dir`, reporting progress through `progress`.
+    /// Downloads one package into `cache_dir`, reporting progress through `progress`.
     ///
     /// Unlike [`Refresher::refresh`], there is no conditional request. A package archive's
     /// name encodes its version, so if it is not already at the destination there is nothing
@@ -954,32 +1047,17 @@ impl Refresher {
     ///
     /// # Errors
     ///
-    /// Returns [`Error`] if no server could supply the package, if it exceeded
-    /// [`Limits::max_package_bytes`], or if the download was cancelled. In every case nothing
-    /// is left in `cache_dir`.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "each parameter names one concern a caller must decide, matching \
-                  `refresh_with_progress`'s own justification"
-    )]
+    /// Returns [`Error`] if no server could supply the package, if it exceeded its declared
+    /// [`PackageFetch::size`] or [`Limits::max_package_bytes`], or if the download was
+    /// cancelled. In every case nothing is left in `cache_dir`.
     pub fn fetch_package_with_progress(
         &self,
         cache_dir: &Path,
-        file_name: &PackageFileName,
-        repo_name: &str,
-        servers: &[String],
-        policy: Policy,
+        wanted: PackageFetch<'_>,
         cancel: &Cancel,
         progress: &(dyn Fn(Event) + Sync),
     ) -> Result<PathBuf> {
-        self.fetch_one(
-            cache_dir,
-            PackageFetch { file_name, repo_name, servers, policy, size: 0 },
-            Concurrency::default(),
-            0,
-            cancel,
-            progress,
-        )
+        self.fetch_one(cache_dir, wanted, Concurrency::default(), 0, cancel, progress)
     }
 
     /// One package's download, as worker `worker` of a batch — see [`Self::refresh_one`] for
@@ -993,7 +1071,7 @@ impl Refresher {
         cancel: &Cancel,
         progress: &(dyn Fn(Event) + Sync),
     ) -> Result<PathBuf> {
-        let PackageFetch { file_name, repo_name, servers, policy, size: _ } = wanted;
+        let PackageFetch { file_name, repo_name, servers, policy, size } = wanted;
         if servers.is_empty() {
             return Err(Error::NoServers { repo: repo_name.to_owned() });
         }
@@ -1015,7 +1093,10 @@ impl Refresher {
                 &destination,
                 LocalCopy::NONE,
                 &name,
-                Target { kind: Kind::Package, max_bytes: self.limits.max_package_bytes },
+                Target {
+                    kind: Kind::Package,
+                    bound: Bound::package(size, self.limits.max_package_bytes),
+                },
                 controls,
             ) {
                 // A server answering "not modified" to a request that carried no
@@ -1188,7 +1269,7 @@ impl Refresher {
         }
         let mut schedule: Vec<usize> = (0..wanted.len()).collect();
         schedule.sort_by_key(|index| {
-            std::cmp::Reverse(wanted.get(*index).map_or(0, |fetch| fetch.size))
+            std::cmp::Reverse(wanted.get(*index).and_then(|fetch| fetch.size).unwrap_or(0))
         });
         pool::run(
             wanted,
@@ -1201,7 +1282,7 @@ impl Refresher {
     }
 }
 
-/// Copies `reader` into `writer`, refusing to exceed `max`.
+/// Copies `reader` into `writer`, refusing to exceed `bound`.
 ///
 /// Bounded as it goes rather than checked afterwards: a bound that
 /// fires only after the work is done has not prevented anything. Cancellation is checked the
@@ -1209,11 +1290,11 @@ impl Refresher {
 ///
 /// `on_chunk` receives the size of the chunk just written, not the running total. See
 /// [`Event::Progress`] for why a total is unusable once more than one file is in flight. The
-/// total is still kept here, because that is what `max` is checked against.
+/// total is still kept here, because that is what `bound` is checked against.
 fn stream_bounded(
     reader: &mut impl Read,
     writer: &mut impl Write,
-    max: u64,
+    bound: Bound,
     name: &str,
     cancel: &Cancel,
     mut on_chunk: impl FnMut(u64),
@@ -1233,8 +1314,8 @@ fn stream_bounded(
             return Ok(total);
         }
         total = total.saturating_add(read as u64);
-        if total > max {
-            return Err(Error::TooLarge { file: name.to_owned(), max });
+        if total > bound.bytes() {
+            return Err(bound.exceeded(name));
         }
         let chunk = buffer.get(..read).unwrap_or_default();
         writer.write_all(chunk).map_err(|source| Error::Io {
@@ -1249,20 +1330,11 @@ fn stream_bounded(
 /// The existing database's mtime in seconds since the Unix epoch.
 ///
 /// `fetch` stamped it with the server's own `Last-Modified`, so this is what that server said
-/// about the file's age. `None` when there is no file.
+/// about the file's age. `None` when there is no file, and for the epoch, which `fetch` stamps
+/// when the server gave no date it could use.
 fn local_stamp(path: &Path) -> Option<u64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
-}
-
-/// The existing database's mtime as an HTTP date, for a conditional request.
-///
-/// `None` when there is nothing to be conditional about, which makes the first refresh an
-/// unconditional download.
-fn last_modified(path: &Path) -> Option<String> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let seconds = modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-    Some(http_date(seconds))
+    Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).filter(|secs| *secs > 0)
 }
 
 /// Formats seconds-since-epoch as an RFC 7231 IMF-fixdate.
@@ -1520,18 +1592,61 @@ mod tests {
     fn the_size_bound_fires_during_the_stream_not_after() {
         let mut source = std::io::repeat(0_u8).take(1024 * 1024);
         let mut sink = Vec::new();
-        let error = stream_bounded(&mut source, &mut sink, 4096, "core.db", &Cancel::new(), |_| {})
-            .unwrap_err();
+        let error = stream_bounded(
+            &mut source,
+            &mut sink,
+            Bound::Limit(4096),
+            "core.db",
+            &Cancel::new(),
+            |_| {},
+        )
+        .unwrap_err();
         assert!(matches!(error, Error::TooLarge { .. }), "{error:?}");
         // The bound stopped the copy rather than letting it finish and complaining.
         assert!(sink.len() <= 64 * 1024 + 4096, "wrote {} bytes past the bound", sink.len());
     }
 
     #[test]
+    fn a_stream_past_its_declared_size_names_the_declared_size() {
+        let mut source = std::io::repeat(0_u8).take(1024 * 1024);
+        let mut sink = Vec::new();
+        let name = "foo-1.0.0-1-x86_64.pkg.tar.zst";
+        let error = stream_bounded(
+            &mut source,
+            &mut sink,
+            Bound::Declared(4096),
+            name,
+            &Cancel::new(),
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::LargerThanDeclared { declared: 4096, .. }), "{error:?}");
+        assert!(sink.len() <= 64 * 1024 + 4096, "wrote {} bytes past the bound", sink.len());
+    }
+
+    /// A declared size only tightens the bound. It never lifts the ceiling, and no declared size
+    /// leaves the ceiling alone.
+    #[test]
+    fn a_declared_size_only_tightens_the_bound() {
+        assert!(matches!(Bound::package(Some(10), 100), Bound::Declared(10)));
+        assert!(matches!(Bound::package(Some(100), 100), Bound::Declared(100)));
+        assert!(matches!(Bound::package(Some(101), 100), Bound::Limit(100)));
+        assert!(matches!(Bound::package(None, 100), Bound::Limit(100)));
+    }
+
+    #[test]
     fn a_stream_within_the_bound_is_copied_whole() {
         let mut source = std::io::Cursor::new(b"core.db contents".to_vec());
         let mut sink = Vec::new();
-        stream_bounded(&mut source, &mut sink, 1024, "core.db", &Cancel::new(), |_| {}).unwrap();
+        stream_bounded(
+            &mut source,
+            &mut sink,
+            Bound::Limit(1024),
+            "core.db",
+            &Cancel::new(),
+            |_| {},
+        )
+        .unwrap();
         assert_eq!(sink, b"core.db contents");
     }
 
@@ -1541,17 +1656,24 @@ mod tests {
         let mut sink = Vec::new();
         let cancel = Cancel::new();
         cancel.request();
-        let error = stream_bounded(&mut source, &mut sink, 1024 * 1024, "core.db", &cancel, |_| {})
-            .unwrap_err();
+        let error = stream_bounded(
+            &mut source,
+            &mut sink,
+            Bound::Limit(1024 * 1024),
+            "core.db",
+            &cancel,
+            |_| {},
+        )
+        .unwrap_err();
         assert!(matches!(error, Error::Cancelled), "{error:?}");
         assert!(sink.is_empty(), "nothing should have been written once already cancelled");
     }
 
     /// No previous database means an unconditional request.
     #[test]
-    fn a_missing_database_has_no_conditional_header() {
+    fn a_missing_database_has_no_stamp() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(last_modified(&dir.path().join("core.db")), None);
+        assert_eq!(local_stamp(&dir.path().join("core.db")), None);
     }
 
     #[test]
@@ -1559,7 +1681,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("core.db");
         std::fs::write(&path, b"x").unwrap();
-        let header = last_modified(&path).expect("an existing file has an mtime");
+        let header = http_date(local_stamp(&path).expect("an existing file has an mtime"));
         assert!(header.ends_with(" GMT"), "{header}");
     }
 }

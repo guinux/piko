@@ -136,6 +136,59 @@ impl std::error::Error for DescFieldError {
     }
 }
 
+/// Why [`scan`] stopped before the end of a `desc`.
+///
+/// Two outcomes with two different scopes, so they are not one error type. A
+/// [`DescFieldError`] is a defect in one `desc`: the caller drops that package and reads the
+/// rest. An exhausted [`RelationBudget`] is a property of the whole database: the caller must
+/// fail the open, or the next `desc` parses past the bound.
+#[derive(Debug)]
+pub(crate) enum ScanError {
+    /// A section of this `desc` is missing or malformed.
+    Field(DescFieldError),
+    /// The database holds more relation entries than its [`RelationBudget`] allows.
+    Budget {
+        /// The configured maximum.
+        max: usize,
+    },
+}
+
+impl From<DescFieldError> for ScanError {
+    fn from(error: DescFieldError) -> Self {
+        Self::Field(error)
+    }
+}
+
+/// How many more relation entries one database open may parse.
+///
+/// Shared by every `desc` of one repository archive, so it bounds the sum over all packages,
+/// not each package alone. A bound per package would let an archive spread its entries over
+/// [`crate::Limits::repo_max_packages`] packages instead. See
+/// [`crate::Limits::repo_max_relations`] for why the byte bounds do not already cover this.
+#[derive(Debug)]
+pub(crate) struct RelationBudget {
+    remaining: usize,
+    max: usize,
+}
+
+impl RelationBudget {
+    /// A budget of `max` entries.
+    pub(crate) const fn new(max: usize) -> Self {
+        Self { remaining: max, max }
+    }
+
+    /// Counts one entry, before it is parsed.
+    fn charge(&mut self) -> Result<(), ScanError> {
+        match self.remaining.checked_sub(1) {
+            Some(remaining) => {
+                self.remaining = remaining;
+                Ok(())
+            }
+            None => Err(ScanError::Budget { max: self.max }),
+        }
+    }
+}
+
 /// Parses one `%DEPENDS%` or `%PROVIDES%` entry, avoiding two failed parses in the common case.
 ///
 /// `RelationOrSoname::from_str` tries alpm-sonamev2, then alpm-sonamev1, then
@@ -213,15 +266,22 @@ impl<'a> Section<'a> {
 /// removed the unknown sections. So a keyword reaching `other` is one this build knows but
 /// this module does not read.
 ///
+/// Every relation entry is charged to `budget` before it is parsed, a deferred `%DEPENDS%`
+/// entry included. So [`parse_depends`] later builds no entry the budget has not counted.
+/// `None` counts nothing. That is for the local database, whose `desc` is read uncompressed
+/// and capped by [`crate::Limits::desc_bytes`], so its text bounds its parse at a fixed ratio.
+///
 /// # Errors
 ///
-/// [`DescFieldError::InvalidEntry`] if any relation entry fails to parse, or whatever `other`
-/// returns for a section it recognises.
+/// - [`ScanError::Field`] carrying [`DescFieldError::InvalidEntry`] if any relation entry fails
+///   to parse, or whatever `other` returns for a section it recognises.
+/// - [`ScanError::Budget`] if `budget` runs out.
 pub(crate) fn scan<'a>(
     text: &'a str,
     depends_mode: Depends,
+    mut budget: Option<&mut RelationBudget>,
     mut other: impl FnMut(&'a str, &'a str) -> Result<(), DescFieldError>,
-) -> Result<Relations, DescFieldError> {
+) -> Result<Relations, ScanError> {
     let mut depends = Vec::new();
     let mut depends_text: Option<(usize, usize)> = None;
     // Byte offsets into `text`, so a deferred `%DEPENDS%` can be re-read without a second
@@ -250,6 +310,18 @@ pub(crate) fn scan<'a>(
         }
         if line.is_empty() {
             continue;
+        }
+
+        let is_relation = matches!(
+            section,
+            Section::Depends
+                | Section::Provides
+                | Section::Conflicts
+                | Section::Replaces
+                | Section::Groups
+        );
+        if is_relation && let Some(budget) = budget.as_deref_mut() {
+            budget.charge()?;
         }
 
         match section {

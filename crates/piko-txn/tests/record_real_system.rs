@@ -114,7 +114,7 @@ fn built_desc_matches_what_pacman_recorded() {
 
     for (archive_path, pacman_desc) in &packages {
         let Some((info, raw)) = pkginfo(archive_path) else { continue };
-        let built = record::desc(&info, &raw, &facts);
+        let built = record::desc(&info, &raw, &facts).unwrap();
         let theirs = Record::parse(RecordKind::Desc, pacman_desc).unwrap();
         checked += 1;
 

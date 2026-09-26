@@ -623,6 +623,11 @@ pub fn plan(
     let explanation = explain.then(|| explain_plan(&universe, &planned, &request, &ambiguities));
 
     let built = Plan::assemble(&universe, &planned, request.targets(), &limits, cache);
+    // `piko install` refuses these in `TransactionPlan::new`, before it downloads anything.
+    if let Err(error) = piko_txn::plan::check_compression(&universe, &built) {
+        report(&error);
+        return ExitCode::FAILURE;
+    }
     // `-u` is what makes this a preview of `piko update`, so it is what turns the broken
     // dependency report on. Without it, the command was asked about the named targets only.
     let reach = if matches!(mode, Mode::Install { sysupgrade: true, .. }) {

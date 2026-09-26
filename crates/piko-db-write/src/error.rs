@@ -102,6 +102,17 @@ pub enum Error {
         dbpath: PathBuf,
     },
 
+    /// The temporary file of an atomic write is no longer the file this process wrote.
+    ///
+    /// Anyone who can write into the directory can unlink the temporary and put a file or a
+    /// symbolic link of their own at its path. A `rename` would then move theirs over the
+    /// destination. So the write is refused, and the destination keeps its previous contents.
+    #[error("{} was replaced by another file before it could be renamed", path.display())]
+    TemporaryReplaced {
+        /// The temporary file's path.
+        path: PathBuf,
+    },
+
     /// A `desc` or `files` file is not a well-formed list of `%SECTION%` blocks.
     ///
     /// Only the writer produces this. The reader is deliberately more permissive. It tolerates

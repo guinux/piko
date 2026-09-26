@@ -922,6 +922,18 @@ impl Transaction<Planned> {
                 return Err(self::discard(source, &location, refusal));
             }
             let entry = self::entry_name(&path, &info)?;
+            // Before anything is extracted: a value the entry format cannot hold refuses the
+            // package here, rather than after its files are already in the root.
+            crate::record::check(
+                &info,
+                &raw,
+                target.files.iter(),
+                target.backups.iter().map(String::as_str),
+            )
+            .map_err(|error| Error::UnusableSource {
+                path: path.clone(),
+                reason: format!("its entry cannot be recorded: {error}"),
+            })?;
 
             // The installed package of the same name, looked up once and used five ways. It
             // decides `pre_install` against `pre_upgrade`. It supplies the scriptlet's `oldver`
@@ -1627,10 +1639,14 @@ fn run_hooks(
 /// success for a path it cannot read (`trans.c:346`). An unreadable one is treated the same
 /// way. A removal must not be blocked by a file it is about to delete anyway.
 fn read_entry_scriptlet(entry_path: &Path) -> Option<Vec<u8>> {
-    let path = entry_path.join("install");
-    piko_db::fs_util::read_capped_utf8(&path, piko_db::Limit::Desc, MAX_SCRIPTLET_BYTES)
-        .ok()
-        .map(String::into_bytes)
+    piko_db::fs_util::read_capped_utf8_in(
+        entry_path,
+        "install",
+        piko_db::Limit::Desc,
+        MAX_SCRIPTLET_BYTES,
+    )
+    .ok()
+    .map(String::into_bytes)
 }
 
 #[cfg(test)]
@@ -2307,6 +2323,98 @@ mod tests {
             "got {error:?}"
         );
         assert!(!root.path().join("usr/bin/foo").exists(), "the payload was extracted anyway");
+        assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was written");
+    }
+
+    /// Verifies one install of `name` from `cache`, expecting a refusal that names an entry
+    /// which cannot be recorded, and nothing written anywhere.
+    fn assert_refused_as_unrecordable(cache: &tempfile::TempDir, name: &str, payload: &str) {
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        let error = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&source)
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, Error::UnusableSource { reason, .. }
+                     if reason.contains("its entry cannot be recorded")),
+            "got {error:?}"
+        );
+        assert!(!root.path().join(payload).exists(), "the payload was extracted anyway");
+        assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was written");
+        assert!(!db.path().join("local/foo-1.0.0-1").exists(), "an entry was written");
+    }
+
+    /// The entry format has no escaping. A group named `%REASON%`, then `1`, would read back as
+    /// an install reason the package chose for itself: a dependency, so an orphan. It is
+    /// refused at `verify`, before the payload reaches the root.
+    #[test]
+    fn a_group_that_forges_a_section_is_refused_before_the_root_is_touched() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let forged = format!("{}group = %REASON%\ngroup = 1\n", pkginfo("1.0.0-1", &[]));
+        let cache = cache_with_raw_pkginfo(name, &forged, &[("usr/bin/foo", b"binary")]);
+        assert_refused_as_unrecordable(&cache, name, "usr/bin/foo");
+    }
+
+    /// A member path holding a newline would add lines to `%FILES%`: the package would own
+    /// `etc/passwd` in the database, and removing it would delete that file. It is refused at
+    /// `verify`, before anything is extracted.
+    #[test]
+    fn a_member_path_holding_a_newline_is_refused_before_the_root_is_touched() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo\netc/passwd", b"binary")]);
+        assert_refused_as_unrecordable(&cache, name, "usr/bin");
+    }
+
+    /// A device node in a package is refused at `verify`, with the regular file beside it, so
+    /// nothing reaches the root, the journal or the database.
+    #[test]
+    fn a_device_node_in_a_package_is_refused_before_the_root_is_touched() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = tempfile::tempdir().unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, contents, entry_type, mode) in [
+            (".PKGINFO", pkginfo("1.0.0-1", &[]).into_bytes(), tar::EntryType::Regular, 0o644),
+            ("usr/", Vec::new(), tar::EntryType::Directory, 0o755),
+            ("usr/bin/", Vec::new(), tar::EntryType::Directory, 0o755),
+            ("usr/bin/foo", b"binary".to_vec(), tar::EntryType::Regular, 0o755),
+            ("usr/bin/tty", Vec::new(), tar::EntryType::Char, 0o666),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(entry_type);
+            header.set_mode(mode);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            header.set_size(contents.len() as u64);
+            header.set_cksum();
+            builder.append_data(&mut header, path, contents.as_slice()).unwrap();
+        }
+        std::fs::write(cache.path().join(name), builder.into_inner().unwrap()).unwrap();
+
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        let error = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&source)
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, Error::UnsupportedMemberType { kind: "character device", .. }),
+            "got {error:?}"
+        );
+        assert!(!root.path().join("usr/bin").exists(), "the payload was extracted anyway");
         assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was written");
     }
 

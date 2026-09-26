@@ -116,6 +116,17 @@ pub enum FreshnessNote {
         /// How many other servers were asked for a newer one.
         probed: usize,
     },
+    /// The installed database carries no verified signature and is dated further in the future
+    /// than the tolerance allows, so its date was not used to refuse an older download.
+    ///
+    /// Kept as a baseline, that date would make every honest database look older until the
+    /// local clock reached it. See [`piko_db::repo::freshness::disqualified_baseline`].
+    FutureBaselineIgnored {
+        /// When the installed database claims to have been published.
+        installed: Publication,
+        /// How far ahead of the local clock that is.
+        ahead: Duration,
+    },
     /// The database is dated further in the future than the tolerance allows.
     ///
     /// Either the local clock is behind or the publisher's is ahead. The database is kept.
@@ -151,7 +162,11 @@ pub(crate) struct Baseline<'a> {
     keyring: Option<&'a Keyring>,
     policy: Policy,
     limits: piko_db::Limits,
+    now: SystemTime,
     value: Option<Option<Publication>>,
+    /// The note for an installed date [`Baseline::reference`] refused to compare against, the
+    /// first time it did.
+    ignored: Option<FreshnessNote>,
 }
 
 impl<'a> Baseline<'a> {
@@ -160,8 +175,9 @@ impl<'a> Baseline<'a> {
         keyring: Option<&'a Keyring>,
         policy: Policy,
         limits: piko_db::Limits,
+        now: SystemTime,
     ) -> Self {
-        Self { path, keyring, policy, limits, value: None }
+        Self { path, keyring, policy, limits, now, value: None, ignored: None }
     }
 
     /// The installed database's publication, computing it on first use.
@@ -172,6 +188,27 @@ impl<'a> Baseline<'a> {
         let value = installed_publication(self.path, self.keyring, self.policy, &self.limits);
         self.value = Some(value);
         value
+    }
+
+    /// The installed database's publication as a baseline for [`freshness::compare`].
+    ///
+    /// `None` when its date is unsigned and in the future, which
+    /// [`freshness::disqualified_baseline`] explains. The first such refusal is recorded, and
+    /// [`Baseline::take_note`] returns it.
+    pub(crate) fn reference(&mut self) -> Option<Publication> {
+        let installed = self.get()?;
+        let Some(ahead) = freshness::disqualified_baseline(installed, self.now) else {
+            return Some(installed);
+        };
+        if self.ignored.is_none() {
+            self.ignored = Some(FreshnessNote::FutureBaselineIgnored { installed, ahead });
+        }
+        None
+    }
+
+    /// The note [`Baseline::reference`] recorded, if any.
+    pub(crate) const fn take_note(&mut self) -> Option<FreshnessNote> {
+        self.ignored.take()
     }
 
     /// The installed database's publication, if something already computed it.

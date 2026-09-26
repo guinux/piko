@@ -32,6 +32,14 @@
 //!
 //! The user switch is `std`'s own `CommandExt::uid`/`gid`, which drop the supplementary groups
 //! first. The helper then confines itself before it reads anything: see `confine`.
+//!
+//! # Never root
+//!
+//! Under root, the helper always switches to another user: `DownloadUser` when it is set, and
+//! [`FALLBACK_USER`] otherwise. libalpm confines nothing without `DownloadUser`. A helper left
+//! as root would keep every capability, and the owner's access to every file, which no
+//! Landlock or system call rule takes back: it could read the keyring's secret keys, or change
+//! the firewall through the netlink socket its resolver needs.
 
 mod confine;
 pub(crate) mod protocol;
@@ -54,6 +62,13 @@ use piko_db::config::Options;
 use self::protocol::{Header, Opening, Reader, Request, Tag, Writer};
 use crate::cancel::Cancel;
 
+/// The user a helper started by root switches to when `pacman.conf` names no `DownloadUser`.
+pub const FALLBACK_USER: &str = "nobody";
+
+/// The user and group ids [`FALLBACK_USER`] stands for when it has no account: the kernel's
+/// overflow ids, which `nobody` is on every Linux system that has it.
+const OVERFLOW_ID: u32 = 65_534;
+
 /// The hidden argument that turns a `piko` process into the download helper.
 ///
 /// It is not a documented subcommand. Anyone can run it, and gains nothing: it fetches one URL
@@ -71,8 +86,14 @@ const WATCHDOG_GRACE: Duration = Duration::from_secs(5);
 /// How often the watchdog looks at the cancellation flag.
 const WATCHDOG_TICK: Duration = Duration::from_millis(100);
 
-/// Ports a request may always reach: HTTP and HTTPS, for a redirect, and DNS over TCP.
-const ALWAYS_ALLOWED_PORTS: [u16; 3] = [53, 80, 443];
+/// Ports a request may always reach: DNS over TCP, and HTTPS for a redirect.
+///
+/// HTTP's port 80 is added only for an `http` URL. An `https` URL is followed only to `https`,
+/// so it has no use for it.
+const ALWAYS_ALLOWED_PORTS: [u16; 2] = [53, 443];
+
+/// HTTP's default port.
+const HTTP_PORT: u16 = 80;
 
 /// The proxy variables passed to the helper. Its environment is otherwise empty.
 ///
@@ -106,7 +127,7 @@ pub struct Sandbox {
 
 #[derive(Clone, Debug)]
 struct Enabled {
-    /// `DownloadUser`, resolved when the first request runs.
+    /// `DownloadUser`, resolved when the first request runs. `None` means [`FALLBACK_USER`].
     user: Option<String>,
     /// Apply Landlock.
     filesystem: bool,
@@ -139,8 +160,9 @@ impl Sandbox {
     /// A sandbox with explicit settings.
     ///
     /// `download_user` is used only when this process runs as root, as in libalpm. Unlike
-    /// libalpm, the other two restrictions apply without root and without a download user.
-    /// Neither needs a privilege.
+    /// libalpm, a root process with no download user still switches, to [`FALLBACK_USER`]. And
+    /// the other two restrictions apply without root and without a download user. Neither needs
+    /// a privilege.
     #[must_use]
     pub fn new(download_user: Option<&str>, filesystem: bool, syscalls: bool) -> Self {
         if !filesystem && !syscalls {
@@ -185,6 +207,7 @@ impl Sandbox {
 
 impl Default for Sandbox {
     /// Both restrictions, and no download user: the sandbox an empty `pacman.conf` asks for.
+    /// Under root, the helper runs as [`FALLBACK_USER`].
     fn default() -> Self {
         Self::new(None, true, true)
     }
@@ -280,12 +303,22 @@ impl Enabled {
     }
 }
 
-/// Looks up `DownloadUser`, when this process runs as root.
+/// The account a helper switches to: none unless this process runs as root.
+///
+/// A named `DownloadUser` must exist, as in libalpm. With none named, [`FALLBACK_USER`] is
+/// looked up, and the overflow ids stand in when it cannot be. A minimal chroot may have no
+/// `nobody`, and root can switch to an id no account names.
 fn resolve_account(user: Option<&str>) -> Result<Option<Account>, String> {
-    let Some(name) = user else { return Ok(None) };
     if !rustix::process::geteuid().is_root() {
         return Ok(None);
     }
+    let Some(name) = user else {
+        let account = match nix::unistd::User::from_name(FALLBACK_USER) {
+            Ok(Some(user)) => Account { uid: user.uid.as_raw(), gid: user.gid.as_raw() },
+            Ok(None) | Err(_) => Account { uid: OVERFLOW_ID, gid: OVERFLOW_ID },
+        };
+        return Ok(Some(account));
+    };
     match nix::unistd::User::from_name(name) {
         Ok(Some(user)) => Ok(Some(Account { uid: user.uid.as_raw(), gid: user.gid.as_raw() })),
         Ok(None) => Err(format!("download user '{name}' does not exist")),
@@ -296,6 +329,9 @@ fn resolve_account(user: Option<&str>) -> Result<Option<Account>, String> {
 /// The TCP ports a request to `url` may reach.
 fn allowed_ports(url: &str) -> Vec<u16> {
     let mut ports = ALWAYS_ALLOWED_PORTS.to_vec();
+    if !crate::transport::is_https(url) {
+        ports.push(HTTP_PORT);
+    }
     let proxies = PROXY_VARIABLES.iter().filter_map(|name| std::env::var(name).ok());
     for target in std::iter::once(url.to_owned()).chain(proxies) {
         if let Some(port) = url_port(&target) {
@@ -443,6 +479,11 @@ fn helper_main() -> ExitCode {
         ExitCode::from(2)
     };
 
+    // Before anything is read. Landlock checks a file when it is opened, so a descriptor
+    // inherited open would carry its rights past every restriction below.
+    if let Err(message) = no_inherited_descriptors() {
+        return setup(&mut writer, &message);
+    }
     let request = match Request::decode(std::io::stdin().lock()) {
         Ok(request) => request,
         Err(message) => return setup(&mut writer, &message),
@@ -460,10 +501,8 @@ fn helper_main() -> ExitCode {
         whole: Duration::from_secs(request.timeout_secs),
         connect: Duration::from_secs(request.connect_timeout_secs),
     });
-    let mut call = agent.get(&request.url);
-    if let Some(value) = &request.if_modified_since {
-        call = call.header("If-Modified-Since", value);
-    }
+    let call =
+        crate::transport::request(&agent, &request.url, request.if_modified_since.as_deref());
     let response = match call.call() {
         Ok(response) => response,
         Err(error) => {
@@ -480,6 +519,41 @@ fn helper_main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::FAILURE,
     }
+}
+
+/// Refuses a descriptor above the three standard ones.
+///
+/// The parent opens every file with `O_CLOEXEC`, so only a descriptor the parent itself
+/// inherited, from whatever started it, can reach the helper. Nothing here can close one:
+/// that needs `unsafe`. So the helper refuses to run, and names it.
+fn no_inherited_descriptors() -> Result<(), String> {
+    let fail = |error: std::io::Error| format!("could not list the open descriptors: {error}");
+    // The listing's own descriptor appears in it, pointing at this directory.
+    let own = format!("/proc/{}/fd", std::process::id());
+    let mut inherited = Vec::new();
+    for entry in std::fs::read_dir("/proc/self/fd").map_err(fail)? {
+        let entry = entry.map_err(fail)?;
+        let name = entry.file_name();
+        let Some(number) = name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        if number <= 2 {
+            continue;
+        }
+        let target = std::fs::read_link(entry.path()).unwrap_or_default();
+        if target.as_os_str() == own.as_str() {
+            continue;
+        }
+        inherited.push(format!("{number} ({})", target.display()));
+    }
+    if inherited.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the download helper inherited open descriptors: {}. Whatever started piko left them \
+         open.",
+        inherited.join(", ")
+    ))
 }
 
 #[cfg(test)]
@@ -501,11 +575,23 @@ mod tests {
     }
 
     #[test]
-    fn the_allowed_ports_always_include_dns_and_both_web_ports() {
+    fn the_allowed_ports_always_include_dns_and_both_web_ports_for_http() {
         let ports = allowed_ports("http://127.0.0.1:43210/core.db");
 
         for port in [53, 80, 443, 43210] {
             assert!(ports.contains(&port), "{ports:?}");
+        }
+    }
+
+    /// An `https` URL is followed only to `https`, so it has no use for port 80.
+    #[test]
+    fn an_https_url_gets_no_http_port() {
+        let ports = allowed_ports("https://mirror.example/core.db");
+
+        assert!(ports.contains(&443), "{ports:?}");
+        // A proxy variable on port 80 would add it back, and this process has none.
+        if PROXY_VARIABLES.iter().all(|name| std::env::var_os(name).is_none()) {
+            assert!(!ports.contains(&80), "{ports:?}");
         }
     }
 
@@ -516,13 +602,14 @@ mod tests {
         assert!(Sandbox::new(None, false, true).is_enabled());
     }
 
-    /// A download user is used only by root, as in libalpm, so this test is meaningful only
-    /// when it does not run as root.
+    /// A helper switches user only under root, so this test is meaningful only when it does not
+    /// run as root. Neither a named download user nor the fallback is used.
     #[test]
-    fn a_download_user_is_ignored_without_root() {
+    fn no_user_switch_happens_without_root() {
         if rustix::process::geteuid().is_root() {
             return;
         }
         assert!(resolve_account(Some("no-such-user-for-piko")).unwrap().is_none());
+        assert!(resolve_account(None).unwrap().is_none());
     }
 }

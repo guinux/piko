@@ -8,7 +8,10 @@
 //! Three properties are enforced here:
 //!
 //! 1. **No symlink traversal.** A metadata file is opened with `O_NOFOLLOW`. A symlink
-//!    planted in an entry directory cannot redirect a read outside the database.
+//!    planted in an entry directory cannot redirect a read outside the database. A file inside
+//!    an entry is read through [`read_capped_in`], which opens the entry directory and then the
+//!    file by descriptor, each `O_NOFOLLOW`: an entry directory swapped for a symlink after the
+//!    scan cannot redirect the read either.
 //! 2. **No blocking on non-files.** The open uses `O_NONBLOCK`, and the descriptor is
 //!    `fstat`ed before any read. Without this, opening a FIFO blocks until a writer
 //!    appears, and reading `/dev/zero` never terminates.
@@ -108,7 +111,17 @@ pub fn open_following_symlinks(path: &Path) -> Result<File> {
 pub(crate) fn read_capped(path: &Path, limit: Limit, max: u64) -> Result<Vec<u8>> {
     let file = open_no_follow(path)?;
     let metadata = ensure_regular_file(&file, path)?;
+    read_open(file, &metadata, path, limit, max)
+}
 
+/// Reads the already-checked `file` in full, refusing more than `max` bytes.
+fn read_open(
+    file: File,
+    metadata: &std::fs::Metadata,
+    path: &Path,
+    limit: Limit,
+    max: u64,
+) -> Result<Vec<u8>> {
     // Reading one byte past the limit distinguishes "exactly at the limit" from "truncated".
     // An oversized file is reported, never silently accepted short.
     let ceiling = max.saturating_add(1);
@@ -122,6 +135,227 @@ pub(crate) fn read_capped(path: &Path, limit: Limit, max: u64) -> Result<Vec<u8>
     }
 
     Ok(buffer)
+}
+
+/// Why a file or a directory is not trusted: a user other than root and this process's
+/// effective user could change it.
+///
+/// The rule is `sshd`'s `StrictModes` for one level. The owner is root or the effective user,
+/// and neither the group nor others may write. A sticky bit does not pass: in a sticky,
+/// world-writable directory, anyone can still create a file under a name before it is written.
+/// libalpm checks none of this.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Distrust {
+    /// Owned by a user that is neither root nor this process's effective user.
+    ForeignOwner {
+        /// The owner's user ID.
+        uid: u32,
+    },
+    /// The group or others may write it.
+    GroupOrOtherWritable {
+        /// The permission bits.
+        mode: u32,
+    },
+}
+
+impl std::fmt::Display for Distrust {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ForeignOwner { uid } => write!(f, "owned by user {uid}"),
+            Self::GroupOrOtherWritable { mode } => {
+                write!(f, "writable by its group or others (mode {mode:04o})")
+            }
+        }
+    }
+}
+
+/// Whether `metadata` describes a file or a directory another user could change. See
+/// [`Distrust`].
+#[must_use]
+pub fn distrust(metadata: &std::fs::Metadata) -> Option<Distrust> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let uid = metadata.uid();
+        if uid != 0 && uid != rustix::process::geteuid().as_raw() {
+            return Some(Distrust::ForeignOwner { uid });
+        }
+        let mode = metadata.mode() & 0o7777;
+        if mode & 0o022 != 0 {
+            return Some(Distrust::GroupOrOtherWritable { mode });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = metadata;
+    None
+}
+
+/// How many symbolic links [`ensure_trusted_directory`] follows before it gives up: Linux's
+/// own limit for one path resolution.
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Fails unless no user other than root and this process's effective user could change what
+/// `directory` names.
+///
+/// Testing `directory` alone is not enough. A user who can write any directory above it can
+/// rename it away between this test and the read, and put another in its place. So the path
+/// is resolved one component at a time, from `/`, following each symbolic link by hand, and
+/// every directory the resolution passes through is tested: each ancestor, and each directory
+/// a link leads through.
+///
+/// A directory on the way may be writable by others only if it is sticky, as `/tmp` is. In a
+/// sticky directory only the owner of an entry can rename or remove it, and the entry that
+/// comes next is tested for its owner: a directory by [`distrust`], and a symbolic link by the
+/// owner of the link itself, since its owner can point it elsewhere at any time. `directory`
+/// itself gets no such exemption: in it, anyone could create a file under a name before it is
+/// written.
+///
+/// A relative path is resolved against the current directory.
+///
+/// # Errors
+///
+/// [`Error::Untrusted`] naming the first directory, or symbolic link, that fails. [`Error::Io`]
+/// if a component cannot be stat'ed or read, is not a directory, or the resolution follows more
+/// than 40 links.
+pub fn ensure_trusted_directory(directory: &Path) -> Result<()> {
+    use std::collections::VecDeque;
+    use std::path::Component;
+
+    /// One step of a resolution still to come.
+    enum Step {
+        Parent,
+        Name(std::ffi::OsString),
+    }
+
+    fn steps(path: &Path) -> impl Iterator<Item = Step> + '_ {
+        path.components().filter_map(|component| match component {
+            Component::ParentDir => Some(Step::Parent),
+            Component::Normal(name) => Some(Step::Name(name.to_os_string())),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+        })
+    }
+
+    let stat = |path: &Path| {
+        std::fs::metadata(path).map_err(|source| Error::io(path, IoAction::Metadata, source))
+    };
+    let untrusted = |path: &Path, distrust| Error::Untrusted { path: path.to_path_buf(), distrust };
+    // Whether a directory on the way is acceptable, and if so whether it is open to others
+    // (sticky), in which case the next entry's owner is tested too.
+    let on_the_way = |path: &Path, metadata: &std::fs::Metadata| -> Result<bool> {
+        match distrust(metadata) {
+            None => Ok(false),
+            Some(Distrust::GroupOrOtherWritable { mode }) if mode & 0o1000 != 0 => Ok(true),
+            Some(distrust) => Err(untrusted(path, distrust)),
+        }
+    };
+
+    let absolute = if directory.is_absolute() {
+        directory.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| Error::io(directory, IoAction::Metadata, source))?
+            .join(directory)
+    };
+    let mut pending: VecDeque<Step> = steps(&absolute).collect();
+    let mut current = PathBuf::from("/");
+    let mut open = on_the_way(&current, &stat(&current)?)?;
+    let mut hops = 0_usize;
+
+    while let Some(step) = pending.pop_front() {
+        let name = match step {
+            Step::Parent => {
+                current.pop();
+                open = on_the_way(&current, &stat(&current)?)?;
+                continue;
+            }
+            Step::Name(name) => name,
+        };
+        let next = current.join(&name);
+        let metadata = std::fs::symlink_metadata(&next)
+            .map_err(|source| Error::io(&next, IoAction::Metadata, source))?;
+        if open && let Some(foreign @ Distrust::ForeignOwner { .. }) = distrust(&metadata) {
+            return Err(untrusted(&next, foreign));
+        }
+        if metadata.file_type().is_symlink() {
+            hops = hops.saturating_add(1);
+            if hops > MAX_SYMLINK_HOPS {
+                let source = std::io::Error::other("too many levels of symbolic links");
+                return Err(Error::io(&next, IoAction::Metadata, source));
+            }
+            let target = std::fs::read_link(&next)
+                .map_err(|source| Error::io(&next, IoAction::Read, source))?;
+            if target.has_root() {
+                current = PathBuf::from("/");
+                open = on_the_way(&current, &stat(&current)?)?;
+            }
+            let mut ahead: VecDeque<Step> = steps(&target).collect();
+            ahead.append(&mut pending);
+            pending = ahead;
+        } else if metadata.is_dir() {
+            open = on_the_way(&next, &metadata)?;
+            current = next;
+        } else {
+            let source = std::io::Error::from(std::io::ErrorKind::NotADirectory);
+            return Err(Error::io(&next, IoAction::Metadata, source));
+        }
+    }
+
+    match distrust(&stat(&current)?) {
+        Some(distrust) => Err(untrusted(&current, distrust)),
+        None => Ok(()),
+    }
+}
+
+/// Fails if the file `metadata` describes, or the directory holding `path`, is one another
+/// user could change.
+///
+/// The directory is the one the path names, not the one a followed link resolves into: a
+/// user who can write it can replace the link.
+fn ensure_trusted(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
+    if let Some(distrust) = self::distrust(metadata) {
+        return Err(Error::Untrusted { path: path.to_path_buf(), distrust });
+    }
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    ensure_trusted_directory(parent)
+}
+
+/// Reads configuration at `path` in full as UTF-8, as [`read_capped_utf8`] does, and refuses a
+/// file another user could change, or one in a directory another user could write.
+///
+/// For a file root reads as instructions: `pacman.conf` and every file it `Include`s. A user
+/// who can change one can name a hook directory, a keyring, or a server.
+///
+/// # Errors
+///
+/// As [`read_capped_utf8`], plus [`Error::Untrusted`] naming the file or the directory that
+/// failed [`distrust`].
+pub fn read_trusted_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
+    let file = open_no_follow(path)?;
+    let metadata = ensure_regular_file(&file, path)?;
+    ensure_trusted(path, &metadata)?;
+    decode(path, read_open(file, &metadata, path, limit, max)?)
+}
+
+/// [`read_trusted_utf8`], **following a final symlink**, as [`read_capped_utf8_following`]
+/// does.
+///
+/// The file tested is the one the link resolves to; the directory tested is the one holding
+/// the link. A link to something that is not a regular file is still
+/// [`Error::NotARegularFile`], tested first, so a hook masked by a link to `/dev/null` stays
+/// masked.
+///
+/// # Errors
+///
+/// As [`read_trusted_utf8`].
+pub fn read_trusted_utf8_following(path: &Path, limit: Limit, max: u64) -> Result<String> {
+    let file = open_following_symlinks(path)?;
+    let metadata = ensure_regular_file(&file, path)?;
+    ensure_trusted(path, &metadata)?;
+    decode(path, read_open(file, &metadata, path, limit, max)?)
 }
 
 /// Reads `path` in full and decodes it as UTF-8.
@@ -174,17 +408,116 @@ pub fn read_capped_utf8_following(path: &Path, limit: Limit, max: u64) -> Result
 pub fn read_capped_following(path: &Path, limit: Limit, max: u64) -> Result<Vec<u8>> {
     let file = open_following_symlinks(path)?;
     let metadata = ensure_regular_file(&file, path)?;
+    read_open(file, &metadata, path, limit, max)
+}
+
+/// Reads the file `name` inside the entry directory `dir`, in full, following no symbolic link
+/// at either level, refusing anything that is not a regular file and anything larger than
+/// `max` bytes.
+///
+/// `O_NOFOLLOW` on `dir.join(name)` covers only the last component. The scan checked that `dir`
+/// is a real directory, but a lazy read comes later, and by then `dir` can be a symbolic link
+/// to anywhere. So `dir`'s parent is opened (following links: the caller named that path), then
+/// `dir` from it with `O_DIRECTORY | O_NOFOLLOW`, then `name` from that with
+/// `O_NOFOLLOW | O_NONBLOCK`. `name` is a single component, such as `desc`.
+///
+/// # Errors
+///
+/// As `read_capped`, plus [`Error::Io`] with [`IoAction::Open`] if `dir` is a symbolic link.
+pub fn read_capped_in(dir: &Path, name: &str, limit: Limit, max: u64) -> Result<Vec<u8>> {
+    let path = join(dir, name);
+    let file = open_in(dir, name).map_err(|source| Error::io(&path, IoAction::Open, source))?;
+    let metadata = ensure_regular_file(&file, &path)?;
 
     let ceiling = max.saturating_add(1);
     let mut buffer = Vec::with_capacity(hint_capacity(metadata.len(), max));
     file.take(ceiling)
         .read_to_end(&mut buffer)
-        .map_err(|source| Error::io(path, IoAction::Read, source))?;
+        .map_err(|source| Error::io(&path, IoAction::Read, source))?;
     if buffer.len() as u64 > max {
-        return Err(Error::LimitExceeded { path: path.to_path_buf(), limit, max });
+        return Err(Error::LimitExceeded { path, limit, max });
     }
 
     Ok(buffer)
+}
+
+/// [`read_capped_in`], decoded as UTF-8.
+///
+/// # Errors
+///
+/// As [`read_capped_in`], plus [`Error::NotUtf8`] if the contents are not valid UTF-8.
+pub fn read_capped_utf8_in(dir: &Path, name: &str, limit: Limit, max: u64) -> Result<String> {
+    let bytes = read_capped_in(dir, name, limit, max)?;
+    decode(&join(dir, name), bytes)
+}
+
+/// Returns `true` if `name` exists inside the entry directory `dir`, following no symbolic link
+/// at either level. A symbolic link named `name` exists; one in place of `dir` does not.
+pub fn exists_in(dir: &Path, name: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{AtFlags, CWD, Mode};
+        let Some((parent, entry)) = split_dir(dir) else { return false };
+        let Ok(parent) = rustix::fs::openat(CWD, parent, parent_flags(), Mode::empty()) else {
+            return false;
+        };
+        let Ok(entry) = rustix::fs::openat(&parent, entry, entry_flags(), Mode::empty()) else {
+            return false;
+        };
+        rustix::fs::statat(&entry, name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        exists_no_follow(&join(dir, name))
+    }
+}
+
+/// Opens `name` inside `dir` as [`read_capped_in`] describes.
+fn open_in(dir: &Path, name: &str) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{Mode, OFlags};
+        let (parent, entry) = split_dir(dir).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
+        })?;
+        let parent = rustix::fs::openat(rustix::fs::CWD, parent, parent_flags(), Mode::empty())?;
+        let entry = rustix::fs::openat(&parent, entry, entry_flags(), Mode::empty())?;
+        let file = rustix::fs::openat(
+            &entry,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(File::from(file))
+    }
+    #[cfg(not(unix))]
+    {
+        File::open(join(dir, name))
+    }
+}
+
+/// Splits an entry directory into its parent and its own name. A bare name has the current
+/// directory as its parent.
+#[cfg(unix)]
+fn split_dir(dir: &Path) -> Option<(&Path, &std::ffi::OsStr)> {
+    let entry = dir.file_name()?;
+    let parent = dir.parent().filter(|parent| !parent.as_os_str().is_empty());
+    Some((parent.unwrap_or(Path::new(".")), entry))
+}
+
+/// The flags the parent of an entry directory is opened with. It follows symbolic links,
+/// because the caller named it.
+#[cfg(unix)]
+fn parent_flags() -> rustix::fs::OFlags {
+    use rustix::fs::OFlags;
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC
+}
+
+/// The flags an entry directory is opened with: never through a symbolic link.
+#[cfg(unix)]
+fn entry_flags() -> rustix::fs::OFlags {
+    use rustix::fs::OFlags;
+    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
 }
 
 /// Decodes bytes read from `path` as UTF-8.

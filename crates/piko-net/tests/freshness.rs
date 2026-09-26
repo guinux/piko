@@ -53,6 +53,8 @@ const T2: u64 = 1_787_133_600;
 const T3: u64 = 1_787_733_087;
 /// Fri, 01 Jan 2027 00:00:00 GMT.
 const T9: u64 = 1_798_761_600;
+/// Fri, 01 Jan 2100 00:00:00 GMT: in the future of any clock these tests run under.
+const FAR: u64 = 4_102_444_800;
 
 /// The `Last-Modified` spelling of each constant, checked against `date -u -d @<n>`.
 fn http_date(seconds: u64) -> &'static str {
@@ -61,6 +63,7 @@ fn http_date(seconds: u64) -> &'static str {
         T2 => "Wed, 19 Aug 2026 10:00:00 GMT",
         T3 => "Wed, 26 Aug 2026 08:31:27 GMT",
         T9 => "Fri, 01 Jan 2027 00:00:00 GMT",
+        FAR => "Fri, 01 Jan 2100 00:00:00 GMT",
         other => panic!("no HTTP date for {other}"),
     }
 }
@@ -413,6 +416,104 @@ fn a_database_from_the_future_is_installed_and_reported() {
         matches!(
             refreshed.notes.as_slice(),
             [FreshnessNote::FromTheFuture { ahead, .. }] if *ahead == Duration::from_secs(2 * 86_400)
+        ),
+        "{:?}",
+        refreshed.notes
+    );
+}
+
+/// A `Last-Modified` past the clock's tolerance is not stamped onto the download, and neither is
+/// the time the file was written: both would pass over an honest server on the next refresh.
+/// The epoch stands for "no date".
+#[test]
+fn a_last_modified_from_the_future_is_not_stamped() {
+    let sync = SyncDir::new();
+    let (mirror, _) = serve(vec![ok(&database("new", T3), T9)]);
+
+    let refreshed = refresh(sync.path(), &[mirror], policy_at(T3 + 60), false).unwrap();
+
+    assert_eq!(refreshed.outcome, Outcome::Updated);
+    let stamped = std::fs::metadata(sync.path().join("core.db")).unwrap().modified().unwrap();
+    assert_eq!(stamped, UNIX_EPOCH);
+}
+
+/// A server that sends no `Last-Modified` gives no date, and the file carries none. The time it
+/// was written would make the next server look behind.
+#[test]
+fn a_download_with_no_last_modified_stamps_no_date() {
+    let sync = SyncDir::new();
+    let body = database("new", T3);
+    let mut response =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    response.extend_from_slice(&body);
+    let (mirror, _) = serve(vec![response]);
+
+    refresh(sync.path(), &[mirror], policy_at(T3 + 60), false).unwrap();
+
+    let stamped = std::fs::metadata(sync.path().join("core.db")).unwrap().modified().unwrap();
+    assert_eq!(stamped, UNIX_EPOCH);
+}
+
+/// The whole freeze, end to end: one server answers with a `Last-Modified` in the future, and
+/// the next refresh still takes an honest server's newer database. This test runs at the real
+/// clock, which is past `T3`, so a file left with the time it was written would make `T3` look
+/// behind.
+#[test]
+fn one_future_last_modified_does_not_freeze_the_next_refresh() {
+    let sync = SyncDir::new();
+    let (planted, _) = serve(vec![ok(&database("planted", T1), FAR)]);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    refresh(sync.path(), &[planted], policy_at(now), false).unwrap();
+
+    let honest = database("honest", T3);
+    let (mirror, _) = serve(vec![ok(&honest, T3)]);
+    let refreshed = refresh(sync.path(), &[mirror], policy_at(now), false).unwrap();
+
+    assert_eq!(refreshed.outcome, Outcome::Updated, "{:?}", refreshed.notes);
+    assert_eq!(installed(sync.path()), honest);
+}
+
+/// A stamp already in the future is ignored: the request is unconditional, and an honest
+/// server's database is not passed over as behind. Trusted, that stamp passed over every server,
+/// `--force` included, until the clock reached it.
+#[test]
+fn an_installed_stamp_from_the_future_does_not_pass_over_honest_servers() {
+    for force in [false, true] {
+        let sync = SyncDir::new();
+        install(sync.path(), &database("installed", T1), T9);
+        let new = database("new", T3);
+        let (mirror, requests) = serve(vec![ok(&new, T3)]);
+
+        let refreshed = refresh(sync.path(), &[mirror], policy_at(T3 + 60), force).unwrap();
+
+        assert_eq!(refreshed.outcome, Outcome::Updated, "force={force}: {:?}", refreshed.notes);
+        assert_eq!(installed(sync.path()), new);
+        let requests = requests.join().unwrap();
+        assert!(
+            requests.iter().all(|request| !request.contains("If-Modified-Since")),
+            "{requests:?}"
+        );
+    }
+}
+
+/// An unsigned installed database dated in the future is no baseline. An honest database from
+/// the next refresh replaces it, and the refresh says why it did not compare the two.
+#[test]
+fn an_unsigned_baseline_from_the_future_does_not_refuse_an_honest_database() {
+    let sync = SyncDir::new();
+    install(sync.path(), &database("planted", T9), T1);
+    let honest = database("honest", T3);
+    let (mirror, _) = serve(vec![ok(&honest, T3)]);
+
+    let refreshed = refresh(sync.path(), &[mirror], policy_at(T3 + 60), false).unwrap();
+
+    assert_eq!(refreshed.outcome, Outcome::Updated);
+    assert_eq!(installed(sync.path()), honest);
+    assert!(
+        matches!(
+            refreshed.notes.as_slice(),
+            [FreshnessNote::FutureBaselineIgnored { installed, ahead }]
+                if installed.at == T9 && *ahead == Duration::from_secs(T9 - T3 - 60)
         ),
         "{:?}",
         refreshed.notes

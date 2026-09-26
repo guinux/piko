@@ -107,6 +107,7 @@ impl FilesSource {
                         entry.version().clone(),
                         parsed.as_ref(),
                         self.limits.repo_inflated_bytes,
+                        self.limits.repo_max_paths,
                     )?;
                 }
                 Ok(())
@@ -179,6 +180,7 @@ impl FilesSource {
                         entry.version().clone(),
                         parsed.as_ref(),
                         self.limits.repo_inflated_bytes,
+                        self.limits.repo_max_paths,
                     )?;
                 }
                 Ok(())
@@ -478,6 +480,7 @@ mod tests {
                 FullVersion::from_str("1.0.0-1").unwrap(),
                 &[std::path::PathBuf::from("usr/bin/foo")],
                 1024,
+                usize::MAX,
             )
             .unwrap();
 
@@ -491,7 +494,11 @@ mod tests {
     /// Builds a package the way [`super::super::database`] does: eager fields parsed now,
     /// the text retained to back the deferred parse.
     fn package_at(name: &str, version: &str, files: Arc<FilesSource>) -> RepoPackage {
-        let eager = super::super::eager::parse(MINIMAL_DESC).unwrap();
+        let eager = super::super::eager::parse(
+            MINIMAL_DESC,
+            &mut crate::eager::RelationBudget::new(usize::MAX),
+        )
+        .unwrap();
         RepoPackage::new(entry(&format!("{name}-{version}")), eager, MINIMAL_DESC.into(), files)
     }
 
@@ -505,6 +512,7 @@ mod tests {
                 FullVersion::from_str("1.0.0-1").unwrap(),
                 &[PathBuf::from("usr/bin/foo")],
                 1024,
+                usize::MAX,
             )
             .unwrap();
         arena
@@ -514,6 +522,7 @@ mod tests {
                 FullVersion::from_str("2.0.0-1").unwrap(),
                 &[PathBuf::from("usr/bin/bar")],
                 1024,
+                usize::MAX,
             )
             .unwrap();
 
@@ -663,7 +672,9 @@ mod tests {
     fn a_malformed_depends_fails_on_access_and_is_cached() {
         let text = format!("{MINIMAL_DESC}%DEPENDS%\nbash>=\n\n");
         let files = Arc::new(FilesSource::unavailable(a_repo_name(), Limits::default()));
-        let Ok(eager) = super::super::eager::parse(&text) else {
+        let Ok(eager) =
+            super::super::eager::parse(&text, &mut crate::eager::RelationBudget::new(usize::MAX))
+        else {
             panic!("a malformed %DEPENDS% must not fail the open")
         };
         let package = RepoPackage::new(entry("foo-1.0.0-1"), eager, text.into(), files);
@@ -686,7 +697,9 @@ mod tests {
         let text =
             MINIMAL_DESC.replace("%PACKAGER%\nFoobar McFooface <foobar@mcfooface.org>\n\n", "");
         let files = Arc::new(FilesSource::unavailable(a_repo_name(), Limits::default()));
-        let eager = super::super::eager::parse(&text).unwrap();
+        let eager =
+            super::super::eager::parse(&text, &mut crate::eager::RelationBudget::new(usize::MAX))
+                .unwrap();
         let package = RepoPackage::new(entry("foo-1.0.0-1"), eager, text.into(), files);
 
         assert_eq!(package.compressed_size(), 1, "the eager fields still work");

@@ -1,8 +1,8 @@
 //! Security properties of the repository database reader, exercised through the public API.
 //!
 //! Mirrors `tests/hardening.rs`, extended for two properties specific to a repository archive.
-//! One is bounded decompression, which piko does itself because `alpm-compress` has no size
-//! cap of its own. The other is the `.db`/`.files` version-skew defence documented on
+//! One is bounded decompression, which piko does itself because its decoder has no size cap
+//! of its own. The other is the `.db`/`.files` version-skew defence documented on
 //! [`piko_db::Error::FilesVersionSkew`].
 
 #![allow(
@@ -446,4 +446,176 @@ fn dating_a_symlink_to_a_fifo_does_not_block() {
             "a FIFO must be refused, not blocked on; got {err:?}"
         );
     });
+}
+
+/// `desc` members for `count` packages, each with `relations` appended, as archive members.
+fn descs_with(count: usize, relations: &str) -> Vec<(String, Vec<u8>)> {
+    (0..count)
+        .map(|index| {
+            let name = format!("pkg{index}");
+            let body = format!("{}{relations}", desc_for(&name, "1.0.0-1"));
+            (format!("{}/desc", entry(&name, "1.0.0-1")), body.into_bytes())
+        })
+        .collect()
+}
+
+fn borrow(members: &[(String, Vec<u8>)]) -> Vec<(&str, &[u8])> {
+    members.iter().map(|(path, body)| (path.as_str(), body.as_slice())).collect()
+}
+
+fn relation_limit(max: usize) -> RepoOpenOptions {
+    RepoOpenOptions::new().limits(Limits { repo_max_relations: max, ..Limits::default() })
+}
+
+/// A relation line of two bytes parses into about 100, and a repetitive member compresses at
+/// more than 1000:1. So the byte bounds cannot stop this allocation: without a count, a 59 KiB
+/// archive parses into 3.7 GiB. The entries are counted instead, and each one before it is
+/// parsed.
+///
+/// The fourth entry here does not parse. Counted after the parse, it would drop the package as
+/// `InvalidDesc` and the open would succeed. Counted before, the open fails on the bound.
+#[test]
+fn a_relation_entry_is_counted_before_it_is_parsed() {
+    let fixture = RepoFixture::new();
+    let members = descs_with(1, "%PROVIDES%\na\nb\nc\nd>=\n\n");
+    let path = fixture.write_gzip_archive("core.db", &borrow(&members));
+
+    let err = RepoDatabase::open_with(&path, relation_limit(3)).unwrap_err();
+    assert!(matches!(&err, Error::TooManyRelations { max: 3, .. }), "got {err:?}");
+}
+
+/// The bound is on the sum over the archive. A bound per package would let an archive spread
+/// the same flood over `repo_max_packages` packages.
+#[test]
+fn the_relation_bound_covers_the_whole_archive_not_one_package() {
+    let fixture = RepoFixture::new();
+    let members = descs_with(4, "%CONFLICTS%\na\n\n%GROUPS%\ng\n\n");
+    let path = fixture.write_gzip_archive("core.db", &borrow(&members));
+
+    let err = RepoDatabase::open_with(&path, relation_limit(7)).unwrap_err();
+    assert!(matches!(&err, Error::TooManyRelations { max: 7, .. }), "got {err:?}");
+
+    let db = RepoDatabase::open_with(&path, relation_limit(8)).unwrap();
+    assert_eq!(db.len(), 4, "an archive at exactly the bound must open");
+}
+
+/// `%DEPENDS%` is parsed on demand, by the planner, long after the open. It is counted at the
+/// open anyway, or a flood of dependencies would pass it and be built with no bound at all.
+#[test]
+fn deferred_dependencies_are_counted_at_open() {
+    let fixture = RepoFixture::new();
+    let members = descs_with(1, "%DEPENDS%\na\nb\nc\nd\n\n");
+    let path = fixture.write_gzip_archive("core.db", &borrow(&members));
+
+    let err = RepoDatabase::open_with(&path, relation_limit(3)).unwrap_err();
+    assert!(matches!(&err, Error::TooManyRelations { max: 3, .. }), "got {err:?}");
+}
+
+/// `alpm-repo-db` parses a `files` member into one `PathBuf` per line. The lines are counted
+/// before that parse, with the default limit, whichever way the member is reached: by opening
+/// the `.files` archive, or through the lazy load a `.db` defers to its sibling.
+#[test]
+fn a_files_member_with_too_many_lines_is_refused_before_it_is_parsed() {
+    let max = Limits::default().repo_entry_paths;
+    let fixture = RepoFixture::new();
+    // The `%FILES%` header is one line, so `max` paths make `max + 1` lines.
+    let files = format!("%FILES%\n{}", "a\n".repeat(max));
+    let desc = desc_for("foo", "1.0.0-1");
+    let desc_path = format!("{}/desc", entry("foo", "1.0.0-1"));
+    let files_path = format!("{}/files", entry("foo", "1.0.0-1"));
+    let files_archive = fixture.write_gzip_archive(
+        "core.files",
+        &[(&desc_path, desc.as_bytes()), (&files_path, files.as_bytes())],
+    );
+    let db_archive = fixture.write_gzip_archive("core.db", &[(&desc_path, desc.as_bytes())]);
+
+    let err = RepoDatabase::open(&files_archive).unwrap_err();
+    assert!(
+        matches!(&err, Error::TooManyEntryPaths { max: m, entry, .. } if *m == max && entry == "foo-1.0.0-1"),
+        "got {err:?}"
+    );
+
+    let db = RepoDatabase::open(&db_archive).unwrap();
+    let err = db.get_str("foo").unwrap().file_list().unwrap_err();
+    assert!(matches!(&*err, Error::TooManyEntryPaths { .. }), "got {err:?}");
+}
+
+/// The files arena stores 8 bytes of offsets per path, which the byte bound does not count.
+/// So the paths have a bound of their own, on the sum over the archive.
+#[test]
+fn file_list_paths_are_bounded_across_the_archive() {
+    let fixture = RepoFixture::new();
+    let mut members: Vec<(String, Vec<u8>)> = Vec::new();
+    for index in 0..3 {
+        let name = format!("pkg{index}");
+        let base = entry(&name, "1.0.0-1");
+        members.push((format!("{base}/desc"), desc_for(&name, "1.0.0-1").into_bytes()));
+        members.push((format!("{base}/files"), MINIMAL_REPO_FILES.as_bytes().to_vec()));
+    }
+    let path = fixture.write_gzip_archive("core.files", &borrow(&members));
+    let paths =
+        |max| RepoOpenOptions::new().limits(Limits { repo_max_paths: max, ..Limits::default() });
+
+    let err = RepoDatabase::open_with(&path, paths(8)).unwrap_err();
+    assert!(matches!(&err, Error::TooManyPaths { max: 8, .. }), "got {err:?}");
+
+    assert!(RepoDatabase::open_with(&path, paths(9)).is_ok(), "exactly at the bound must open");
+}
+
+/// A tar archive of `entries`, zstd-compressed with a window of `2^window_log` bytes.
+fn zstd_tar(entries: &[(&str, &[u8])], window_log: u32) -> Vec<u8> {
+    use std::io::Write as _;
+
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, content) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, path, *content).unwrap();
+    }
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1).unwrap();
+    encoder.window_log(window_log).unwrap();
+    encoder.write_all(&builder.into_inner().unwrap()).unwrap();
+    encoder.finish().unwrap()
+}
+
+/// A zstd frame declares its window size, and the decoder allocates it. piko caps it at
+/// `compression::ZSTD_WINDOW_LOG_MAX`, so a frame one step past the cap is refused, and one
+/// at the cap still opens.
+#[test]
+fn a_zstd_archive_past_the_window_bound_is_refused() {
+    let fixture = RepoFixture::new();
+    let desc = desc_for("foo", "1.0.0-1");
+    let member = format!("{}/desc", entry("foo", "1.0.0-1"));
+    let bound = piko_db::compression::ZSTD_WINDOW_LOG_MAX;
+
+    let path =
+        fixture.write_archive("core.db", &zstd_tar(&[(&member, desc.as_bytes())], bound + 1));
+    let err = RepoDatabase::open(&path).unwrap_err();
+    assert!(matches!(&err, Error::Io { .. }), "got {err:?}");
+
+    let path = fixture.write_archive("core.db", &zstd_tar(&[(&member, desc.as_bytes())], bound));
+    let db = RepoDatabase::open(&path).unwrap();
+    assert_eq!(db.len(), 1, "a window at the bound must still open");
+}
+
+/// An xz or bzip2 database is refused before any decoder runs, and the error names the
+/// format, so a user can tell a refused format from a corrupt download.
+#[test]
+fn an_xz_or_bzip2_archive_is_refused_by_name() {
+    use piko_db::compression::Unsupported;
+
+    let fixture = RepoFixture::new();
+    for (magic, expected) in [
+        (&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 0x00][..], Unsupported::Xz),
+        (b"BZh91AY&SY".as_slice(), Unsupported::Bzip2),
+    ] {
+        let path = fixture.write_archive("core.db", magic);
+        let err = RepoDatabase::open(&path).unwrap_err();
+        assert!(
+            matches!(&err, Error::UnsupportedCompression { format, .. } if *format == expected),
+            "got {err:?}"
+        );
+    }
 }

@@ -27,10 +27,6 @@ allow = [
     "Zlib",
     "0BSD",
     "Unlicense",
-    # The bzip2 library's own (BSD-style, permissive) license — added with `alpm-compress`.
-    # Not to be confused with a GPL "bzip2" package; `cargo deny list` reports it under this
-    # exact SPDX-ish identifier.
-    "bzip2-1.0.6",
     # gpgme, gpgme-sys, gpg-error, libgpg-error-sys.
     # The obligation it does create is on *distributing a built
     # binary*: recipients must be able to relink against a modified libgpgme.

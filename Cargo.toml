@@ -54,10 +54,10 @@ alpm-db = "0.2"
 # But  it does not build, because of an upstream bug.
 alpm-mtree = "0.3"
 alpm-common = "0.2"
-# For repository databases. Only for `CompressionDecoder`.
-# `TarballReader` cannot be bounded, so `tar` is a
-# direct dependency too and piko drives `tar::Archive` itself.
-alpm-compress = "0.1"
+# The zstd decoder for `piko_db::compression`, the one decoder every archive goes through.
+# Without the default features: `legacy` decodes the pre-1.0 frame formats, which no package
+# or database uses, and the other two are for compressing.
+zstd = { version = "0.13", default-features = false }
 alpm-repo-db = "0.1"
 alpm-pkginfo = "0.6"
 flate2 = "1"

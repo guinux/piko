@@ -42,6 +42,17 @@
 //! (`fprintf("%%NAME%%\n%s\n\n")`) and for lists (`write_deps`) alike, and emits `files` the
 //! same way for `%FILES%` and `%BACKUP%`. A file is a concatenation of such sections and
 //! nothing else, so it ends with a blank line whenever it is not empty.
+//!
+//! # Which values fit
+//!
+//! The format has no escaping. A value is one line, so it must not be empty (a blank line ends
+//! the section), must hold no line break (it would read back as several values), and must not
+//! read as a `%KEYWORD%` header (it would open a section of that name). `_alpm_local_db_write`
+//! writes such a value anyway. A package could then decide what its own entry says: a group
+//! named `%REASON%` followed by `1` reads back as an install reason, and a member path holding
+//! a newline adds lines to `%FILES%`, so the package appears to own a file it never shipped.
+//! [`Record::set`] refuses every such value instead, with
+//! [`RecordError::UnrepresentableValue`].
 
 use std::fmt::Write as _;
 
@@ -109,9 +120,18 @@ pub struct Section {
 
 impl Section {
     /// Builds a section from a keyword (without the surrounding `%`) and its values.
-    #[must_use]
-    pub fn new(keyword: impl Into<String>, values: Vec<String>) -> Self {
-        Self { keyword: keyword.into(), values }
+    ///
+    /// # Errors
+    ///
+    /// - [`RecordError::InvalidKeyword`] if `keyword` would not read back as its header.
+    /// - [`RecordError::UnrepresentableValue`] if a value would not read back as one value line.
+    pub fn new(keyword: impl Into<String>, values: Vec<String>) -> Result<Self, RecordError> {
+        let keyword = keyword.into();
+        check_keyword(&keyword)?;
+        for value in &values {
+            check_value(&keyword, value)?;
+        }
+        Ok(Self { keyword, values })
     }
 
     /// The section keyword, without the surrounding `%`.
@@ -154,6 +174,27 @@ pub enum RecordError {
         keyword: String,
         /// The 1-based line number of the repeat.
         line: usize,
+    },
+
+    /// A keyword would not read back as the `%KEYWORD%` header it is written as.
+    #[error("{keyword:?} cannot be a section keyword")]
+    InvalidKeyword {
+        /// The rejected keyword, truncated for display.
+        keyword: String,
+    },
+
+    /// A value would not read back as the one value line it is written as.
+    ///
+    /// The format has no escaping, so such a value cannot be written at all. Writing it anyway
+    /// would let the value change what the rest of the file says.
+    #[error("section %{keyword}% cannot hold the value {value:?}: {reason}")]
+    UnrepresentableValue {
+        /// The section the value was meant for.
+        keyword: String,
+        /// The rejected value, truncated for display.
+        value: String,
+        /// Why it does not fit.
+        reason: &'static str,
     },
 }
 
@@ -201,7 +242,9 @@ impl Record {
                         line: line_number,
                     });
                 }
-                current = Some(Section::new(keyword, Vec::new()));
+                // Built directly: `section_keyword` has just accepted the keyword, and every
+                // value pushed below is a non-empty line that is not a header.
+                current = Some(Section { keyword: keyword.to_owned(), values: Vec::new() });
                 continue;
             }
 
@@ -277,22 +320,29 @@ impl Record {
     /// from one pacman wrote. A keyword absent from that table goes last, since there is
     /// nothing better to infer. That covers a section from a newer pacman, which the reader
     /// deliberately tolerates.
-    pub fn set(&mut self, keyword: &str, values: Vec<String>) {
+    ///
+    /// # Errors
+    ///
+    /// - [`RecordError::InvalidKeyword`] if `keyword` would not read back as its header.
+    /// - [`RecordError::UnrepresentableValue`] if a value is empty, holds a line break, or reads
+    ///   as a `%KEYWORD%` header. The record is left unchanged.
+    pub fn set(&mut self, keyword: &str, values: Vec<String>) -> Result<(), RecordError> {
         if values.is_empty() {
             self.remove(keyword);
-            return;
+            return Ok(());
         }
 
-        if let Some(section) = self.sections.iter_mut().find(|s| s.keyword == keyword) {
-            section.values = values;
-            return;
+        let section = Section::new(keyword, values)?;
+        if let Some(existing) = self.sections.iter_mut().find(|s| s.keyword == keyword) {
+            *existing = section;
+            return Ok(());
         }
 
-        let section = Section::new(keyword, values);
         match self.insertion_point(keyword) {
             Some(index) => self.sections.insert(index, section),
             None => self.sections.push(section),
         }
+        Ok(())
     }
 
     /// Removes `keyword`, reporting whether it was there.
@@ -318,6 +368,34 @@ impl Record {
             .iter()
             .position(|section| rank(&section.keyword).unwrap_or(usize::MAX) > target)
     }
+}
+
+/// Refuses a keyword that would not read back as the `%KEYWORD%` header it is written as.
+fn check_keyword(keyword: &str) -> Result<(), RecordError> {
+    let fits = !keyword.is_empty() && !keyword.contains(['%', '\n', '\r']);
+    if fits { Ok(()) } else { Err(RecordError::InvalidKeyword { keyword: truncate(keyword) }) }
+}
+
+/// Refuses a value that would not read back as the one value line it is written as.
+///
+/// A carriage return is refused anywhere, not only where it would be lost. No field pacman
+/// records holds one, and a reader that splits on `\r\n` would read it differently from one
+/// that splits on `\n`.
+fn check_value(keyword: &str, value: &str) -> Result<(), RecordError> {
+    let reason = if value.is_empty() {
+        "an empty line ends a section"
+    } else if value.contains(['\n', '\r']) {
+        "a line break would read back as several values"
+    } else if section_keyword(value).is_some() {
+        "it would read back as a section header"
+    } else {
+        return Ok(());
+    };
+    Err(RecordError::UnrepresentableValue {
+        keyword: keyword.to_owned(),
+        value: truncate(value),
+        reason,
+    })
 }
 
 /// Extracts `KEYWORD` from a `%KEYWORD%` header line, if the line is one.
@@ -402,7 +480,7 @@ mod tests {
     #[test]
     fn set_replaces_in_place_without_moving_the_section() {
         let mut record = Record::parse(RecordKind::Desc, DESC).unwrap();
-        record.set("VERSION", vec!["2.0.0-1".to_owned()]);
+        record.set("VERSION", vec!["2.0.0-1".to_owned()]).unwrap();
         assert_eq!(
             record.render(),
             "%NAME%\nfoo\n\n%VERSION%\n2.0.0-1\n\n%DEPENDS%\nbar\nbaz>=2\n\n"
@@ -415,7 +493,7 @@ mod tests {
     fn set_inserts_at_the_canonical_position() {
         let text = "%NAME%\nfoo\n\n%SIZE%\n10\n\n%GROUPS%\ng\n\n%DEPENDS%\nbar\n\n";
         let mut record = Record::parse(RecordKind::Desc, text).unwrap();
-        record.set("REASON", vec!["1".to_owned()]);
+        record.set("REASON", vec!["1".to_owned()]).unwrap();
         assert_eq!(
             record.render(),
             "%NAME%\nfoo\n\n%SIZE%\n10\n\n%REASON%\n1\n\n%GROUPS%\ng\n\n%DEPENDS%\nbar\n\n"
@@ -426,7 +504,7 @@ mod tests {
     fn set_inserts_before_every_later_section_even_when_the_neighbour_is_absent() {
         let mut record =
             Record::parse(RecordKind::Desc, "%NAME%\nfoo\n\n%PROVIDES%\np\n\n").unwrap();
-        record.set("DEPENDS", vec!["bar".to_owned()]);
+        record.set("DEPENDS", vec!["bar".to_owned()]).unwrap();
         assert_eq!(record.render(), "%NAME%\nfoo\n\n%DEPENDS%\nbar\n\n%PROVIDES%\np\n\n");
     }
 
@@ -437,7 +515,7 @@ mod tests {
         let text = "%NAME%\nfoo\n\n%FROM_THE_FUTURE%\nx\n\n";
         let mut record = Record::parse(RecordKind::Desc, text).unwrap();
         assert_eq!(record.render(), text);
-        record.set("VERSION", vec!["1-1".to_owned()]);
+        record.set("VERSION", vec!["1-1".to_owned()]).unwrap();
         assert_eq!(record.render(), "%NAME%\nfoo\n\n%VERSION%\n1-1\n\n%FROM_THE_FUTURE%\nx\n\n");
     }
 
@@ -446,7 +524,7 @@ mod tests {
     #[test]
     fn setting_no_values_removes_the_section() {
         let mut record = Record::parse(RecordKind::Desc, DESC).unwrap();
-        record.set("DEPENDS", Vec::new());
+        record.set("DEPENDS", Vec::new()).unwrap();
         assert_eq!(record.render(), "%NAME%\nfoo\n\n%VERSION%\n1.0.0-1\n\n");
     }
 
@@ -492,5 +570,53 @@ mod tests {
         let record =
             Record::parse(RecordKind::Desc, "%NAME%\nfoo\n\n\n\n%VERSION%\n1-1\n\n").unwrap();
         assert_eq!(record.render(), "%NAME%\nfoo\n\n%VERSION%\n1-1\n\n");
+    }
+
+    /// Every value the format cannot hold is refused, and the record is left unchanged. Each
+    /// of these would otherwise change what the file says on the next read.
+    #[test]
+    fn a_value_the_format_cannot_hold_is_refused() {
+        let mut record = Record::new(RecordKind::Desc);
+        record.set("GROUPS", vec!["base".to_owned()]).unwrap();
+
+        for value in ["", "a\nb", "a\r", "a\rb", "%REASON%", "%FILES%"] {
+            let error = record.set("GROUPS", vec!["ok".to_owned(), value.to_owned()]).unwrap_err();
+            assert!(
+                matches!(error, RecordError::UnrepresentableValue { .. }),
+                "{value:?}: got {error:?}"
+            );
+        }
+        assert_eq!(record.get("GROUPS"), Some(["base".to_owned()].as_slice()));
+    }
+
+    /// The shape a package can use to set its own install reason: a group named `%REASON%`,
+    /// then `1`. Written, it would read back with no groups and `%REASON%` set to 1.
+    #[test]
+    fn a_group_named_like_a_section_cannot_forge_one() {
+        let mut record = Record::new(RecordKind::Desc);
+        let error = record.set("GROUPS", vec!["%REASON%".to_owned(), "1".to_owned()]).unwrap_err();
+        assert!(matches!(error, RecordError::UnrepresentableValue { .. }), "got {error:?}");
+        assert!(record.get("REASON").is_none());
+    }
+
+    /// Values that only look unusual still fit: a `%` that does not open and close a keyword,
+    /// `%%` (an empty keyword is none), a tab as in a `%BACKUP%` line.
+    #[test]
+    fn a_value_the_format_can_hold_round_trips() {
+        let values = ["100%", "%%", "a%b%", "etc/foo.conf\t(null)", " leading space"];
+        let mut record = Record::new(RecordKind::Files);
+        record.set("BACKUP", values.iter().map(|value| (*value).to_owned()).collect()).unwrap();
+
+        let reread = Record::parse(RecordKind::Files, &record.render()).unwrap();
+        assert_eq!(reread.get("BACKUP").unwrap(), values.map(str::to_owned).as_slice());
+    }
+
+    #[test]
+    fn a_keyword_that_cannot_be_a_header_is_refused() {
+        let mut record = Record::new(RecordKind::Desc);
+        for keyword in ["", "A%B", "A\nB"] {
+            let error = record.set(keyword, vec!["x".to_owned()]).unwrap_err();
+            assert!(matches!(error, RecordError::InvalidKeyword { .. }), "{keyword:?}: {error:?}");
+        }
     }
 }

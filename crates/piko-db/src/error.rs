@@ -90,6 +90,16 @@ pub enum Error {
         max: u64,
     },
 
+    /// A file root reads as instructions, or the directory holding it, could be changed by a
+    /// user other than root and this process's own.
+    #[error("refusing {}: {distrust}, so another user could change it", path.display())]
+    Untrusted {
+        /// The file or directory that failed the test.
+        path: PathBuf,
+        /// Why.
+        distrust: crate::fs_util::Distrust,
+    },
+
     /// A path that must be a regular file was something else — a FIFO, a device node, a
     /// symlink, or a directory.
     #[error("{} is not a regular file", path.display())]
@@ -127,6 +137,38 @@ pub enum Error {
     TooManyEntries {
         /// The database directory.
         path: PathBuf,
+        /// The configured maximum.
+        max: usize,
+    },
+
+    /// A repository archive carries more relation entries than
+    /// [`Limits::repo_max_relations`](crate::Limits::repo_max_relations).
+    #[error("repository archive {} has more than {max} relation entries", path.display())]
+    TooManyRelations {
+        /// The archive.
+        path: PathBuf,
+        /// The configured maximum.
+        max: usize,
+    },
+
+    /// A repository archive carries more file-list paths than
+    /// [`Limits::repo_max_paths`](crate::Limits::repo_max_paths).
+    #[error("repository archive {} has more than {max} file-list paths", path.display())]
+    TooManyPaths {
+        /// The archive.
+        path: PathBuf,
+        /// The configured maximum.
+        max: usize,
+    },
+
+    /// One `files` member of a repository archive has more lines than
+    /// [`Limits::repo_entry_paths`](crate::Limits::repo_entry_paths).
+    #[error("the files member of {entry} in {} has more than {max} lines", path.display())]
+    TooManyEntryPaths {
+        /// The archive.
+        path: PathBuf,
+        /// The entry directory name of the member.
+        entry: String,
         /// The configured maximum.
         max: usize,
     },
@@ -266,6 +308,19 @@ pub enum Error {
         source: alpm_common::Error,
     },
 
+    /// An installed package's `mtree` data names a path that is not beneath the directory it
+    /// describes: a `..` component, say.
+    ///
+    /// [`crate::local::LocalPackage::verify_files`] refuses the whole check rather than stat or
+    /// hash a file outside the installation root.
+    #[error("{} lists {}, which is not beneath the installation root", mtree.display(), entry.display())]
+    UnsafeMtreePath {
+        /// The entry's `mtree` file.
+        mtree: PathBuf,
+        /// The path it lists, after the `./` prefix.
+        entry: PathBuf,
+    },
+
     /// An archive's file name is not `<repo>.db` or `<repo>.files`.
     ///
     /// [`crate::repo::RepoDatabase::open`] derives the repository name from the file name
@@ -276,16 +331,21 @@ pub enum Error {
         path: PathBuf,
     },
 
-    /// A repository archive uses a compression format `alpm-compress` does not implement.
+    /// A repository archive uses a compression format piko does not decode.
     ///
-    /// The [alpm-repo-db] spec also allows `.Z`, `.lrz`, `.lz`, `.lz4` and `.lzo`; only
-    /// gzip, zstd, xz and bzip2 are supported.
+    /// piko decodes gzip, zstd and an uncompressed tar. The [alpm-repo-db] spec allows seven
+    /// more, xz and bzip2 among them. See [`crate::compression`] for why they are refused.
     ///
     /// [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
-    #[error("{} does not use a supported compression format", path.display())]
+    #[error(
+        "{} uses {format}; piko reads gzip, zstd and uncompressed archives only",
+        path.display()
+    )]
     UnsupportedCompression {
-        /// The archive that could not be identified.
+        /// The archive that was refused.
         path: PathBuf,
+        /// What its leading bytes identify it as.
+        format: crate::compression::Unsupported,
     },
 
     /// A `<repo>.db` database was opened with no sibling `<repo>.files`, so file lists are

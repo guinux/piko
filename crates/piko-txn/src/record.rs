@@ -12,7 +12,7 @@
 
 use alpm_pkginfo::PackageInfo;
 use alpm_types::{PackageInstallReason, PackageValidation};
-use piko_db_write::{Record, RecordKind};
+use piko_db_write::{Record, RecordError, RecordKind};
 
 use crate::install::Extraction;
 
@@ -48,63 +48,67 @@ pub struct InstallFacts {
 /// `%PACKAGER%` is copied the same way, for a second reason on top of that one.
 /// [`crate::pkginfo::parse`] substitutes makepkg's default packager before the typed parse. So
 /// `info` holds a value the package file never carried.
-#[must_use]
-pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Record {
+///
+/// # Errors
+///
+/// [`RecordError`] if a value cannot be written as one value line: a group named `%REASON%`,
+/// say. [`check`] asks the same question before anything is extracted.
+pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Result<Record, RecordError> {
     let mut record = Record::new(RecordKind::Desc);
     let mut one = |key: &str, value: String| record.set(key, vec![value]);
 
     match info {
         PackageInfo::V1(v1) => {
-            one("NAME", v1.pkgname.to_string());
-            one("VERSION", v1.pkgver.to_string());
-            one("BASE", v1.pkgbase.to_string());
-            one("DESC", v1.pkgdesc.to_string());
-            one("URL", raw_field(raw, "url").unwrap_or_else(|| v1.url.to_string()));
-            one("ARCH", v1.arch.to_string());
-            one("BUILDDATE", v1.builddate.to_string());
-            one("PACKAGER", raw_field(raw, "packager").unwrap_or_else(|| v1.packager.to_string()));
+            one("NAME", v1.pkgname.to_string())?;
+            one("VERSION", v1.pkgver.to_string())?;
+            one("BASE", v1.pkgbase.to_string())?;
+            one("DESC", v1.pkgdesc.to_string())?;
+            one("URL", raw_field(raw, "url").unwrap_or_else(|| v1.url.to_string()))?;
+            one("ARCH", v1.arch.to_string())?;
+            one("BUILDDATE", v1.builddate.to_string())?;
+            one("PACKAGER", raw_field(raw, "packager").unwrap_or_else(|| v1.packager.to_string()))?;
             if v1.size.to_string() != "0" {
-                one("SIZE", v1.size.to_string());
+                one("SIZE", v1.size.to_string())?;
             }
-            record.set("GROUPS", strings(&v1.group));
-            record.set("LICENSE", strings(&v1.license));
-            record.set("REPLACES", strings(&v1.replaces));
-            record.set("DEPENDS", strings(&v1.depend));
-            record.set("OPTDEPENDS", strings(&v1.optdepend));
-            record.set("CONFLICTS", strings(&v1.conflict));
-            record.set("PROVIDES", strings(&v1.provides));
+            record.set("GROUPS", strings(&v1.group))?;
+            record.set("LICENSE", strings(&v1.license))?;
+            record.set("REPLACES", strings(&v1.replaces))?;
+            record.set("DEPENDS", strings(&v1.depend))?;
+            record.set("OPTDEPENDS", strings(&v1.optdepend))?;
+            record.set("CONFLICTS", strings(&v1.conflict))?;
+            record.set("PROVIDES", strings(&v1.provides))?;
         }
         PackageInfo::V2(v2) => {
-            one("NAME", v2.pkgname.to_string());
-            one("VERSION", v2.pkgver.to_string());
-            one("BASE", v2.pkgbase.to_string());
-            one("DESC", v2.pkgdesc.to_string());
-            one("URL", raw_field(raw, "url").unwrap_or_else(|| v2.url.to_string()));
-            one("ARCH", v2.arch.to_string());
-            one("BUILDDATE", v2.builddate.to_string());
-            one("PACKAGER", raw_field(raw, "packager").unwrap_or_else(|| v2.packager.to_string()));
+            one("NAME", v2.pkgname.to_string())?;
+            one("VERSION", v2.pkgver.to_string())?;
+            one("BASE", v2.pkgbase.to_string())?;
+            one("DESC", v2.pkgdesc.to_string())?;
+            one("URL", raw_field(raw, "url").unwrap_or_else(|| v2.url.to_string()))?;
+            one("ARCH", v2.arch.to_string())?;
+            one("BUILDDATE", v2.builddate.to_string())?;
+            one("PACKAGER", raw_field(raw, "packager").unwrap_or_else(|| v2.packager.to_string()))?;
             if v2.size.to_string() != "0" {
-                one("SIZE", v2.size.to_string());
+                one("SIZE", v2.size.to_string())?;
             }
-            record.set("GROUPS", strings(&v2.group));
-            record.set("LICENSE", strings(&v2.license));
-            record.set("REPLACES", strings(&v2.replaces));
-            record.set("DEPENDS", strings(&v2.depend));
-            record.set("OPTDEPENDS", strings(&v2.optdepend));
-            record.set("CONFLICTS", strings(&v2.conflict));
-            record.set("PROVIDES", strings(&v2.provides));
-            record.set("XDATA", v2.xdata.clone().into_iter().map(|e| e.to_string()).collect());
+            record.set("GROUPS", strings(&v2.group))?;
+            record.set("LICENSE", strings(&v2.license))?;
+            record.set("REPLACES", strings(&v2.replaces))?;
+            record.set("DEPENDS", strings(&v2.depend))?;
+            record.set("OPTDEPENDS", strings(&v2.optdepend))?;
+            record.set("CONFLICTS", strings(&v2.conflict))?;
+            record.set("PROVIDES", strings(&v2.provides))?;
+            record.set("XDATA", v2.xdata.clone().into_iter().map(|e| e.to_string()).collect())?;
         }
     }
 
-    record.set("INSTALLDATE", vec![facts.install_date.to_string()]);
+    record.set("INSTALLDATE", vec![facts.install_date.to_string()])?;
     // `%REASON%` is omitted for an explicit install.
     if facts.reason != PackageInstallReason::Explicit {
-        record.set("REASON", vec![facts.reason.to_string()]);
+        record.set("REASON", vec![facts.reason.to_string()])?;
     }
-    record.set("VALIDATION", strings(&facts.validation));
+    record.set("VALIDATION", strings(&facts.validation))?;
 
-    record
+    Ok(record)
 }
 
 /// Builds the `files` record from what the installation actually laid down.
@@ -112,24 +116,62 @@ pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Record {
 /// This is deliberately driven by [`Extraction::owned`] rather than by the archive's member
 /// list. A `NoExtract` path is not on this system. A `files` entry claiming it would make the
 /// package appear to own a file a later removal then fails to find.
-#[must_use]
-pub fn files(extraction: &Extraction) -> Record {
-    let mut record = Record::new(RecordKind::Files);
-
-    let paths: Vec<String> =
-        extraction.owned.iter().map(|path| path.to_string_lossy().into_owned()).collect();
-    record.set("FILES", paths);
-
+///
+/// # Errors
+///
+/// [`RecordError`] if a path cannot be written as one value line: a member name holding a
+/// newline, say. [`check`] asks the same question before anything is extracted.
+pub fn files(extraction: &Extraction) -> Result<Record, RecordError> {
+    let paths = extraction.owned.iter().map(|path| path.to_string_lossy().into_owned());
     // pacman writes `<path>\t<md5>`. `write::Record` keeps the line verbatim, tab included,
     // because that is what makes a `(null)` hash survive a rewrite.
-    let backups: Vec<String> = extraction
+    let backups = extraction
         .backup_hashes
         .iter()
-        .map(|(path, hash)| format!("{}\t{hash}", path.to_string_lossy()))
-        .collect();
-    record.set("BACKUP", backups);
+        .map(|(path, hash)| format!("{}\t{hash}", path.to_string_lossy()));
+    files_record(paths.collect(), backups.collect())
+}
 
-    record
+/// The `files` record for `paths` and `backups`, each backup already spelled
+/// `<path>\t<hash>`.
+fn files_record(paths: Vec<String>, backups: Vec<String>) -> Result<Record, RecordError> {
+    let mut record = Record::new(RecordKind::Files);
+    record.set("FILES", paths)?;
+    record.set("BACKUP", backups)?;
+    Ok(record)
+}
+
+/// Refuses a package whose entry cannot be written, before anything of it is extracted.
+///
+/// The format has no escaping, so a value holding a line break, or reading as a `%KEYWORD%`
+/// header, would change what the rest of the entry says. A package could then choose its own
+/// install reason, or claim a file it never shipped, which a later removal deletes. `desc` and
+/// `files` refuse such a value, but `install_step` builds them after the extraction. This asks
+/// the same question at `verify`, from what the archive read already gave: the `.PKGINFO`,
+/// every member path, and every declared backup.
+///
+/// The transaction's own facts and the backup hashes are left out: a number, a
+/// [`PackageInstallReason`] and a hash always fit. So placeholders stand in for them, and the
+/// member list stands in for the paths the extraction will lay down, which it contains.
+///
+/// # Errors
+///
+/// [`RecordError`] naming the first value that does not fit.
+pub fn check<'a>(
+    info: &PackageInfo,
+    raw: &str,
+    paths: impl Iterator<Item = &'a str>,
+    backups: impl Iterator<Item = &'a str>,
+) -> Result<(), RecordError> {
+    let facts = InstallFacts {
+        install_date: 0,
+        reason: PackageInstallReason::Depend,
+        validation: vec![PackageValidation::None],
+    };
+    desc(info, raw, &facts)?;
+    let backups = backups.map(|path| format!("{path}\t(null)")).collect();
+    files_record(paths.map(str::to_owned).collect(), backups)?;
+    Ok(())
 }
 
 /// The verbatim value of a `key = value` line in a `.PKGINFO`.
@@ -192,7 +234,7 @@ depend = bar
     /// The order is `be_local.c`'s, and it is the whole reason `Record::set` exists.
     #[test]
     fn desc_sections_are_in_pacmans_order() {
-        let record = desc(&info(), PKGINFO, &facts());
+        let record = desc(&info(), PKGINFO, &facts()).unwrap();
         let order: Vec<&str> = record.sections().iter().map(|s| s.keyword()).collect();
         assert_eq!(
             order,
@@ -216,7 +258,7 @@ depend = bar
 
     #[test]
     fn desc_transcribes_the_pkginfo() {
-        let record = desc(&info(), PKGINFO, &facts());
+        let record = desc(&info(), PKGINFO, &facts()).unwrap();
         assert_eq!(record.get("NAME").unwrap(), ["foo".to_owned()]);
         assert_eq!(record.get("VERSION").unwrap(), ["1.0.0-1".to_owned()]);
         assert_eq!(record.get("SIZE").unwrap(), ["123".to_owned()]);
@@ -232,7 +274,7 @@ depend = bar
             "Foobar McFooface <foobar@mcfooface.org>",
             piko_db::desc_compat::UNKNOWN_PACKAGER,
         );
-        let record = desc(&crate::pkginfo::parse(&raw).unwrap(), &raw, &facts());
+        let record = desc(&crate::pkginfo::parse(&raw).unwrap(), &raw, &facts()).unwrap();
 
         assert_eq!(
             record.get("PACKAGER").unwrap(),
@@ -243,10 +285,10 @@ depend = bar
     /// An explicit install writes no `%REASON%`, matching a freshly installed package.
     #[test]
     fn an_explicit_install_omits_the_reason() {
-        assert!(desc(&info(), PKGINFO, &facts()).get("REASON").is_none());
+        assert!(desc(&info(), PKGINFO, &facts()).unwrap().get("REASON").is_none());
 
         let as_dependency = InstallFacts { reason: PackageInstallReason::Depend, ..facts() };
-        let record = desc(&info(), PKGINFO, &as_dependency);
+        let record = desc(&info(), PKGINFO, &as_dependency).unwrap();
         assert_eq!(record.get("REASON").unwrap(), ["1".to_owned()]);
     }
 
@@ -254,7 +296,7 @@ depend = bar
     #[test]
     fn the_reason_lands_in_its_canonical_position() {
         let as_dependency = InstallFacts { reason: PackageInstallReason::Depend, ..facts() };
-        let record = desc(&info(), PKGINFO, &as_dependency);
+        let record = desc(&info(), PKGINFO, &as_dependency).unwrap();
         let order: Vec<&str> = record.sections().iter().map(|s| s.keyword()).collect();
         let size = order.iter().position(|k| *k == "SIZE").unwrap();
         let reason = order.iter().position(|k| *k == "REASON").unwrap();
@@ -265,7 +307,7 @@ depend = bar
     /// An empty section is not written at all; libalpm never emits one.
     #[test]
     fn empty_sections_are_omitted() {
-        let record = desc(&info(), PKGINFO, &facts());
+        let record = desc(&info(), PKGINFO, &facts()).unwrap();
         assert!(record.get("GROUPS").is_none());
         assert!(record.get("CONFLICTS").is_none());
         assert!(record.get("REPLACES").is_none());
@@ -281,7 +323,7 @@ depend = bar
             ],
             ..Extraction::default()
         };
-        let record = files(&extraction);
+        let record = files(&extraction).unwrap();
 
         assert_eq!(
             record.get("FILES").unwrap(),
@@ -297,7 +339,7 @@ depend = bar
         extraction
             .backup_hashes
             .insert(PathBuf::from("etc/foo.conf"), Md5Checksum::calculate_from(b"x"));
-        let record = files(&extraction);
+        let record = files(&extraction).unwrap();
 
         let backup = record.get("BACKUP").unwrap().first().unwrap().clone();
         assert_eq!(backup, format!("etc/foo.conf\t{}", Md5Checksum::calculate_from(b"x")));
@@ -307,13 +349,13 @@ depend = bar
     /// A round-trip through the writer's own parser. What is built must be re-readable.
     #[test]
     fn the_built_records_round_trip() {
-        let record = desc(&info(), PKGINFO, &facts());
+        let record = desc(&info(), PKGINFO, &facts()).unwrap();
         let text = record.render();
         assert_eq!(Record::parse(RecordKind::Desc, &text).unwrap().render(), text);
 
         let extraction =
             Extraction { owned: vec![PathBuf::from("usr/bin/foo")], ..Extraction::default() };
-        let record = files(&extraction);
+        let record = files(&extraction).unwrap();
         let text = record.render();
         assert_eq!(Record::parse(RecordKind::Files, &text).unwrap().render(), text);
     }

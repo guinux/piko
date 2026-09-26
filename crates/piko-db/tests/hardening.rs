@@ -1,7 +1,7 @@
 //! Security properties of the database reader, exercised through the public API.
 //!
-//! These test four security claims: bounded reads, no symlink traversal, no blocking on a
-//! non-regular file, and a bounded entry count. They run against a real filesystem rather
+//! These test five security claims: bounded reads, no symlink traversal, no blocking on a
+//! non-regular file, a bounded entry count, and no configuration another user could change. They run against a real filesystem rather
 //! than unit-tested internals. The properties are about what actually happens when the
 //! process opens a hostile path.
 
@@ -301,4 +301,126 @@ fn non_package_entries_never_consume_the_package_budget() {
 
     let names: Vec<&str> = db.iter().map(|package| package.name().as_ref()).collect();
     assert_eq!(names, ["acl", "zlib"]);
+}
+
+/// The scan checks that an entry is a real directory, but `desc`, `files` and `mtree` are read
+/// later, on first access. An entry swapped for a symlink in between must not redirect those
+/// reads: the entry directory is opened by descriptor with `O_NOFOLLOW`, not only the file in
+/// it.
+#[cfg(unix)]
+#[test]
+fn an_entry_swapped_for_a_symlink_after_the_scan_is_not_followed() {
+    let db = DbFixture::new();
+    db.package("foo-1.0.0-1").with_defaults().build();
+    let local = LocalDatabase::open(db.path()).unwrap();
+    let package = local.get_str("foo").unwrap();
+
+    // A directory elsewhere holding what the swap wants read: a desc naming a dependency the
+    // real one does not have.
+    let elsewhere = db.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("desc"), format!("{MINIMAL_DESC_V1}%DEPENDS%\nplanted\n\n"))
+        .unwrap();
+    std::fs::write(elsewhere.join("files"), MINIMAL_FILES).unwrap();
+    std::fs::write(elsewhere.join("install"), "post_install() { :; }\n").unwrap();
+    let entry = db.path().join("foo-1.0.0-1");
+    std::fs::remove_dir_all(&entry).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &entry).unwrap();
+
+    let desc_error = package.eager().unwrap_err();
+    assert!(matches!(&*desc_error, Error::Io { .. }), "got {desc_error:?}");
+    let files_error = package.files().unwrap_err();
+    assert!(matches!(&*files_error, Error::Io { .. }), "got {files_error:?}");
+    assert!(!package.has_install_scriptlet());
+}
+
+/// `pacman.conf` and every file it `Include`s name the hook directories, the keyring and the
+/// servers root trusts. One another user could change, or one in a directory another user could
+/// write, is refused rather than read.
+#[test]
+fn a_config_file_another_user_could_change_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let chmod = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let included = dir.path().join("extra.conf");
+    std::fs::write(&included, "[extra]\nServer = https://example.org\n").unwrap();
+    let conf = dir.path().join("pacman.conf");
+    std::fs::write(&conf, format!("[options]\nInclude = {}\n", included.display())).unwrap();
+    assert!(piko_db::config::PacmanConfig::open(&conf).is_ok());
+
+    chmod(&included, 0o664);
+    let err = piko_db::config::PacmanConfig::open(&conf).unwrap_err();
+    assert!(matches!(&err, Error::Untrusted { path, .. } if path == &included), "got {err:?}");
+    chmod(&included, 0o644);
+
+    chmod(dir.path(), 0o1777);
+    let err = piko_db::config::PacmanConfig::open(&conf).unwrap_err();
+    chmod(dir.path(), 0o700);
+    assert!(matches!(&err, Error::Untrusted { path, .. } if path == dir.path()), "got {err:?}");
+}
+
+fn chmod(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A user who can write any directory above a trusted one can rename it away and put another in
+/// its place, so every ancestor is tested. A sticky ancestor passes, as `/tmp` does: only an
+/// entry's owner can rename it there. The directory itself gets no such exemption.
+#[test]
+fn a_directory_below_one_others_can_write_is_not_trusted() {
+    use piko_db::fs_util::{Distrust, ensure_trusted_directory};
+
+    let top = tempfile::tempdir().unwrap();
+    let parent = top.path().join("parent");
+    let leaf = parent.join("leaf");
+    std::fs::create_dir_all(&leaf).unwrap();
+    ensure_trusted_directory(&leaf).unwrap();
+
+    chmod(&parent, 0o777);
+    let err = ensure_trusted_directory(&leaf).unwrap_err();
+    assert!(
+        matches!(&err, Error::Untrusted { path, distrust: Distrust::GroupOrOtherWritable { .. } }
+            if path == &parent),
+        "got {err:?}"
+    );
+
+    chmod(&parent, 0o1777);
+    ensure_trusted_directory(&leaf).unwrap();
+    let err = ensure_trusted_directory(&parent).unwrap_err();
+    assert!(matches!(&err, Error::Untrusted { path, .. } if path == &parent), "got {err:?}");
+    chmod(&parent, 0o755);
+
+    // A relative spelling with `..` resolves to the same directories.
+    let relative = leaf.join("..").join("leaf");
+    ensure_trusted_directory(&relative).unwrap();
+}
+
+/// A symbolic link on the way is followed by hand, so the directories its target passes
+/// through are tested too, not only the directory holding the link.
+#[test]
+fn a_link_through_a_directory_others_can_write_is_not_trusted() {
+    use piko_db::fs_util::ensure_trusted_directory;
+
+    let top = tempfile::tempdir().unwrap();
+    let shared = top.path().join("shared");
+    let target = shared.join("cache");
+    std::fs::create_dir_all(&target).unwrap();
+    let trusted = top.path().join("trusted");
+    std::fs::create_dir(&trusted).unwrap();
+    std::os::unix::fs::symlink(&target, trusted.join("cache")).unwrap();
+    ensure_trusted_directory(&trusted.join("cache")).unwrap();
+
+    chmod(&shared, 0o777);
+    let err = ensure_trusted_directory(&trusted.join("cache")).unwrap_err();
+    chmod(&shared, 0o755);
+    assert!(matches!(&err, Error::Untrusted { path, .. } if path == &shared), "got {err:?}");
+
+    // A loop ends in an error, not a hang.
+    std::os::unix::fs::symlink(top.path().join("b"), top.path().join("a")).unwrap();
+    std::os::unix::fs::symlink(top.path().join("a"), top.path().join("b")).unwrap();
+    let err = ensure_trusted_directory(&top.path().join("a")).unwrap_err();
+    assert!(matches!(&err, Error::Io { .. }), "got {err:?}");
 }
