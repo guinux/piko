@@ -1,11 +1,10 @@
 //! `pacman.conf` parsing.
 //!
 //! Mirrors pacman's own config parser (`conf.c` + `ini.c`) and its dump tool
-//! (`pacman-conf.c`). These directives are deliberately unsupported: `DownloadUser`,
-//! `XferCommand`, `UseSyslog`, `VerbosePkgLists`, `ILoveCandy`, `DisableSandbox`,
-//! `DisableSandboxFilesystem`, `DisableSandboxSyscalls`. All are downloading, logging, or
-//! sandboxing concerns — stated non-goals of piko. Each is recognized, so parsing a real
-//! `pacman.conf` does not spuriously warn about it, and silently dropped.
+//! (`pacman-conf.c`). These directives are deliberately unsupported: `XferCommand`,
+//! `UseSyslog`, `VerbosePkgLists`, `ILoveCandy`. All are downloading or logging concerns —
+//! stated non-goals of piko. Each is recognized, so parsing a real `pacman.conf` does not
+//! spuriously warn about it, and silently dropped.
 //!
 //! A missing or unreadable `Include` target is a **fatal** error, not a soft diagnostic.
 //! This matches `globdir`'s `GLOB_NOCHECK` flag in `conf.c`: a pattern that matches nothing
@@ -163,6 +162,14 @@ pub struct Options {
     pub disable_download_timeout: bool,
     /// `ParallelDownloads`. Default `1`.
     pub parallel_downloads: u32,
+    /// `DownloadUser`: the user a download runs as. The first occurrence wins, as for
+    /// `DBPath`. The name is not resolved here: a user that does not exist is an error only
+    /// when something is downloaded.
+    pub download_user: Option<String>,
+    /// `DisableSandboxFilesystem`, also set by `DisableSandbox`.
+    pub disable_sandbox_filesystem: bool,
+    /// `DisableSandboxSyscalls`, also set by `DisableSandbox`.
+    pub disable_sandbox_syscalls: bool,
     /// `SigLevel`. Default `PACKAGE | DATABASE` (required, trusted-only).
     pub sig_level: SigLevel,
     /// `LocalFileSigLevel`, merged against `sig_level`.
@@ -280,6 +287,9 @@ struct OptionsScratch {
     no_progress_bar: bool,
     disable_download_timeout: bool,
     parallel_downloads: u32,
+    download_user: Option<String>,
+    disable_sandbox_filesystem: bool,
+    disable_sandbox_syscalls: bool,
     sig_level: SigLevel,
     sig_level_mask: SigLevel,
     local_file_sig_level: SigLevel,
@@ -312,6 +322,9 @@ impl Default for OptionsScratch {
             no_progress_bar: false,
             disable_download_timeout: false,
             parallel_downloads: 1,
+            download_user: None,
+            disable_sandbox_filesystem: false,
+            disable_sandbox_syscalls: false,
             sig_level: SigLevel::default_global(),
             sig_level_mask: SigLevel::default(),
             local_file_sig_level: SigLevel::USE_DEFAULT,
@@ -536,6 +549,9 @@ impl<'a> Parser<'a> {
             no_progress_bar: self.options.no_progress_bar,
             disable_download_timeout: self.options.disable_download_timeout,
             parallel_downloads: self.options.parallel_downloads,
+            download_user: self.options.download_user,
+            disable_sandbox_filesystem: self.options.disable_sandbox_filesystem,
+            disable_sandbox_syscalls: self.options.disable_sandbox_syscalls,
             sig_level: self.options.sig_level,
             local_file_sig_level,
             remote_file_sig_level,
@@ -641,14 +657,15 @@ fn apply_bare_option(
         "Color" => options.color = true,
         "NoProgressBar" => options.no_progress_bar = true,
         "DisableDownloadTimeout" => options.disable_download_timeout = true,
-        // Explicitly unsupported: downloading, logging, and sandboxing concerns, all stated
-        // non-goals. Recognized and silently dropped, not reported as unknown.
-        "UseSyslog"
-        | "ILoveCandy"
-        | "VerbosePkgLists"
-        | "DisableSandbox"
-        | "DisableSandboxFilesystem"
-        | "DisableSandboxSyscalls" => {}
+        "DisableSandbox" => {
+            options.disable_sandbox_filesystem = true;
+            options.disable_sandbox_syscalls = true;
+        }
+        "DisableSandboxFilesystem" => options.disable_sandbox_filesystem = true,
+        "DisableSandboxSyscalls" => options.disable_sandbox_syscalls = true,
+        // Explicitly unsupported: logging concerns, a stated non-goal. Recognized and silently
+        // dropped, not reported as unknown.
+        "UseSyslog" | "ILoveCandy" | "VerbosePkgLists" => {}
         _ => {
             return Some(ConfigDiagnostic::UnknownDirective {
                 path: path.to_path_buf(),
@@ -718,8 +735,13 @@ fn apply_valued_option(
         "ParallelDownloads" => {
             options.parallel_downloads = parse_parallel_downloads(value, path, line)?;
         }
+        "DownloadUser" => {
+            if options.download_user.is_none() {
+                options.download_user = Some(value.to_owned());
+            }
+        }
         // Explicitly unsupported.
-        "DownloadUser" | "XferCommand" => {}
+        "XferCommand" => {}
         _ => {
             return Ok(Some(ConfigDiagnostic::UnknownDirective {
                 path: path.to_path_buf(),
@@ -1017,6 +1039,39 @@ mod tests {
         let config = PacmanConfig::open(&path).unwrap();
 
         assert!(config.diagnostics().is_empty());
+    }
+
+    /// Measured against `pacman-conf`: the first `DownloadUser` wins, and `DisableSandbox`
+    /// sets both halves.
+    #[test]
+    fn the_sandbox_directives_are_parsed() {
+        let dir = TempDir::new().unwrap();
+        let path = write_conf(
+            &dir,
+            "pacman.conf",
+            "[options]\nDownloadUser = alpm\nDownloadUser = nobody\nDisableSandbox\n",
+        );
+
+        let config = PacmanConfig::open(&path).unwrap();
+
+        assert_eq!(config.options.download_user.as_deref(), Some("alpm"));
+        assert!(config.options.disable_sandbox_filesystem);
+        assert!(config.options.disable_sandbox_syscalls);
+        assert!(config.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn each_sandbox_half_can_be_disabled_alone() {
+        let dir = TempDir::new().unwrap();
+        let filesystem = write_conf(&dir, "a.conf", "[options]\nDisableSandboxFilesystem\n");
+        let syscalls = write_conf(&dir, "b.conf", "[options]\nDisableSandboxSyscalls\n");
+
+        let filesystem = PacmanConfig::open(&filesystem).unwrap().options;
+        let syscalls = PacmanConfig::open(&syscalls).unwrap().options;
+
+        assert!(filesystem.disable_sandbox_filesystem && !filesystem.disable_sandbox_syscalls);
+        assert!(!syscalls.disable_sandbox_filesystem && syscalls.disable_sandbox_syscalls);
+        assert_eq!(filesystem.download_user, None);
     }
 
     /// The mask-merge case worth getting right. Overriding only the package half of

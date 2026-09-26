@@ -67,6 +67,11 @@ libc = "0.2"
 # `libc::openat` directly.
 # `process` is for `chroot` and `umask`. See `piko_txn::exec`.
 rustix = { version = "1.1", default-features = false, features = ["fs", "process"] }
+# The download sandbox's two kernel restrictions. See `piko_net::sandbox`.
+landlock = "0.4"
+# The same C library libalpm filters system calls with, so a name resolves to the same number on
+# every architecture.
+libseccomp = "0.4"
 tar = "0.4"
 # The `%SHA256SUM%` of a package file, hashed as the file streams. `alpm-types` already depends on
 # it, and its own `Checksum::calculate_from` takes the whole input as one slice.

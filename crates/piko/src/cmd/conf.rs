@@ -19,11 +19,11 @@ type OptionLine = (&'static str, Option<String>);
 /// `piko conf IgnorePkg` reports an unknown directive on a system that simply ignores no
 /// package.
 ///
-/// The last eight names are the downloading, logging, and sandboxing directives piko parses
-/// but never acts on. It holds no field for them, and never prints them. A query for one of
-/// them succeeds and prints nothing, matching the dump. `pacman-conf` prints a value for
-/// `DownloadUser`, so the query carries the same divergence the dump already does, and no
-/// other.
+/// The last four names are the downloading and logging directives piko parses but never acts
+/// on. It holds no field for them, and never prints them. A query for one of them succeeds and
+/// prints nothing, matching the dump and `pacman-conf`.
+///
+/// `DisableSandbox` is a name a query accepts but no line carries: see [`answers`].
 const KNOWN_DIRECTIVES: &[&str] = &[
     "RootDir",
     "DBPath",
@@ -47,14 +47,24 @@ const KNOWN_DIRECTIVES: &[&str] = &[
     "LocalFileSigLevel",
     "RemoteFileSigLevel",
     "DownloadUser",
+    "DisableSandbox",
+    "DisableSandboxFilesystem",
+    "DisableSandboxSyscalls",
     "XferCommand",
     "UseSyslog",
     "VerbosePkgLists",
     "ILoveCandy",
-    "DisableSandbox",
-    "DisableSandboxFilesystem",
-    "DisableSandboxSyscalls",
 ];
+
+/// Whether a line printed under `name` answers a query for `known`.
+///
+/// `DisableSandbox` sets two directives, and `pacman-conf DisableSandbox` prints whichever of
+/// the two is set. Every other name answers only for itself.
+fn answers(known: &str, name: &str) -> bool {
+    name == known
+        || (known == "DisableSandbox"
+            && matches!(name, "DisableSandboxFilesystem" | "DisableSandboxSyscalls"))
+}
 
 /// Every `[options]` line, in the order `pacman-conf` prints them.
 ///
@@ -74,6 +84,9 @@ fn option_lines(options: &Options) -> Vec<OptionLine> {
     }
     valued("GPGDir", options.gpg_dir.display().to_string());
     valued("LogFile", options.log_file.display().to_string());
+    if let Some(user) = &options.download_user {
+        valued("DownloadUser", user.clone());
+    }
     for pkg in &options.hold_pkg {
         valued("HoldPkg", pkg.clone());
     }
@@ -103,6 +116,12 @@ fn option_lines(options: &Options) -> Vec<OptionLine> {
     }
     if options.no_progress_bar {
         lines.push(("NoProgressBar", None));
+    }
+    if options.disable_sandbox_filesystem {
+        lines.push(("DisableSandboxFilesystem", None));
+    }
+    if options.disable_sandbox_syscalls {
+        lines.push(("DisableSandboxSyscalls", None));
     }
     lines.push(("ParallelDownloads", Some(options.parallel_downloads.to_string())));
     for line in clean_method_lines(options.clean_method) {
@@ -146,7 +165,7 @@ fn conf_directive(
     };
 
     for (name, value) in option_lines(&config.options) {
-        if name != *known {
+        if !answers(known, name) {
             continue;
         }
         match value {
@@ -269,18 +288,67 @@ mod tests {
         }
     }
 
-    /// The eight dropped directives are names a query accepts. So a script asking for one
+    /// The four dropped directives are names a query accepts. So a script asking for one
     /// gets the same answer the dump gives, which is nothing.
     #[test]
     fn a_dropped_directive_prints_nothing_and_succeeds() {
         let dir = tempfile::tempdir().unwrap();
-        let config = parse(dir.path(), "[options]\nDownloadUser = alpm\nDisableSandbox\n");
+        let config = parse(dir.path(), "[options]\nXferCommand = /bin/false %u\nUseSyslog\n");
 
-        for directive in ["DownloadUser", "DisableSandbox"] {
+        for directive in ["XferCommand", "UseSyslog"] {
             let (code, out) = run(&config, Some(directive));
             assert_eq!(code, ExitCode::SUCCESS, "{directive}");
             assert_eq!(out, "", "{directive}");
         }
+    }
+
+    /// Measured against `pacman-conf` 7.1.0, including the line order.
+    #[test]
+    fn the_sandbox_directives_are_printed_where_pacman_conf_prints_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = parse(
+            dir.path(),
+            "[options]\nHoldPkg = a\nDownloadUser = alpm\nNoProgressBar\nDisableSandbox\n",
+        );
+
+        let (_, out) = run(&config, None);
+
+        assert!(
+            out.contains("\nLogFile = /var/log/pacman.log\nDownloadUser = alpm\nHoldPkg = a\n")
+        );
+        assert!(out.contains(
+            "\nNoProgressBar\nDisableSandboxFilesystem\nDisableSandboxSyscalls\nParallelDownloads"
+        ));
+        assert_eq!(run(&config, Some("DownloadUser")).1, "alpm\n");
+    }
+
+    /// `pacman-conf DisableSandbox` prints whichever half is set.
+    #[test]
+    fn a_disable_sandbox_query_prints_each_half_that_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let both = parse(dir.path(), "[options]\nDisableSandbox\n");
+        let one = parse(dir.path(), "[options]\nDisableSandboxSyscalls\n");
+        let none = parse(dir.path(), "[options]\n");
+
+        assert_eq!(
+            run(&both, Some("DisableSandbox")).1,
+            "DisableSandboxFilesystem\nDisableSandboxSyscalls\n"
+        );
+        assert_eq!(run(&one, Some("disablesandbox")).1, "DisableSandboxSyscalls\n");
+        assert_eq!(run(&none, Some("DisableSandbox")), (ExitCode::SUCCESS, String::new()));
+    }
+
+    /// `pacman-conf DisableSandboxFilesystem` reports an unknown directive, which is a defect
+    /// in its lookup table: the dump prints that name. piko answers the query.
+    #[test]
+    fn a_disable_sandbox_filesystem_query_is_answered() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = parse(dir.path(), "[options]\nDisableSandboxFilesystem\n");
+
+        let (code, out) = run(&config, Some("DisableSandboxFilesystem"));
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(out, "DisableSandboxFilesystem\n");
     }
 
     /// `pacman-conf dbpath` answers the same as `pacman-conf DBPath`, measured.

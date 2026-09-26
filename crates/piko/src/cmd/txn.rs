@@ -93,6 +93,8 @@ pub struct InstallOptions {
     /// `pacman.conf`'s `CheckSpace`: weigh the transaction against free disk space before
     /// writing anything. There is no flag for it, because pacman has none either.
     pub check_space: bool,
+    /// The download sandbox `pacman.conf` configures.
+    pub sandbox: piko_net::Sandbox,
     /// A `SIGINT` handler already installed by an earlier step (`update`'s pre-refresh),
     /// reused instead of installing a second one. `ctrlc::set_handler` accepts exactly one
     /// registration per process, and a second call would panic. `None` when nothing installed
@@ -446,6 +448,7 @@ pub fn install(
         cancel,
         piko_net::Concurrency::new(options.parallel_downloads),
         options.check_space,
+        options.sandbox.clone(),
         rig.sink,
     ) {
         Ok(source) => source,
@@ -617,7 +620,14 @@ fn fetch_package_url(
         return Err(ExitCode::SUCCESS);
     }
     let policy = Policy::for_package(options.remote_file_sig_level);
-    match piko_txn::file_target::fetch_url(url, cache, policy, &cancel, &|_| {}) {
+    match piko_txn::file_target::fetch_url(
+        url,
+        cache,
+        policy,
+        options.sandbox.clone(),
+        &cancel,
+        &|_| {},
+    ) {
         Ok(path) => Ok(path),
         Err(error) => {
             report_error(&error);

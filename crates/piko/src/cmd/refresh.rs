@@ -57,7 +57,8 @@ pub fn refresh(
 ) -> ExitCode {
     let Options { force, files, freshness } = options;
     let sync_dir = dbpath.join("sync");
-    let refresher = Refresher::default();
+    let refresher =
+        Refresher::default().with_sandbox(piko_net::Sandbox::from_options(&config.options));
 
     let lock = match piko_db_write::DbLock::acquire(dbpath) {
         Ok(lock) => lock,

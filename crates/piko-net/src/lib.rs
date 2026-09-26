@@ -102,6 +102,14 @@
 //! [`freshness`] for the two levels of protection this gives, and for why an older database
 //! moves on to the next server while a bad signature does not.
 //!
+//! # Every request runs in a confined helper
+//!
+//! The code that parses a mirror's answer runs before the signature check. So a [`Refresher`]
+//! given a [`Sandbox`] makes each request in a helper process that cannot write a file, start a
+//! program, or reach an unexpected port, and runs as `DownloadUser` under root. The helper sends
+//! the body back on a pipe, and everything above happens in the caller's process. See
+//! [`sandbox`].
+//!
 //! # What is deliberately not here
 //!
 //! - **Resumed or segmented downloads.** pacman does the first. Neither changes correctness,
@@ -119,6 +127,8 @@ pub mod freshness;
 mod pool;
 pub mod progress;
 pub mod refresh;
+pub mod sandbox;
+mod transport;
 
 pub use cancel::Cancel;
 pub use concurrency::Concurrency;
@@ -126,3 +136,4 @@ pub use error::{Error, Result};
 pub use freshness::{FreshnessNote, FreshnessPolicy, Refreshed};
 pub use progress::{Event, Kind};
 pub use refresh::{DatabaseKind, Outcome, PackageFetch, Refresher, RepoRefresh, refresh};
+pub use sandbox::{Sandbox, run_helper_if_requested};

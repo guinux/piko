@@ -29,9 +29,8 @@
 //!
 //! A chroot confines paths and nothing else. A scriptlet or hook runs with piko's own
 //! privileges and can do anything they permit. That is what these files are *for*, and pacman
-//! works the same way. piko does not implement libalpm's `sandbox.c` (landlock + seccomp for
-//! the download process). That is a separate mechanism for a separate purpose, not something
-//! this module claims to provide.
+//! works the same way. The download sandbox, `piko_net::sandbox`, is a separate mechanism for a
+//! separate purpose, not something this module provides.
 
 use std::{
     ffi::{OsStr, OsString},

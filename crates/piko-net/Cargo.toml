@@ -11,6 +11,11 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# The sandbox tests start their own binary as the download helper, so they need their own `main`.
+[[test]]
+name = "sandbox"
+harness = false
+
 [dependencies]
 # `PackageFileName`, for naming a package download.
 alpm-types.workspace = true
@@ -18,6 +23,10 @@ piko-db.workspace = true
 piko-db-write.workspace = true
 piko-sig.workspace = true
 thiserror.workspace = true
+landlock.workspace = true
+libseccomp.workspace = true
+nix = { version = "0.31", default-features = false, features = ["user"] }
+rustix = { workspace = true, features = ["process", "thread"] }
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
 
 [dev-dependencies]

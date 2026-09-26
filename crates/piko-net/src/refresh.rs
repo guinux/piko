@@ -18,6 +18,8 @@ use crate::{
     freshness::{Baseline, FreshnessNote, FreshnessPolicy, Refreshed},
     pool,
     progress::{Event, Kind},
+    sandbox::{Failure, Sandbox, Timeouts},
+    transport::Transport,
 };
 
 /// What a refresh did to one repository.
@@ -271,9 +273,12 @@ fn first_duplicate(names: impl Iterator<Item = String>) -> Option<String> {
 }
 
 /// Downloads and installs repository databases.
+///
+/// [`Refresher::new`] reaches servers from this process. A program that downloads for a system
+/// gives it the configured [`Sandbox`] with [`Refresher::with_sandbox`].
 #[derive(Debug)]
 pub struct Refresher {
-    agent: ureq::Agent,
+    transport: Transport,
     limits: Limits,
 }
 
@@ -284,32 +289,26 @@ impl Default for Refresher {
 }
 
 impl Refresher {
-    /// Builds a refresher with the given bounds.
+    /// Builds a refresher with the given bounds, which reaches servers from this process.
     #[must_use]
     pub fn new(limits: Limits) -> Self {
-        // The provider must be named explicitly, or ureq's default provider selection and
-        // this workspace's enabled features can silently disagree.
-        let tls = ureq::tls::TlsConfig::builder()
-            .provider(ureq::tls::TlsProvider::Rustls)
-            // The system CA store, matching what libcurl and therefore pacman use. The
-            // alternative is a Mozilla root bundle compiled into the binary, which then ages
-            // independently of it.
-            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-            .build();
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(limits.timeout))
-            // Much shorter than the global one, and separate from it on purpose.
-            // Cancellation is only observable between requests and between chunks. So a
-            // worker parked in DNS/connect/TLS ignores a Ctrl+C for as long as this allows,
-            // once per worker. That is why it is worth bounding tightly, while the transfer
-            // itself keeps the generous `timeout_global`.
-            .timeout_connect(Some(CONNECT_TIMEOUT))
-            // A mirror that redirects forever is a mirror that hangs the update.
-            .max_redirects(5)
-            .user_agent(concat!("piko/", env!("CARGO_PKG_VERSION")))
-            .tls_config(tls)
-            .build();
-        Self { agent: ureq::Agent::new_with_config(config), limits }
+        Self { transport: Transport::direct(Self::timeouts(&limits)), limits }
+    }
+
+    /// Runs every request in a helper process confined by `sandbox`.
+    ///
+    /// A disabled sandbox keeps requests in this process. See [`crate::sandbox`].
+    #[must_use]
+    pub fn with_sandbox(mut self, sandbox: Sandbox) -> Self {
+        if sandbox.is_enabled() {
+            self.transport =
+                Transport::Sandboxed { sandbox, timeouts: Self::timeouts(&self.limits) };
+        }
+        self
+    }
+
+    const fn timeouts(limits: &Limits) -> Timeouts {
+        Timeouts { whole: limits.timeout, connect: CONNECT_TIMEOUT }
     }
 
     /// Refreshes `<repo>.db` into `sync_dir`, verifying before it lands.
@@ -588,7 +587,7 @@ impl Refresher {
                 }));
             }
             Ok(Fetched::Body(database)) => database,
-            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(error) if error.stops_every_server() => return Err(error),
             Err(error) => return Ok(Step::Failed(attempt_reason(url, &error))),
         };
 
@@ -603,7 +602,7 @@ impl Refresher {
             controls.progress,
         ) {
             Ok(signature) => signature,
-            Err(Error::Cancelled) => return Err(Error::Cancelled),
+            Err(error) if error.stops_every_server() => return Err(error),
             // This server served the database but could not be asked for its signature: a
             // 500, a timeout, a redirect. The two must come from one server, so the recovery is
             // the next server for *both*. Pairing this database with someone else's signature
@@ -682,31 +681,27 @@ impl Refresher {
         if cancel.is_requested() {
             return Err(Error::Cancelled);
         }
-        let mut request = self.agent.get(url);
-        if let Some(value) = local.since {
-            request = request.header("If-Modified-Since", value);
-        }
-
-        let response = match request.call() {
+        let response = match self.transport.get(url, local.since, cancel) {
             Ok(response) => response,
-            Err(error) => {
+            Err(_) if cancel.is_requested() => return Err(Error::Cancelled),
+            Err(Failure::Sandbox(reason)) => return Err(Error::Sandbox { reason }),
+            Err(Failure::Request(reason)) => {
                 return Err(Error::Io {
                     path: PathBuf::from(url),
                     action: "download",
-                    source: std::io::Error::other(error.to_string()),
+                    source: std::io::Error::other(reason),
                 });
             }
         };
 
         // The status is inspected explicitly, and only 200 yields a body to install.
         //
-        // Treating any non-error response as a body destroys data. ureq returns 304 as `Ok`
-        // with an empty body, not as `Err(StatusCode(304))`. A successful conditional request
-        // then looks like a successful download of nothing. Committing it truncates the live
+        // Treating any other response as a body destroys data. A `304` has an empty body. A
+        // successful conditional request then looks like a successful download of nothing. Committing it truncates the live
         // database to zero bytes, which was observed against a real mirror. Nothing downstream
         // catches it. With no signature to contradict it, an empty file verifies fine under
         // `DatabaseOptional`.
-        match response.status().as_u16() {
+        match response.status {
             200 => {}
             304 => return Ok(Fetched::NotModified),
             other => {
@@ -718,12 +713,7 @@ impl Refresher {
             }
         }
 
-        // Read before the body is consumed: `into_body` takes the response.
-        let stamp = response
-            .headers()
-            .get("last-modified")
-            .and_then(|value| value.to_str().ok())
-            .and_then(parse_http_date);
+        let stamp = response.last_modified.as_deref().and_then(parse_http_date);
 
         // libcurl's time condition, which pacman relies on, applies to a `200` as well as to a
         // `304`. Measured with `curl -z` against a server that ignores `If-Modified-Since`: a
@@ -743,16 +733,12 @@ impl Refresher {
         }
 
         // Display-only, per this module's documentation. Never fed into `max_bytes`.
-        let total = response
-            .headers()
-            .get("content-length")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
+        let total = response.content_length;
 
         progress(Event::Started { file: name.to_owned(), kind, total });
 
         let mut file = AtomicFile::create(destination)?;
-        let mut reader = response.into_body().into_reader();
+        let mut reader = response.body;
         let written = stream_bounded(&mut reader, &mut file, max_bytes, name, cancel, |bytes| {
             progress(Event::Progress { kind, bytes });
         })?;
@@ -799,46 +785,44 @@ impl Refresher {
             return Err(Error::Cancelled);
         }
 
-        let response = match self.agent.get(&url).call() {
+        let response = match self.transport.get(&url, None, cancel) {
             Ok(response) => response,
+            Err(_) if cancel.is_requested() => return Err(Error::Cancelled),
+            Err(Failure::Sandbox(reason)) => return Err(Error::Sandbox { reason }),
+            // A timeout or a TLS failure is not evidence of absence. Reporting it as "it is not
+            // signed" would send the user looking for the wrong problem.
+            Err(Failure::Request(reason)) => {
+                return Err(Error::SignatureUncheckable {
+                    file: name.to_owned(),
+                    reason: format!("could not fetch {url}: {reason}"),
+                });
+            }
+        };
+        match response.status {
+            200 => {}
             // A 404 means this repository is simply not signed, which is the norm. Arch
             // mirrors serve no `.db.sig` at all (measured: `core.db` is 200, `core.db.sig` is
             // 404), which is why pacman ships `DatabaseOptional`. That is the policy's
             // business, so it becomes "no signatures" and `decide` resolves it.
-            Err(ureq::Error::StatusCode(404 | 410)) => return Ok(Signature::Absent),
-            // Anything else — a timeout, a TLS failure, a 500 — is not evidence of absence.
-            // Reporting it as "it is not signed" would send the user looking for the wrong
-            // problem.
-            Err(error) => {
+            404 | 410 => return Ok(Signature::Absent),
+            // Only 200 carries a signature. A 500 is not evidence of absence. A 3xx left over
+            // after the redirect limit has an empty body: that is the same shape `fetch` guards
+            // against, where an empty body truncates a live database. Here, without this check,
+            // an empty file reaches GPGME, which reports "No data (gpg error 58)" and names the
+            // wrong culprit.
+            status => {
                 return Err(Error::SignatureUncheckable {
                     file: name.to_owned(),
-                    reason: format!("could not fetch {url}: {error}"),
+                    reason: format!("{url} answered HTTP {status} rather than 200"),
                 });
             }
-        };
-        // Only 200 carries a signature, and the status must be checked rather than assumed.
-        // `http_status_as_error` turns 4xx and 5xx into `Err`, which the arms above rely on.
-        // It does not turn 3xx into `Err`: ureq returns those as `Ok` with an empty body. That
-        // is the same shape `fetch` guards against above, where an empty body truncates a live
-        // database. Here, without this check, an empty file reaches GPGME, which reports "No
-        // data (gpg error 58)" and names the wrong culprit.
-        let status = response.status().as_u16();
-        if status != 200 {
-            return Err(Error::SignatureUncheckable {
-                file: name.to_owned(),
-                reason: format!("{url} answered HTTP {status} rather than 200"),
-            });
         }
 
-        let total = response
-            .headers()
-            .get("content-length")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
+        let total = response.content_length;
         progress(Event::Started { file: name.to_owned(), kind: Kind::Signature, total });
 
         let mut file = AtomicFile::create(destination)?;
-        let mut reader = response.into_body().into_reader();
+        let mut reader = response.body;
         // A signature is a few hundred bytes. Anything larger is not one.
         let written = stream_bounded(&mut reader, &mut file, 1024 * 1024, name, cancel, |bytes| {
             progress(Event::Progress { kind: Kind::Signature, bytes });
@@ -1057,7 +1041,7 @@ impl Refresher {
                         progress,
                     ) {
                         Ok(signature) => signature,
-                        Err(Error::Cancelled) => return Err(Error::Cancelled),
+                        Err(error) if error.stops_every_server() => return Err(error),
                         // As in `refresh_one`. The pair has to come from one server. So a
                         // server that served the package but could not be asked for its
                         // signature loses both halves to the next server. `file` is dropped
@@ -1080,7 +1064,7 @@ impl Refresher {
                     progress(Event::Installed);
                     return Ok(destination);
                 }
-                Err(Error::Cancelled) => return Err(Error::Cancelled),
+                Err(error) if error.stops_every_server() => return Err(error),
                 Err(error) => {
                     let reason = attempt_reason(&url, &error);
                     attempts.push((url, reason));

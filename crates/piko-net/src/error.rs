@@ -132,6 +132,24 @@ pub enum Error {
     /// written stays uncommitted and is removed on drop. Nothing changed on disk.
     #[error("the download was cancelled")]
     Cancelled,
+
+    /// The download sandbox could not run a request.
+    ///
+    /// The helper could not be started, the download user does not exist, or the kernel refused
+    /// a restriction. Every server would fail the same way, so no other server is tried. Nothing
+    /// was downloaded.
+    #[error("the download sandbox failed: {reason}")]
+    Sandbox {
+        /// What went wrong.
+        reason: String,
+    },
+}
+
+impl Error {
+    /// Whether this error stops a whole transfer, rather than one server's attempt.
+    pub(crate) const fn stops_every_server(&self) -> bool {
+        matches!(self, Self::Cancelled | Self::Sandbox { .. })
+    }
 }
 
 /// Renders `error` followed by every cause in its chain, joined by `": "`.

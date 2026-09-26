@@ -243,6 +243,8 @@ pub fn check_duplicates(targets: &[FileTarget]) -> Result<()> {
 /// reported as a malformed URL rather than as a cache problem. And a URL already in the cache
 /// needs no writable directory at all.
 ///
+/// The download runs in a helper confined by `sandbox`, as every repository package's does.
+///
 /// Nothing is verified here. The file joins the transaction as an ordinary file target and is
 /// checked in [`crate::Transaction::verify`], under `policy`.
 ///
@@ -255,6 +257,7 @@ pub fn fetch_url(
     url: &str,
     cache: &CacheDirSource,
     policy: Policy,
+    sandbox: piko_net::Sandbox,
     cancel: &piko_net::Cancel,
     progress: &(dyn Fn(piko_net::Event) + Sync),
 ) -> Result<PathBuf> {
@@ -275,6 +278,7 @@ pub fn fetch_url(
 
     let download_dir = crate::source::select_download_dir(cache.directories())?;
     piko_net::Refresher::default()
+        .with_sandbox(sandbox)
         .fetch_package_with_progress(
             download_dir.path(),
             &file_name,
@@ -435,7 +439,9 @@ mod tests {
         let cancel = piko_net::Cancel::new();
 
         for url in ["https://host/notapackage", "https://host/"] {
-            let error = fetch_url(url, &cache, policy(), &cancel, &|_| {}).unwrap_err();
+            let error =
+                fetch_url(url, &cache, policy(), piko_net::Sandbox::disabled(), &cancel, &|_| {})
+                    .unwrap_err();
             assert!(matches!(error, Error::InvalidPackageUrl { .. }), "{url}: got {error:?}");
         }
     }
@@ -454,7 +460,8 @@ mod tests {
         // Nothing to check: the hit stands.
         let unchecked = Policy { check: false, ..policy() };
         assert_eq!(
-            fetch_url(&url, &cache, unchecked, &cancel, &|_| {}).unwrap(),
+            fetch_url(&url, &cache, unchecked, piko_net::Sandbox::disabled(), &cancel, &|_| {})
+                .unwrap(),
             dir.path().join(name)
         );
 
@@ -462,12 +469,16 @@ mod tests {
         // is attempted. The host does not resolve. That is how this test knows the hit was
         // rejected, without needing a server.
         let checked = Policy { check: true, ..policy() };
-        assert!(fetch_url(&url, &cache, checked, &cancel, &|_| {}).is_err());
+        assert!(
+            fetch_url(&url, &cache, checked, piko_net::Sandbox::disabled(), &cancel, &|_| {})
+                .is_err()
+        );
 
         // With the signature there, the hit stands again.
         std::fs::write(dir.path().join(format!("{name}.sig")), b"not a real signature").unwrap();
         assert_eq!(
-            fetch_url(&url, &cache, checked, &cancel, &|_| {}).unwrap(),
+            fetch_url(&url, &cache, checked, piko_net::Sandbox::disabled(), &cancel, &|_| {})
+                .unwrap(),
             dir.path().join(name)
         );
     }

@@ -44,6 +44,10 @@ fn main() -> ExitCode {
     if let Some(code) = exec_helper() {
         return code;
     }
+    // The download helper, for the same reason. See `piko_net::sandbox`.
+    if let Some(code) = piko_net::run_helper_if_requested() {
+        return code;
+    }
 
     // Read here, before anything spawns a thread. `time` refuses to read the local UTC
     // offset from a multi-threaded process, and piko is multi-threaded by the time a
@@ -741,6 +745,7 @@ fn sync(
             download_only: args.download_only,
             parallel_downloads: parsed.options.parallel_downloads,
             check_space: parsed.options.check_space,
+            sandbox: piko_net::Sandbox::from_options(&parsed.options),
             pre_cancel,
         },
         out,

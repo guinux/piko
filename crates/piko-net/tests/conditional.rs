@@ -231,7 +231,7 @@ fn an_unexpected_status_is_not_installed() {
     assert!(matches!(error, piko_net::Error::AllServersFailed { .. }), "{error:?}");
     // The status is the reason this server failed, so the user must see it.
     let message = error.to_string();
-    assert!(message.contains("status: 500"), "{message}");
+    assert!(message.contains("HTTP status 500"), "{message}");
     // The attempt is listed under its URL, so the reason does not repeat it.
     assert_eq!(message.matches(&format!("{url}/core.db")).count(), 1, "{message}");
     assert!(!dir.path().join("core.db").exists(), "a 500 left a file behind");
