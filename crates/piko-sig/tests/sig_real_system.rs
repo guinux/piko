@@ -34,7 +34,7 @@ use std::{
 };
 
 use piko_db::config::SigLevel;
-use piko_sig::{Keyring, Policy, Rejection, Verdict, decide, signature_path};
+use piko_sig::{Keyring, Policy, Verdict, decide, signature_path};
 
 const KEYRING: &str = "/etc/pacman.d/gnupg";
 const CACHE: &str = "/var/cache/pacman/pkg";
@@ -181,11 +181,12 @@ fn a_modified_package_is_rejected() {
     );
 }
 
-/// An unsigned file is refused under Required and allowed under Optional. These are the two
-/// halves of the policy that decide whether piko installs something it cannot check.
+/// Only an absent `.sig` means "unsigned", and the caller decides that before it asks the
+/// keyring. Anything else at that path is read as a signature, so an empty one is an error.
+/// Read as no signatures, it would reach the policy as "unsigned", which `...Optional` accepts.
 #[test]
 #[ignore = "requires a real pacman keyring"]
-fn an_unsigned_file_follows_the_policy() {
+fn an_empty_signature_file_is_an_error_not_an_unsigned_file() {
     if !Path::new(KEYRING).is_dir() {
         return;
     }
@@ -193,16 +194,10 @@ fn an_unsigned_file_follows_the_policy() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("unsigned.pkg.tar");
     std::fs::write(&file, b"not a real package").unwrap();
-    // Verifying against a signature that does not exist yields no signatures, not an error.
     std::fs::write(signature_path(&file), b"").unwrap();
 
-    let signatures = keyring.verify_detached(&file, &signature_path(&file)).unwrap_or_default();
-    assert_eq!(
-        decide(&signatures, Policy::for_package(SigLevel::PACKAGE)),
-        Verdict::Rejected(Rejection::MissingRequired)
-    );
-    let optional = Policy::for_package(SigLevel::PACKAGE | SigLevel::PACKAGE_OPTIONAL);
-    assert_eq!(decide(&signatures, optional), Verdict::Accepted { verified: false });
+    let result = keyring.verify_detached(&file, &signature_path(&file));
+    assert!(result.is_err(), "an empty signature file was read as {result:?}");
 }
 
 /// Reports which trust levels this machine's packages actually carry. This makes a future

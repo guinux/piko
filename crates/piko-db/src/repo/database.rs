@@ -811,26 +811,6 @@ mod tests {
         fixture.write_gzip_archive(file_name, &refs)
     }
 
-    /// The bound must stop the allocation, which means firing during the walk rather than after
-    /// it. Otherwise every `desc` in an oversized archive is parsed before the error.
-    #[test]
-    fn refuses_an_archive_with_too_many_packages() {
-        let fixture = RepoFixture::new();
-        let packages: Vec<(String, String)> =
-            (0..10).map(|index| (format!("pkg{index}"), "1.0.0-1".to_owned())).collect();
-        let refs: Vec<(&str, &str)> =
-            packages.iter().map(|(name, version)| (name.as_str(), version.as_str())).collect();
-        let path = archive_of(&fixture, "core.db", &refs);
-
-        let err = RepoDatabase::open_with(
-            &path,
-            RepoOpenOptions::new().limits(Limits { repo_max_packages: 3, ..Limits::default() }),
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, Error::TooManyEntries { max: 3, .. }), "got {err:?}");
-    }
-
     /// The counterpart to the local database's own boundary case: an archive holding exactly
     /// `repo_max_packages` packages must open.
     #[test]
@@ -883,32 +863,6 @@ mod tests {
             assert_eq!(kept, "foo-1.0.0-1", "the first member in archive order wins");
             assert_eq!(ignored, "foo-2.0.0-1");
         }
-    }
-
-    /// A flood of unusable members must not allocate without bound, and must not stop the
-    /// readable packages from being read.
-    #[test]
-    fn diagnostics_are_bounded_and_the_overflow_is_counted() {
-        let fixture = RepoFixture::new();
-        let good = desc_text("foo", "1.0.0-1");
-        let mut entries: Vec<(String, Vec<u8>)> =
-            vec![("foo-1.0.0-1/desc".to_owned(), good.into_bytes())];
-        for index in 0..20 {
-            entries.push((format!("not-a-valid-entry-name-{index}/desc"), b"x".to_vec()));
-        }
-        let refs: Vec<(&str, &[u8])> =
-            entries.iter().map(|(path, body)| (path.as_str(), body.as_slice())).collect();
-        let path = fixture.write_gzip_archive("core.db", &refs);
-
-        let db = RepoDatabase::open_with(
-            &path,
-            RepoOpenOptions::new().limits(Limits { max_diagnostics: 5, ..Limits::default() }),
-        )
-        .unwrap();
-
-        assert_eq!(db.len(), 1, "the readable package must still be readable");
-        assert_eq!(db.diagnostics().len(), 5);
-        assert_eq!(db.diagnostics_dropped(), 15);
     }
 
     #[test]

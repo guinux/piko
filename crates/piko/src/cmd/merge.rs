@@ -53,6 +53,10 @@ pub struct Options {
     pub threeway: bool,
     /// Which pending files to cover.
     pub selection: Selection,
+    /// The global `SigLevel` a cached build must satisfy to serve as a merge base, and the
+    /// keyring it is checked against. `None` when the configuration cannot be read: every
+    /// merge is then two-way.
+    pub signing: Option<crate::context::SigningPolicy>,
 }
 
 /// The programs a run may start, already split into words.
@@ -61,6 +65,9 @@ struct Programs {
     diffprog: Vec<OsString>,
     mergeprog: Vec<OsString>,
     threeway: bool,
+    /// How a cached build's signature is checked before it serves as a base. `None` when the
+    /// keyring could not be opened: every merge is then two-way.
+    bases: Option<merge::BaseCheck>,
 }
 
 /// `piko merge`: resolve the pending files one at a time.
@@ -135,16 +142,16 @@ pub fn report_pending(root: &Path, report: &piko_txn::Report, out: &mut impl Wri
         let _ = writeln!(
             out,
             "  {} installed as {}",
-            root.join(self::strip(path, ".pacnew")).display(),
-            root.join(path).display()
+            piko_db::printable_path(&root.join(self::strip(path, ".pacnew"))),
+            piko_db::printable_path(&root.join(path))
         );
     }
     for path in &report.pacsaves {
         let _ = writeln!(
             out,
             "  {} saved as {}",
-            root.join(self::strip(path, ".pacsave")).display(),
-            root.join(path).display()
+            piko_db::printable_path(&root.join(self::strip(path, ".pacsave"))),
+            piko_db::printable_path(&root.join(path))
         );
     }
     let _ = writeln!(out, "Run 'piko merge' to resolve them.");
@@ -340,7 +347,10 @@ fn view(
     let target = root.join(&entry.target);
     let pacfile = root.join(&entry.pacfile);
 
-    let scratch = programs.threeway.then(|| self::write_base(cache_dirs, entry, out)).flatten();
+    let scratch = programs
+        .threeway
+        .then(|| self::write_base(cache_dirs, entry, programs.bases.as_ref(), out))
+        .flatten();
     let invocation = match scratch.as_ref() {
         Some((_dir, base)) => merge::three_way_diff(&programs.diffprog, &pacfile, base, &target),
         None => merge::two_way_diff(&programs.diffprog, &pacfile, &target),
@@ -366,7 +376,7 @@ fn merge_one(
     programs: &Programs,
     out: &mut impl Write,
 ) -> Option<Decided> {
-    let (scratch, base) = self::write_base(cache_dirs, entry, out)?;
+    let (scratch, base) = self::write_base(cache_dirs, entry, programs.bases.as_ref(), out)?;
     let target = root.join(&entry.target);
     let pacfile = root.join(&entry.pacfile);
     let merged = scratch.path().join("merged");
@@ -414,26 +424,47 @@ fn merge_one(
 fn write_base(
     cache_dirs: &[PathBuf],
     entry: &Pending,
+    bases: Option<&merge::BaseCheck>,
     out: &mut impl Write,
 ) -> Option<(tempfile::TempDir, PathBuf)> {
+    let Some(check) = bases else {
+        let _ = writeln!(
+            out,
+            "No signature policy can check a cached build, so there is no base to merge against."
+        );
+        return None;
+    };
     let limits = BaseLimits::default();
-    let candidate =
-        match merge::find_base(cache_dirs, &entry.package, &entry.installed_version, &limits) {
-            Ok(Some(candidate)) => candidate,
-            Ok(None) => {
-                let _ = writeln!(
-                    out,
-                    "No cached build of {} older than {} was found, so there is no base to \
-                     merge against.",
-                    entry.package, entry.installed_version
-                );
-                return None;
-            }
-            Err(error) => {
-                report(&error);
-                return None;
-            }
-        };
+    let search = match merge::find_base(
+        cache_dirs,
+        &entry.package,
+        &entry.installed_version,
+        &limits,
+        check,
+    ) {
+        Ok(search) => search,
+        Err(error) => {
+            report(&error);
+            return None;
+        }
+    };
+    for refused in &search.refused {
+        let _ = writeln!(
+            out,
+            "Not using {} as a base: {}",
+            piko_db::printable_path(&refused.path),
+            piko_db::printable(&refused.reason)
+        );
+    }
+    let Some(candidate) = search.base else {
+        let _ = writeln!(
+            out,
+            "No signed cached build of {} older than {} was found, so there is no base to merge \
+             against.",
+            entry.package, entry.installed_version
+        );
+        return None;
+    };
 
     let contents = match merge::extract_member(&candidate.path, &entry.target, &limits) {
         Ok(Some(contents)) => contents,
@@ -571,7 +602,18 @@ fn now_identical(root_dir: &RootDir, entry: &Pending) -> bool {
 fn programs(options: &Options) -> Result<Programs, String> {
     let diffprog = self::configured(options.diffprog.as_deref(), "DIFFPROG", DEFAULT_DIFFPROG)?;
     let mergeprog = self::configured(options.mergeprog.as_deref(), "MERGEPROG", DEFAULT_MERGEPROG)?;
-    Ok(Programs { diffprog, mergeprog, threeway: options.threeway })
+    // A base is optional, so a keyring that cannot be opened costs the three-way view, and
+    // nothing else.
+    let bases = options.signing.as_ref().and_then(|signing| {
+        match merge::BaseCheck::new(signing.sig_level, &signing.gpg_dir) {
+            Ok(check) => Some(check),
+            Err(error) => {
+                eprintln!("Warning: {error}; no cached build can serve as a merge base");
+                None
+            }
+        }
+    });
+    Ok(Programs { diffprog, mergeprog, threeway: options.threeway, bases })
 }
 
 /// One program value, split into words.

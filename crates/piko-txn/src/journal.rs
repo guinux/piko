@@ -286,14 +286,11 @@ impl Journal {
         }
         let _ = writeln!(text, "begin");
 
-        write_new(&path, text.as_bytes())?;
-
-        // Reopened for appending: progress lines extend the file rather than rewriting it.
-        // A crash mid-append then truncates at a line boundary at worst.
-        let file = std::fs::File::options()
-            .append(true)
-            .open(&path)
-            .map_err(|source| Error::io(&path, IoAction::Open, source))?;
+        // The descriptor that wrote the journal keeps appending to it: progress lines extend the
+        // file rather than rewriting it, and a crash mid-append truncates at a line boundary at
+        // worst. The name is never opened again, so nothing put there after the link is
+        // written through.
+        let file = write_new(&path, text.as_bytes())?;
         Ok(Self { path, file })
     }
 
@@ -346,6 +343,11 @@ pub enum Unreadable {
     /// The header names a format version this build does not know. A newer build can have
     /// written it.
     UnknownVersion(String),
+    /// Something other than a regular file sits at the journal's path: a directory, a FIFO, a
+    /// device or a symbolic link.
+    NotARegularFile,
+    /// The file is larger than [`piko_db::Limits::journal_bytes`].
+    TooLarge,
 }
 
 impl std::fmt::Display for Unreadable {
@@ -356,6 +358,8 @@ impl std::fmt::Display for Unreadable {
             Self::UnknownVersion(version) => {
                 write!(f, "it uses format version {version:?}, and this build reads only {VERSION}")
             }
+            Self::NotARegularFile => f.write_str("it is not a regular file"),
+            Self::TooLarge => f.write_str("it is larger than a journal can be"),
         }
     }
 }
@@ -377,10 +381,29 @@ const MAX_VERSION_CHARS: usize = 32;
 /// - [`Error::JournalUnreadable`] if the file exists but is not a journal this build can read.
 pub fn read(dbpath: &Path) -> Result<Option<Record>> {
     let path = dbpath.join(JOURNAL_FILE);
-    let bytes = match std::fs::read(&path) {
+    // The audited door: bounded, no final symlink followed, and a FIFO refused rather than
+    // waited on. Each refusal is a journal that is there and cannot be read, which refuses a
+    // transaction like any other unreadable journal.
+    let max = piko_db::Limits::default().get(piko_db::Limit::Journal);
+    let unreadable = |reason| Err(Error::JournalUnreadable { path: path.clone(), reason });
+    let bytes = match piko_db::fs_util::read_capped(&path, piko_db::Limit::Journal, max) {
         Ok(bytes) => bytes,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(Error::io(&path, IoAction::Read, source)),
+        Err(piko_db::Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(piko_db::Error::Io { source, .. }) if source.raw_os_error() == Some(libc::ELOOP) => {
+            return unreadable(Unreadable::NotARegularFile);
+        }
+        Err(piko_db::Error::NotARegularFile { .. }) => {
+            return unreadable(Unreadable::NotARegularFile);
+        }
+        Err(piko_db::Error::LimitExceeded { .. }) => return unreadable(Unreadable::TooLarge),
+        Err(piko_db::Error::Io { source, .. }) => {
+            return Err(Error::io(&path, IoAction::Read, source));
+        }
+        Err(other) => {
+            return Err(Error::io(&path, IoAction::Read, std::io::Error::other(other.to_string())));
+        }
     };
     let parsed =
         String::from_utf8(bytes).map_err(|_| Unreadable::NotText).and_then(|text| parse(&text));
@@ -445,7 +468,7 @@ fn parse(text: &str) -> std::result::Result<Record, Unreadable> {
 }
 
 /// Writes `contents` to `path`, which must not exist, so that `path` is never observed partially
-/// written.
+/// written. Returns the descriptor that wrote it, open for appending.
 ///
 /// The temporary is written and fsynced, then hard-linked to `path`. `link` fails with `EEXIST`
 /// when `path` is there, which a rename would replace. `O_EXCL` on the temporary rather than
@@ -455,14 +478,15 @@ fn parse(text: &str) -> std::result::Result<Record, Unreadable> {
 /// # Errors
 ///
 /// [`Error::UnfinishedTransaction`] if `path` exists. [`Error::Io`] otherwise.
-fn write_new(path: &Path, contents: &[u8]) -> Result<()> {
+fn write_new(path: &Path, contents: &[u8]) -> Result<std::fs::File> {
     let directory = path.parent().unwrap_or(Path::new("."));
     let mut temp = path.as_os_str().to_os_string();
     temp.push(".new");
     let temp = PathBuf::from(temp);
 
     let mut options = std::fs::File::options();
-    options.write(true).create_new(true);
+    // Append mode, because the caller keeps this descriptor for the progress lines.
+    options.append(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -488,7 +512,6 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&temp);
         return Err(error);
     }
-    drop(file);
 
     // The temporary goes whether or not the link succeeded. A failed removal leaves a second
     // name for the same file, which the next write removes before it starts.
@@ -504,7 +527,8 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<()> {
 
     std::fs::File::open(directory)
         .and_then(|handle| handle.sync_all())
-        .map_err(|source| Error::io(directory, IoAction::Sync, source))
+        .map_err(|source| Error::io(directory, IoAction::Sync, source))?;
+    Ok(file)
 }
 
 /// Fails if `dbpath` holds a transaction journal, readable or not.
@@ -713,7 +737,8 @@ mod tests {
         assert_eq!(record.outstanding(), [&Intent::Remove { entry: "bar-2.0-1".to_owned() }]);
     }
 
-    /// A journal written but not yet begun means the system stays untouched.
+    /// The root and the database path a journal records are read back as written. The
+    /// recovery commands `piko report` prints name them.
     #[test]
     fn the_recorded_root_and_dbpath_survive() {
         let dir = tempfile::tempdir().unwrap();
@@ -756,6 +781,67 @@ mod tests {
             }
             other => panic!("an unknown version was not refused: {other:?}"),
         }
+    }
+
+    /// A FIFO at the journal's path is refused without waiting for a writer, and so is a
+    /// symbolic link. Either one still refuses a transaction: a journal is there.
+    #[test]
+    fn a_journal_that_is_not_a_regular_file_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join(JOURNAL_FILE);
+
+        std::os::unix::fs::symlink("/etc/hostname", &journal).unwrap();
+        assert!(
+            matches!(
+                read(dir.path()),
+                Err(Error::JournalUnreadable { reason: Unreadable::NotARegularFile, .. })
+            ),
+            "a symbolic link was followed"
+        );
+        std::fs::remove_file(&journal).unwrap();
+
+        // `mkfifo(3)` is `unsafe`, which this workspace forbids, so the utility makes it.
+        let made = std::process::Command::new("mkfifo").arg(&journal).status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("skipping the FIFO half: mkfifo is unavailable");
+            return;
+        }
+        assert!(
+            matches!(
+                read(dir.path()),
+                Err(Error::JournalUnreadable { reason: Unreadable::NotARegularFile, .. })
+            ),
+            "a FIFO was not refused"
+        );
+    }
+
+    /// A journal past its bound is refused, never read short.
+    #[test]
+    fn an_oversized_journal_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let max = piko_db::Limits::default().get(piko_db::Limit::Journal);
+        let file = std::fs::File::create(dir.path().join(JOURNAL_FILE)).unwrap();
+        file.set_len(max + 1).unwrap();
+        assert!(matches!(
+            read(dir.path()),
+            Err(Error::JournalUnreadable { reason: Unreadable::TooLarge, .. })
+        ));
+    }
+
+    /// Progress lines go through the descriptor that wrote the journal. A file swapped in at
+    /// the journal's name afterwards receives none of them.
+    #[test]
+    fn progress_lines_go_to_the_journal_that_was_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = Journal::begin(dir.path(), Path::new("/"), &steps()).unwrap();
+        let path = dir.path().join(JOURNAL_FILE);
+        let moved = dir.path().join("moved");
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::write(&path, b"planted\n").unwrap();
+
+        journal.completed(0).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "planted\n");
+        assert!(std::fs::read_to_string(&moved).unwrap().ends_with("done 0\n"));
     }
 
     #[test]

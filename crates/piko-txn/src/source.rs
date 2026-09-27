@@ -17,7 +17,10 @@ use std::{
     io::Read as _,
     os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use alpm_types::PackageFileName;
@@ -415,6 +418,12 @@ fn create_cache_dir(directory: &Path) -> std::io::Result<()> {
 #[derive(Clone, Debug)]
 pub struct CacheDirSource {
     directories: Vec<PathBuf>,
+    /// For each directory, set once it passed `ensure_trusted_directory`.
+    ///
+    /// A directory that passed stays trusted: only root and the effective user can change it or
+    /// any directory above it. So one test covers every package found there afterwards. A
+    /// failure is not kept, because a directory can be repaired or created during the run.
+    trusted: Vec<OnceLock<()>>,
 }
 
 impl CacheDirSource {
@@ -436,7 +445,8 @@ impl CacheDirSource {
                 reason: "no cache directories were configured".to_owned(),
             });
         }
-        Ok(Self { directories })
+        let trusted = directories.iter().map(|_| OnceLock::new()).collect();
+        Ok(Self { directories, trusted })
     }
 
     /// The directories this source searches, in order.
@@ -457,14 +467,14 @@ impl PackageSource for CacheDirSource {
         let name = file_name.to_string();
         let mut skipped = Vec::new();
 
-        for directory in &self.directories {
+        for (directory, trusted) in self.directories.iter().zip(&self.trusted) {
             let candidate = directory.join(&name);
             match std::fs::symlink_metadata(&candidate) {
                 Ok(metadata) if metadata.is_symlink() => {
                     skipped.push(Skipped { path: candidate, reason: SkipReason::SymbolicLink });
                 }
                 Ok(metadata) if metadata.is_file() => {
-                    if let Err(reason) = check_trusted(directory, &candidate, &metadata) {
+                    if let Err(reason) = check_trusted(directory, trusted, &candidate, &metadata) {
                         skipped.push(Skipped { path: candidate, reason });
                         continue;
                     }
@@ -498,17 +508,25 @@ impl PackageSource for CacheDirSource {
 /// `candidate` found in `directory`, whose `metadata` has been read.
 ///
 /// The file itself, and every directory on the way to it: `directory` and its ancestors. A user
-/// who can write any of them can swap the file between two reads.
+/// who can write any of them can swap the file between two reads. The directories are tested
+/// once, and `trusted` records that they passed.
 fn check_trusted(
     directory: &Path,
+    trusted: &OnceLock<()>,
     candidate: &Path,
     metadata: &std::fs::Metadata,
 ) -> std::result::Result<(), SkipReason> {
     if let Some(distrust) = distrust(metadata) {
         return Err(SkipReason::Untrusted { path: candidate.to_path_buf(), distrust });
     }
+    if trusted.get().is_some() {
+        return Ok(());
+    }
     match piko_db::fs_util::ensure_trusted_directory(directory) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            let _ = trusted.set(());
+            Ok(())
+        }
         Err(piko_db::Error::Untrusted { path, distrust }) => {
             Err(SkipReason::Untrusted { path, distrust })
         }
@@ -526,31 +544,6 @@ impl piko_db::solve::PackageCache for CacheDirSource {
     fn is_cached(&self, file_name: &PackageFileName) -> bool {
         self.contains(file_name)
     }
-}
-
-/// Opens a located package file, refusing anything that is not a regular file.
-///
-/// The check repeats here even though [`PackageSource::locate`] already made it. The file can
-/// be replaced between the two calls, which is the staleness [`Location`] documents. The
-/// re-check runs on the open descriptor with `fstat`, rather than on the path. So the answer
-/// describes the bytes actually about to be read.
-///
-/// # Errors
-///
-/// [`Error::Io`] if the file cannot be opened or stat'ed. [`Error::UnusableSource`] if it is
-/// no longer a regular file.
-pub fn open(location: &Location) -> Result<std::fs::File> {
-    let file = std::fs::File::open(location.path())
-        .map_err(|source| Error::io(location.path(), IoAction::Open, source))?;
-    let metadata =
-        file.metadata().map_err(|source| Error::io(location.path(), IoAction::Metadata, source))?;
-    if !metadata.is_file() {
-        return Err(Error::UnusableSource {
-            path: location.path().to_path_buf(),
-            reason: "not a regular file".to_owned(),
-        });
-    }
-    Ok(file)
 }
 
 /// Serves the package files named on the command line, and delegates everything else.
@@ -1429,13 +1422,6 @@ mod tests {
         chmod(locked.path(), 0o700);
     }
 
-    #[test]
-    fn an_empty_cache_directory_list_is_still_refused() {
-        let error = CacheDirSource::new([]).unwrap_err();
-
-        assert!(matches!(error, Error::UnusableSource { .. }), "{error}");
-    }
-
     fn file_name() -> PackageFileName {
         PackageFileName::from_str(PACKAGE).unwrap()
     }
@@ -1694,34 +1680,6 @@ mod tests {
     fn refuses_to_be_built_with_no_directories() {
         let err = CacheDirSource::new(Vec::new()).unwrap_err();
         assert!(matches!(err, Error::UnusableSource { .. }), "got {err:?}");
-    }
-
-    #[test]
-    fn open_reads_the_located_file() {
-        use std::io::Read as _;
-
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), PACKAGE, b"payload");
-        let source = CacheDirSource::new([dir.path().to_path_buf()]).unwrap();
-        let location = source.locate(&file_name()).unwrap();
-
-        let mut contents = Vec::new();
-        open(&location).unwrap().read_to_end(&mut contents).unwrap();
-        assert_eq!(contents, b"payload");
-    }
-
-    /// The file can be swapped between locating and opening. The open must not trust the
-    /// earlier check.
-    #[test]
-    fn open_rechecks_the_file_type() {
-        let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), PACKAGE, b"payload");
-        let source = CacheDirSource::new([dir.path().to_path_buf()]).unwrap();
-        let location = source.locate(&file_name()).unwrap();
-
-        std::fs::remove_file(location.path()).unwrap();
-        std::fs::create_dir(location.path()).unwrap();
-        assert!(open(&location).is_err());
     }
 
     /// The trait is object-safe and thread-safe, both of which the engine above relies on.

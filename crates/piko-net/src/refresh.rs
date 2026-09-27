@@ -1676,12 +1676,38 @@ mod tests {
         assert_eq!(local_stamp(&dir.path().join("core.db")), None);
     }
 
+    /// The stamp is the file's mtime, and the header carries that second back unchanged.
     #[test]
     fn an_existing_database_yields_a_conditional_header() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("core.db");
         std::fs::write(&path, b"x").unwrap();
-        let header = http_date(local_stamp(&path).expect("an existing file has an mtime"));
-        assert!(header.ends_with(" GMT"), "{header}");
+        let stamp = 1_757_000_000;
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(stamp))
+            .unwrap();
+
+        assert_eq!(local_stamp(&path), Some(stamp));
+        assert_eq!(parse_http_date(&http_date(stamp)), Some(stamp));
+    }
+
+    /// `fetch` stamps the epoch when the server gave no usable date. That is no stamp, so the
+    /// next request is unconditional.
+    #[test]
+    fn an_epoch_stamp_is_no_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("core.db");
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+
+        assert_eq!(local_stamp(&path), None);
     }
 }

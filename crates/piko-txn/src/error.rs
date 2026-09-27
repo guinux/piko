@@ -14,6 +14,20 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// How many file conflicts [`Error::FileConflicts`] names before summarising the rest.
 const MAX_SHOWN: usize = 10;
 
+/// A path in a message, with anything that could drive a terminal escaped.
+///
+/// A member path, a `.PKGINFO` value quoted in a parse error and a file name on disk are all
+/// chosen outside piko, and every message here can reach a terminal. See
+/// [`piko_db::printable`].
+fn shown(path: &std::path::Path) -> String {
+    piko_db::printable_path(path)
+}
+
+/// A reason in a message, escaped as [`shown`] escapes a path.
+fn said(reason: &str) -> String {
+    piko_db::printable(reason)
+}
+
 /// The filesystem operation that failed.
 ///
 /// This mirrors `piko_db::IoAction`, and is separate for the same reason the error type is.
@@ -77,7 +91,7 @@ impl fmt::Display for IoAction {
 #[non_exhaustive]
 pub enum Error {
     /// A filesystem operation failed.
-    #[error("failed to {action} {}", path.display())]
+    #[error("failed to {action} {}", shown(path))]
     Io {
         /// The path the operation was attempted on.
         path: PathBuf,
@@ -96,7 +110,7 @@ pub enum Error {
     /// like an absent file. So does a directory with the right name.
     #[error(
         "{file_name} is not available from any configured source (searched {}{})",
-        searched.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
+        searched.iter().map(|p| shown(p)).collect::<Vec<_>>().join(", "),
         if skipped.is_empty() {
             String::new()
         } else {
@@ -119,8 +133,8 @@ pub enum Error {
     /// sparse file, or a pax global header would otherwise reach the disk as a regular file.
     #[error(
         "{}: {} is a {kind}; piko installs regular files, directories and links only",
-        path.display(),
-        member.display()
+        shown(path),
+        shown(member)
     )]
     UnsupportedMemberType {
         /// The package archive.
@@ -131,11 +145,29 @@ pub enum Error {
         kind: &'static str,
     },
 
+    /// A member's owner is not a user and group id the kernel can set.
+    ///
+    /// An id is 32 bits, and `u32::MAX` is `-1`, which `chown` reads as "leave unchanged". A
+    /// tar header can hold a larger number. Narrowed to some default, it would give the file an
+    /// owner the archive never named: root, or the extracting user.
+    #[error(
+        "{} is owned by {uid}:{gid}, which is not a user and group id piko can set",
+        shown(member)
+    )]
+    UnusableMemberOwner {
+        /// The member's path, as the archive spells it.
+        member: PathBuf,
+        /// The user id the archive records.
+        uid: u64,
+        /// The group id the archive records.
+        gid: u64,
+    },
+
     /// An archive named a path that could escape the installation root.
     ///
     /// This is refused on the path alone, before any filesystem access — see
     /// [`crate::rootfs::components`].
-    #[error("{} is not a safe path to extract: {reason}", path.display())]
+    #[error("{} is not a safe path to extract: {reason}", shown(path))]
     UnsafeArchivePath {
         /// The path as the archive spelled it.
         path: PathBuf,
@@ -150,8 +182,8 @@ pub enum Error {
     /// reason resolution walks with `openat`.
     #[error(
         "{} would be extracted outside the installation root: {} — {reason}",
-        path.display(),
-        component.display()
+        shown(path),
+        shown(component)
     )]
     PathEscapesRoot {
         /// The path as the archive spelled it.
@@ -166,7 +198,7 @@ pub enum Error {
     ///
     /// This is a count or a size, named rather than enumerated. The bounds here are few, and
     /// their names are the whole message.
-    #[error("{} exceeds the {limit} limit of {max}", path.display())]
+    #[error("{} exceeds the {limit} limit of {max}", shown(path))]
     PackageLimitExceeded {
         /// The package that was too large.
         path: PathBuf,
@@ -180,10 +212,7 @@ pub enum Error {
     ///
     /// This is determined by sniffing the magic bytes, not by the file name. See
     /// [`piko_db::compression`] for which formats are decoded and why.
-    #[error(
-        "{} uses {format}; piko reads gzip, zstd and uncompressed packages only",
-        path.display()
-    )]
+    #[error("{} uses {format}; piko reads gzip, zstd and uncompressed packages only", shown(path))]
     UnsupportedCompression {
         /// The archive that was refused.
         path: PathBuf,
@@ -211,7 +240,7 @@ pub enum Error {
     /// Currently this is only the "a directory is in the way of a file" case. libalpm also
     /// treats that as fatal (`add.c:290`) rather than removing the directory. That directory
     /// may hold files belonging to another package, or to nobody.
-    #[error("cannot extract {}: {reason:?}", path.display())]
+    #[error("cannot extract {}: {reason:?}", shown(path))]
     ExtractionRefused {
         /// The member's path as the archive spells it.
         path: PathBuf,
@@ -252,7 +281,7 @@ pub enum Error {
     /// orphans every file the package installed, with nothing left to say who owned them.
     /// That is
     /// principle 3 ("cached failures, not cached emptiness") applied where it matters most.
-    #[error("the installed entry {entry} cannot be read: {reason}")]
+    #[error("the installed entry {entry} cannot be read: {}", said(reason))]
     UnreadableEntry {
         /// The entry directory name, `<name>-<version>`.
         entry: String,
@@ -273,7 +302,8 @@ pub enum Error {
     /// user learns that a hook stopped the transaction and nothing more. A hook that never ran
     /// prints nothing at all. `reason` is then the only part that names the cause.
     #[error(
-        "the transaction was stopped by the hook {hook}, which sets AbortOnFail: it {reason}{}",
+        "the transaction was stopped by the hook {hook}, which sets AbortOnFail: it {}{}",
+        said(reason),
         if output.is_empty() { String::new() } else { format!("\n  {}", output.join("\n  ")) }
     )]
     HookAborted {
@@ -307,7 +337,7 @@ pub enum Error {
     /// The package is intact as far as piko knows. What failed is the *policy*. This is
     /// distinct from [`Error::SignatureUncheckable`] because the two call for opposite
     /// responses. This one means do not install the package. That one means fix the keyring.
-    #[error("{}: {reason}", package.display())]
+    #[error("{}: {}", shown(package), said(reason))]
     SignatureRejected {
         /// The package file that was refused.
         package: PathBuf,
@@ -326,7 +356,7 @@ pub enum Error {
     /// deliberately **not** treated as a failed signature: doing so would refuse valid
     /// packages and blame them for a local misconfiguration. Equally it is not a pass. piko
     /// has no opinion on a package it could not check, so the transaction stops.
-    #[error("cannot check the signature of {}: {reason}", package.display())]
+    #[error("cannot check the signature of {}: {}", shown(package), said(reason))]
     SignatureUncheckable {
         /// The package file that could not be checked.
         package: PathBuf,
@@ -338,7 +368,7 @@ pub enum Error {
     ///
     /// libalpm's `ALPM_ERR_PKG_INVALID_CHECKSUM`. The file is damaged, or it is not the build
     /// the database describes. Either way, it is not installed.
-    #[error("{}: {reason}", package.display())]
+    #[error("{}: {}", shown(package), said(reason))]
     ChecksumMismatch {
         /// The package file that was refused.
         package: PathBuf,
@@ -370,7 +400,7 @@ pub enum Error {
     /// `Box<piko_db::Error>` rather than to `piko_db::Error`. That is the same shape
     /// [`Error::RepositoryPackageUnreadable`] already has with its `Arc`, and the price of not
     /// growing the enum. `Display` is unaffected, so nothing a user reads changes.
-    #[error("the local database at {} cannot be opened", path.display())]
+    #[error("the local database at {} cannot be opened", shown(path))]
     LocalDatabaseUnreadable {
         /// The `<dbpath>/local` directory that could not be opened.
         path: PathBuf,
@@ -392,7 +422,7 @@ pub enum Error {
         "the transaction does not fit:\n  {}",
         too_full.iter().take(MAX_SHOWN).map(ToString::to_string)
             .chain(read_only.iter().take(MAX_SHOWN)
-                .map(|path| format!("{} is mounted read only", path.display())))
+                .map(|path| format!("{} is mounted read only", shown(path))))
             .collect::<Vec<_>>()
             .join("\n  ")
     )]
@@ -408,7 +438,7 @@ pub enum Error {
     /// Only the disk-space check needs it, so this is reachable only under `CheckSpace`.
     /// libalpm returns a bare `-1` here without setting an error code at all. That leaves its
     /// caller reporting "unexpected error". piko names the path and the reason instead.
-    #[error("the mount table at {} cannot be used: {reason}", path.display())]
+    #[error("the mount table at {} cannot be used: {}", shown(path), said(reason))]
     MountTableUnreadable {
         /// The file that was read, or the path that could not be placed on any filesystem.
         path: PathBuf,
@@ -427,7 +457,7 @@ pub enum Error {
     },
 
     /// A source was configured with a path that cannot be used.
-    #[error("{} is not a usable package source: {reason}", path.display())]
+    #[error("{} is not a usable package source: {}", shown(path), said(reason))]
     UnusableSource {
         /// The offending path.
         path: PathBuf,
@@ -477,7 +507,7 @@ pub enum Error {
     /// The reason is stringified rather than carrying [`piko_db::EntryNameError`] itself. This
     /// is the same trade [`Error::SignatureRejected`] makes, and for the same reason.
     /// Nesting it would make every variant of this enum pay for that one's size.
-    #[error("{name} has no usable entry name: {reason}")]
+    #[error("{name} has no usable entry name: {}", said(reason))]
     InvalidEntryName {
         /// The package name.
         name: String,
@@ -508,11 +538,7 @@ pub enum Error {
     /// `ALPM_ERR_TRANS_DUP_TARGET` (`add.c:49`) and `ALPM_ERR_TRANS_DUP_FILENAME`
     /// (`sync.c:470`) are one question for a file target. Its package name and its file name
     /// are the same string.
-    #[error(
-        "{package} is named twice: {} and {}",
-        first.display(),
-        second.display()
-    )]
+    #[error("{package} is named twice: {} and {}", shown(first), shown(second))]
     DuplicateTarget {
         /// The package file name both targets render.
         package: String,
@@ -527,7 +553,7 @@ pub enum Error {
     /// piko fetches a URL through the same request a repository package uses, which addresses
     /// a file by an `alpm_types::PackageFileName` under a server. A URL whose last component
     /// is not such a name has nothing to fetch.
-    #[error("cannot fetch {url}: {reason}")]
+    #[error("cannot fetch {url}: {}", said(reason))]
     InvalidPackageUrl {
         /// The URL as the user wrote it.
         url: String,
@@ -540,7 +566,7 @@ pub enum Error {
     /// This is raised only when something actually asks for checking — see
     /// [`crate::plan::TransactionPlan::new`]. A system with no usable keyring can still run a
     /// transaction whose effective policy needs nothing from it.
-    #[error("cannot open the GnuPG keyring at {}", path.display())]
+    #[error("cannot open the GnuPG keyring at {}", shown(path))]
     KeyringUnusable {
         /// The configured `GPGDir`.
         path: PathBuf,
@@ -554,7 +580,7 @@ pub enum Error {
     /// The file is there, so a previous run wrote it and did not finish. What that run
     /// recorded is unknown, and so is the state of the system. So this refuses a transaction
     /// the same way a readable journal does. It is never read as "no journal".
-    #[error("{} records a transaction that cannot be read: {reason}", path.display())]
+    #[error("{} records a transaction that cannot be read: {reason}", shown(path))]
     JournalUnreadable {
         /// The journal file.
         path: PathBuf,
@@ -568,7 +594,7 @@ pub enum Error {
     /// Its repository is not among the configured ones, or it is a package file that is not
     /// among the named files. Refused rather than checked under `[options]`' `SigLevel`, which
     /// may check nothing where the repository's own policy asks for a signature.
-    #[error("{package} has no configured source: {reason}")]
+    #[error("{package} has no configured source: {}", said(reason))]
     UnconfiguredSource {
         /// The package's name.
         package: String,
@@ -581,7 +607,7 @@ pub enum Error {
     /// A new transaction is refused rather than written over it. What state the system is in
     /// is unknown, and the journal is the only record of which steps ran and which one was
     /// half applied. [`crate::journal::read`] reads it.
-    #[error("{} records an unfinished transaction", path.display())]
+    #[error("{} records an unfinished transaction", shown(path))]
     UnfinishedTransaction {
         /// The journal file.
         path: PathBuf,
@@ -622,6 +648,26 @@ mod tests {
     fn error_is_send_sync_static() {
         const fn assert_send_sync<T: Send + Sync + 'static>() {}
         assert_send_sync::<Error>();
+    }
+
+    /// A member path and a reason are chosen by the package. Neither reaches a terminal with a
+    /// control character left in it.
+    #[test]
+    fn text_from_a_package_is_escaped_in_a_message() {
+        let unsafe_path = Error::UnsafeArchivePath {
+            path: PathBuf::from("usr/\u{1b}]52;c;cHduZWQ=\u{7}"),
+            reason: crate::rootfs::UnsafePath::CurrentDirectory,
+        };
+        let message = unsafe_path.to_string();
+        assert!(!message.contains('\u{1b}') && !message.contains('\u{7}'), "{message:?}");
+        assert!(message.contains("usr/\\u{1b}]52"), "{message:?}");
+
+        let unusable = Error::UnusableSource {
+            path: PathBuf::from("foo.pkg.tar"),
+            reason: "its .PKGINFO is unreadable: bad line\nWarning: forged".to_owned(),
+        };
+        let message = unusable.to_string();
+        assert!(!message.contains('\n'), "{message:?}");
     }
 
     #[test]

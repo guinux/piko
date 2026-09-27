@@ -189,7 +189,8 @@ fn stem(name: &str) -> &str {
     name.strip_suffix(HOOK_SUFFIX).unwrap_or(name)
 }
 
-/// The file names in `directory`, sorted.
+/// The file names in `directory`, sorted, once `directory` and every directory on the way to it
+/// pass `ensure_trusted_directory`. That one test covers every hook read from it.
 ///
 /// Returns `Err(None)` when the directory is simply not there. That is ordinary:
 /// `/etc/pacman.d/hooks` does not exist until someone puts a hook in it.
@@ -247,13 +248,13 @@ fn read_directory(directory: &Path) -> std::result::Result<Vec<String>, Option<P
 /// `alpm-hooks(5)` says to disable a hook by shadowing it with **a symlink to `/dev/null`**.
 /// Two of piko's usual protections stand in the way of that. Both are handled, not dropped:
 ///
-/// - The read goes through [`piko_db::fs_util::read_capped_utf8_following`], the door that
-///   resolves a final symlink. It is the same door repository archives use, instead of the
+/// - The read goes through [`piko_db::fs_util::read_trusted_file_utf8_following`], the door
+///   that resolves a final symlink. It is the same door repository archives use, instead of the
 ///   `O_NOFOLLOW` one the local database uses. A hook directory is host configuration named by
 ///   `pacman.conf`, not a package-controlled directory of entries.
-/// - The door is the trusted variant: a hook file another user could change, or one in a
-///   directory another user could write, is [`Problem::UntrustedHook`] and does not run. A
-///   hook is a command root runs.
+/// - The door is the trusted variant: a hook file another user could change is
+///   [`Problem::UntrustedHook`] and does not run. A hook is a command root runs. The directory
+///   holding it was tested once, by `read_directory`, before it was listed.
 /// - `/dev/null` is a character device, which that door still refuses. Rather than loosen the
 ///   check, a non-regular file is treated as **empty**. That parses into an inert masking
 ///   hook — exactly what reading `/dev/null` would have produced. It also means a FIFO planted
@@ -271,7 +272,7 @@ fn read_hook(path: &Path, name: &str) -> std::result::Result<Option<Hook>, Probl
         }
     }
 
-    let text = match piko_db::fs_util::read_trusted_utf8_following(
+    let text = match piko_db::fs_util::read_trusted_file_utf8_following(
         path,
         piko_db::Limit::Hook,
         max_hook_bytes(),

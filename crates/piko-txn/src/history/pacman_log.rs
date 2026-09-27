@@ -53,8 +53,10 @@ pub struct PacmanLog {
 impl PacmanLog {
     /// Opens `path` for appending, creating it if it is absent.
     ///
-    /// `O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC` at mode `0644`, the same flags `log.c`
-    /// uses. The parent directory is **not** created, and libalpm does not create it either.
+    /// `O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC` at mode `0644`, the flags `log.c` uses,
+    /// plus `O_NOFOLLOW | O_NONBLOCK` and a regular-file test: see `open_for_append`. A log
+    /// that is a symbolic link is refused, and reported like any log that cannot be opened.
+    /// The parent directory is **not** created, and libalpm does not create it either.
     /// A missing `/var/log` means the caller pointed at a root that is not set up yet. That is
     /// worth reporting rather than papering over.
     ///
@@ -62,21 +64,7 @@ impl PacmanLog {
     ///
     /// [`std::io::Error`] if the file cannot be opened.
     pub fn open(path: &Path, offset: LocalOffset) -> std::io::Result<Self> {
-        use std::os::unix::fs::OpenOptionsExt as _;
-
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).append(true).create(true).mode(LOG_MODE);
-        options.custom_flags(libc::O_CLOEXEC);
-
-        // libalpm retries only `EINTR` (`log.c`), and so does this. Every other failure is
-        // the caller's to hear about.
-        let file = loop {
-            match options.open(path) {
-                Ok(file) => break file,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            }
-        };
+        let file = super::open_for_append(path, LOG_MODE)?;
         Ok(Self { path: path.to_path_buf(), file, offset })
     }
 
@@ -207,7 +195,7 @@ pub struct Session {
 ///
 /// [`std::io::Error`] if the file cannot be opened or read.
 pub fn read(path: &Path) -> std::io::Result<Vec<Line>> {
-    let file = std::fs::File::open(path)?;
+    let file = super::open_for_reading(path)?;
     let reader = std::io::BufReader::new(file.take(MAX_LOG_BYTES));
     let mut lines = Vec::new();
     for line in reader.lines() {
@@ -335,6 +323,29 @@ mod tests {
         tempfile::tempdir().expect("a temporary directory")
     }
 
+    /// The log is appended to as root. A symbolic link at its name would send those lines into
+    /// any file, and a FIFO would hang the transaction until a reader appeared.
+    #[test]
+    fn a_log_that_is_a_link_or_a_fifo_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"untouched\n").unwrap();
+        let log = dir.path().join("pacman.log");
+        std::os::unix::fs::symlink(&victim, &log).unwrap();
+
+        assert!(PacmanLog::open(&log, LocalOffset::UTC).is_err(), "a symbolic link was followed");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched\n");
+        std::fs::remove_file(&log).unwrap();
+
+        // `mkfifo(3)` is `unsafe`, which this workspace forbids, so the utility makes it.
+        let made = std::process::Command::new("mkfifo").arg(&log).status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("skipping the FIFO half: mkfifo is unavailable");
+            return;
+        }
+        assert!(PacmanLog::open(&log, LocalOffset::UTC).is_err(), "a FIFO was opened");
+        assert!(read(&log).is_err(), "a FIFO was read");
+    }
     #[test]
     fn a_line_matches_the_libalpm_leader() {
         let dir = temp();

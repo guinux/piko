@@ -103,12 +103,16 @@ pub fn open_following_symlinks(path: &Path) -> Result<File> {
 ///
 /// `limit` names the bound in the resulting error; it carries no behaviour.
 ///
+/// A final symlink is not followed. Public for a file a caller keeps beside the database it
+/// reads, such as `piko-txn`'s journal, so that read takes this door too.
+///
 /// # Errors
 ///
-/// - [`Error::Io`] if the path cannot be opened, stat'ed or read.
-/// - [`Error::NotARegularFile`] if it is a directory, FIFO, socket, device node or symlink.
+/// - [`Error::Io`] if the path cannot be opened, stat'ed or read. A final symlink is an
+///   [`Error::Io`] carrying `ELOOP`.
+/// - [`Error::NotARegularFile`] if it is a directory, FIFO, socket or device node.
 /// - [`Error::LimitExceeded`] if the contents exceed `max` bytes.
-pub(crate) fn read_capped(path: &Path, limit: Limit, max: u64) -> Result<Vec<u8>> {
+pub fn read_capped(path: &Path, limit: Limit, max: u64) -> Result<Vec<u8>> {
     let file = open_no_follow(path)?;
     let metadata = ensure_regular_file(&file, path)?;
     read_open(file, &metadata, path, limit, max)
@@ -340,21 +344,28 @@ pub fn read_trusted_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> 
     decode(path, read_open(file, &metadata, path, limit, max)?)
 }
 
-/// [`read_trusted_utf8`], **following a final symlink**, as [`read_capped_utf8_following`]
-/// does.
+/// Reads `path` in full as UTF-8, **following a final symlink**, as
+/// [`read_capped_utf8_following`] does, and refuses a file another user could change.
 ///
-/// The file tested is the one the link resolves to; the directory tested is the one holding
-/// the link. A link to something that is not a regular file is still
-/// [`Error::NotARegularFile`], tested first, so a hook masked by a link to `/dev/null` stays
-/// masked.
+/// Only the file is tested, on its descriptor: the one the link resolves to. The directory
+/// holding the link is the caller's to test, with [`ensure_trusted_directory`], once for every
+/// file it reads there. A directory that passed that test stays trusted: only root and the
+/// effective user can change it or any directory above it. So one test covers every file read
+/// from it afterwards, and repeating it per file adds nothing.
+///
+/// A link to something that is not a regular file is still [`Error::NotARegularFile`], tested
+/// first, so a hook masked by a link to `/dev/null` stays masked.
 ///
 /// # Errors
 ///
-/// As [`read_trusted_utf8`].
-pub fn read_trusted_utf8_following(path: &Path, limit: Limit, max: u64) -> Result<String> {
+/// As [`read_capped_utf8_following`], plus [`Error::Untrusted`] naming the file if it fails
+/// [`distrust`].
+pub fn read_trusted_file_utf8_following(path: &Path, limit: Limit, max: u64) -> Result<String> {
     let file = open_following_symlinks(path)?;
     let metadata = ensure_regular_file(&file, path)?;
-    ensure_trusted(path, &metadata)?;
+    if let Some(distrust) = distrust(&metadata) {
+        return Err(Error::Untrusted { path: path.to_path_buf(), distrust });
+    }
     decode(path, read_open(file, &metadata, path, limit, max)?)
 }
 

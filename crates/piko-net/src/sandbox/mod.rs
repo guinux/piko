@@ -36,7 +36,8 @@
 //! # Never root
 //!
 //! Under root, the helper always switches to another user: `DownloadUser` when it is set, and
-//! [`FALLBACK_USER`] otherwise. libalpm confines nothing without `DownloadUser`. A helper left
+//! [`FALLBACK_USER`] otherwise. A `DownloadUser` whose user ID is 0 is refused, since switching
+//! to it keeps every capability. libalpm confines nothing without `DownloadUser`. A helper left
 //! as root would keep every capability, and the owner's access to every file, which no
 //! Landlock or system call rule takes back: it could read the keyring's secret keys, or change
 //! the firewall through the netlink socket its resolver needs.
@@ -86,14 +87,11 @@ const WATCHDOG_GRACE: Duration = Duration::from_secs(5);
 /// How often the watchdog looks at the cancellation flag.
 const WATCHDOG_TICK: Duration = Duration::from_millis(100);
 
-/// Ports a request may always reach: DNS over TCP, and HTTPS for a redirect.
-///
-/// HTTP's port 80 is added only for an `http` URL. An `https` URL is followed only to `https`,
-/// so it has no use for it.
-const ALWAYS_ALLOWED_PORTS: [u16; 2] = [53, 443];
+/// The port a request may always reach: DNS over TCP.
+const DNS_PORT: u16 = 53;
 
-/// HTTP's default port.
-const HTTP_PORT: u16 = 80;
+/// HTTPS's default port, which an `https` URL may be redirected to.
+const HTTPS_PORT: u16 = 443;
 
 /// The proxy variables passed to the helper. Its environment is otherwise empty.
 ///
@@ -308,18 +306,32 @@ impl Enabled {
 /// A named `DownloadUser` must exist, as in libalpm. With none named, [`FALLBACK_USER`] is
 /// looked up, and the overflow ids stand in when it cannot be. A minimal chroot may have no
 /// `nobody`, and root can switch to an id no account names.
+///
+/// A `DownloadUser` whose user ID is 0 is refused. `setuid(0)` from root keeps every
+/// capability, so the helper would stay root, which is what the switch exists to prevent.
 fn resolve_account(user: Option<&str>) -> Result<Option<Account>, String> {
     if !rustix::process::geteuid().is_root() {
         return Ok(None);
     }
+    named_account(user)
+}
+
+/// [`resolve_account`] for a process that runs as root.
+fn named_account(user: Option<&str>) -> Result<Option<Account>, String> {
     let Some(name) = user else {
         let account = match nix::unistd::User::from_name(FALLBACK_USER) {
-            Ok(Some(user)) => Account { uid: user.uid.as_raw(), gid: user.gid.as_raw() },
-            Ok(None) | Err(_) => Account { uid: OVERFLOW_ID, gid: OVERFLOW_ID },
+            // A `nobody` that is root is no switch, so the overflow ids stand in for it too.
+            Ok(Some(user)) if !user.uid.is_root() => {
+                Account { uid: user.uid.as_raw(), gid: user.gid.as_raw() }
+            }
+            Ok(_) | Err(_) => Account { uid: OVERFLOW_ID, gid: OVERFLOW_ID },
         };
         return Ok(Some(account));
     };
     match nix::unistd::User::from_name(name) {
+        Ok(Some(user)) if user.uid.is_root() => Err(format!(
+            "download user '{name}' has user ID 0, and the download helper must not run as root"
+        )),
         Ok(Some(user)) => Ok(Some(Account { uid: user.uid.as_raw(), gid: user.gid.as_raw() })),
         Ok(None) => Err(format!("download user '{name}' does not exist")),
         Err(error) => Err(format!("failed to get download user '{name}': {error}")),
@@ -327,10 +339,15 @@ fn resolve_account(user: Option<&str>) -> Result<Option<Account>, String> {
 }
 
 /// The TCP ports a request to `url` may reach.
+///
+/// DNS, the URL's own port, and each proxy's. An `https` URL also gets 443: a mirror often
+/// redirects to another host, and the redirect is followed only to `https`. An `http` URL gets
+/// nothing more, because it follows no redirect (`transport::request`), so it never reaches a
+/// port other than its own.
 fn allowed_ports(url: &str) -> Vec<u16> {
-    let mut ports = ALWAYS_ALLOWED_PORTS.to_vec();
-    if !crate::transport::is_https(url) {
-        ports.push(HTTP_PORT);
+    let mut ports = vec![DNS_PORT];
+    if crate::transport::is_https(url) {
+        ports.push(HTTPS_PORT);
     }
     let proxies = PROXY_VARIABLES.iter().filter_map(|name| std::env::var(name).ok());
     for target in std::iter::once(url.to_owned()).chain(proxies) {
@@ -574,23 +591,34 @@ mod tests {
         assert_eq!(url_port("ftp://mirror.example/core"), None);
     }
 
+    /// Whether this process has no proxy variable, which would add its own port.
+    fn no_proxy() -> bool {
+        PROXY_VARIABLES.iter().all(|name| std::env::var_os(name).is_none())
+    }
+
+    /// An `http` URL follows no redirect, so it reaches its own port and DNS, nothing else.
     #[test]
-    fn the_allowed_ports_always_include_dns_and_both_web_ports_for_http() {
+    fn an_http_url_gets_its_own_port_and_dns_only() {
         let ports = allowed_ports("http://127.0.0.1:43210/core.db");
 
-        for port in [53, 80, 443, 43210] {
+        for port in [53, 43210] {
             assert!(ports.contains(&port), "{ports:?}");
         }
+        if no_proxy() {
+            assert_eq!(ports, [53, 43210]);
+        }
+        assert!(allowed_ports("http://localhost/core.db").contains(&80));
     }
 
     /// An `https` URL is followed only to `https`, so it has no use for port 80.
     #[test]
     fn an_https_url_gets_no_http_port() {
-        let ports = allowed_ports("https://mirror.example/core.db");
+        let ports = allowed_ports("https://mirror.example:8443/core.db");
 
-        assert!(ports.contains(&443), "{ports:?}");
-        // A proxy variable on port 80 would add it back, and this process has none.
-        if PROXY_VARIABLES.iter().all(|name| std::env::var_os(name).is_none()) {
+        for port in [53, 443, 8443] {
+            assert!(ports.contains(&port), "{ports:?}");
+        }
+        if no_proxy() {
             assert!(!ports.contains(&80), "{ports:?}");
         }
     }
@@ -611,5 +639,21 @@ mod tests {
         }
         assert!(resolve_account(Some("no-such-user-for-piko")).unwrap().is_none());
         assert!(resolve_account(None).unwrap().is_none());
+    }
+
+    /// Switching to user ID 0 keeps every capability, so a download user that is root is no
+    /// switch at all.
+    #[test]
+    fn a_download_user_with_user_id_0_is_refused() {
+        let error = named_account(Some("root")).unwrap_err();
+
+        assert!(error.contains("user ID 0"), "{error}");
+    }
+
+    #[test]
+    fn without_a_download_user_the_fallback_is_never_root() {
+        let account = named_account(None).unwrap().unwrap();
+
+        assert_ne!(account.uid, 0);
     }
 }

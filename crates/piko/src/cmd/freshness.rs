@@ -198,8 +198,7 @@ mod tests {
     #[test]
     fn zero_days_turns_the_limit_off() {
         assert_eq!(max_age(0), None);
-        assert_eq!(max_age(14), Some(DEFAULT_MAX_AGE));
-        assert_eq!(DEFAULT_MAX_AGE_DAYS, 14);
+        assert_eq!(max_age(DEFAULT_MAX_AGE_DAYS), Some(DEFAULT_MAX_AGE));
     }
 
     #[test]

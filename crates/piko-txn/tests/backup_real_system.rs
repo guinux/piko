@@ -156,8 +156,8 @@ fn install(archive: &Path) -> Result<BTreeMap<String, String>, piko_txn::Error> 
     )
     // The test is unprivileged, so the archive's uid/gid cannot be applied.
     .ownership(Ownership::Inherit)
-    .verify(&source)?
-    .stage(&lock)?
+    .verify(&lock, &source)?
+    .stage()?
     .commit()?;
 
     let entries: Vec<PathBuf> = std::fs::read_dir(dbpath.join("local"))
@@ -306,9 +306,9 @@ fn a_real_config_file_edited_by_the_user_survives_a_reinstall() {
             }],
         )
         .ownership(Ownership::Inherit)
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap()
-        .stage(&lock)
+        .stage()
         .unwrap()
         .commit()
         .unwrap()

@@ -527,18 +527,26 @@ mod tests {
         assert!(owners_of_path(&local, root.path(), &root.path().join("usr/bin/foo")).is_empty());
     }
 
-    /// The index is read once, however many targets are asked about.
+    /// The index is read once, however many targets are asked about. A rebuild would allocate
+    /// a new package list while the old one is still alive, so the list's address shows it.
     #[test]
     fn the_index_is_built_once_for_many_targets() {
         let (_keep, local) = database(&[("foo-1.0.0-1", &["usr/", "usr/bin/", "usr/bin/foo"])]);
         let root = root(&["usr/bin/foo"]);
+        let target = root.path().join("usr/bin/foo").to_string_lossy().into_owned();
         let mut owners = Owners::new(&local);
         assert!(owners.loaded.is_none());
+
+        owners.query(root.path(), &target, &[]).unwrap();
+        let first = owners.loaded.as_ref().map(|installed| installed.packages.as_ptr());
+        assert!(first.is_some(), "the first query must build the index");
         for _ in 0..3 {
-            owners
-                .query(root.path(), &root.path().join("usr/bin/foo").to_string_lossy(), &[])
-                .unwrap();
+            owners.query(root.path(), &target, &[]).unwrap();
+            assert_eq!(
+                owners.loaded.as_ref().map(|installed| installed.packages.as_ptr()),
+                first,
+                "a later query must reuse the index"
+            );
         }
-        assert_eq!(owners.installed().packages.len(), 1);
     }
 }

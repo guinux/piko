@@ -67,6 +67,14 @@
 //! |------------------------------|-------------------------|---------------|
 //! | `mount_table_bytes`          | 2.7 KB (29 mounts)      | 4 MiB |
 //!
+//! A transaction journal, `<dbpath>/piko-journal`, is piko's own file, and runs to about 110
+//! bytes per step. It is bounded like every other read, since it is read precisely when
+//! something went wrong.
+//!
+//! | file                        | observed                | default limit |
+//! |------------------------------|-------------------------|---------------|
+//! | `journal_bytes`              | ~110 B per step         | 16 MiB |
+//!
 //! Diagnostics are bounded separately (`max_diagnostics`, default 4096). They are the one
 //! part of an open whose size is attacker-controlled *without* the package count growing. A
 //! directory of a million badly-named entries yields no packages at all. So neither
@@ -113,6 +121,8 @@ pub enum Limit {
     /// file. The kernel generates it, and its length is the number of mounts in this
     /// namespace.
     MountTable,
+    /// The maximum size of a transaction journal.
+    Journal,
 }
 
 impl Limit {
@@ -131,6 +141,7 @@ impl Limit {
             Self::PacmanConf => "pacman.conf file",
             Self::Hook => "hook file",
             Self::MountTable => "mount table",
+            Self::Journal => "transaction journal",
         }
     }
 }
@@ -272,6 +283,10 @@ pub struct Limits {
     /// transaction writes belongs to. Its length is the number of mounts in this namespace,
     /// which this machine does not control: a container host can publish thousands.
     pub mount_table_bytes: u64,
+    /// Maximum size in bytes of a transaction journal, `<dbpath>/piko-journal`.
+    ///
+    /// 16 MiB holds a journal of well over a hundred thousand steps.
+    pub journal_bytes: u64,
     /// Maximum number of candidate packages a single planning run may consider.
     ///
     /// One candidate per installed package plus one per package in every configured
@@ -395,6 +410,7 @@ impl Default for Limits {
             pacman_conf_bytes: MIB,
             hook_bytes: MIB,
             mount_table_bytes: 4 * MIB,
+            journal_bytes: 16 * MIB,
             solve_max_solvables: 1 << 21,
             solve_max_conflicts: 1 << 20,
             solve_max_clauses: 1 << 24,
@@ -425,6 +441,7 @@ impl Limits {
             Limit::PacmanConf => self.pacman_conf_bytes,
             Limit::Hook => self.hook_bytes,
             Limit::MountTable => self.mount_table_bytes,
+            Limit::Journal => self.journal_bytes,
         }
     }
 }

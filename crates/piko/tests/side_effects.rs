@@ -2205,8 +2205,10 @@ fn the_command_line_reaches_the_log_before_anything_is_planned() {
     drop(sandbox.install("1.0.0-1", &[]));
 
     let log = sandbox.log();
-    assert!(log.contains("[PIKO] Running '"), "{log}");
-    assert!(log.contains(" install "), "{log}");
+    let running = log.find("[PIKO] Running '").unwrap_or_else(|| panic!("{log}"));
+    assert!(log[running..].lines().next().unwrap().contains(" install "), "{log}");
+    let started = log.find("[PIKO] transaction started").unwrap_or_else(|| panic!("{log}"));
+    assert!(running < started, "the command line must come first:\n{log}");
 }
 
 /// A transaction a `PreTransaction` hook refuses has still started. It must be recorded as a

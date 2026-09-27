@@ -2250,23 +2250,12 @@ mod tests {
             resolve_targets(&universe, Request::new(), &["absent".to_owned()], &Limits::default())
                 .unwrap_err();
         assert!(
-            matches!(&failure, TargetResolutionFailure::NotFound { nearest: None, .. }),
+            matches!(
+                &failure,
+                TargetResolutionFailure::NotFound { target, nearest: None } if target == "absent"
+            ),
             "{failure:?}"
         );
-    }
-
-    #[test]
-    fn a_target_naming_neither_a_package_nor_a_group_is_reported() {
-        let scenario = Scenario::new().repo("core", [PackageSpec::new("app", "1.0.0-1")]).build();
-        let universe = universe_of(&scenario, DbUsage::ALL);
-
-        let failure =
-            resolve_targets(&universe, Request::new(), &["absent".to_owned()], &Limits::default())
-                .unwrap_err();
-        assert!(matches!(
-            failure,
-            TargetResolutionFailure::NotFound { target, .. } if target == "absent"
-        ));
     }
 
     /// A member both enabled repositories carry expands to one target. So the at-most-one

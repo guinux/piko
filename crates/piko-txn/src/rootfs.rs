@@ -27,7 +27,7 @@
 use std::{
     ffi::{OsStr, OsString},
     os::fd::OwnedFd,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use rustix::fs::{Mode, OFlags};
@@ -42,14 +42,15 @@ pub enum UnsafePath {
     Absolute,
     /// The path contains a `..` component.
     ParentTraversal,
-    /// The path contains a `.` component, or a repeated separator that yields one.
+    /// The path contains a `.` component, or a repeated separator.
     ///
     /// piko refuses this rather than normalizing it away. A well-formed package never contains
     /// one, so its presence means the producer is doing something unusual. Silently rewriting
     /// an attacker-influenced path is how a check gets bypassed by a spelling it did not
-    /// consider.
+    /// consider: every check that compares paths as strings would see a different path than
+    /// the one written.
     CurrentDirectory,
-    /// The path is empty, or is nothing but separators.
+    /// The path is empty.
     Empty,
     /// A component contains a byte the kernel cannot accept in a file name.
     InvalidComponent,
@@ -60,7 +61,7 @@ impl std::fmt::Display for UnsafePath {
         f.write_str(match self {
             Self::Absolute => "the path is absolute",
             Self::ParentTraversal => "the path contains a '..' component",
-            Self::CurrentDirectory => "the path contains a '.' component",
+            Self::CurrentDirectory => "the path contains a '.' component or a repeated separator",
             Self::Empty => "the path is empty",
             Self::InvalidComponent => "a component is not a usable file name",
         })
@@ -73,50 +74,44 @@ impl std::fmt::Display for UnsafePath {
 /// a root to resolve against. That matters: these rules decide whether a hostile archive can
 /// write to `/etc`.
 ///
+/// # One spelling per path
+///
+/// The path is split on its bytes, not through `Path::components`. That function drops a `.`
+/// after the first component and collapses a repeated separator, so `usr/./bin/ls`, `usr//bin/ls`
+/// and `usr/bin/ls` would all resolve to one file. Conflict detection, `%FILES%`, `NoExtract`
+/// and the hook triggers compare the path as a string, so the second and third spellings would
+/// write a file that another package owns without either comparison seeing it. Exactly one
+/// trailing separator is accepted, because that is how tar spells a directory.
+///
 /// # Errors
 ///
-/// [`Error::UnsafeArchivePath`] if the path is absolute, empty, or contains a `.` or `..`
-/// component.
+/// [`Error::UnsafeArchivePath`] if the path is absolute or empty, holds a `.` or `..`
+/// component or a repeated separator, or holds a NUL byte.
 pub fn components(relative: &Path) -> Result<Vec<&OsStr>> {
+    use std::os::unix::ffi::OsStrExt as _;
+
     let refuse = |reason| Err(Error::UnsafeArchivePath { path: relative.to_path_buf(), reason });
 
-    let mut parts = Vec::new();
-    for component in relative.components() {
-        match component {
-            Component::Normal(part) => {
-                // A NUL cannot reach the kernel. An embedded separator means the component was
-                // never really one component.
-                if part.is_empty() || as_bytes(part).contains(&0) {
-                    return refuse(UnsafePath::InvalidComponent);
-                }
-                parts.push(part);
-            }
-            Component::ParentDir => return refuse(UnsafePath::ParentTraversal),
-            Component::CurDir => return refuse(UnsafePath::CurrentDirectory),
-            Component::RootDir | Component::Prefix(_) => return refuse(UnsafePath::Absolute),
-        }
-    }
-
-    if parts.is_empty() {
+    let bytes = relative.as_os_str().as_bytes();
+    if bytes.is_empty() {
         return refuse(UnsafePath::Empty);
     }
-    Ok(parts)
-}
+    if bytes.first() == Some(&b'/') {
+        return refuse(UnsafePath::Absolute);
+    }
+    let body = bytes.strip_suffix(b"/").unwrap_or(bytes);
 
-/// The bytes of a path component.
-fn as_bytes(part: &OsStr) -> &[u8] {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        part.as_bytes()
+    let mut parts = Vec::new();
+    for part in body.split(|byte| *byte == b'/') {
+        match part {
+            b"" | b"." => return refuse(UnsafePath::CurrentDirectory),
+            b".." => return refuse(UnsafePath::ParentTraversal),
+            // A NUL cannot reach the kernel.
+            _ if part.contains(&0) => return refuse(UnsafePath::InvalidComponent),
+            _ => parts.push(OsStr::from_bytes(part)),
+        }
     }
-    #[cfg(not(unix))]
-    {
-        // Non-unix is not a supported target for extraction. This branch only keeps the module
-        // building.
-        let _ = part;
-        &[]
-    }
+    Ok(parts)
 }
 
 /// A directory that resolution is confined to.
@@ -360,12 +355,38 @@ mod tests {
         }
     }
 
-    /// `Path::components` normalizes `a//b` and a trailing `/.`. The check must not depend
-    /// on which spellings it happens to collapse.
+    /// `Path::components` normalizes `a/./b`, `a//b` and a trailing `/.`. Each of these names
+    /// the same file as the plain spelling, so each is refused rather than collapsed.
     #[test]
     fn refuses_current_directory_components() {
-        assert_eq!(refused("./usr/bin"), UnsafePath::CurrentDirectory);
-        assert_eq!(refused("."), UnsafePath::CurrentDirectory);
+        for path in [
+            "./usr/bin",
+            ".",
+            "usr/./bin/ls",
+            "usr/bin/./ls",
+            "usr/bin/.",
+            "usr//bin/ls",
+            "usr/bin//",
+            "usr/bin/ls//",
+        ] {
+            assert_eq!(refused(path), UnsafePath::CurrentDirectory, "{path:?}");
+        }
+    }
+
+    /// A leading separator, however many, is an absolute path.
+    #[test]
+    fn refuses_leading_separators_as_absolute() {
+        for path in ["//etc/passwd", "//"] {
+            assert_eq!(refused(path), UnsafePath::Absolute, "{path:?}");
+        }
+    }
+
+    /// A name that merely starts with a dot is an ordinary name.
+    #[test]
+    fn accepts_names_that_start_with_a_dot() {
+        assert_eq!(components(Path::new(".PKGINFO")).unwrap(), [".PKGINFO"]);
+        assert_eq!(components(Path::new("etc/skel/.bashrc")).unwrap(), ["etc", "skel", ".bashrc"]);
+        assert_eq!(components(Path::new("usr/share/..data")).unwrap(), ["usr", "share", "..data"]);
     }
 
     #[test]

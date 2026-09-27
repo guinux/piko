@@ -126,6 +126,8 @@ fn a_decompression_bomb_is_caught_as_limit_exceeded_not_a_parse_error() {
     );
 }
 
+/// The bound must stop the allocation, which means firing during the walk rather than after
+/// it. Otherwise every `desc` in an oversized archive is parsed before the error.
 #[test]
 fn an_archive_with_too_many_packages_is_refused() {
     let fixture = RepoFixture::new();

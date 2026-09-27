@@ -42,7 +42,9 @@ pub mod scan;
 
 pub use self::{
     action::{Action, Outcome, apply, remove_if_identical},
-    base::{BaseCandidate, BaseLimits, extract_member, find_base},
+    base::{
+        BaseCandidate, BaseCheck, BaseLimits, BaseSearch, RefusedBase, extract_member, find_base,
+    },
     program::{
         DEFAULT_DIFFPROG, DEFAULT_MERGEPROG, Invocation, parse_program, review_diff,
         three_way_diff, three_way_merge, two_way_diff,
@@ -137,7 +139,7 @@ pub struct Pending {
 #[non_exhaustive]
 pub enum Problem {
     /// A package's backup list could not be read, so none of its files were examined.
-    #[error("{package}'s backup list cannot be read: {reason}")]
+    #[error("{package}'s backup list cannot be read: {}", piko_db::printable(reason))]
     UnreadableEntry {
         /// The package.
         package: String,
@@ -145,7 +147,7 @@ pub enum Problem {
         reason: String,
     },
     /// A pair exists but could not be compared.
-    #[error("{} cannot be compared: {reason}", path.display())]
+    #[error("{} cannot be compared: {}", piko_db::printable_path(path), piko_db::printable(reason))]
     Uncomparable {
         /// The pending file.
         path: PathBuf,
@@ -153,7 +155,11 @@ pub enum Problem {
         reason: String,
     },
     /// A path did not resolve inside the root, so nothing was listed for it.
-    #[error("{} cannot be resolved inside the root: {reason}", path.display())]
+    #[error(
+        "{} cannot be resolved inside the root: {}",
+        piko_db::printable_path(path),
+        piko_db::printable(reason)
+    )]
     OutsideRoot {
         /// The path, as `%BACKUP%` spells it.
         path: PathBuf,
@@ -165,7 +171,7 @@ pub enum Problem {
     /// The plain `.pacnew` and `.pacsave` files in that directory are still found. They are
     /// tested by name rather than by listing, so a directory too large to list does not hide
     /// the two kinds that can be merged.
-    #[error("{} cannot be listed: {reason}", path.display())]
+    #[error("{} cannot be listed: {}", piko_db::printable_path(path), piko_db::printable(reason))]
     UnlistableDirectory {
         /// The directory, root-relative.
         path: PathBuf,
@@ -177,7 +183,7 @@ pub enum Problem {
     /// The number must fit in a `u32` and must render back to the same digits. `.pacsave.01`
     /// fails the second test: read as `1`, it would make a rotation rename `.pacsave.1` to
     /// `.pacsave.2` while leaving `.pacsave.01` in place, with two files claiming one rank.
-    #[error("{} does not carry a usable .pacsave number", path.display())]
+    #[error("{} does not carry a usable .pacsave number", piko_db::printable_path(path))]
     UnusableNumber {
         /// The file, root-relative.
         path: PathBuf,

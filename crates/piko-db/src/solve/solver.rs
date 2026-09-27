@@ -780,18 +780,31 @@ mod tests {
     }
 
     /// Termination is guaranteed by the budget, not by the learning scheme being correct.
+    /// The problem needs a real backjump, so a zero budget is exhausted on the first
+    /// conflict, and a budget of exactly the conflicts the search needs still solves it.
     #[test]
     fn the_conflict_budget_is_enforced() {
-        let mut problem = Problem::new(2);
+        let mut problem = Problem::new(8);
         problem.add([pos(0)], ClauseKind::Target { target: id(0) });
-        problem.add([pos(1)], ClauseKind::Target { target: id(1) });
-        problem.add([neg(0), neg(1)], ClauseKind::Conflicts { declarer: id(0), other: id(1) });
+        requires(&mut problem, 0, [neg(0), pos(1), pos(2)]);
+        requires(&mut problem, 0, [neg(0), pos(5), pos(6)]);
+        problem.add([neg(1), neg(5)], ClauseKind::Conflicts { declarer: id(1), other: id(5) });
+        problem.add([neg(1), neg(6)], ClauseKind::Conflicts { declarer: id(1), other: id(6) });
 
-        let limits = Limits { solve_max_conflicts: 0, ..Limits::default() };
-        // Unsatisfiable at level 0 here, so it resolves without consuming budget. The point
-        // is that a zero budget never hangs.
-        let outcome = Solver::new(&problem, limits).solve();
-        assert!(outcome.is_ok() || matches!(outcome, Err(Error::SolveBudgetExhausted { max: 0 })));
+        let needed = match solve(&problem) {
+            Outcome::Satisfied(solution) => solution.conflicts(),
+            Outcome::Unsatisfiable(_) => panic!("the problem is satisfiable"),
+        };
+        assert!(needed > 0, "the budget is only tested if the search meets a conflict");
+
+        let exhausted = Limits { solve_max_conflicts: 0, ..Limits::default() };
+        assert!(matches!(
+            Solver::new(&problem, exhausted).solve(),
+            Err(Error::SolveBudgetExhausted { max: 0 })
+        ));
+
+        let enough = Limits { solve_max_conflicts: needed, ..Limits::default() };
+        assert!(matches!(Solver::new(&problem, enough).solve(), Ok(Outcome::Satisfied(_))));
     }
 
     #[test]

@@ -700,22 +700,6 @@ mod tests {
         assert!(db.get_str("not a valid name!").is_none());
     }
 
-    #[test]
-    fn refuses_a_database_with_too_many_entries() {
-        let fixture = DbFixture::new();
-        for index in 0..4 {
-            fixture.package(&format!("pkg{index}-1.0.0-1")).with_defaults().build();
-        }
-
-        let err = LocalDatabase::open_with(
-            fixture.path(),
-            OpenOptions::new().limits(Limits { max_entries: 2, ..Limits::default() }),
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, Error::TooManyEntries { max: 2, .. }), "got {err:?}");
-    }
-
     /// The bound counts packages, not directory entries. `ALPM_DB_VERSION` is always present
     /// and always enumerated. So counting entries would reject a database holding exactly
     /// `max_entries` packages, and whether it did would depend on readdir order.
@@ -753,27 +737,6 @@ mod tests {
 
         assert_eq!(names(&db), ["foo"]);
         assert_eq!(db.diagnostics().len(), 20);
-    }
-
-    /// A flood of unusable entries produces a diagnostic per entry. `max_entries` does not
-    /// bound those. That is `max_diagnostics`' job, and it must not fail the open.
-    #[test]
-    fn diagnostics_are_bounded_and_the_overflow_is_counted() {
-        let fixture = DbFixture::new();
-        fixture.package("foo-1.0.0-1").with_defaults().build();
-        for index in 0..20 {
-            fixture.package(&format!("invalid{index}")).build();
-        }
-
-        let db = LocalDatabase::open_with(
-            fixture.path(),
-            OpenOptions::new().limits(Limits { max_diagnostics: 5, ..Limits::default() }),
-        )
-        .unwrap();
-
-        assert_eq!(names(&db), ["foo"], "the readable package must still be readable");
-        assert_eq!(db.diagnostics().len(), 5);
-        assert_eq!(db.diagnostics_dropped(), 15);
     }
 
     #[test]

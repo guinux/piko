@@ -165,12 +165,17 @@ impl Staging {
             // `mkdirat`'s mode is masked by the umask. `01777` would land as `01755` under the
             // usual `0022`, and a real `/tmp` would come out unwritable by anyone else. libalpm
             // has the same gap. piko closes it: a root piko created is a root someone will boot.
-            let _ = rustix::fs::chmodat(
+            //
+            // The mode is set through a descriptor opened `O_NOFOLLOW`, never by name. A name
+            // swapped for a symbolic link in between would give `01777` to its target.
+            if let Ok(fd) = rustix::fs::openat(
                 tmp_slot.dir(),
                 tmp_slot.name(),
-                Mode::from_raw_mode(0o1777),
-                rustix::fs::AtFlags::empty(),
-            );
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                let _ = rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o1777));
+            }
         }
 
         // `mkdirat` is atomic and refuses an existing name. `mkdtemp` relies on the same

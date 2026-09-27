@@ -165,28 +165,9 @@ impl Error {
     }
 }
 
-/// `text` with every control character and every bidirectional formatting character written as
-/// an escape.
-///
-/// For text a server or the download helper wrote, before it reaches a terminal. An escape
-/// sequence there could rewrite what the terminal shows, set its title, or write its clipboard,
-/// and a line break could print a line that piko never wrote.
-pub(crate) fn printable(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for character in text.chars() {
-        if character.is_control() || is_bidi_control(character) {
-            out.extend(character.escape_debug());
-        } else {
-            out.push(character);
-        }
-    }
-    out
-}
-
-/// Whether `character` changes the direction the text around it is shown in.
-const fn is_bidi_control(character: char) -> bool {
-    matches!(character, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-}
+/// Text a server or the download helper wrote, escaped before it reaches a terminal. The rule
+/// is shared with every other crate: see [`piko_db::printable`].
+pub(crate) use piko_db::printable;
 
 /// Renders `error` followed by every cause in its chain, joined by `": "`.
 ///
@@ -280,17 +261,6 @@ mod tests {
         );
         let empty = Error::EmptyDownload { file: "core.db".to_owned() };
         assert_eq!(attempt_reason(url, &empty), empty.to_string());
-    }
-
-    /// A message is kept as it reads, except what could drive a terminal.
-    #[test]
-    fn printable_escapes_what_could_drive_a_terminal() {
-        assert_eq!(printable("connection reset: \"core.db\""), "connection reset: \"core.db\"");
-        assert_eq!(printable("é ok"), "é ok");
-        assert_eq!(printable("a\u{1b}]52;c;cHduZWQ=\u{7}b"), "a\\u{1b}]52;c;cHduZWQ=\\u{7}b");
-        assert_eq!(printable("one\nWarning: two"), "one\\nWarning: two");
-        assert_eq!(printable("\u{9b}31m"), "\\u{9b}31m");
-        assert_eq!(printable("abc\u{202e}fed"), "abc\\u{202e}fed");
     }
 
     /// A rejection has to say the system was left alone. Otherwise the user's next move is to

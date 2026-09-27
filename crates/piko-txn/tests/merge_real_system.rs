@@ -120,11 +120,30 @@ fn every_pending_file_has_a_base_candidate_or_a_reason() {
     let limits = BaseLimits::default();
     let (mut with_base, mut without_base) = (0_usize, 0_usize);
 
+    // This machine's own keyring and default policy, so the split below is what `piko merge`
+    // offers here. A keyring this user cannot use falls back to no check, and says so.
+    let check = merge::BaseCheck::new(
+        piko_db::config::SigLevel::default_global(),
+        std::path::Path::new("/etc/pacman.d/gnupg"),
+    )
+    .unwrap_or_else(|error| {
+        println!("checking no signature: {error}");
+        merge::BaseCheck::Unchecked
+    });
+
     for entry in scan.pending() {
-        let found =
-            merge::find_base(&cache_dirs, &entry.package, &entry.installed_version, &limits)
-                .unwrap();
-        match found {
+        let found = merge::find_base(
+            &cache_dirs,
+            &entry.package,
+            &entry.installed_version,
+            &limits,
+            &check,
+        )
+        .unwrap();
+        for refused in &found.refused {
+            println!("{}: passed over: {}", refused.path.display(), refused.reason);
+        }
+        match found.base {
             Some(candidate) => {
                 with_base += 1;
                 // The ancestor must sit strictly below the installed version. The installed
@@ -169,9 +188,16 @@ fn a_base_extracted_from_the_cache_is_what_bsdtar_extracts() {
     let mut compared = 0_usize;
 
     for entry in scan.pending() {
-        let Some(candidate) =
-            merge::find_base(&cache_dirs, &entry.package, &entry.installed_version, &limits)
-                .unwrap()
+        // Extraction is what this compares, so no signature is asked for.
+        let Some(candidate) = merge::find_base(
+            &cache_dirs,
+            &entry.package,
+            &entry.installed_version,
+            &limits,
+            &merge::BaseCheck::Unchecked,
+        )
+        .unwrap()
+        .base
         else {
             continue;
         };
@@ -240,4 +266,47 @@ fn the_scan_reports_what_it_found_and_what_it_cost() {
 
     // Not a performance assertion, but a scan that read nothing would be a broken one.
     assert!(backups > 0, "a real system declares %BACKUP% entries");
+}
+
+/// A build pacman downloaded, with the `.sig` beside it, passes the check `piko merge` asks of a
+/// base under this machine's keyring and default policy. Otherwise the check would turn every
+/// three-way merge into a two-way view.
+#[test]
+#[ignore = "requires a real package cache and keyring"]
+fn a_signed_cached_build_is_accepted_as_a_base() {
+    let cache = PathBuf::from("/var/cache/pacman/pkg");
+    let check = match merge::BaseCheck::new(
+        piko_db::config::SigLevel::default_global(),
+        std::path::Path::new("/etc/pacman.d/gnupg"),
+    ) {
+        Ok(check) => check,
+        Err(error) => {
+            eprintln!("skipping: {error}");
+            return;
+        }
+    };
+    let Ok(entries) = std::fs::read_dir(&cache) else { return };
+    let signed = entries.filter_map(Result::ok).find_map(|entry| {
+        let name = entry.file_name().to_str()?.to_owned();
+        let file_name: alpm_types::PackageFileName = name.parse().ok()?;
+        cache.join(format!("{name}.sig")).is_file().then_some(file_name)
+    });
+    let Some(file_name) = signed else {
+        eprintln!("skipping: no cached package has a .sig");
+        return;
+    };
+
+    // An installed version above every build, so the newest cached one is the candidate.
+    let above: alpm_types::FullVersion = "999999:0-1".parse().unwrap();
+    let search = merge::find_base(
+        std::slice::from_ref(&cache),
+        file_name.name(),
+        &above,
+        &BaseLimits::default(),
+        &check,
+    )
+    .unwrap();
+    assert!(search.refused.is_empty(), "{:?}", search.refused);
+    assert!(search.base.is_some(), "no base found for {file_name}");
+    println!("{file_name}: accepted as a base");
 }

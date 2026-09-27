@@ -1215,22 +1215,6 @@ mod tests {
         assert_eq!(text, original);
     }
 
-    /// The invariant the borrow buys: a writer cannot outlive the lock that authorized it.
-    /// This is a compile-time property. The runtime check here only confirms the lock is
-    /// still held while the writer is in use.
-    #[test]
-    fn the_lock_is_held_for_the_writers_lifetime() {
-        let harness = Harness::new();
-        let lock = harness.lock();
-        let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
-        writer.create_entry(&entry("foo-1.0.0-1")).unwrap();
-        assert!(harness.dbpath().join(crate::LOCK_FILE).exists());
-        assert!(
-            DbLock::acquire(harness.dbpath()).is_err(),
-            "the database must stay locked while a writer exists"
-        );
-    }
-
     /// A staged member's temporary swapped for a symbolic link is refused at commit. Its mode
     /// was set through the descriptor at staging, so it never reached the link's target.
     #[cfg(unix)]

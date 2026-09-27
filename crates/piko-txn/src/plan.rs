@@ -795,8 +795,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
 
+        let lock = piko_db_write::DbLock::acquire(db.path()).unwrap();
         let error = crate::Transaction::from_plan(root.path(), db.path(), plan)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
         assert!(matches!(error, Error::ChecksumMismatch { .. }), "got {error:?}");
     }

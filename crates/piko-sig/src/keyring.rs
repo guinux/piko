@@ -512,20 +512,15 @@ pub fn signature_path(file: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// The extension is appended, not replaced. A package name is full of dots, and
+    /// `set_extension` would eat `.zst`.
     #[test]
     fn a_signature_path_is_the_file_plus_sig() {
         assert_eq!(
             signature_path(Path::new("/cache/foo-1.0-1-x86_64.pkg.tar.zst")),
             PathBuf::from("/cache/foo-1.0-1-x86_64.pkg.tar.zst.sig")
         );
-    }
-
-    /// The extension is appended, not replaced. A package name is full of dots, and
-    /// `set_extension` would eat `.zst`.
-    #[test]
-    fn a_signature_path_does_not_replace_the_existing_extension() {
-        let signed = signature_path(Path::new("core.db"));
-        assert_eq!(signed, PathBuf::from("core.db.sig"));
+        assert_eq!(signature_path(Path::new("core.db")), PathBuf::from("core.db.sig"));
     }
 
     /// A keyring another user could change is refused before GnuPG reads it: the directory,

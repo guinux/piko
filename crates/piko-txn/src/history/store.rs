@@ -71,19 +71,7 @@ pub fn path(dbpath: &Path) -> PathBuf {
 ///
 /// [`std::io::Error`] if the file cannot be opened, written, or flushed.
 pub fn append(path: &Path, entry: &Entry, offset: LocalOffset) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).append(true).create(true).mode(FILE_MODE);
-    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-
-    let mut file = loop {
-        match options.open(path) {
-            Ok(file) => break file,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    };
+    let mut file = super::open_for_append(path, FILE_MODE)?;
     file.write_all(self::render(entry, offset).as_bytes())?;
     file.sync_data()
 }
@@ -150,7 +138,7 @@ pub fn render(entry: &Entry, offset: LocalOffset) -> String {
 ///
 /// [`std::io::Error`] if the file exists but cannot be read.
 pub fn read_last(path: &Path, limit: usize, tail_bytes: u64) -> std::io::Result<Vec<Entry>> {
-    let mut file = match std::fs::File::open(path) {
+    let mut file = match super::open_for_reading(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),

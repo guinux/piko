@@ -11,11 +11,12 @@
 //! The states are not decoration. Each is a point where something is guaranteed:
 //!
 //! - **`Planned`** — the steps are known. Nothing has been read or written.
-//! - **`Verified`** — every package the transaction needs has been located *and read*, every
-//!   `.PKGINFO` is one piko can record, and every entry it will remove exists. The commit can
-//!   still fail, but not for want of a package file or its metadata.
-//! - **`Staged`** — the database lock is held and the journal is on disk and fsynced. This is
-//!   the last state in which abandoning the transaction leaves the system untouched.
+//! - **`Verified`** — the database lock is held, and has been since before the first check.
+//!   Every package the transaction needs has been located *and read*, every `.PKGINFO` is one
+//!   piko can record, and every entry it will remove exists. The commit can still fail, but not
+//!   for want of a package file or its metadata.
+//! - **`Staged`** — the journal is on disk and fsynced. This is the last state in which
+//!   abandoning the transaction leaves the system untouched.
 //! - committing consumes `Staged` and mutates.
 //!
 //! # This is where piko can change a real system
@@ -140,7 +141,7 @@ pub struct Report {
 #[non_exhaustive]
 pub enum BackupProblem {
     /// The file was left where it is, because the `.pacsave` beside it could not be rotated.
-    #[error("{} was left in place: {reason}", path.display())]
+    #[error("{} was left in place: {}", piko_db::printable_path(path), piko_db::printable(reason))]
     RotationImpossible {
         /// The file that is still there.
         path: PathBuf,
@@ -395,6 +396,12 @@ struct Superseded {
     /// whether the user edited a file that is going away. Extraction asks what the *previous*
     /// package shipped, so it can tell an edited file from an untouched one.
     backups: BTreeMap<PathBuf, String>,
+    /// The directories of [`Self::files`] that another installed package also lists, without
+    /// their trailing `/`. Taking this entry apart leaves them in place, even when empty.
+    ///
+    /// Filled by `mark_shared_directories` once every step is known, since which packages still
+    /// count as owners depends on what the transaction removes.
+    shared_directories: BTreeSet<PathBuf>,
 }
 
 /// The `pacman.conf` path patterns a transaction obeys.
@@ -461,9 +468,9 @@ impl Replacement<'_> {
 }
 
 /// Every package is available and verified, every entry to remove exists and is readable, and
-/// no file is contested.
+/// no file is contested, all read under the database lock this state holds.
 #[derive(Debug)]
-pub struct Verified {
+pub struct Verified<'lock> {
     steps: Vec<Step>,
     /// Located packages, parallel to the install steps.
     packages: Vec<Prepared>,
@@ -482,6 +489,8 @@ pub struct Verified {
     /// Returned rather than logged, like every other diagnostic this crate produces. Empty
     /// when `CheckSpace` is off, and empty on the ordinary system where everything measured.
     space_problems: Vec<crate::space::Problem>,
+    /// The lock every check above was made under, held until the commit ends.
+    lock: &'lock DbLock,
 }
 
 /// The lock is held, the journal is written, and the records are open.
@@ -784,22 +793,26 @@ impl Transaction<Planned> {
     /// - a `.PKGINFO` that cannot be recorded,
     /// - a file two packages both claim.
     ///
-    /// The check needs no lock of its own, since the caller holds one by the time it matters. It
-    /// does read the local database, so a `Verified` transaction is only as current as the
-    /// moment it was verified.
+    /// It runs under `lock`, the `db.lck` of this transaction's `dbpath`. The checks read the
+    /// local database: which files each installed package owns, which entries exist. Another
+    /// package manager changing that database between this check and the commit would make
+    /// every answer stale, and a conflict check would then clear a write over a file it never
+    /// saw. So the lock is taken first, and the transaction holds it until the commit ends.
     ///
     /// # Errors
     ///
+    /// [`Error::Database`] wrapping `WrongLock` if `lock` is not this `dbpath`'s.
     /// [`Error::UnfinishedTransaction`] or [`Error::JournalUnreadable`] if a previous transaction
     /// left its journal. [`Error::NotAvailable`] if a package cannot be supplied.
     /// [`Error::UnusableSource`] if an entry to be removed is not installed, or a package's
     /// `.PKGINFO` cannot be read.
     /// [`Error::FileConflicts`] if the transaction would write a file it does not own.
-    pub fn verify(
+    pub fn verify<'lock>(
         self,
+        lock: &'lock DbLock,
         source: &dyn crate::source::PackageSource,
-    ) -> Result<Transaction<Verified>> {
-        self.verify_with_progress(source, &mut |_| {})
+    ) -> Result<Transaction<Verified<'lock>>> {
+        self.verify_with_progress(lock, source, &mut |_| {})
     }
 
     /// As [`Transaction::verify`], reporting progress through `progress` as it runs.
@@ -813,11 +826,19 @@ impl Transaction<Planned> {
     /// # Errors
     ///
     /// As [`Transaction::verify`].
-    pub fn verify_with_progress(
+    pub fn verify_with_progress<'lock>(
         self,
+        lock: &'lock DbLock,
         source: &dyn crate::source::PackageSource,
         progress: &mut dyn FnMut(VerifyEvent),
-    ) -> Result<Transaction<Verified>> {
+    ) -> Result<Transaction<Verified<'lock>>> {
+        // A lock over another database protects nothing this transaction reads.
+        if lock.path().parent() != Some(self.dbpath.as_path()) {
+            return Err(Error::Database(piko_db_write::Error::WrongLock {
+                lock: lock.path().to_path_buf(),
+                dbpath: self.dbpath.clone(),
+            }));
+        }
         // First, before anything is downloaded or read. `stage` refuses again, under `db.lck`,
         // when it writes the journal.
         crate::journal::refuse_if_present(&self.dbpath)?;
@@ -900,6 +921,13 @@ impl Transaction<Planned> {
             }
         }
 
+        {
+            let removed: BTreeSet<&str> = removals.iter().map(String::as_str).collect();
+            let mut taken_apart: Vec<&mut Superseded> =
+                doomed_entries.iter_mut().map(|doomed| &mut doomed.installed).collect();
+            self::mark_shared_directories(&local, &mut taken_apart, &removed);
+        }
+
         // Reading each archive answers two questions, and nothing else can answer either. What
         // will a package not yet installed write? And is its `.PKGINFO` one piko can record?
         // pacman loads the same files for the same reason before its own check, so this is not
@@ -972,6 +1000,13 @@ impl Transaction<Planned> {
             });
         }
 
+        {
+            let removed: BTreeSet<&str> = removals.iter().map(String::as_str).collect();
+            let mut taken_apart: Vec<&mut Superseded> =
+                packages.iter_mut().filter_map(|package| package.replaces.as_mut()).collect();
+            self::mark_shared_directories(&local, &mut taken_apart, &removed);
+        }
+
         // The last read before the conflict check. That check walks the filesystem once for
         // the whole plan, so it cannot be interrupted part-way.
         self.stop_if_cancelled(total_steps)?;
@@ -1023,6 +1058,7 @@ impl Transaction<Planned> {
                 skip_remove: check.skip_remove,
                 summary,
                 space_problems,
+                lock,
             },
         })
     }
@@ -1222,7 +1258,65 @@ fn installed_state(entry: &EntryName, package: &LocalPackage) -> Result<Supersed
         .map(|backup| (backup.path.inner().to_path_buf(), backup.md5.to_string()))
         .collect();
 
-    Ok(Superseded { entry: entry.clone(), files, backups })
+    Ok(Superseded { entry: entry.clone(), files, backups, shared_directories: BTreeSet::new() })
+}
+
+/// Records, for each installed entry a step takes apart, the directories it lists that another
+/// installed package also lists.
+///
+/// This is the last check `unlink_file` makes before an `rmdir` (`remove.c:495-513`). A
+/// directory another package owns stays, even when it is empty now: it is that package's
+/// directory too, with the mode and owner that package gave it. libalpm walks the whole local
+/// database per directory. This reads every file list once, for the whole transaction, and
+/// only when some step takes an entry apart, so no step opens a database.
+///
+/// A package this transaction removes is not counted as an owner. libalpm takes a removed
+/// package out of its database as it goes, so the last of several owners being removed sees
+/// the directory unowned. The entry itself is not counted either, removed or upgraded.
+///
+/// A file list that cannot be read owns nothing, as in the conflict check's index.
+fn mark_shared_directories(
+    local: &LocalDatabase,
+    entries: &mut [&mut Superseded],
+    removed: &BTreeSet<&str>,
+) {
+    let mut wanted: HashMap<String, Vec<usize>> = HashMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        for path in &entry.files {
+            let spelled = path.to_string_lossy();
+            if spelled.ends_with('/') {
+                wanted.entry(spelled.into_owned()).or_default().push(index);
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return;
+    }
+    let names: Vec<String> = entries.iter().map(|entry| entry.entry.name().to_string()).collect();
+
+    let mut shared: Vec<(usize, PathBuf)> = Vec::new();
+    for package in local.iter() {
+        let owner = package.name().to_string();
+        if removed.contains(owner.as_str()) {
+            continue;
+        }
+        let Ok(files) = package.file_list() else { continue };
+        for path in files {
+            let spelled = path.to_string_lossy();
+            let Some(indices) = wanted.get(spelled.as_ref()) else { continue };
+            for &index in indices {
+                if names.get(index).is_some_and(|name| *name != owner) {
+                    let directory = spelled.strip_suffix('/').unwrap_or(&spelled);
+                    shared.push((index, PathBuf::from(directory)));
+                }
+            }
+        }
+    }
+    for (index, directory) in shared {
+        if let Some(entry) = entries.get_mut(index) {
+            entry.shared_directories.insert(directory);
+        }
+    }
 }
 
 /// Everything a removal step needs, read while the entry is still installed.
@@ -1267,7 +1361,7 @@ fn doomed(entry: &EntryName, package: &LocalPackage, want_script: bool) -> Resul
     })
 }
 
-impl Transaction<Verified> {
+impl<'lock> Transaction<Verified<'lock>> {
     /// What the disk-space estimate could not measure.
     ///
     /// Empty when `CheckSpace` is off, and empty on a system where every path mapped to a
@@ -1279,10 +1373,7 @@ impl Transaction<Verified> {
         &self.state.space_problems
     }
 
-    /// Writes the journal under the held lock, reaching the point of no return.
-    ///
-    /// `lock` must be the lock for this transaction's `dbpath`. The check belongs here rather
-    /// than at the first write, because a lock over the wrong database protects nothing.
+    /// Writes the journal under the lock `verify` was given, reaching the point of no return.
     ///
     /// The transaction's records are opened here too, beside the journal and for the same
     /// reason. An unwritable `LogFile` is worth reporting while nothing has changed yet.
@@ -1293,7 +1384,7 @@ impl Transaction<Verified> {
     ///
     /// [`Error::UnfinishedTransaction`] if a journal appeared since `verify` checked, and
     /// [`Error::Io`] if the journal cannot be written.
-    pub fn stage(self, lock: &DbLock) -> Result<Transaction<Staged<'_>>> {
+    pub fn stage(self) -> Result<Transaction<Staged<'lock>>> {
         let intents: Vec<Intent> = self.state.steps.iter().map(Step::intent).collect();
         let journal = Journal::begin(&self.dbpath, &self.root_path, &intents)?;
         let recorder =
@@ -1324,7 +1415,7 @@ impl Transaction<Verified> {
                 summary: self.state.summary,
                 journal,
                 recorder: Some(recorder),
-                lock,
+                lock: self.state.lock,
             },
         })
     }
@@ -1638,15 +1729,17 @@ fn run_hooks(
 /// A missing scriptlet is the common case and not an error — `_alpm_runscriptlet` returns
 /// success for a path it cannot read (`trans.c:346`). An unreadable one is treated the same
 /// way. A removal must not be blocked by a file it is about to delete anyway.
+///
+/// Read as bytes, as the install read it out of the archive: a scriptlet that ran at install is
+/// one its `pre_remove` runs from too, whatever its encoding.
 fn read_entry_scriptlet(entry_path: &Path) -> Option<Vec<u8>> {
-    piko_db::fs_util::read_capped_utf8_in(
+    piko_db::fs_util::read_capped_in(
         entry_path,
         "install",
         piko_db::Limit::Desc,
         MAX_SCRIPTLET_BYTES,
     )
     .ok()
-    .map(String::into_bytes)
 }
 
 #[cfg(test)]
@@ -1794,9 +1887,9 @@ mod tests {
         let lock = DbLock::acquire(db.path()).unwrap();
         let report = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap()
-            .stage(&lock)
+            .stage()
             .unwrap()
             .commit()
             .unwrap();
@@ -1869,9 +1962,9 @@ mod tests {
         let lock = DbLock::acquire(db.path()).unwrap();
         Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap()
-            .stage(&lock)
+            .stage()
             .unwrap()
             .commit()
             .unwrap();
@@ -1918,7 +2011,7 @@ mod tests {
         let verified = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
             .check_space(true)
-            .verify_with_progress(&source, &mut |event| {
+            .verify_with_progress(&lock, &source, &mut |event| {
                 if matches!(event, VerifyEvent::DiskSpaceCheckStarted) {
                     announced = true;
                 }
@@ -1927,7 +2020,7 @@ mod tests {
         assert!(announced, "the disk-space check ran without saying so");
         assert!(verified.space_problems().is_empty(), "{:?}", verified.space_problems());
 
-        verified.stage(&lock).unwrap().commit().unwrap();
+        verified.stage().unwrap().commit().unwrap();
         assert!(root.path().join("usr/bin/foo").is_file());
     }
 
@@ -1953,9 +2046,9 @@ mod tests {
             }],
         )
         .ownership(Ownership::Inherit)
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap()
-        .stage(&lock)
+        .stage()
         .unwrap()
         .commit()
         .unwrap();
@@ -1965,7 +2058,7 @@ mod tests {
             Step::Remove { entry: EntryName::parse("foo-1.0.0-1").unwrap(), no_save: false };
         let verified = Transaction::new(root.path(), db.path(), vec![removal])
             .check_space(true)
-            .verify_with_progress(&source, &mut |event| {
+            .verify_with_progress(&lock, &source, &mut |event| {
                 if matches!(event, VerifyEvent::DiskSpaceCheckStarted) {
                     announced = true;
                 }
@@ -2012,9 +2105,9 @@ mod tests {
             }],
         )
         .ownership(Ownership::Inherit)
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap()
-        .stage(&lock)
+        .stage()
         .unwrap()
         .commit()
         .unwrap();
@@ -2030,9 +2123,9 @@ mod tests {
         let error = Transaction::new(root.path(), db.path(), steps)
             .ownership(Ownership::Inherit)
             .cancel(cancel)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap()
-            .stage(&lock)
+            .stage()
             .unwrap()
             .commit_with_progress(&mut |event| {
                 if matches!(event, Event::StepFinished { .. }) {
@@ -2071,6 +2164,7 @@ mod tests {
 
         let cancel = piko_net::Cancel::new();
         cancel.request();
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(
             root.path(),
             db.path(),
@@ -2081,7 +2175,7 @@ mod tests {
         )
         .ownership(Ownership::Inherit)
         .cancel(cancel)
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap_err();
 
         assert!(matches!(error, Error::Cancelled { completed: 0, total: 1 }), "{error:?}");
@@ -2115,16 +2209,42 @@ mod tests {
         )
         .ownership(Ownership::Inherit)
         .cancel(cancel.clone())
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap();
         cancel.request();
 
-        let error = verified.stage(&lock).unwrap().commit().unwrap_err();
+        let error = verified.stage().unwrap().commit().unwrap_err();
 
         assert!(matches!(error, Error::Cancelled { completed: 0, total: 1 }), "{error:?}");
         assert!(!root.path().join("usr/bin/foo").exists());
         let record = crate::journal::read(db.path()).unwrap().expect("the journal was removed");
         assert!(record.completed.is_empty());
+    }
+
+    /// Verification reads the local database, so it runs under that database's own lock. A lock
+    /// taken on another database protects none of what it reads.
+    #[test]
+    fn verification_refuses_the_lock_of_another_database() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let other = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+
+        let lock = DbLock::acquire(other.path()).unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        let error = Transaction::new(root.path(), db.path(), vec![step])
+            .ownership(Ownership::Inherit)
+            .verify(&lock, &source)
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Database(piko_db_write::Error::WrongLock { .. })),
+            "got {error:?}"
+        );
     }
 
     #[test]
@@ -2145,18 +2265,18 @@ mod tests {
             }],
         )
         .ownership(Ownership::Inherit)
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap()
-        .stage(&lock)
+        .stage()
         .unwrap()
         .commit()
         .unwrap();
 
         let entry = EntryName::parse("foo-1.0.0-1").unwrap();
         Transaction::new(root.path(), db.path(), vec![Step::Remove { entry, no_save: false }])
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap()
-            .stage(&lock)
+            .stage()
             .unwrap()
             .commit()
             .unwrap();
@@ -2164,6 +2284,189 @@ mod tests {
         assert!(!root.path().join("usr/bin/foo").exists());
         let local = LocalDatabase::open(db.path().join("local")).unwrap();
         assert!(local.get_str("foo").is_none(), "the entry survived removal");
+    }
+
+    /// Writes package `name` at `version` into `dir`, with `members` spelled byte for byte.
+    ///
+    /// `tar::Builder::append_data` normalises a name, so a test of a spelling the reader must
+    /// refuse cannot go through it.
+    fn write_raw_package(
+        dir: &Path,
+        name: &str,
+        version: &str,
+        members: &[(&str, tar::EntryType)],
+    ) -> PackageFileName {
+        use crate::extract::archive::fixture::raw;
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let info = pkginfo(version, &[]).replace("= foo\n", &format!("= {name}\n"));
+        raw(&mut builder, ".PKGINFO", tar::EntryType::Regular, None, info.as_bytes());
+        for (path, kind) in members {
+            raw(&mut builder, path, *kind, None, name.as_bytes());
+        }
+        let file = format!("{name}-{version}-x86_64.pkg.tar");
+        std::fs::write(dir.join(&file), builder.into_inner().unwrap()).unwrap();
+        file.parse().unwrap()
+    }
+
+    /// Runs `steps` against `root` and `db`, from `cache`, without ownership.
+    fn run_steps(cache: &Path, db: &Path, root: &Path, steps: Vec<Step>) -> Result<Report> {
+        let source = CacheDirSource::new([cache.to_path_buf()]).unwrap();
+        let lock = DbLock::acquire(db).unwrap();
+        Transaction::new(root, db, steps)
+            .ownership(Ownership::Inherit)
+            .verify(&lock, &source)?
+            .stage()?
+            .commit()
+    }
+
+    fn install_step(package: PackageFileName) -> Step {
+        Step::Install { package, reason: PackageInstallReason::Explicit }
+    }
+
+    fn remove_step(entry: &str) -> Step {
+        Step::Remove { entry: EntryName::parse(entry).unwrap(), no_save: false }
+    }
+
+    /// A member spelled `usr/./bin/tool` names the file another package in the same
+    /// transaction ships as `usr/bin/tool`. Conflict detection compares the strings and would
+    /// see two files, while extraction writes one: the second package would take the first
+    /// one's file over, and removing it would delete a file the first still claims. So the
+    /// spelling refuses the package before anything is written.
+    #[test]
+    fn a_second_spelling_of_another_package_s_file_is_refused_before_the_root_is_touched() {
+        use tar::EntryType::{Directory, Regular};
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let first = write_raw_package(
+            cache.path(),
+            "aaa",
+            "1.0.0-1",
+            &[("usr/", Directory), ("usr/bin/", Directory), ("usr/bin/tool", Regular)],
+        );
+        let second = write_raw_package(
+            cache.path(),
+            "bbb",
+            "1.0.0-1",
+            &[("usr/", Directory), ("usr/bin/", Directory), ("usr/./bin/tool", Regular)],
+        );
+
+        let error = run_steps(
+            cache.path(),
+            db.path(),
+            root.path(),
+            vec![install_step(first), install_step(second)],
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::UnsafeArchivePath { .. }), "got {error:?}");
+        assert!(!root.path().join("usr").exists(), "the root was touched");
+    }
+
+    /// An upgrade that moves a file beneath a symbolic link (`usr/sbin -> bin`) is refused at
+    /// `verify`. Extraction never writes through the link, and by the time it would try, the
+    /// upgrade has deleted the old version's files: the package would keep no binary, with its
+    /// entry naming the old version.
+    #[test]
+    fn a_file_beneath_a_symlinked_directory_is_refused_before_the_old_version_is_removed() {
+        use tar::EntryType::{Directory, Regular};
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("usr/bin")).unwrap();
+        std::os::unix::fs::symlink("bin", root.path().join("usr/sbin")).unwrap();
+
+        let old = write_raw_package(
+            cache.path(),
+            "ccc",
+            "1.0.0-1",
+            &[("usr/", Directory), ("usr/bin/", Directory), ("usr/bin/ccc", Regular)],
+        );
+        run_steps(cache.path(), db.path(), root.path(), vec![install_step(old)]).unwrap();
+
+        let new = write_raw_package(
+            cache.path(),
+            "ccc",
+            "2.0.0-1",
+            &[("usr/", Directory), ("usr/sbin/", Directory), ("usr/sbin/ccc", Regular)],
+        );
+        let error =
+            run_steps(cache.path(), db.path(), root.path(), vec![install_step(new)]).unwrap_err();
+
+        let Error::FileConflicts { conflicts } = &error else {
+            panic!("expected a file conflict, got {error:?}");
+        };
+        assert!(
+            matches!(
+                conflicts.as_slice(),
+                [conflict::FileConflict { blocker: conflict::Blocker::Unreachable { .. }, .. }]
+            ),
+            "{conflicts:?}"
+        );
+        assert_eq!(std::fs::read(root.path().join("usr/bin/ccc")).unwrap(), b"ccc");
+        assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was left");
+    }
+
+    /// An empty directory two packages own stays when one of them is removed, as libalpm
+    /// keeps it (`remove.c:495`). It goes with the last owner.
+    #[test]
+    fn an_empty_directory_another_package_owns_survives_a_removal() {
+        use tar::EntryType::Directory;
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let members = [("srv/", Directory), ("srv/shared/", Directory)];
+        let first = write_raw_package(cache.path(), "aaa", "1.0.0-1", &members);
+        let second = write_raw_package(cache.path(), "bbb", "1.0.0-1", &members);
+        let third = write_raw_package(cache.path(), "ccc", "1.0.0-1", &members);
+        run_steps(
+            cache.path(),
+            db.path(),
+            root.path(),
+            vec![install_step(first), install_step(second), install_step(third)],
+        )
+        .unwrap();
+
+        run_steps(cache.path(), db.path(), root.path(), vec![remove_step("bbb-1.0.0-1")]).unwrap();
+        assert!(root.path().join("srv/shared").is_dir(), "a directory aaa owns was removed");
+
+        // Removed together, the last two owners take it with them.
+        run_steps(
+            cache.path(),
+            db.path(),
+            root.path(),
+            vec![remove_step("aaa-1.0.0-1"), remove_step("ccc-1.0.0-1")],
+        )
+        .unwrap();
+        assert!(!root.path().join("srv").exists(), "a directory nobody owns was left");
+    }
+
+    /// The same rule during an upgrade's removal of the old version: a directory the new
+    /// version drops stays while another package owns it.
+    #[test]
+    fn an_upgrade_keeps_an_empty_directory_another_package_owns() {
+        use tar::EntryType::Directory;
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let members = [("srv/", Directory), ("srv/shared/", Directory)];
+        let other = write_raw_package(cache.path(), "aaa", "1.0.0-1", &members);
+        let old = write_raw_package(cache.path(), "bbb", "1.0.0-1", &members);
+        run_steps(
+            cache.path(),
+            db.path(),
+            root.path(),
+            vec![install_step(other), install_step(old)],
+        )
+        .unwrap();
+
+        let new = write_raw_package(cache.path(), "bbb", "2.0.0-1", &[("srv/", Directory)]);
+        run_steps(cache.path(), db.path(), root.path(), vec![install_step(new)]).unwrap();
+        assert!(root.path().join("srv/shared").is_dir(), "a directory aaa owns was removed");
     }
 
     /// One bad `%BACKUP%` hash makes the whole entry unreadable, file list included.
@@ -2197,9 +2500,9 @@ mod tests {
             }],
         )
         .ownership(Ownership::Inherit)
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap()
-        .stage(&lock)
+        .stage()
         .unwrap()
         .commit()
         .unwrap();
@@ -2214,7 +2517,7 @@ mod tests {
         let entry = EntryName::parse("foo-1.0.0-1").unwrap();
         let error =
             Transaction::new(root.path(), db.path(), vec![Step::Remove { entry, no_save: false }])
-                .verify(&source)
+                .verify(&lock, &source)
                 .unwrap_err();
 
         // The reason names the file list, not the backup list, because one parse produced both.
@@ -2256,8 +2559,10 @@ mod tests {
             package: "absent-1.0.0-1-x86_64.pkg.tar.zst".parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
-        let error =
-            Transaction::new(root.path(), db.path(), vec![step]).verify(&source).unwrap_err();
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let error = Transaction::new(root.path(), db.path(), vec![step])
+            .verify(&lock, &source)
+            .unwrap_err();
 
         assert!(
             matches!(error, Error::LocalDatabaseUnreadable { .. }),
@@ -2287,8 +2592,9 @@ mod tests {
             package: "absent-1.0.0-1-x86_64.pkg.tar.zst".parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let planned = Transaction::new(root.path(), db.path(), vec![step]);
-        assert!(planned.verify(&source).is_err());
+        assert!(planned.verify(&lock, &source).is_err());
         // No journal, because staging never happened.
         assert!(crate::journal::read(db.path()).unwrap().is_none());
     }
@@ -2312,9 +2618,10 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         assert!(
@@ -2336,9 +2643,10 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         assert!(
@@ -2405,9 +2713,10 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         assert!(
@@ -2436,9 +2745,9 @@ mod tests {
                 reason: PackageInstallReason::Explicit,
             }],
         )
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap()
-        .stage(&lock)
+        .stage()
         .unwrap();
 
         assert!(crate::journal::read(db.path()).unwrap().is_some(), "staging writes a journal");
@@ -2449,7 +2758,7 @@ mod tests {
     }
 
     /// The check is wired in, and it stops the transaction at `verify`. That is before the
-    /// lock, before the journal, and before a single byte is written.
+    /// journal, and before a single byte is written.
     #[test]
     fn a_file_another_package_owns_stops_the_transaction() {
         let name = "foo-1.0.0-1-x86_64.pkg.tar";
@@ -2477,9 +2786,10 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         let Error::FileConflicts { conflicts } = &error else {
@@ -2525,9 +2835,9 @@ mod tests {
         Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
             .overwrite(Overwrite::new(|path| path == std::path::Path::new("usr/bin/tool")))
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap()
-            .stage(&lock)
+            .stage()
             .unwrap()
             .commit()
             .unwrap();
@@ -2535,8 +2845,8 @@ mod tests {
         assert_eq!(std::fs::read(root.path().join("usr/bin/tool")).unwrap(), b"binary");
     }
 
-    /// With verification on and no signature present, `Required` stops the transaction —
-    /// before the lock, before the journal, before anything is written.
+    /// With verification on and no signature present, `Required` stops the transaction at
+    /// `verify`: before the journal, before anything is written.
     #[test]
     fn an_unsigned_package_is_refused_when_signatures_are_required() {
         let name = "foo-1.0.0-1-x86_64.pkg.tar";
@@ -2550,13 +2860,14 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
             .verification(Verification::Enabled {
                 keyring: Keyring::open(keys.path()).unwrap(),
                 policy: Policy::for_package(piko_db::config::SigLevel::PACKAGE),
             })
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         assert!(matches!(error, Error::SignatureRejected { .. }), "got {error:?}");
@@ -2594,7 +2905,7 @@ mod tests {
         let lock = DbLock::acquire(db.path()).unwrap();
         let verified = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap();
 
         // Same name, same version, other contents: what a swap after the check looks like.
@@ -2602,7 +2913,7 @@ mod tests {
         write_package(replacement.path(), name, "1.0.0-1", &[], &[("usr/bin/foo", b"swapped")]);
         std::fs::rename(replacement.path().join(name), &named).unwrap();
 
-        verified.stage(&lock).unwrap().commit().unwrap();
+        verified.stage().unwrap().commit().unwrap();
         assert_eq!(std::fs::read(root.path().join("usr/bin/foo")).unwrap(), b"verified");
     }
 
@@ -2622,9 +2933,10 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         let Error::UnusableSource { reason, .. } = &error else {
@@ -2660,9 +2972,10 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         let Error::UnusableSource { reason, .. } = &error else {
@@ -2710,10 +3023,11 @@ mod tests {
             }
             Expected::of_archive(&info)
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step()])
             .ownership(Ownership::Inherit)
             .expectations(HashMap::from([(name.to_owned(), planned)]))
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
         let Error::UnusableSource { reason, .. } = &error else {
             panic!("expected the archive to be refused, got {error:?}");
@@ -2724,13 +3038,12 @@ mod tests {
 
         // Put back, as a download would: the same archive under a matching expectation.
         std::fs::write(cache.path().join(name), &archive).unwrap();
-        let lock = DbLock::acquire(db.path()).unwrap();
         Transaction::new(root.path(), db.path(), vec![step()])
             .ownership(Ownership::Inherit)
             .expectations(HashMap::from([(name.to_owned(), Expected::of_archive(&info))]))
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap()
-            .stage(&lock)
+            .stage()
             .unwrap()
             .commit()
             .unwrap();
@@ -2756,6 +3069,7 @@ mod tests {
             crate::conflict::load_pkginfo(&cache.path().join(name), &PackageLimits::default())
                 .unwrap();
 
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(
             root.path(),
             db.path(),
@@ -2766,7 +3080,7 @@ mod tests {
         )
         .ownership(Ownership::Inherit)
         .expectations(HashMap::from([(name.to_owned(), Expected::of_archive(&info))]))
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap_err();
 
         assert!(
@@ -2793,9 +3107,10 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         assert!(matches!(error, Error::UnusableSource { .. }), "got {error:?}");
@@ -2829,9 +3144,9 @@ mod tests {
                 piko_db::config::SigLevel::PACKAGE | piko_db::config::SigLevel::PACKAGE_OPTIONAL,
             ),
         })
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap()
-        .stage(&lock)
+        .stage()
         .unwrap()
         .commit()
         .unwrap();
@@ -2856,6 +3171,7 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
             // The fallback would accept an unsigned package...
@@ -2871,7 +3187,7 @@ mod tests {
                 name.to_owned(),
                 Policy::for_package(piko_db::config::SigLevel::PACKAGE),
             )]))
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         assert!(matches!(error, Error::SignatureRejected { .. }), "got {error:?}");
@@ -2889,9 +3205,9 @@ mod tests {
             }],
         )
         .ownership(Ownership::Inherit)
-        .verify(&source)
+        .verify(lock, &source)
         .unwrap()
-        .stage(lock)
+        .stage()
         .unwrap()
         .commit()
         .unwrap()
@@ -3138,9 +3454,9 @@ mod tests {
         let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
         let entry = EntryName::parse("foo-1.0.0-1").unwrap();
         Transaction::new(root.path(), db.path(), vec![Step::Remove { entry, no_save: false }])
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap()
-            .stage(&lock)
+            .stage()
             .unwrap()
             .commit()
             .unwrap();
@@ -3248,13 +3564,13 @@ mod tests {
         )
         .ownership(Ownership::Inherit)
         .patterns(patterns.clone())
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap();
 
         // The hooks are told the same list extraction obeys, from the same setting.
         assert_eq!(verified.state.summary.no_extract, patterns.no_extract);
 
-        verified.stage(&lock).unwrap().commit().unwrap();
+        verified.stage().unwrap().commit().unwrap();
 
         assert!(!root.path().join("usr/share/locale/de.mo").exists(), "it was written anyway");
         assert!(root.path().join("usr/bin/foo").exists());
@@ -3301,9 +3617,9 @@ mod tests {
             )
             .ownership(Ownership::Inherit)
             .patterns(patterns.clone())
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap()
-            .stage(&lock)
+            .stage()
             .unwrap()
             .commit()
             .unwrap()
@@ -3331,9 +3647,9 @@ mod tests {
         let entry = EntryName::parse("foo-2.0.0-1").unwrap();
         Transaction::new(root.path(), db.path(), vec![Step::Remove { entry, no_save: false }])
             .patterns(patterns)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap()
-            .stage(&lock)
+            .stage()
             .unwrap()
             .commit()
             .unwrap();
@@ -3363,9 +3679,9 @@ mod tests {
             }],
         )
         .ownership(Ownership::Inherit)
-        .verify(&source)
+        .verify(&lock, &source)
         .unwrap()
-        .stage(&lock)
+        .stage()
         .unwrap()
         .commit()
         .unwrap();
@@ -3396,8 +3712,8 @@ mod tests {
             .ownership(Ownership::Inherit)
             .verification(verification)
             .published(published)
-            .verify(&source)?
-            .stage(&lock)?
+            .verify(&lock, &source)?
+            .stage()?
             .commit()?;
 
         let desc = std::fs::read_to_string(db.path().join("local/foo-1.0.0-1/desc")).unwrap();
@@ -3602,9 +3918,10 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let error = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap_err();
 
         assert!(matches!(error, Error::UnfinishedTransaction { .. }), "got {error:?}");
@@ -3624,17 +3941,17 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
+        let lock = DbLock::acquire(db.path()).unwrap();
         let verified = Transaction::new(root.path(), db.path(), vec![step])
             .ownership(Ownership::Inherit)
-            .verify(&source)
+            .verify(&lock, &source)
             .unwrap();
 
         let other = [crate::journal::Intent::Remove { entry: "bar-1.0-1".to_owned() }];
         std::mem::forget(crate::journal::Journal::begin(db.path(), root.path(), &other).unwrap());
         let journal = std::fs::read(db.path().join(crate::journal::JOURNAL_FILE)).unwrap();
 
-        let lock = DbLock::acquire(db.path()).unwrap();
-        let error = verified.stage(&lock).unwrap_err();
+        let error = verified.stage().unwrap_err();
         assert!(matches!(error, Error::UnfinishedTransaction { .. }), "got {error:?}");
         assert_eq!(std::fs::read(db.path().join(crate::journal::JOURNAL_FILE)).unwrap(), journal);
         assert!(!root.path().join("usr/bin/foo").exists(), "files were written anyway");

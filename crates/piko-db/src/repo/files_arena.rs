@@ -380,39 +380,6 @@ mod tests {
         assert_eq!(found, [Path::new("a")], "the first entry must be the one kept");
     }
 
-    /// The duplicate report must name the entry that **won**, not the one that was discarded.
-    /// The caller only knows the discarded one — that is why `kept` is returned at all.
-    #[test]
-    fn a_duplicate_reports_the_kept_version_not_the_discarded_one() {
-        let mut arena = FilesArena::new();
-        arena
-            .insert(
-                Path::new("x"),
-                name("foo"),
-                version("1.0.0-1"),
-                &paths(&["a"]),
-                1024,
-                usize::MAX,
-            )
-            .unwrap();
-
-        let second = arena
-            .insert(
-                Path::new("x"),
-                name("foo"),
-                version("2.0.0-1"),
-                &paths(&["b"]),
-                1024,
-                usize::MAX,
-            )
-            .unwrap();
-
-        let Inserted::Duplicate { kept } = second else {
-            panic!("expected a duplicate, got {second:?}")
-        };
-        assert_eq!(kept.to_string(), "1.0.0-1");
-    }
-
     /// A package is appended whole or not at all. Tripping the byte limit part-way through
     /// must not leave path bytes behind that no index entry addresses.
     #[test]

@@ -77,6 +77,7 @@ pub mod fs_util;
 pub mod glob;
 pub mod lazy;
 pub mod limits;
+pub mod printable;
 pub mod search;
 
 // Answers that need both databases at once.
@@ -101,6 +102,7 @@ pub use local::{
     ALPM_DB_VERSION, DescView, Diagnostic, EagerView, FileCheckReport, FileProblem, Inconsistency,
     LocalDatabase, LocalPackage, LocalSearchHit, OpenOptions,
 };
+pub use printable::{printable, printable_path};
 pub use resolve::{IgnoreList, Resolved, SyncRepo, SyncRepos};
 pub use search::{LocalOrRepo, MatchKind, resolve_installed_or_repo};
 pub use updates::Update;

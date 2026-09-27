@@ -128,6 +128,19 @@ pub enum Blocker {
         /// `None` means the path is unowned — a file some other tool or the user put there.
         owner: Option<String>,
     },
+    /// A directory on the way to the path is a symbolic link or not a directory, and nothing in
+    /// this transaction takes it away first.
+    ///
+    /// Extraction never writes through such a component (see [`crate::rootfs`]), so the write
+    /// would fail half-way through the commit, after earlier steps had changed the system. This
+    /// is where it fails instead. `usr/sbin` is the common case: Arch makes it a link to `bin`,
+    /// and a package that still ships `usr/sbin/foo` cannot be installed.
+    Unreachable {
+        /// The component that stops the walk.
+        component: PathBuf,
+        /// What it is.
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for Blocker {
@@ -136,6 +149,9 @@ impl std::fmt::Display for Blocker {
             Self::Target { other } => write!(f, "also in {other}"),
             Self::Filesystem { owner: Some(owner) } => write!(f, "owned by {owner}"),
             Self::Filesystem { owner: None } => f.write_str("exists in filesystem"),
+            Self::Unreachable { component, reason } => {
+                write!(f, "cannot be reached: {} {reason}", piko_db::printable_path(component))
+            }
         }
     }
 }
@@ -153,7 +169,7 @@ pub struct FileConflict {
 
 impl std::fmt::Display for FileConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {} ({})", self.package, self.path.display(), self.blocker)
+        write!(f, "{}: {} ({})", self.package, piko_db::printable_path(&self.path), self.blocker)
     }
 }
 
@@ -471,12 +487,28 @@ fn check_filesystem(
         let mut index = 0_usize;
         while let Some(spelled) = new_paths.get(index) {
             index = index.saturating_add(1);
+            let existing = match locate(root, Path::new(strip_dir(spelled))) {
+                Located::At(existing) => existing,
+                // `--overwrite` does not release this: extraction refuses it whatever the
+                // patterns say.
+                Located::Blocked { component, reason } => {
+                    if !vacated(owners, &component, targets, removals) {
+                        into.conflicts.push(FileConflict {
+                            package: target.name.clone(),
+                            path: PathBuf::from(strip_dir(spelled)),
+                            blocker: Blocker::Unreachable { component, reason },
+                        });
+                    }
+                    continue;
+                }
+            };
             let verdict = examine(
                 root,
                 owners,
                 target,
                 installed.as_ref(),
                 spelled,
+                existing,
                 targets,
                 &handovers,
                 removals,
@@ -522,6 +554,7 @@ fn examine(
     target: &Target,
     installed: Option<&FileList>,
     spelled: &str,
+    existing: Existing,
     targets: &[Target],
     handovers: &HashMap<String, Handover>,
     removals: &[String],
@@ -534,7 +567,6 @@ fn examine(
     let stripped = strip_dir(spelled);
     let as_path = Path::new(stripped);
 
-    let existing = crate::install::probe_existing(root, as_path);
     if existing == Existing::Absent {
         return Ok(Verdict::Resolved(Resolution::NotPresent));
     }
@@ -584,6 +616,66 @@ fn examine(
     }
 
     Ok(decide(&context))
+}
+
+/// What [`locate`] found.
+enum Located {
+    /// What is at the path. `Absent` covers a missing directory on the way, which extraction
+    /// creates.
+    At(Existing),
+    /// A component on the way that no write passes: a symbolic link, or not a directory.
+    Blocked {
+        /// The component, root-relative.
+        component: PathBuf,
+        /// What it is.
+        reason: &'static str,
+    },
+}
+
+/// What is at `path` inside `root`, from an `lstat` that follows nothing, or the component that
+/// stops the walk to it.
+///
+/// Extraction resolves every member through the same walk, so a path blocked here is a path
+/// extraction would refuse.
+fn locate(root: &RootDir, path: &Path) -> Located {
+    match root.resolve_parent(path) {
+        Ok(resolved) => Located::At(crate::install::existing_in(&resolved)),
+        Err(crate::Error::PathEscapesRoot { component, reason, .. }) => {
+            Located::Blocked { component, reason }
+        }
+        Err(_) => Located::At(Existing::Absent),
+    }
+}
+
+/// Whether this transaction takes `component` away before anything is written beneath it.
+///
+/// That is so when a package it removes owns `component`, or when a package it upgrades owns it
+/// and the new version does not ship it: the removal, or the upgrade's own removal of the old
+/// version, unlinks it. A directory that replaces a file or a link of the same package is the
+/// ordinary case, as `FileBecomesDirectory` records for the path itself.
+///
+/// Both owners are matched on the exact spelling, with no trailing `/`, because a symbolic
+/// link or a file is recorded that way.
+fn vacated(
+    owners: &mut Owners<'_>,
+    component: &Path,
+    targets: &[Target],
+    removals: &[String],
+) -> bool {
+    let Some(spelled) = component.to_str() else { return false };
+    for removed in removals {
+        if owners.files_of(removed).is_some_and(|files| files.contains(spelled)) {
+            return true;
+        }
+    }
+    for target in targets {
+        if !target.files.contains(spelled)
+            && owners.files_of(&target.name).is_some_and(|files| files.contains(spelled))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether `path` inside `root` is a directory once symlinks are followed.
@@ -755,19 +847,13 @@ pub fn load_package(
     crate::extract::archive::walk(package, limits, |member, contents| {
         if member.kind == crate::extract::archive::MemberKind::Metadata {
             if member.path == Path::new(".PKGINFO") {
-                let mut text = String::new();
                 // A `.PKGINFO` that is not valid UTF-8 leaves nothing to parse. It is reported
                 // below as the absence it amounts to.
-                let mut limited = std::io::Read::take(contents, MAX_PKGINFO_BYTES);
-                if std::io::Read::read_to_string(&mut limited, &mut text).is_ok() {
-                    pkginfo = Some(text);
-                }
+                pkginfo = read_whole(contents, package, ".PKGINFO size", MAX_PKGINFO_BYTES)?
+                    .and_then(|bytes| String::from_utf8(bytes).ok());
             } else if member.path == Path::new(".INSTALL") {
-                let mut bytes = Vec::new();
-                let mut limited = std::io::Read::take(contents, MAX_SCRIPTLET_BYTES);
-                if std::io::Read::read_to_end(&mut limited, &mut bytes).is_ok() {
-                    install_script = Some(bytes);
-                }
+                install_script =
+                    read_whole(contents, package, "scriptlet size", MAX_SCRIPTLET_BYTES)?;
             }
             return Ok(());
         }
@@ -856,13 +942,10 @@ pub fn load_pkginfo(
         {
             return Ok(crate::extract::archive::Flow::Continue);
         }
-        let mut text = String::new();
         // A `.PKGINFO` that is not valid UTF-8 leaves nothing to parse. It is reported below
         // as the absence it amounts to.
-        let mut limited = std::io::Read::take(contents, MAX_PKGINFO_BYTES);
-        if std::io::Read::read_to_string(&mut limited, &mut text).is_ok() {
-            pkginfo = Some(text);
-        }
+        pkginfo = read_whole(contents, package, ".PKGINFO size", MAX_PKGINFO_BYTES)?
+            .and_then(|bytes| String::from_utf8(bytes).ok());
         Ok(crate::extract::archive::Flow::Stop)
     })?;
 
@@ -881,6 +964,36 @@ pub fn load_pkginfo(
 
 /// Largest `.PKGINFO` this reads. It is a few kilobytes in practice.
 const MAX_PKGINFO_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Reads a whole metadata member of `package`, refusing one larger than `max`.
+///
+/// Never a prefix. A `.PKGINFO` cut short loses its last fields without a parse error, and a
+/// scriptlet cut short runs its first `max` bytes as code: `rm -rf /usr/share/foo` becomes
+/// `rm -rf /usr` at the wrong byte. One byte past the bound is what tells a member at the
+/// limit from one over it.
+///
+/// `Ok(None)` when the member cannot be read at all. The caller reports that as the absence
+/// it amounts to.
+///
+/// # Errors
+///
+/// [`crate::Error::PackageLimitExceeded`] naming `limit` if the member is larger than `max`.
+fn read_whole(
+    contents: &mut dyn std::io::Read,
+    package: &Path,
+    limit: &'static str,
+    max: u64,
+) -> Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    let mut limited = std::io::Read::take(contents, max.saturating_add(1));
+    if std::io::Read::read_to_end(&mut limited, &mut bytes).is_err() {
+        return Ok(None);
+    }
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max {
+        return Err(crate::Error::PackageLimitExceeded { path: package.to_path_buf(), limit, max });
+    }
+    Ok(Some(bytes))
+}
 
 /// Builds the [`Target`] view of an already-installed package, for a removal step.
 ///
@@ -1353,6 +1466,113 @@ mod tests {
         assert!(result.is_clear(), "{:?}", result.conflicts);
     }
 
+    /// A conflict's path is the archive's, and the conflict is printed.
+    #[test]
+    fn a_conflict_escapes_what_could_drive_a_terminal() {
+        let conflict = FileConflict {
+            package: "pkg".to_owned(),
+            path: PathBuf::from("usr/bin/\u{1b}[2J"),
+            blocker: Blocker::Filesystem { owner: None },
+        };
+        assert!(!conflict.to_string().contains('\u{1b}'), "{conflict}");
+    }
+
+    /// A file beneath a symbolic link to a directory is refused here, before the commit, since
+    /// extraction never writes through a link. `usr/sbin -> bin` is the real case.
+    #[test]
+    fn a_path_beneath_a_symlinked_directory_is_unreachable() {
+        let (_keep, local) = database(&[("filesystem-1.0.0-1", &["usr/", "usr/bin/", "usr/sbin"])]);
+        let (_dir, root) =
+            filesystem(&[("usr/bin", Entry::Dir), ("usr/sbin", Entry::SymlinkTo("bin"))]);
+
+        let result =
+            run(&root, &local, &[target("pkg", &["usr/", "usr/sbin/", "usr/sbin/tool"])], &[]);
+        assert_eq!(
+            result.conflicts,
+            [FileConflict {
+                package: "pkg".to_owned(),
+                path: PathBuf::from("usr/sbin/tool"),
+                blocker: Blocker::Unreachable {
+                    component: PathBuf::from("usr/sbin"),
+                    reason: "it is a symlink",
+                },
+            }]
+        );
+    }
+
+    /// `--overwrite` does not release it: extraction would refuse the write whatever it says.
+    #[test]
+    fn overwrite_does_not_release_an_unreachable_path() {
+        let (_keep, local) = database(&[]);
+        let (_dir, root) =
+            filesystem(&[("usr/bin", Entry::Dir), ("usr/sbin", Entry::SymlinkTo("bin"))]);
+
+        let everything = Overwrite::new(|_| true);
+        let result = check(
+            &root,
+            &local,
+            &[target("pkg", &["usr/sbin/tool"])],
+            &[],
+            &everything,
+            &WalkLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                result.conflicts.as_slice(),
+                [FileConflict { blocker: Blocker::Unreachable { .. }, .. }]
+            ),
+            "{:?}",
+            result.conflicts
+        );
+    }
+
+    /// A link a removal in this transaction deletes is no obstacle.
+    #[test]
+    fn a_link_the_transaction_removes_is_not_in_the_way() {
+        let (_keep, local) = database(&[("links-1.0.0-1", &["opt/", "opt/app"])]);
+        let (_dir, root) =
+            filesystem(&[("opt/real", Entry::Dir), ("opt/app", Entry::SymlinkTo("real"))]);
+
+        let result = run(
+            &root,
+            &local,
+            &[target("app", &["opt/", "opt/app/", "opt/app/bin"])],
+            &["links".to_owned()],
+        );
+        assert!(result.is_clear(), "{:?}", result.conflicts);
+    }
+
+    /// Nor is a file the package's own old version ships and the new one turns into a
+    /// directory: the upgrade removes the old version's files first.
+    #[test]
+    fn a_file_the_upgrade_replaces_with_a_directory_is_not_in_the_way() {
+        let (_keep, local) = database(&[("app-0.9.0-1", &["opt/", "opt/app"])]);
+        let (_dir, root) = filesystem(&[("opt/app", Entry::File)]);
+
+        let result =
+            run(&root, &local, &[target("app", &["opt/", "opt/app/", "opt/app/bin"])], &[]);
+        assert!(result.is_clear(), "{:?}", result.conflicts);
+    }
+
+    /// But a link the new version still ships stays, and so stays in the way.
+    #[test]
+    fn a_link_the_upgrade_keeps_is_still_in_the_way() {
+        let (_keep, local) = database(&[("app-0.9.0-1", &["opt/", "opt/app"])]);
+        let (_dir, root) =
+            filesystem(&[("opt/real", Entry::Dir), ("opt/app", Entry::SymlinkTo("real"))]);
+
+        let result = run(&root, &local, &[target("app", &["opt/", "opt/app", "opt/app/bin"])], &[]);
+        assert!(
+            matches!(
+                result.conflicts.as_slice(),
+                [FileConflict { blocker: Blocker::Unreachable { .. }, .. }]
+            ),
+            "{:?}",
+            result.conflicts
+        );
+    }
+
     /// And the case libalpm's `ENOTDIR` hides from it: a plain file where a package wants a
     /// directory. Extraction would replace the file, so it must be reported.
     #[test]
@@ -1505,6 +1725,45 @@ arch = x86_64
 license = MIT
 backup = etc/foo.conf
 ";
+
+    /// A package holding `.PKGINFO` and a `.INSTALL` of `scriptlet_bytes` bytes.
+    fn package_with_scriptlet(scriptlet_bytes: usize) -> (tempfile::TempDir, PathBuf) {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut add = |path: &str, contents: &[u8]| {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            header.set_size(contents.len() as u64);
+            header.set_cksum();
+            builder.append_data(&mut header, path, contents).unwrap();
+        };
+        add(".PKGINFO", PKGINFO.as_bytes());
+        add(".INSTALL", &vec![b'#'; scriptlet_bytes]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("foo-1.0.0-1-x86_64.pkg.tar");
+        std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
+        (dir, path)
+    }
+
+    /// A scriptlet over the bound refuses the package. Kept to its first bytes, it would run
+    /// code the package did not write, cut at an arbitrary byte.
+    #[test]
+    fn a_scriptlet_over_the_bound_refuses_the_package_rather_than_running_a_prefix() {
+        let limit = usize::try_from(MAX_SCRIPTLET_BYTES).unwrap();
+        let (_keep, path) = package_with_scriptlet(limit + 1);
+        let error = load_package(&path, &crate::extract::PackageLimits::default()).unwrap_err();
+        assert!(
+            matches!(error, crate::Error::PackageLimitExceeded { limit: "scriptlet size", .. }),
+            "got {error:?}"
+        );
+
+        // At the bound exactly, the whole scriptlet is kept.
+        let (_keep, path) = package_with_scriptlet(limit);
+        let loaded = load_package(&path, &crate::extract::PackageLimits::default()).unwrap();
+        assert_eq!(loaded.target.install_script.map(|script| script.len()), Some(limit));
+    }
 
     /// A package's own file list is read from the archive. The package is not installed yet,
     /// so there is nothing else to read it from.

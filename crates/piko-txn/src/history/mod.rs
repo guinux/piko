@@ -749,6 +749,52 @@ fn strip_suffix(path: &Path, suffix: &str) -> PathBuf {
     text.strip_suffix(suffix).map_or_else(|| path.to_path_buf(), PathBuf::from)
 }
 
+/// Opens a record for appending, creating it at `mode` if it is absent.
+///
+/// Both records are appended to as root, in directories the caller names. So the open refuses a
+/// symbolic link at the name (`O_NOFOLLOW`), which would send root's lines into any file. It does
+/// not wait on a FIFO (`O_NONBLOCK`), and it refuses anything that is not a regular file once
+/// open. libalpm's `open` (`log.c:61`) does none of the three. Only `EINTR` is retried,
+/// as libalpm retries it.
+///
+/// # Errors
+///
+/// [`std::io::Error`] if the file cannot be opened, or is not a regular file.
+pub(crate) fn open_for_append(path: &Path, mode: u32) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).append(true).create(true).mode(mode);
+    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+
+    let file = loop {
+        match options.open(path) {
+            Ok(file) => break file,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    Ok(file)
+}
+
+/// Opens a record for reading, through the audited door: a final symbolic link is followed, as
+/// for any file the configuration names, but a FIFO or a device is refused rather than waited
+/// on.
+///
+/// # Errors
+///
+/// [`std::io::Error`] if the file cannot be opened, or is not a regular file. An absent file
+/// keeps [`std::io::ErrorKind::NotFound`].
+pub(crate) fn open_for_reading(path: &Path) -> std::io::Result<std::fs::File> {
+    piko_db::fs_util::open_following_symlinks(path).map_err(|error| match error {
+        piko_db::Error::Io { source, .. } => source,
+        other => std::io::Error::other(other.to_string()),
+    })
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -843,11 +889,11 @@ mod tests {
         assert_eq!(strip_pacnew(Path::new("/etc/foo.conf.pacnew")), Path::new("/etc/foo.conf"));
     }
 
-    /// Two transactions in the same second from different processes must not share an id.
+    /// Two transactions in the same second from different processes must not share an id, so
+    /// the id carries the process id beside the second.
     #[test]
     fn an_id_names_the_second_and_the_process() {
-        let id = transaction_id(1_757_000_000);
-        assert!(id.starts_with("1757000000-"), "{id}");
-        assert_eq!(id, transaction_id(1_757_000_000));
+        assert_eq!(transaction_id(1_757_000_000), format!("1757000000-{}", std::process::id()));
+        assert_ne!(transaction_id(1_757_000_000), transaction_id(1_757_000_001));
     }
 }

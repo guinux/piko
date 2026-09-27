@@ -699,10 +699,13 @@ fn print_step_result(
     outcome: &piko_txn::progress::StepOutcome<'_>,
 ) {
     use piko_txn::progress::StepOutcome;
+    // Every path below is spelled by a package archive, so each is escaped before the terminal
+    // sees it.
     match (step, outcome) {
         (piko_txn::Step::Install { .. }, StepOutcome::Installed { extraction, pacsaves, .. }) => {
             for path in &extraction.unreadable {
-                let _ = writeln!(out, "  Warning: could not hash {}", path.display());
+                let _ =
+                    writeln!(out, "  Warning: could not hash {}", piko_db::printable_path(path));
             }
             for problem in &extraction.xattr_problems {
                 let _ = writeln!(out, "  Warning: {problem}");
@@ -714,16 +717,20 @@ fn print_step_result(
                     piko_txn::extract::BackupOutcome::KeptBoth { pacnew },
                 ) = step_outcome
                 {
-                    let _ = writeln!(out, "  Installed as {} -- merge it", pacnew.display());
+                    let _ = writeln!(
+                        out,
+                        "  Installed as {} -- merge it",
+                        piko_db::printable_path(pacnew)
+                    );
                 }
             }
             for pacsave in *pacsaves {
-                let _ = writeln!(out, "  Saved {} as .pacsave", pacsave.display());
+                let _ = writeln!(out, "  Saved {} as .pacsave", piko_db::printable_path(pacsave));
             }
         }
         (piko_txn::Step::Remove { .. }, StepOutcome::Removed { pacsaves }) => {
             for pacsave in *pacsaves {
-                let _ = writeln!(out, "  Saved {} as .pacsave", pacsave.display());
+                let _ = writeln!(out, "  Saved {} as .pacsave", piko_db::printable_path(pacsave));
             }
         }
         // `Step`/`StepOutcome` are reported together by construction (`Event::StepFinished`),

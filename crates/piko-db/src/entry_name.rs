@@ -324,11 +324,4 @@ mod tests {
         assert_eq!(entry.to_string(), raw);
         assert_eq!(AsRef::<str>::as_ref(&entry), raw);
     }
-
-    #[test]
-    fn parsing_is_deterministic() {
-        let first = EntryName::parse("linux-firmware-20260101.abcdef-1").unwrap();
-        let second = EntryName::parse("linux-firmware-20260101.abcdef-1").unwrap();
-        assert_eq!(first, second);
-    }
 }

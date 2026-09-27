@@ -19,11 +19,12 @@
 //! ordering worth enforcing:
 //!
 //! - **`Planned`** — the steps are known. Nothing has been read or written.
-//! - **`Verified`** — every package is located *and read*, every `.PKGINFO` parses, every entry
-//!   to be removed exists, and no step would write a file another package owns. All of this
-//!   happens before anything is written, never part-way through a commit.
-//! - **`Staged`** — the `db.lck` lock is held and the journal is on disk and fsynced. This is
-//!   the last state in which dropping the transaction leaves the system untouched.
+//! - **`Verified`** — the `db.lck` lock is held, and was before the first check. Every package
+//!   is located *and read*, every `.PKGINFO` parses, every entry to be removed exists, and no
+//!   step would write a file another package owns. All of this happens before anything is
+//!   written, never part-way through a commit.
+//! - **`Staged`** — the journal is on disk and fsynced. This is the last state in which
+//!   dropping the transaction leaves the system untouched.
 //! - committing consumes `Staged` and mutates.
 //!
 //! libalpm enforces the same sequence with a runtime `ASSERT` on `trans->state`, returning
@@ -58,9 +59,9 @@
 //!
 //! # Example
 //!
-//! Installing one package file that already sits in a cache directory. `verify` reads it and
-//! checks it against the rest of the system; `stage` takes the database lock; only `commit`
-//! writes. A transaction a solver planned is built with [`Transaction::from_plan`] instead, from
+//! Installing one package file that already sits in a cache directory. The database lock comes
+//! first; `verify` reads the package and checks it against the rest of the system under it;
+//! `stage` writes the journal; only `commit` writes to the root. A transaction a solver planned is built with [`Transaction::from_plan`] instead, from
 //! a [`TransactionPlan`], so each package is also compared with what the plan says it is.
 //!
 //! ```rust,no_run
@@ -80,12 +81,14 @@
 //!
 //! let source = CacheDirSource::new([PathBuf::from("/var/cache/pacman/pkg")])?;
 //!
-//! // Reads every package and runs file-conflict detection. Nothing is written yet.
-//! let verified = Transaction::new(root, dbpath, steps).verify(&source)?;
-//!
-//! // Takes `db.lck` and fsyncs the journal. Dropping here still changes nothing.
+//! // Every check reads the local database, so it runs under `db.lck`.
 //! let lock = DbLock::acquire(dbpath)?;
-//! let report = verified.stage(&lock)?.commit()?;
+//!
+//! // Reads every package and runs file-conflict detection. Nothing is written yet.
+//! let verified = Transaction::new(root, dbpath, steps).verify(&lock, &source)?;
+//!
+//! // Fsyncs the journal. Dropping here still changes nothing.
+//! let report = verified.stage()?.commit()?;
 //!
 //! for (package, extraction) in &report.installed {
 //!     println!("{package}: {} files", extraction.owned.len());

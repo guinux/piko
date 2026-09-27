@@ -1160,7 +1160,8 @@ fn run(
         progress.download,
         progress.download_head,
     );
-    let verified = planned.verify_with_progress(source, &mut |event| verify_driver.handle(event));
+    let verified =
+        planned.verify_with_progress(&lock, source, &mut |event| verify_driver.handle(event));
     verify_driver.finish();
     let verified = match verified {
         Ok(verified) => verified,
@@ -1182,7 +1183,7 @@ fn run(
         return ExitCode::FAILURE;
     }
 
-    let staged = match verified.stage(&lock) {
+    let staged = match verified.stage() {
         Ok(staged) => staged,
         Err(error) => {
             report_refusal(&error);

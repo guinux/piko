@@ -559,11 +559,6 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_block_size_is_refused_rather_than_divided_by() {
-        assert!(NonZeroU64::new(0).is_none());
-    }
-
-    #[test]
     fn a_requirement_that_fits_reports_no_shortfall() {
         let fs = stats(1 << 20, 1 << 20);
         assert_eq!(shortfall(Path::new("/"), 10, &fs), None);

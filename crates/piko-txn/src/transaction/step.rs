@@ -93,6 +93,7 @@ pub(super) fn install_step(
             &Removal {
                 files: &old.files,
                 backups: &old.backups,
+                shared_directories: &old.shared_directories,
                 skip_remove: step.skip_remove,
                 replacement: Some(step.package.as_replacement()),
                 patterns: step.patterns,
@@ -313,6 +314,7 @@ pub(super) fn remove_step(
         &Removal {
             files: &doomed.installed.files,
             backups: &doomed.installed.backups,
+            shared_directories: &doomed.installed.shared_directories,
             skip_remove,
             // A real removal, so there is no `newpkg`. Nothing is spared for a successor.
             replacement: None,
@@ -336,6 +338,8 @@ struct Removal<'a> {
     files: &'a [PathBuf],
     /// The removed package's `%BACKUP%` hashes — the baseline a `.pacsave` decision needs.
     backups: &'a BTreeMap<PathBuf, String>,
+    /// Its directories another installed package also owns, without the trailing `/`.
+    shared_directories: &'a BTreeSet<PathBuf>,
     /// Paths another step of this transaction has taken over.
     skip_remove: &'a BTreeSet<PathBuf>,
     /// The package taking this one's place, for an upgrade's fake removal.
@@ -393,7 +397,7 @@ fn remove_files(
             old_backup_hash: recorded.as_deref(),
             local_hash: local_hash.as_deref(),
             no_save: removal.no_save,
-            directory_has_other_owner: false,
+            directory_has_other_owner: removal.shared_directories.contains(&trimmed),
         };
 
         match decide_removal(&context) {

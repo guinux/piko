@@ -30,6 +30,8 @@ use std::{
 };
 
 use alpm_types::{FullVersion, Name, PackageFileName};
+use piko_db::config::SigLevel;
+use piko_sig::{Keyring, Policy, Verdict};
 
 use crate::source::distrust;
 use crate::{
@@ -50,6 +52,76 @@ pub struct BaseCandidate {
     pub file_name: PackageFileName,
 }
 
+/// A cached build that was not used as the ancestor, and why.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefusedBase {
+    /// The package file.
+    pub path: PathBuf,
+    /// Why its bytes cannot reach a merge.
+    pub reason: String,
+}
+
+/// What [`find_base`] found.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BaseSearch {
+    /// The ancestor to merge against. `None` means a two-way view.
+    pub base: Option<BaseCandidate>,
+    /// Newer builds passed over on the way to it, newest first.
+    pub refused: Vec<RefusedBase>,
+}
+
+/// How a cached build's signature is checked before its bytes can reach a merge.
+///
+/// A base is read out of a cache, and every cache holds whatever was downloaded into it: a
+/// package fetched by URL and then refused for having no signature stays there, under the name
+/// its URL gave it. Its bytes then decide which side of a three-way merge wins, in a file root
+/// reads as configuration. So a base must carry a signature the keyring accepts, as a package
+/// must before it is installed.
+#[derive(Clone, Debug)]
+pub enum BaseCheck {
+    /// Check each candidate's `.sig` against `keyring`, under `policy`.
+    Signed {
+        /// The keyring, `GPGDir`.
+        keyring: Keyring,
+        /// What a signature must satisfy. Never optional: see [`BaseCheck::new`].
+        policy: Policy,
+    },
+    /// Check nothing, because the configuration checks no package signature (`SigLevel = Never`).
+    Unchecked,
+}
+
+impl BaseCheck {
+    /// The check `level`, the global `SigLevel`, asks of a package file, against the keyring at
+    /// `gpg_dir`.
+    ///
+    /// The keyring is opened only when `level` checks package signatures. `...Optional` is not
+    /// honoured: a base is optional itself, so a build with no signature is passed over, and
+    /// the merge falls back to a two-way view rather than to unchecked bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyringUnusable`] if a keyring is needed and cannot be opened.
+    pub fn new(level: SigLevel, gpg_dir: &Path) -> Result<Self> {
+        let policy = Policy { optional: false, ..Policy::for_package(level) };
+        if !policy.check {
+            return Ok(Self::Unchecked);
+        }
+        let keyring = Keyring::open(gpg_dir)
+            .map_err(|source| Error::KeyringUnusable { path: gpg_dir.to_path_buf(), source })?;
+        Ok(Self::Signed { keyring, policy })
+    }
+
+    /// Why `path` cannot be a base, or `None` when it can.
+    fn refusal(&self, path: &Path) -> Option<String> {
+        let Self::Signed { keyring, policy } = self else { return None };
+        match keyring.check(path, *policy) {
+            Ok(Verdict::Accepted { .. }) => None,
+            Ok(Verdict::Rejected(rejection)) => Some(rejection.to_string()),
+            Err(error) => Some(error.to_string()),
+        }
+    }
+}
+
 /// Bounds on the cache search and on one member's extraction.
 #[derive(Clone, Copy, Debug)]
 pub struct BaseLimits {
@@ -57,6 +129,11 @@ pub struct BaseLimits {
     pub max_cache_entries: usize,
     /// Largest member read into memory.
     pub max_member_bytes: u64,
+    /// Largest number of builds whose signature is checked in one search.
+    ///
+    /// A check hashes the whole package, and a cache that was never cleaned can hold dozens of
+    /// older builds, each refused for the same reason.
+    pub max_signature_checks: usize,
     /// What the archive walk itself is bounded by.
     pub package: PackageLimits,
 }
@@ -67,6 +144,7 @@ impl Default for BaseLimits {
             // A real cache holds a few thousand packages. This machine's holds 1872.
             max_cache_entries: 200_000,
             max_member_bytes: MAX_BACKUP_BYTES,
+            max_signature_checks: 8,
             package: PackageLimits::default(),
         }
     }
@@ -74,8 +152,9 @@ impl Default for BaseLimits {
 
 /// Picks the cached build of `package` a three-way merge should use as its ancestor.
 ///
-/// That is the newest build strictly older than `installed`. `None` means no such build is
-/// cached.
+/// That is the newest build strictly older than `installed` whose signature `check` accepts.
+/// A newer build that fails the check is passed over, and named in [`BaseSearch::refused`].
+/// No base means a two-way view.
 ///
 /// `directories` are searched in `CacheDir` order. Two directories holding the same version
 /// resolve to the first one, as [`crate::source::CacheDirSource`] resolves a package file.
@@ -83,8 +162,7 @@ impl Default for BaseLimits {
 ///
 /// A directory or a file another user could change is passed over too
 /// ([`crate::source::Distrust`]), and so is a directory with an ancestor another user could
-/// write ([`piko_db::fs_util::ensure_trusted_directory`]). No signature is checked on an ancestor, and its bytes become
-/// part of what a merge writes into a configuration file.
+/// write ([`piko_db::fs_util::ensure_trusted_directory`]).
 ///
 /// # Errors
 ///
@@ -96,8 +174,9 @@ pub fn find_base(
     package: &Name,
     installed: &FullVersion,
     limits: &BaseLimits,
-) -> Result<Option<BaseCandidate>> {
-    let mut best: Option<BaseCandidate> = None;
+    check: &BaseCheck,
+) -> Result<BaseSearch> {
+    let mut candidates: Vec<BaseCandidate> = Vec::new();
 
     for directory in directories {
         if piko_db::fs_util::ensure_trusted_directory(directory).is_err() {
@@ -139,18 +218,25 @@ pub fn find_base(
             {
                 continue;
             }
-            // A later directory only wins by being strictly newer, so the first directory
-            // keeps a version both hold.
-            let better = best
-                .as_ref()
-                .is_none_or(|current| file_name.version() > current.file_name.version());
-            if better {
-                best = Some(BaseCandidate { path: entry.path(), file_name });
-            }
+            candidates.push(BaseCandidate { path: entry.path(), file_name });
         }
     }
 
-    Ok(best)
+    // Newest first. The sort is stable, so of two directories holding one version, the first
+    // is tried first.
+    candidates.sort_by(|left, right| right.file_name.version().cmp(left.file_name.version()));
+
+    let mut search = BaseSearch::default();
+    for candidate in candidates.into_iter().take(limits.max_signature_checks) {
+        match check.refusal(&candidate.path) {
+            None => {
+                search.base = Some(candidate);
+                break;
+            }
+            Some(reason) => search.refused.push(RefusedBase { path: candidate.path, reason }),
+        }
+    }
+    Ok(search)
 }
 
 /// Reads one member of a package archive into memory.
@@ -277,9 +363,16 @@ mod tests {
     }
 
     fn base(dirs: &[PathBuf], package: &str, installed: &str) -> Option<String> {
-        find_base(dirs, &name(package), &version(installed), &BaseLimits::default())
-            .unwrap()
-            .map(|candidate| candidate.file_name.to_string())
+        find_base(
+            dirs,
+            &name(package),
+            &version(installed),
+            &BaseLimits::default(),
+            &BaseCheck::Unchecked,
+        )
+        .unwrap()
+        .base
+        .map(|candidate| candidate.file_name.to_string())
     }
 
     #[test]
@@ -387,9 +480,16 @@ mod tests {
         let second = cache(&["foo-1.0.0-1-x86_64.pkg.tar.zst"]);
         let dirs = vec![first.path().to_path_buf(), second.path().to_path_buf()];
 
-        let picked = find_base(&dirs, &name("foo"), &version("2.0.0-1"), &BaseLimits::default())
-            .unwrap()
-            .unwrap();
+        let picked = find_base(
+            &dirs,
+            &name("foo"),
+            &version("2.0.0-1"),
+            &BaseLimits::default(),
+            &BaseCheck::Unchecked,
+        )
+        .unwrap()
+        .base
+        .unwrap();
         assert!(picked.path.starts_with(first.path()), "{:?}", picked.path);
     }
 
@@ -409,10 +509,135 @@ mod tests {
     fn the_cache_bound_stops_the_walk() {
         let dir = cache(&["foo-1.0.0-1-x86_64.pkg.tar.zst"]);
         let limits = BaseLimits { max_cache_entries: 0, ..BaseLimits::default() };
-        let found =
-            find_base(&[dir.path().to_path_buf()], &name("foo"), &version("2.0-1"), &limits)
-                .unwrap();
-        assert!(found.is_none());
+        let found = find_base(
+            &[dir.path().to_path_buf()],
+            &name("foo"),
+            &version("2.0-1"),
+            &limits,
+            &BaseCheck::Unchecked,
+        )
+        .unwrap();
+        assert!(found.base.is_none());
+    }
+
+    /// A keyring holding one fresh, fully trusted signing key, or `None` without `gpg`.
+    fn signing_keyring() -> Option<tempfile::TempDir> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().ok()?;
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).ok()?;
+        let output = std::process::Command::new("gpg")
+            .arg("--homedir")
+            .arg(home.path())
+            .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+            .args(["--quick-generate-key", "piko test <test@example.invalid>", "ed25519"])
+            .args(["sign", "never"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            eprintln!("skipping: no test key: {}", String::from_utf8_lossy(&output.stderr));
+            return None;
+        }
+        Some(home)
+    }
+
+    /// Writes `file.sig`, a detached signature of `file` by the key in `home`.
+    fn sign(home: &Path, file: &Path) {
+        let status = std::process::Command::new("gpg")
+            .arg("--homedir")
+            .arg(home)
+            .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+            .arg("--output")
+            .arg(piko_sig::signature_path(file))
+            .arg("--detach-sign")
+            .arg(file)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// A build with no signature, or with one that does not verify, is never a base. The
+    /// newest build that verifies is, and the ones passed over are named, newest first.
+    #[test]
+    fn a_base_needs_a_signature_the_keyring_accepts() {
+        let Some(home) = signing_keyring() else { return };
+        let dir = cache(&[
+            "foo-1.0.0-1-x86_64.pkg.tar.zst",
+            "foo-1.5.0-1-x86_64.pkg.tar.zst",
+            "foo-1.8.0-1-x86_64.pkg.tar.zst",
+        ]);
+        sign(home.path(), &dir.path().join("foo-1.0.0-1-x86_64.pkg.tar.zst"));
+        // A signature over other bytes: the file was replaced after it was signed.
+        let replaced = dir.path().join("foo-1.8.0-1-x86_64.pkg.tar.zst");
+        sign(home.path(), &replaced);
+        std::fs::write(&replaced, b"other bytes").unwrap();
+
+        let check = BaseCheck::new(SigLevel::PACKAGE, home.path()).unwrap();
+        let search = find_base(
+            &[dir.path().to_path_buf()],
+            &name("foo"),
+            &version("2.0.0-1"),
+            &BaseLimits::default(),
+            &check,
+        )
+        .unwrap();
+
+        assert_eq!(
+            search.base.map(|candidate| candidate.file_name.to_string()).as_deref(),
+            Some("foo-1.0.0-1-x86_64.pkg.tar.zst")
+        );
+        let refused: Vec<_> =
+            search.refused.iter().map(|refused| refused.path.file_name().unwrap()).collect();
+        assert_eq!(refused, ["foo-1.8.0-1-x86_64.pkg.tar.zst", "foo-1.5.0-1-x86_64.pkg.tar.zst"]);
+    }
+
+    /// `PackageOptional` does not let an unsigned build through: a base is optional itself.
+    #[test]
+    fn an_optional_policy_still_refuses_an_unsigned_base() {
+        let Some(home) = signing_keyring() else { return };
+        let dir = cache(&["foo-1.0.0-1-x86_64.pkg.tar.zst"]);
+        let level = SigLevel::PACKAGE.union(SigLevel::PACKAGE_OPTIONAL);
+        let check = BaseCheck::new(level, home.path()).unwrap();
+        let search = find_base(
+            &[dir.path().to_path_buf()],
+            &name("foo"),
+            &version("2.0.0-1"),
+            &BaseLimits::default(),
+            &check,
+        )
+        .unwrap();
+        assert!(search.base.is_none(), "{search:?}");
+        assert_eq!(search.refused.len(), 1);
+    }
+
+    /// A level that checks no package signature needs no keyring at all.
+    #[test]
+    fn a_policy_that_checks_nothing_opens_no_keyring() {
+        let check = BaseCheck::new(SigLevel::DATABASE, Path::new("/nonexistent-keyring")).unwrap();
+        assert!(matches!(check, BaseCheck::Unchecked));
+    }
+
+    /// The signature checks are bounded: each one hashes a whole package.
+    #[test]
+    fn the_signature_checks_are_bounded() {
+        let Some(home) = signing_keyring() else { return };
+        let dir = cache(&[
+            "foo-1.0.0-1-x86_64.pkg.tar.zst",
+            "foo-1.1.0-1-x86_64.pkg.tar.zst",
+            "foo-1.2.0-1-x86_64.pkg.tar.zst",
+        ]);
+        sign(home.path(), &dir.path().join("foo-1.0.0-1-x86_64.pkg.tar.zst"));
+        let check = BaseCheck::new(SigLevel::PACKAGE, home.path()).unwrap();
+        let limits = BaseLimits { max_signature_checks: 2, ..BaseLimits::default() };
+        let search = find_base(
+            &[dir.path().to_path_buf()],
+            &name("foo"),
+            &version("2.0.0-1"),
+            &limits,
+            &check,
+        )
+        .unwrap();
+        assert!(search.base.is_none(), "{search:?}");
+        assert_eq!(search.refused.len(), 2);
     }
 
     /// The archive spells a payload path without a leading separator. Some producers write

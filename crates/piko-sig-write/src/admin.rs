@@ -927,13 +927,6 @@ fn create_keyring_dir(home: &Path) -> Result<bool> {
 mod tests {
     use super::*;
 
-    /// A `KeyringAdmin` whose master key is ed25519, not `init`'s real RSA-4096. This exercises
-    /// every real GPGME operation `init`/`lsign`/`set_owner_trust`/`disable`/`delete`/
-    /// `list_keys` drive, without RSA-4096's wall-clock cost. `init`'s own key generation is
-    /// covered separately, `#[ignore]`d, in `tests/key_real_system.rs`.
-    ///
-    /// `None` if GnuPG cannot be reached at all here, the same graceful skip
-    /// `piko-sig/tests/signed_database.rs` uses.
     /// `pacman-key`'s `check_keyring` (`pacman-key.sh.in:262`) refuses a keyring whose
     /// `pubring.gpg` or `trustdb.gpg` it cannot read. Without both, `archlinux-keyring`'s
     /// `.INSTALL` scriptlet takes its `pacman-key -l` guard as a no and populates nothing. A new
@@ -959,12 +952,16 @@ mod tests {
 
     /// The directory is shared with pacman, which needs it readable. A keyring only piko can
     /// open is one `pacman-key` refuses.
+    ///
+    /// `init` sets the mode before it opens GnuPG, so the mode is checked whether or not the
+    /// key generation that follows succeeds here. Only a directory `init` creates gets the
+    /// mode, so this is the one test here that pays for a real RSA-4096 key.
     #[test]
     fn a_keyring_piko_creates_is_readable_by_everyone() {
         let parent = tempfile::tempdir().unwrap();
         let home = parent.path().join("gnupg");
 
-        let Ok((_, _)) = KeyringAdmin::init(&home) else { return };
+        drop(KeyringAdmin::init(&home));
 
         let mode = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, KEYRING_DIR_MODE);
@@ -1023,6 +1020,13 @@ mod tests {
         assert!(!error.to_string().contains("would be"), "{error}");
     }
 
+    /// A `KeyringAdmin` whose master key is ed25519, not `init`'s real RSA-4096. This exercises
+    /// every real GPGME operation `init`/`lsign`/`set_owner_trust`/`disable`/`delete`/
+    /// `list_keys` drive, without RSA-4096's wall-clock cost. `init`'s own key generation is
+    /// covered separately, `#[ignore]`d, in `tests/key_real_system.rs`.
+    ///
+    /// `None` if GnuPG cannot be reached at all here, the same graceful skip
+    /// `piko-sig/tests/signed_database.rs` uses.
     fn fast_admin() -> Option<KeyringAdmin> {
         let home = tempfile::tempdir().ok()?;
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).ok()?;
@@ -1186,7 +1190,10 @@ mod tests {
     #[test]
     fn lsign_and_set_owner_trust_refuse_a_key_that_is_not_in_the_keyring() {
         let Some(admin) = fast_admin() else { return };
-        let err = admin.lsign("0".repeat(40).as_str()).unwrap_err();
+        let absent = "0".repeat(40);
+        let err = admin.lsign(&absent).unwrap_err();
+        assert!(matches!(err, Error::KeyNotFound { .. }), "{err:?}");
+        let err = admin.set_owner_trust(&absent, OwnerTrust::Full).unwrap_err();
         assert!(matches!(err, Error::KeyNotFound { .. }), "{err:?}");
     }
 

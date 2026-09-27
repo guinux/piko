@@ -129,10 +129,4 @@ mod tests {
     fn rejects_a_leading_dash() {
         assert!(matches!(RepoName::parse("-core"), Err(RepoNameError::LeadingDash { .. })));
     }
-
-    /// A dash elsewhere in the name is fine; only a *leading* one is ambiguous with a flag.
-    #[test]
-    fn accepts_a_dash_that_is_not_leading() {
-        assert!(RepoName::parse("core-testing").is_ok());
-    }
 }

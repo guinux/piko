@@ -53,21 +53,19 @@ fn piko_agrees_with_the_hashes_pacman_recorded() {
     };
     let db = LocalDatabase::open(LOCAL_DB).unwrap();
 
-    let (mut matched, mut edited, mut unreadable, mut absent, mut null_hash) =
+    let (mut matched, mut edited, mut unreadable, mut absent, mut unparsed) =
         (0_usize, 0_usize, 0_usize, 0_usize, 0_usize);
     let mut edited_examples = Vec::new();
 
     for package in db.iter() {
-        let Ok(backups) = package.backups() else { continue };
+        // A `%BACKUP%` entry with a literal `(null)` hash, written when pacman could not hash
+        // the file, fails the typed parse. Such a package has nothing to compare against.
+        let Ok(backups) = package.backups() else {
+            unparsed += 1;
+            continue;
+        };
         for entry in backups {
             let recorded = entry.md5.to_string();
-            // pacman writes a literal `(null)` when it could not hash the file. Those are
-            // the entries that motivated `piko_db_write::Record`. There is nothing to
-            // compare against.
-            if recorded == "(null)" {
-                null_hash += 1;
-                continue;
-            }
 
             let path = entry.path.inner();
             let Ok(resolved) = root.resolve_parent(path) else {
@@ -100,7 +98,8 @@ fn piko_agrees_with_the_hashes_pacman_recorded() {
 
     println!(
         "backup files: {matched} match the recorded hash, {edited} differ (user-edited), \
-         {absent} deleted, {unreadable} unreadable, {null_hash} recorded as (null)"
+         {absent} deleted, {unreadable} unreadable; {unparsed} packages with an unparsable \
+         %BACKUP%"
     );
     for example in &edited_examples {
         println!("  differs: {example}");

@@ -520,6 +520,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                     mergeprog: mergeprog.clone(),
                     threeway: *threeway,
                     selection,
+                    signing: context::signing_policy_if_readable(cli, &config),
                 },
                 &mut out,
             )

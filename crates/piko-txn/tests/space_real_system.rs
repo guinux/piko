@@ -62,28 +62,11 @@ fn every_mount_the_kernel_reports_is_in_the_table() {
     let kernel = kernel_mount_dirs();
     assert_eq!(parsed, kernel, "the parse dropped or invented a mount point");
     // Deduplication is the only reason the two counts can differ, and `kernel` is a set.
+    // A directory can be mounted twice (`/boot`: an autofs placeholder, then the vfat
+    // filesystem that shadows it). libalpm keeps both records, but its stable sort makes the
+    // scan always answer with the first, so dropping the second is the same answer.
     assert_eq!(table.count(), kernel.len(), "a duplicate mount directory survived");
     println!("{} mount points", table.count());
-}
-
-#[test]
-#[ignore = "requires a real ALPM system"]
-fn a_duplicated_mount_directory_appears_once() {
-    // This machine mounts `/boot` twice: an autofs placeholder, then the vfat filesystem
-    // that shadows it. libalpm keeps both records. Its stable sort makes the scan always
-    // answer with the first, so the second is never checked. Dropping it is the same answer.
-    let raw = std::fs::read_to_string("/proc/self/mounts").unwrap();
-    let mut seen: Vec<&str> =
-        raw.lines().filter_map(|line| line.split_whitespace().nth(1)).collect();
-    let total = seen.len();
-    seen.sort_unstable();
-    seen.dedup();
-    if total == seen.len() {
-        println!("no duplicated mount directory on this machine; nothing to prove");
-        return;
-    }
-    println!("{} raw mount records, {} distinct directories", total, seen.len());
-    assert_eq!(table().count(), seen.len());
 }
 
 #[test]

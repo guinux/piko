@@ -362,9 +362,25 @@ pub fn helper_main(
     // `exec` is safe and stable. It returns only on failure.
     let error = {
         use std::os::unix::process::CommandExt as _;
-        std::process::Command::new(program).args(args).exec()
+        std::process::Command::new(self::executable(program)).args(args).exec()
     };
     Err(format!("could not run {}: {error}", Path::new(program).display()))
+}
+
+/// The path the helper executes for `program`, as `execv` would find it.
+///
+/// libalpm runs a hook's `Exec` and the scriptlet shell with `execv` (`util.c:698`), which never
+/// searches `PATH`: a name without a `/` is a file in the working directory, which is `/` here.
+/// `Command` searches the `PATH` it inherited from whoever started piko for such a name. So a
+/// bare name is spelled as a path relative to the working directory, and runs what libalpm
+/// runs.
+fn executable(program: &OsStr) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt as _;
+    if program.as_bytes().contains(&b'/') {
+        PathBuf::from(program)
+    } else {
+        Path::new(".").join(program)
+    }
 }
 
 /// Whether `argument` is the hidden helper marker.
@@ -418,6 +434,15 @@ mod tests {
         let outcome =
             Outcome { status: Status::Signalled(9), output: Vec::new(), truncated: false };
         assert_eq!(outcome.describe(), "was killed by signal 9");
+    }
+
+    /// A bare program name is found where `execv` finds it, in the working directory, and never
+    /// through the inherited `PATH`. A name with a `/` is used as it is.
+    #[test]
+    fn a_bare_program_name_is_not_searched_in_path() {
+        assert_eq!(executable(OsStr::new("locale-gen")), Path::new("./locale-gen"));
+        assert_eq!(executable(OsStr::new("/usr/bin/true")), Path::new("/usr/bin/true"));
+        assert_eq!(executable(OsStr::new("usr/bin/true")), Path::new("usr/bin/true"));
     }
 
     /// The helper refuses a malformed invocation rather than doing something arbitrary.

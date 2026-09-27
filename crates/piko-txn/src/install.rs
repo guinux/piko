@@ -355,9 +355,13 @@ fn capture_metadata(member: &Member, contents: &mut dyn std::io::Read, into: &mu
     let name = member.path.to_string_lossy().into_owned();
     let mut buffer = Vec::new();
     // A metadata member too large to buffer is dropped, not treated as a failed install. It
-    // is not payload, and the entry is still usable without, say, a `.CHANGELOG`.
-    let mut limited = contents.take(MAX_METADATA_BYTES as u64);
-    if std::io::Read::read_to_end(&mut limited, &mut buffer).is_ok() {
+    // is not payload, and the entry is still usable without, say, a `.CHANGELOG`. It is never
+    // kept cut short: the entry would then hold bytes the package did not ship. One byte past
+    // the bound is what tells the two apart.
+    let mut limited = contents.take((MAX_METADATA_BYTES as u64).saturating_add(1));
+    if std::io::Read::read_to_end(&mut limited, &mut buffer).is_ok()
+        && buffer.len() <= MAX_METADATA_BYTES
+    {
         into.metadata.insert(name, MetadataMember { contents: buffer, mtime: member.mtime });
     }
 }
@@ -376,17 +380,22 @@ fn probe(root: &RootDir, path: &Path) -> Result<Existing> {
 
         return Ok(Existing::Absent);
     };
+    Ok(existing_in(&resolved))
+}
+
+/// What is at `resolved`'s name, from an `lstat` that follows nothing.
+pub(crate) fn existing_in(resolved: &crate::rootfs::Resolved) -> Existing {
     match rustix::fs::statat(resolved.dir(), resolved.name(), rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
     {
-        Ok(stat) => Ok(
+        Ok(stat) => {
             if rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory
             {
                 Existing::Directory
             } else {
                 Existing::Other
-            },
-        ),
-        Err(_) => Ok(Existing::Absent),
+            }
+        }
+        Err(_) => Existing::Absent,
     }
 }
 
@@ -467,6 +476,20 @@ mod tests {
         install(pkg, root, filters, Ownership::Inherit, &PackageLimits::default()).unwrap()
     }
 
+    /// The probe is an `lstat`. A symbolic link to a directory is `Existing::Other`, so a file
+    /// replacing it is an ordinary overwrite. A `stat` would call it a directory, and the file
+    /// would be refused as "file replacing directory".
+    #[test]
+    fn a_symlink_to_a_directory_is_probed_as_a_file() {
+        let (dir, root) = root();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::os::unix::fs::symlink("target", dir.path().join("link")).unwrap();
+
+        assert_eq!(probe_existing(&root, Path::new("target")), Existing::Directory);
+        assert_eq!(probe_existing(&root, Path::new("link")), Existing::Other);
+        assert_eq!(probe_existing(&root, Path::new("absent")), Existing::Absent);
+    }
+
     #[test]
     fn installs_a_payload_and_records_what_it_owns() {
         let (_keep, pkg) = package(|b| {
@@ -485,10 +508,6 @@ mod tests {
         assert!(!dir.path().join(".PKGINFO").exists());
     }
 
-    /// A captured member carries the archive's time, not the time it was read.
-    ///
-    /// The bytes alone are not enough. A member is copied into the database entry, and the
-    /// `ALPM-MTREE` data that describes it records a time. See [`MetadataMember`].
     /// The extended attribute an archive records reaches the installed file.
     #[test]
     fn installs_a_file_with_the_extended_attribute_its_archive_records() {
@@ -514,6 +533,10 @@ mod tests {
         assert!(result.xattr_problems.is_empty(), "{:?}", result.xattr_problems);
     }
 
+    /// A captured member carries the archive's time, not the time it was read.
+    ///
+    /// The bytes alone are not enough. A member is copied into the database entry, and the
+    /// `ALPM-MTREE` data that describes it records a time. See [`MetadataMember`].
     #[test]
     fn a_captured_metadata_member_carries_its_archive_time() {
         let (_keep, pkg) = package(|b| {

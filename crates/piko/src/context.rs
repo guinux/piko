@@ -133,6 +133,15 @@ pub fn signing_policy(parsed: &PacmanConfig) -> SigningPolicy {
     }
 }
 
+/// [`signing_policy`], when the configuration can be read.
+///
+/// For a command whose signature check guards something optional rather than the command
+/// itself: `piko merge` checks a three-way base with it, and without a configuration offers no
+/// base rather than an unchecked one.
+pub fn signing_policy_if_readable(cli: &Cli, config: &ConfigCache) -> Option<SigningPolicy> {
+    config.get(cli).ok().map(signing_policy)
+}
+
 /// The directories hooks are read from, in increasing priority.
 ///
 /// `--hookdir` replaces the whole list, matching pacman. Otherwise the list is the system

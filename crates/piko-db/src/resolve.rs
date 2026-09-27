@@ -690,15 +690,6 @@ Foobar McFooface <foobar@mcfooface.org>
     }
 
     #[test]
-    fn without_with_ignores_nothing_is_ignored() {
-        let fixture = RepoFixture::new();
-        let core = repo_db(&fixture, "core.db", &[("foo", "1.0.0-1")]);
-        let repos = SyncRepos::new([SyncRepo::new(DbUsage::ALL, &core)]);
-
-        assert!(repos.find_literal_satisfier(&dep("foo")).is_some());
-    }
-
-    #[test]
     fn a_package_matching_ignore_pkg_is_skipped_in_every_repo_that_carries_it() {
         // Unlike Usage, IgnorePkg matches by name alone. It is global, not per repository. So a
         // name ignored once is ignored everywhere it appears, not just in the earliest listing.
@@ -915,15 +906,6 @@ Foobar McFooface <foobar@mcfooface.org>
             repos.find_literal_satisfier(&dep("foo")).is_some(),
             "an invalid glob must not accidentally ignore an unrelated exact name"
         );
-    }
-
-    #[test]
-    fn a_bare_name_still_matches_any_version() {
-        let fixture = RepoFixture::new();
-        let core = repo_db(&fixture, "core.db", &[("foo", "1.0.0-1")]);
-        let repos = SyncRepos::new([SyncRepo::new(DbUsage::ALL, &core)]);
-
-        assert!(repos.find_literal_satisfier(&dep("foo")).is_some());
     }
 
     #[test]

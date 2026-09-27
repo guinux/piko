@@ -152,14 +152,17 @@ mod tests {
         );
     }
 
-    /// Two entries where the later one would override the earlier under libalpm's
+    /// Two entries where the later one overrides the earlier under libalpm's
     /// backwards-with-inversion scan. pacman's forward `alpm_list_find` has no such rule, so
-    /// both still hold.
+    /// the earlier entry still holds.
     #[test]
     fn a_later_entry_does_not_override_an_earlier_one() {
-        let held = patterns(&["glibc", "pacman"]);
+        let held = patterns(&["glibc", "!glibc"]);
         assert!(is_held("glibc", &held));
-        assert!(is_held("pacman", &held));
+        assert!(
+            !piko_db::resolve::matches_any(&held, "glibc"),
+            "under libalpm's scan the later `!glibc` wins, which is the rule `is_held` refuses"
+        );
     }
 
     /// Same fallback `matches_any` takes, and for the same reason. `fnmatch` has no invalid

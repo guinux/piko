@@ -177,18 +177,11 @@ mod tests {
     #[test]
     fn concurrent_readers_share_one_value() {
         let lazy = Lazy::new();
-        let calls = AtomicUsize::new(0);
-
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..8)
                 .map(|_| {
                     scope.spawn(|| {
-                        let value = lazy
-                            .get_or_load(|| {
-                                calls.fetch_add(1, Ordering::SeqCst);
-                                Ok(vec![1_u8, 2, 3])
-                            })
-                            .unwrap();
+                        let value = lazy.get_or_load(|| Ok(vec![1_u8, 2, 3])).unwrap();
                         // A raw pointer is not `Send`; compare addresses instead.
                         std::ptr::from_ref(value) as usize
                     })
@@ -198,16 +191,14 @@ mod tests {
             let pointers: Vec<_> =
                 handles.into_iter().map(|handle| handle.join().unwrap()).collect();
 
+            // `get_or_init` may run the initializer on more than one thread under contention.
+            // Exactly one result is ever published, so every thread sees the same address.
             let first = pointers.first().copied().unwrap();
             assert!(
                 pointers.iter().all(|&pointer| pointer == first),
                 "every thread must observe the same cached value"
             );
         });
-
-        // `get_or_init` may run the initializer on more than one thread under contention.
-        // Exactly one result is ever published.
-        assert!(calls.load(Ordering::SeqCst) >= 1);
     }
 
     /// `Debug` must not trigger a load, or debugging a database would read all of it.

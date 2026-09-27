@@ -359,7 +359,6 @@ mod tests {
         assert_eq!(url.as_deref(), Some("https://example.org/"));
         assert!(text.contains("%URL%\n\n"), "the header stays, the value goes: {text:?}");
         assert!(!text.contains("example.org"));
-        assert!(parse(&text).eq(&parse(&text)), "the blanked text still parses");
     }
 
     /// The section is mandatory for `alpm-db`, so blanking it must not remove it. This is the

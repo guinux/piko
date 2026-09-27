@@ -192,10 +192,8 @@ fn live_db_files_skew_is_handled_without_ever_serving_the_wrong_build() {
 
     for package in &core {
         match package.file_list() {
-            Ok(paths) => {
-                assert!(paths.len() > 0 || true, "an empty file list is still a valid answer");
-                ok += 1;
-            }
+            // An empty file list is still a valid answer.
+            Ok(_) => ok += 1,
             Err(error) => match &*error {
                 Error::FilesVersionSkew { db_version, files_version, .. } => {
                     assert_ne!(db_version.to_string(), files_version.to_string());
@@ -305,34 +303,38 @@ fn a_version_constraint_is_honored_against_a_real_package() {
     );
 }
 
-/// A soname `%PROVIDES%` entry must resolve via its own exact string, if this machine's
-/// `core`/`extra` happen to carry one. That is proof against real data, not just fixtures.
+/// Every soname `%PROVIDES%` entry in `core` and `extra` must resolve via its own exact
+/// string. That is proof against real data, not just fixtures: the provides index must be
+/// keyed no finer than `depcmp` compares, or an identical-text soname fails to satisfy itself.
 ///
-/// This test skips rather than asserting a fact about repositories piko does not control.
-/// Neither `core` nor `extra` carries a soname `%PROVIDES%` entry on this mirror. Arch's
-/// `autodeps` soname feature, from pacman 6.1, is not yet in wide use there.
+/// This test skips rather than asserting a fact about repositories piko does not control, if
+/// neither repository carries a soname `%PROVIDES%` entry.
 #[test]
 #[ignore = "requires a real ALPM sync database"]
 fn a_real_soname_provide_resolves_by_its_own_exact_string() {
     let Some(core) = open_db_only("core") else { return };
     let Some(extra) = open_db_only("extra") else { return };
 
-    let Some(soname) = core
+    let sonames: Vec<_> = core
         .iter()
         .chain(extra.iter())
         .flat_map(RepoPackage::provides)
-        .find(|provided| !matches!(provided, RelationOrSoname::Relation(_)))
-    else {
+        .filter(|provided| !matches!(provided, RelationOrSoname::Relation(_)))
+        .collect();
+    if sonames.is_empty() {
         eprintln!("skipping: no soname %PROVIDES% entry found in core or extra");
         return;
-    };
+    }
 
     let repos =
         SyncRepos::new([SyncRepo::new(DbUsage::ALL, &core), SyncRepo::new(DbUsage::ALL, &extra)]);
-    assert!(
-        !repos.find_satisfiers(soname).is_empty(),
-        "{soname} is a real %PROVIDES% entry but find_satisfiers did not resolve it"
-    );
+    for soname in &sonames {
+        assert!(
+            !repos.find_satisfiers(soname).is_empty(),
+            "{soname} is a real %PROVIDES% entry but find_satisfiers did not resolve it"
+        );
+    }
+    println!("{} soname %PROVIDES% entries resolved", sonames.len());
 }
 
 /// A real named `%PROVIDES%` entry (e.g. a package providing a virtual package like `cron`

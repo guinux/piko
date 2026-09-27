@@ -299,14 +299,6 @@ mod tests {
         );
     }
 
-    /// A symlink is `Existing::Other`, so replacing one is case 3 rather than case 5. If
-    /// `lstat` were a `stat`, a symlink to a directory would be refused instead. That is why
-    /// the distinction is spelled out on `Existing`.
-    #[test]
-    fn a_symlink_to_a_directory_is_overwritten_not_refused() {
-        assert_eq!(decide(&context(EntryKind::Other, Existing::Other)), Disposition::Extract);
-    }
-
     #[test]
     fn no_extract_wins_over_every_case() {
         for existing in [Existing::Absent, Existing::Directory, Existing::Other] {

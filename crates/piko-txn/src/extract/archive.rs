@@ -17,6 +17,10 @@
 //! kinds only, so a fifth would reach the disk as something the archive did not say it was.
 //! No Arch package carries one.
 //!
+//! A member's path, and a hard link's target, must also have one spelling:
+//! [`crate::rootfs::components`] refuses `.`, `..`, a repeated separator and a leading `/`. Every
+//! reader of the walk then sees the path extraction writes.
+//!
 //! Nothing here writes. [`super::decision`] makes the decisions; the caller writes, through
 //! [`crate::rootfs`].
 
@@ -226,6 +230,9 @@ impl Member {
 /// - [`Error::PackageLimitExceeded`] if a bound is exceeded.
 /// - [`Error::UnsupportedMemberType`] if a member is not a regular file, a directory or a
 ///   link.
+/// - [`Error::UnsafeArchivePath`] if a member's path, or a hard link's target, is not a
+///   canonical relative path.
+/// - [`Error::UnusableMemberOwner`] if a member's uid or gid is not one the kernel can set.
 /// - Whatever `on_member` returns.
 pub fn walk(
     path: &Path,
@@ -262,16 +269,19 @@ pub fn walk_until(
     limits: &PackageLimits,
     mut on_member: impl FnMut(&Member, &mut dyn Read) -> Result<Flow>,
 ) -> Result<()> {
+    // The audited door: `O_NONBLOCK`, so a FIFO named on the command line cannot hang the read,
+    // and an `fstat` that refuses anything but a regular file.
     let mut file =
-        std::fs::File::open(path).map_err(|source| Error::io(path, IoAction::Open, source))?;
+        piko_db::fs_util::open_following_symlinks(path).map_err(|error| match error {
+            piko_db::Error::Io { source, .. } => Error::io(path, IoAction::Open, source),
+            piko_db::Error::NotARegularFile { .. } => Error::UnusableSource {
+                path: path.to_path_buf(),
+                reason: "not a regular file".to_owned(),
+            },
+            other => Error::UnusableSource { path: path.to_path_buf(), reason: other.to_string() },
+        })?;
 
     let metadata = file.metadata().map_err(|source| Error::io(path, IoAction::Metadata, source))?;
-    if !metadata.is_file() {
-        return Err(Error::UnusableSource {
-            path: path.to_path_buf(),
-            reason: "not a regular file".to_owned(),
-        });
-    }
     if metadata.len() > limits.compressed_bytes {
         return Err(Error::PackageLimitExceeded {
             path: path.to_path_buf(),
@@ -321,6 +331,17 @@ pub fn walk_until(
                 kind,
             });
         }
+        // One spelling per path, for every reader of this walk. Conflict detection, `%FILES%`
+        // and the hook triggers read the path as a string, and extraction resolves it through
+        // `rootfs`. A path that is not canonical would be one file to the second and another
+        // to the first. A hard link's target is a path inside the root too.
+        crate::rootfs::components(&member.path)?;
+        if let Some(Link { kind: LinkKind::Hard, target }) = &member.link {
+            crate::rootfs::components(target)?;
+        }
+        // Refused here rather than narrowed at extraction, so the package is refused before
+        // anything of it is written.
+        crate::extract::apply::owner_ids(&member)?;
         member.xattrs = match read_xattrs(&mut entry, limits).map_err(classify)? {
             Ok(xattrs) => xattrs,
             Err((limit, max)) => {
@@ -624,6 +645,34 @@ pub(crate) mod fixture {
         header.set_cksum();
         builder.append_data(&mut header, "PaxHeader", data.as_slice()).unwrap();
     }
+
+    /// Appends a member whose name, and link target if any, is written into the header byte
+    /// for byte.
+    ///
+    /// `Builder::append_data` normalises the name it is given, so `usr/./bin/ls` would arrive
+    /// as `usr/bin/ls`. A test of a spelling the reader must refuse has to bypass that.
+    pub(crate) fn raw(
+        builder: &mut tar::Builder<Vec<u8>>,
+        name: &str,
+        entry_type: tar::EntryType,
+        link: Option<&str>,
+        contents: &[u8],
+    ) {
+        let mut header = tar::Header::new_gnu();
+        let gnu = header.as_gnu_mut().unwrap();
+        gnu.name.get_mut(..name.len()).unwrap().copy_from_slice(name.as_bytes());
+        if let Some(link) = link {
+            gnu.linkname.get_mut(..link.len()).unwrap().copy_from_slice(link.as_bytes());
+        }
+        header.set_entry_type(entry_type);
+        header.set_mode(if entry_type.is_dir() { 0o755 } else { 0o644 });
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_size(contents.len() as u64);
+        header.set_cksum();
+        builder.append(&header, contents).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -827,6 +876,85 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    /// A package file named on the command line is read here first, by `file_target::load`. A
+    /// FIFO in its place is refused, rather than blocking the open until a writer appears.
+    #[test]
+    fn refuses_a_fifo_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("foo-1-1-any.pkg.tar.zst");
+        // `mkfifo(3)` is `unsafe`, which this workspace forbids, so the utility makes it.
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        if !made.is_ok_and(|status| status.success()) {
+            eprintln!("skipping: mkfifo is unavailable");
+            return;
+        }
+
+        let err = walk(&path, &PackageLimits::default(), |_, _| Ok(())).unwrap_err();
+        assert!(matches!(err, Error::UnusableSource { .. }), "got {err:?}");
+    }
+
+    /// A member path with a second spelling is refused before any caller sees it. Extraction
+    /// would write `usr/bin/ls` while conflict detection and `%FILES%` compare the string, so
+    /// another package's file could be taken over without a conflict.
+    #[test]
+    fn refuses_a_member_path_that_is_not_canonical() {
+        for name in ["usr/./bin/ls", "usr//bin/ls", "usr/bin/./ls", "usr/bin/ls/."] {
+            let path = tarball(|builder| {
+                fixture::raw(builder, name, tar::EntryType::Regular, None, b"x");
+            });
+            let err = walk(&path, &PackageLimits::default(), |_, _| Ok(())).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::UnsafeArchivePath {
+                        reason: crate::rootfs::UnsafePath::CurrentDirectory,
+                        ..
+                    }
+                ),
+                "{name:?}: got {err:?}"
+            );
+        }
+    }
+
+    /// An owner the kernel cannot set refuses the package. Narrowed, a uid past 32 bits would
+    /// have become root, and `u32::MAX` is `chown`'s "leave unchanged".
+    #[test]
+    fn refuses_an_owner_the_kernel_cannot_set() {
+        for (uid, gid) in [(1_u64 << 32, 0), (0, 1 << 40), (u64::from(u32::MAX), 0)] {
+            let path = tarball(|builder| {
+                let mut header = header(0o644);
+                header.set_uid(uid);
+                header.set_gid(gid);
+                header.set_size(1);
+                header.set_cksum();
+                builder.append_data(&mut header, "usr/bin/foo", &b"x"[..]).unwrap();
+            });
+            let err = walk(&path, &PackageLimits::default(), |_, _| Ok(())).unwrap_err();
+            assert!(matches!(err, Error::UnusableMemberOwner { .. }), "{uid}:{gid}: got {err:?}");
+        }
+    }
+
+    /// A hard link's target names a file inside the root, so it gets the same rule.
+    #[test]
+    fn refuses_a_hard_link_target_that_is_not_canonical() {
+        let path = tarball(|builder| {
+            fixture::raw(builder, "usr/bin/a", tar::EntryType::Regular, None, b"x");
+            fixture::raw(builder, "usr/bin/b", tar::EntryType::Link, Some("usr//bin/a"), b"");
+        });
+        let err = walk(&path, &PackageLimits::default(), |_, _| Ok(())).unwrap_err();
+        assert!(matches!(err, Error::UnsafeArchivePath { .. }), "got {err:?}");
+    }
+
+    /// The directory spelling tar uses, one trailing separator, stays accepted.
+    #[test]
+    fn accepts_a_directory_spelled_with_its_trailing_separator() {
+        let path = tarball(|builder| {
+            fixture::raw(builder, "usr/bin/", tar::EntryType::Directory, None, b"");
+        });
+        let members = collect(&path);
+        assert_eq!(members.first().map(|(member, _)| member.path.clone()), Some("usr/bin/".into()));
     }
 
     #[test]

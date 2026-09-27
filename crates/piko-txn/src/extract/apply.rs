@@ -110,8 +110,9 @@ pub enum XattrRefusal {
 
 impl std::fmt::Display for XattrProblem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = self.name.to_string_lossy();
-        let path = self.path.display();
+        // Both come from the archive, and this line is printed on a terminal.
+        let name = piko_db::printable(&self.name.to_string_lossy());
+        let path = piko_db::printable_path(&self.path);
         match &self.reason {
             XattrRefusal::Namespace => {
                 write!(f, "{path}: extended attribute {name} is not restored (namespace refused)")
@@ -120,6 +121,7 @@ impl std::fmt::Display for XattrProblem {
                 write!(f, "{path}: extended attribute {name} is not set on a symbolic link")
             }
             XattrRefusal::Failed(error) => {
+                let error = piko_db::printable(error);
                 write!(f, "{path}: could not set extended attribute {name}: {error}")
             }
         }
@@ -163,6 +165,10 @@ pub fn apply(
     ownership: Ownership,
     xattrs: &mut Vec<XattrProblem>,
 ) -> Result<Applied> {
+    // Before anything is written, so a refused owner leaves no file behind.
+    if ownership == Ownership::FromArchive {
+        owner_ids(member)?;
+    }
     match disposition {
         Disposition::Skip(_) => Ok(Applied::Skipped),
         Disposition::Refuse(reason) => {
@@ -282,27 +288,45 @@ fn write_file(
 ) -> Result<()> {
     remove_existing(resolved, name)?;
 
-    let mode = Mode::from_raw_mode(member.mode & 0o7777);
+    // Created private, and given its own mode only once its contents, owner and attributes are
+    // final. Created at the archive's mode, a setuid binary would sit executable and setuid,
+    // under the extracting user's id, while its contents were still being written. libarchive
+    // creates restrictively and sets the mode last for the same reason.
     let fd = rustix::fs::openat(
         resolved.dir(),
         name,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        mode,
+        Mode::from_raw_mode(0o600),
     )
     .map_err(|source| io(name, IoAction::Create, source))?;
 
     let mut file = std::fs::File::from(fd);
     copy(contents, &mut file, name)?;
+    set_metadata_fd(&file, name, member, ownership, xattrs)
+}
 
-    // Ownership is applied first, then the mode. This order is load-bearing — see the module
-    // note above.
-    apply_ownership_fd(&file, member, ownership, name)?;
-    // The process umask masks the mode passed to `openat`, so this sets the mode again.
-    rustix::fs::fchmod(&file, mode).map_err(|source| io(name, IoAction::Metadata, source))?;
-    // After the owner and the mode, which is the order the module note explains.
-    set_xattrs(&file, member, xattrs);
-    set_times(resolved, name, member)?;
-    Ok(())
+/// Applies `member`'s owner, mode, extended attributes and times to the open object `fd`.
+///
+/// Through the descriptor, never through the name. A name can be swapped for a symbolic link
+/// between the create and these calls by anyone who can write the directory, and `chmod` on a
+/// name follows a link: root would then give the archive's mode to whatever the link points at.
+///
+/// Ownership is applied first, then the mode. This order is load-bearing — see the module
+/// note above. The attributes come after both, and the times last.
+fn set_metadata_fd(
+    fd: &impl AsFd,
+    name: &std::ffi::OsStr,
+    member: &Member,
+    ownership: Ownership,
+    xattrs: &mut Vec<XattrProblem>,
+) -> Result<()> {
+    apply_ownership_fd(fd, member, ownership, name)?;
+    // The process umask masks the mode passed to `openat` or `mkdirat`, so this sets it again.
+    let mode = Mode::from_raw_mode(member.mode & 0o7777);
+    rustix::fs::fchmod(fd, mode).map_err(|source| io(name, IoAction::Metadata, source))?;
+    set_xattrs(fd, member, xattrs);
+    rustix::fs::futimens(fd, &timestamps(member))
+        .map_err(|source| io(name, IoAction::Metadata, source))
 }
 
 /// Creates a directory, or leaves an existing one alone.
@@ -310,6 +334,15 @@ fn write_file(
 /// An existing directory keeps its mode. libalpm warns when the modes differ but changes
 /// nothing (`add.c:258`), because the directory may be shared with another package or
 /// adjusted deliberately.
+///
+/// The new directory is opened `O_NOFOLLOW | O_DIRECTORY` straight after the create, and its
+/// metadata is set through that descriptor. A user who can write the parent can replace the
+/// directory with a symbolic link in between. The open then fails rather than reaching the
+/// link's target.
+///
+/// A directory is exempt from the setgid-clearing rule the module note describes. Measured:
+/// `chown_common` sets `ATTR_KILL_SUID` only for `!S_ISDIR`. Ownership still comes before the
+/// mode, so a setgid directory does not depend on that exemption.
 fn write_directory(
     resolved: &Resolved,
     name: &std::ffi::OsStr,
@@ -324,26 +357,14 @@ fn write_directory(
         Err(source) => return Err(io(name, IoAction::CreateDir, source)),
     }
 
-    // Ownership is applied before the mode, as for a file. A directory is actually exempt
-    // from the setgid-clearing rule. Measured: `chown_common` sets `ATTR_KILL_SUID` only for
-    // `!S_ISDIR`. So this order changes nothing today. It keeps the two functions from
-    // drifting apart, and keeps a setgid directory from depending on that exemption.
-    apply_ownership_at(resolved, name, member, ownership)?;
-    // As for files, `mkdirat`'s mode is umask-masked.
-    rustix::fs::chmodat(resolved.dir(), name, mode, AtFlags::empty())
-        .map_err(|source| io(name, IoAction::Metadata, source))?;
-    if !member.xattrs.is_empty() {
-        let fd = rustix::fs::openat(
-            resolved.dir(),
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|source| io(name, IoAction::Open, source))?;
-        set_xattrs(&fd, member, xattrs);
-    }
-    set_times(resolved, name, member)?;
-    Ok(())
+    let fd = rustix::fs::openat(
+        resolved.dir(),
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|source| io(name, IoAction::Open, source))?;
+    set_metadata_fd(&fd, name, member, ownership, xattrs)
 }
 
 /// Creates a symlink, replacing whatever is there.
@@ -399,7 +420,7 @@ fn apply_ownership_fd(
     if ownership == Ownership::Inherit {
         return Ok(());
     }
-    let (uid, gid) = ids(member);
+    let (uid, gid) = owner_ids(member)?;
     rustix::fs::fchown(file, Some(uid), Some(gid))
         .map_err(|source| io(name, IoAction::Chown, source))
 }
@@ -414,16 +435,30 @@ fn apply_ownership_at(
     if ownership == Ownership::Inherit {
         return Ok(());
     }
-    let (uid, gid) = ids(member);
+    let (uid, gid) = owner_ids(member)?;
     rustix::fs::chownat(resolved.dir(), name, Some(uid), Some(gid), AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|source| io(name, IoAction::Chown, source))
 }
 
-/// The archive's uid and gid, narrowed to what the kernel accepts.
-fn ids(member: &Member) -> (Uid, Gid) {
-    let uid = u32::try_from(member.uid).unwrap_or(0);
-    let gid = u32::try_from(member.gid).unwrap_or(0);
-    (Uid::from_raw(uid), Gid::from_raw(gid))
+/// The archive's uid and gid, as ids the kernel accepts.
+///
+/// `archive::walk` refuses a member this refuses, so extraction never meets one. The check is
+/// repeated here because [`apply`] is public and takes any [`Member`].
+///
+/// # Errors
+///
+/// [`Error::UnusableMemberOwner`] if either id does not fit 32 bits, or is `u32::MAX`, which
+/// `chown` reads as "leave unchanged".
+pub(crate) fn owner_ids(member: &Member) -> Result<(Uid, Gid)> {
+    let usable = |id: u64| u32::try_from(id).ok().filter(|id| *id != u32::MAX);
+    match (usable(member.uid), usable(member.gid)) {
+        (Some(uid), Some(gid)) => Ok((Uid::from_raw(uid), Gid::from_raw(gid))),
+        _ => Err(Error::UnusableMemberOwner {
+            member: member.path.clone(),
+            uid: member.uid,
+            gid: member.gid,
+        }),
+    }
 }
 
 /// Applies the archive's modification time, without following a symlink.
@@ -432,12 +467,15 @@ fn ids(member: &Member) -> (Uid, Gid) {
 /// member's `mtime`. tar records no access time, and leaving atime alone would let the
 /// extraction itself define it.
 fn set_times(resolved: &Resolved, name: &std::ffi::OsStr, member: &Member) -> Result<()> {
+    rustix::fs::utimensat(resolved.dir(), name, &timestamps(member), AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|source| io(name, IoAction::Metadata, source))
+}
+
+/// The member's modification time, as both timestamps.
+fn timestamps(member: &Member) -> Timestamps {
     let seconds = i64::try_from(member.mtime).unwrap_or(0);
     let stamp = rustix::fs::Timespec { tv_sec: seconds, tv_nsec: 0 };
-    let times = Timestamps { last_access: stamp, last_modification: stamp };
-
-    rustix::fs::utimensat(resolved.dir(), name, &times, AtFlags::SYMLINK_NOFOLLOW)
-        .map_err(|source| io(name, IoAction::Metadata, source))
+    Timestamps { last_access: stamp, last_modification: stamp }
 }
 
 /// Wraps a `rustix` error, naming the member rather than a full path.
@@ -815,6 +853,18 @@ mod tests {
         assert_eq!(get_xattr(&dir.path().join("f"), "user.ok").unwrap(), b"1");
     }
 
+    /// The attribute's name and the member's path are the archive's, and the report is printed.
+    #[test]
+    fn a_reported_attribute_escapes_what_could_drive_a_terminal() {
+        let problem = XattrProblem {
+            path: PathBuf::from("usr/bin/\u{1b}[2J"),
+            name: "trusted.\u{1b}]0;title\u{7}".into(),
+            reason: XattrRefusal::Namespace,
+        };
+        let line = problem.to_string();
+        assert!(!line.contains('\u{1b}') && !line.contains('\u{7}'), "{line:?}");
+    }
+
     #[test]
     fn an_attribute_on_a_symlink_is_reported_and_the_link_is_still_made() {
         let (dir, root) = root();
@@ -848,6 +898,138 @@ mod tests {
             "got {problems:?}"
         );
         assert_eq!(std::fs::read(dir.path().join("newuidmap")).unwrap(), b"payload");
+    }
+
+    /// While a file's contents are written, it is private: no setuid bit, no group or other
+    /// access. The archive's mode arrives only once the file is complete.
+    #[test]
+    fn a_file_is_private_while_its_contents_are_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        /// A reader that records the destination's mode the first time it is read from.
+        struct Spy {
+            path: PathBuf,
+            seen: Option<u32>,
+            data: &'static [u8],
+        }
+        impl Read for Spy {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.seen.is_none() {
+                    self.seen = Some(std::fs::metadata(&self.path)?.permissions().mode() & 0o7777);
+                }
+                self.data.read(buffer)
+            }
+        }
+
+        let (dir, root) = root();
+        let mut entry = member("suid", EntryKind::Other, 0o4755);
+        entry.uid = u64::from(rustix::process::getuid().as_raw());
+        entry.gid = u64::from(rustix::process::getgid().as_raw());
+        let mut spy = Spy { path: dir.path().join("suid"), seen: None, data: b"payload" };
+
+        apply(
+            &root,
+            &entry,
+            &mut spy,
+            &Disposition::Extract,
+            Ownership::FromArchive,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let during = spy.seen.unwrap();
+        assert_eq!(during & 0o7077, 0, "the file was {during:o} while it was written");
+        let after = std::fs::metadata(dir.path().join("suid")).unwrap().permissions().mode();
+        assert_eq!(after & 0o7777, 0o4755);
+    }
+
+    /// A new directory swapped for a symbolic link before its mode is set must not lend that
+    /// mode to the link's target.
+    ///
+    /// A second thread replaces each directory `apply` creates with a link to a file outside
+    /// the root, as a user who can write the parent could. A mode set by name reaches that file
+    /// within a few hundred attempts. A mode set through the descriptor cannot, so no number of
+    /// attempts makes this test fail.
+    #[test]
+    fn a_directory_swapped_for_a_symlink_does_not_lend_its_mode_to_the_target() {
+        use std::{
+            os::unix::fs::PermissionsExt as _,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+
+        let (dir, root) = root();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, b"secret").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut entry = member("d", EntryKind::Directory, 0o777);
+        entry.uid = u64::from(rustix::process::getuid().as_raw());
+        entry.gid = u64::from(rustix::process::getgid().as_raw());
+
+        let slot = dir.path().join("d");
+        let parked = dir.path().join("parked");
+        let stop = Arc::new(AtomicBool::new(false));
+        let racer = {
+            let (slot, parked, victim, stop) =
+                (slot.clone(), parked.clone(), victim.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if std::fs::symlink_metadata(&slot).is_ok_and(|m| m.is_dir())
+                        && std::fs::rename(&slot, &parked).is_ok()
+                    {
+                        let _ = std::os::unix::fs::symlink(&victim, &slot);
+                    }
+                }
+            })
+        };
+
+        for _ in 0..5_000 {
+            let _ = std::fs::remove_file(&slot);
+            let _ = std::fs::remove_dir(&slot);
+            let _ = std::fs::remove_dir(&parked);
+            // Either outcome of the race is acceptable: written, or refused. Only the victim's
+            // mode is asserted.
+            let _ = apply(
+                &root,
+                &entry,
+                &mut &b""[..],
+                &Disposition::Extract,
+                Ownership::FromArchive,
+                &mut Vec::new(),
+            );
+            let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o7777;
+            if mode != 0o600 {
+                stop.store(true, Ordering::Relaxed);
+                racer.join().unwrap();
+                panic!("a file outside the root was re-moded to {mode:o}");
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        racer.join().unwrap();
+    }
+
+    /// `apply` takes any `Member`, so it refuses an owner the walk would have refused, rather
+    /// than narrowing it to root.
+    #[test]
+    fn an_owner_the_kernel_cannot_set_is_refused_rather_than_narrowed() {
+        let (dir, root) = root();
+        let mut entry = member("f", EntryKind::Other, 0o644);
+        entry.uid = 1 << 32;
+        let err = apply(
+            &root,
+            &entry,
+            &mut &b"x"[..],
+            &Disposition::Extract,
+            Ownership::FromArchive,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::UnusableMemberOwner { .. }), "got {err:?}");
+        assert!(!dir.path().join("f").exists(), "the file was written anyway");
     }
 
     /// Confinement still applies at the writing layer, not only at resolution.
