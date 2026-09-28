@@ -204,6 +204,17 @@ pub enum Error {
         max: usize,
     },
 
+    /// The solver selected a set that breaks one of the problem's own clauses.
+    ///
+    /// This is a defect in piko, never in the repositories. The selection is checked before
+    /// it becomes a plan, so the defect refuses the transaction instead of installing a set
+    /// with a dependency left unmet or two conflicting packages side by side.
+    #[error("dependency solving produced a selection that breaks clause {clause}; this is a bug")]
+    SolveInconsistent {
+        /// The index of the first clause the selection breaks.
+        clause: usize,
+    },
+
     /// An installed package's `desc` could not be read while building a planning universe.
     ///
     /// Unlike a scan diagnostic, this is fatal. A transaction cannot be planned against an

@@ -36,7 +36,7 @@ fn owner_line(path: &str, name: impl std::fmt::Display, version: &str, quiet: bo
         format!("{name}")
     } else {
         let dim = console::Style::new().dim();
-        format!("{} is owned by {name} {version}", dim.apply_to(path))
+        format!("{} is owned by {name} {version}", dim.apply_to(piko_db::printable(path)))
     }
 }
 

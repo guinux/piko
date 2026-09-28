@@ -13,20 +13,19 @@ use std::{
 };
 
 use alpm_types::PackageInstallReason;
-use piko_db::EntryName;
 use piko_db::config::{DbUsage, RepositoryConfig, SigLevel};
 use piko_db::repo::RepoDatabase;
 use piko_db::resolve::IgnoreList;
 use piko_db::solve::{
-    Plan, Request, SolvableId, Universe, UniverseOptions, resolve_targets, solve_with_removals,
+    Ambiguity, GroupChoice, GroupTarget, InstallPlan, InstallQuestions, NamedRemovalFailure,
+    ResolutionNotes, SolvableId, Universe, UniverseOptions, plan_install,
 };
 use piko_db::{Limits, LocalDatabase};
 use piko_sig::Policy;
 use piko_txn::{
-    CacheDirSource, FileTarget, PackageOrigins, PackageSource, Step, TargetKind, Transaction,
-    TransactionPlan,
+    CacheDirSource, PackageOrigins, PackageSource, Step, TargetKind, Transaction, TransactionPlan,
     conflict::Overwrite,
-    file_target,
+    file_target::{self, FilePolicies, Targets, Urls},
     journal::{self, Intent},
 };
 
@@ -41,7 +40,7 @@ use crate::output::{emit, report as report_error};
 /// command the user asked for still runs. See [`piko_txn::history`].
 pub fn note(recording: &piko_txn::Recording, message: &str) {
     if let Err(problem) = piko_txn::history::note(recording, message) {
-        eprintln!("Warning: {problem}");
+        crate::output::warn(problem);
     }
 }
 
@@ -116,7 +115,7 @@ pub struct SideEffects {
     /// Where to read `.hook` files from, in increasing priority.
     ///
     /// The system directory is resolved inside `--root`; a configured `HookDir` is a host
-    /// path. `crate::context::hook_dirs` explains why libalpm draws that line. Empty runs no
+    /// path. `piko_txn::hook::directories` explains why libalpm draws that line. Empty runs no
     /// hooks.
     pub hook_dirs: Vec<PathBuf>,
     /// Where the transaction is recorded: the `LogFile` pacman shares, and the history store
@@ -186,12 +185,12 @@ pub fn install(
     // here too, which is why this precedes the confirmation prompt. `alpm_fetch_pkgurl` runs in
     // the same order, ahead of `trans_init` (`upgrade.c`).
     let mut pre_cancel = options.pre_cancel.take();
-    let prepared =
+    let loaded =
         match prepare_file_targets(targets, &cache, &catalog, &options, &mut pre_cancel, out) {
-            Ok(prepared) => prepared,
+            Ok(loaded) => loaded,
             Err(code) => return code,
         };
-    let file_candidates = prepared.candidates();
+    let file_candidates = loaded.candidates();
 
     let steplist = crate::progress::StepList::new();
     let resolving = steplist.spinner("Resolving dependencies");
@@ -209,148 +208,45 @@ pub fn install(
         }
     };
 
-    let base = Request::new().needed(options.needed);
-    let mut resolution = match resolve_targets(&universe, base.clone(), &prepared.names, &limits) {
-        Ok(resolved) => resolved,
+    // Every question is asked through `Prompts`, the notes printed through it too, while the
+    // "Resolving dependencies" spinner is still running. The order in which they come is
+    // `plan_install`'s.
+    let mut questions = Prompts {
+        steplist: &steplist,
+        pre_cancel: &pre_cancel,
+        out: &mut *out,
+        noconfirm: options.noconfirm,
+    };
+    let planned = plan_install(
+        &universe,
+        &loaded.names,
+        piko_db::solve::InstallOptions {
+            needed: options.needed,
+            sysupgrade: options.sysupgrade,
+            explain: false,
+        },
+        &mut questions,
+        &cache,
+        &limits,
+    );
+    // `--noconfirm` takes libalpm's own `use_index = 0` for every provider question: the first
+    // candidate in repository priority order. Reported rather than silent, so an unattended
+    // run still says a choice was made on its behalf. Unlike `HoldPkg` and `IgnorePkg`, there
+    // is no standing instruction in `pacman.conf` for that default to contradict, so it needs
+    // no refusal.
+    if let Ok(planned) = &planned
+        && !planned.defaulted.is_empty()
+    {
+        steplist.suspend(|| crate::cmd::provider::report_defaults(&universe, &planned.defaulted));
+    }
+    crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
+    let InstallPlan { plan: built, explicit: explicit_targets, .. } = match planned {
+        Ok(planned) => planned,
         Err(failure) => {
-            crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-            crate::cmd::plan::report_target_resolution_failure(&failure);
+            crate::cmd::plan::report_install_failure(&failure);
             return ExitCode::FAILURE;
         }
     };
-
-    // Ask which members of each group target to install. Then resolve once more with the
-    // answers. A group names several targets, so an answer settles the target list rather than
-    // a clause inside the solve. That is why this is two calls, not the provider question's
-    // open-ended loop. The second call cannot uncover a group the first did not. Expansion
-    // reads the universe and the target list, never the answers.
-    if !resolution.groups.is_empty() && !options.noconfirm {
-        let choices = steplist.suspend(|| {
-            let mut ask = || crate::cmd::group::answer(&universe, &resolution.groups, out);
-            match &pre_cancel {
-                Some(handoff) => handoff.mode.during_prompt(ask),
-                None => ask(),
-            }
-        });
-        let mut answered = base;
-        for choice in choices {
-            answered = answered.choose_group(choice);
-        }
-        resolution = match resolve_targets(&universe, answered, &prepared.names, &limits) {
-            Ok(resolved) => resolved,
-            Err(failure) => {
-                crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-                crate::cmd::plan::report_target_resolution_failure(&failure);
-                return ExitCode::FAILURE;
-            }
-        };
-    }
-
-    let mut request = resolution.request;
-    // Through `suspend`, since the spinner is still running: an ordinary `eprintln!` here
-    // lands inside the row indicatif is redrawing.
-    if !resolution.expansions.is_empty() {
-        steplist.suspend(|| crate::cmd::plan::print_expansions(&resolution.expansions));
-    }
-    if !resolution.ignored.is_empty() {
-        steplist.suspend(|| crate::cmd::plan::print_ignored_targets(&resolution.ignored));
-    }
-
-    // Each file candidate is targeted by its id, not by a name. Resolving it by name would find
-    // whichever candidate the universe prefers, which is the file only by construction. It would
-    // then silently install a repository package the day that construction changed.
-    let file_ids = universe.file_candidates();
-    if file_ids.len() != prepared.files.len() {
-        crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-        eprintln!("Internal error: the universe lost a package file candidate");
-        return ExitCode::FAILURE;
-    }
-    for id in file_ids {
-        request = request.target(id);
-    }
-
-    // The ids named on the command line, captured before `--sysupgrade` adds its own. These
-    // decide `Explicit` vs `Depend` below. A package `-u` pulled in on its own was not named by
-    // anyone, whatever `request.targets()` grows into next.
-    let explicit_targets: Vec<SolvableId> = request.targets().to_vec();
-
-    // `-u`: everything the repositories have moved on from becomes a target too. Each
-    // `%REPLACES%` pair becomes a target plus the removal it displaces. This mirrors `piko plan
-    // -u`'s own handling (`cmd::plan::plan`) exactly, since this is the same operation
-    // committed rather than only printed.
-    if let Some(downgrade) = options.sysupgrade {
-        request = request.with_sysupgrade(&universe, downgrade);
-        if !request.ignored_upgrades().is_empty() {
-            steplist.suspend(|| {
-                crate::cmd::plan::print_ignored_upgrades(&universe, request.ignored_upgrades());
-            });
-        }
-    }
-
-    // Ask, answer, solve again. An answered requirement is encoded with one satisfier, so it is
-    // never raised a second time. And the set of requirements the cone can raise does not depend
-    // on the answers. So the loop adds at least one answer per round, and runs out of questions.
-    // Two rounds is the common case, because a chosen provider brings its own dependencies,
-    // which may be ambiguous in turn.
-    let mut answered: std::collections::HashMap<String, SolvableId> =
-        std::collections::HashMap::new();
-    let planned = loop {
-        let planned = match solve_with_removals(&universe, &request, &limits) {
-            Ok(Ok(planned)) => planned,
-            Ok(Err(encoded)) => {
-                crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-                crate::cmd::plan::report_unsatisfiable(&universe, encoded, &limits);
-                return ExitCode::FAILURE;
-            }
-            Err(error) => {
-                crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
-                report_error(&error);
-                return ExitCode::FAILURE;
-            }
-        };
-
-        let questions =
-            piko_db::solve::ambiguities(&universe, &planned.encoded, &planned.selected, &limits);
-        if questions.is_empty() {
-            break planned;
-        }
-        // `--noconfirm` takes libalpm's own `use_index = 0` for every question: the first
-        // candidate in repository priority order. Reported rather than silent, so an
-        // unattended run still says a choice was made on its behalf. Unlike `HoldPkg` and
-        // `IgnorePkg`, there is no standing instruction in `pacman.conf` for that default to
-        // contradict, so it needs no refusal.
-        if options.noconfirm {
-            steplist.suspend(|| crate::cmd::provider::report_defaults(&universe, &questions));
-            break planned;
-        }
-
-        // Through `suspend`: the "Resolving dependencies" spinner is still redrawing its row,
-        // and would overwrite the question. `during_prompt` brackets it the way the
-        // "Proceed with installation?" prompt below is bracketed.
-        let choices = steplist.suspend(|| {
-            let mut ask =
-                || crate::cmd::provider::answer(&universe, &questions, &mut answered, out);
-            match &pre_cancel {
-                Some(handoff) => handoff.mode.during_prompt(ask),
-                None => ask(),
-            }
-        });
-        if questions.dropped() > 0 {
-            steplist.suspend(|| {
-                eprintln!(
-                    "Warning: {} further provider question(s) not asked; the first candidate \
-                     was taken",
-                    questions.dropped()
-                );
-            });
-        }
-        for choice in choices {
-            request = request.choose_provider(choice);
-        }
-    };
-
-    let built = Plan::assemble(&universe, &planned, request.targets(), &limits, &cache);
-    crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
     // `piko update` decides something about every installed package, so it is the command
     // that reports a dependency broken before it ran. `piko install foo` was asked about
     // `foo`.
@@ -414,7 +310,7 @@ pub fn install(
     let origins = PackageOrigins {
         repos: catalog.configs,
         sig_level: options.sig_level,
-        files: &prepared.files,
+        files: &loaded.files,
         gpg_dir: &options.gpg_dir,
     };
     let plan = match TransactionPlan::new(
@@ -461,7 +357,7 @@ pub fn install(
     report_download_dir(&steplist, source.download_dir());
 
     let settings = Settings {
-        overwrite: overwrite_from(options.overwrite),
+        overwrite: Overwrite::from_patterns(options.overwrite),
         scriptlets: options.side_effects.scriptlets,
         hook_dirs: options.side_effects.hook_dirs.clone(),
         patterns: options.patterns,
@@ -490,21 +386,88 @@ pub fn install(
     )
 }
 
-/// The command line, split into what the solver resolves and what was read from a file.
-struct PreparedTargets {
-    /// Targets to resolve through the repositories, in the order they were given.
-    names: Vec<String>,
-    /// Every package file named, path and URL alike, in the order they were given.
-    files: Vec<FileTarget>,
+/// How `piko install` answers the questions a plan raises: at the terminal, or not at all
+/// under `--noconfirm`.
+///
+/// Every line goes through `StepList::suspend`, since the "Resolving dependencies" spinner is
+/// still running: an ordinary `eprintln!` would land inside the row indicatif is redrawing. A
+/// prompt is also bracketed in `during_prompt`, the way the "Proceed with installation?"
+/// prompt is.
+struct Prompts<'a, W: std::io::Write> {
+    steplist: &'a crate::progress::StepList,
+    pre_cancel: &'a Option<crate::signal::Handoff>,
+    out: &'a mut W,
+    noconfirm: bool,
 }
 
-impl PreparedTargets {
-    /// The solver's view of each named file, in the order they were given.
-    ///
-    /// `Universe` borrows these for as long as it lives. So the caller collects them once and
-    /// keeps them alongside it, rather than rebuild them.
-    fn candidates(&self) -> Vec<&piko_db::solve::FilePackage> {
-        self.files.iter().map(FileTarget::candidate).collect()
+impl<W: std::io::Write> Prompts<'_, W> {
+    /// Runs `ask` with the spinner suspended, and with Ctrl+C killing the process.
+    fn prompt<T>(
+        steplist: &crate::progress::StepList,
+        pre_cancel: &Option<crate::signal::Handoff>,
+        ask: impl FnOnce() -> T,
+    ) -> T {
+        steplist.suspend(|| match pre_cancel {
+            Some(handoff) => handoff.mode.during_prompt(ask),
+            None => ask(),
+        })
+    }
+}
+
+impl<W: std::io::Write> InstallQuestions for Prompts<'_, W> {
+    fn resolved(&mut self, universe: &Universe<'_>, notes: &ResolutionNotes<'_>) {
+        if !notes.expansions.is_empty() {
+            self.steplist.suspend(|| crate::cmd::plan::print_expansions(notes.expansions));
+        }
+        if !notes.ignored.is_empty() {
+            self.steplist.suspend(|| crate::cmd::plan::print_ignored_targets(notes.ignored));
+        }
+        if !notes.ignored_upgrades.is_empty() {
+            self.steplist.suspend(|| {
+                crate::cmd::plan::print_ignored_upgrades(universe, notes.ignored_upgrades);
+            });
+        }
+    }
+
+    /// `--noconfirm` takes every member without refusing, unlike `HoldPkg` and `IgnorePkg`. A
+    /// group name is the command line, not a standing `pacman.conf` directive.
+    fn groups(
+        &mut self,
+        universe: &Universe<'_>,
+        groups: &[GroupTarget],
+    ) -> Option<Vec<GroupChoice>> {
+        if self.noconfirm {
+            return None;
+        }
+        let out = &mut *self.out;
+        Some(Self::prompt(self.steplist, self.pre_cancel, || {
+            crate::cmd::group::answer(universe, groups, out)
+        }))
+    }
+
+    fn asks_providers(&self) -> bool {
+        !self.noconfirm
+    }
+
+    fn provider(
+        &mut self,
+        universe: &Universe<'_>,
+        question: &Ambiguity,
+        relation: &str,
+    ) -> SolvableId {
+        let out = &mut *self.out;
+        Self::prompt(self.steplist, self.pre_cancel, || {
+            crate::cmd::provider::ask(universe, question, relation, out)
+        })
+    }
+
+    fn withheld(&mut self, count: usize) {
+        self.steplist.suspend(|| {
+            eprintln!(
+                "Warning: {count} further provider question(s) not asked; the first candidate \
+                 was taken"
+            );
+        });
     }
 }
 
@@ -532,108 +495,73 @@ fn prepare_file_targets(
     options: &InstallOptions,
     pre_cancel: &mut Option<crate::signal::Handoff>,
     out: &mut impl std::io::Write,
-) -> Result<PreparedTargets, ExitCode> {
-    let classified: Vec<TargetKind> =
-        targets.iter().map(|target| piko_txn::classify(target)).collect();
-    let names: Vec<String> = classified
-        .iter()
-        .filter_map(|kind| match kind {
-            TargetKind::Name(name) => Some(name.clone()),
-            TargetKind::File(_) | TargetKind::Url(_) => None,
-        })
-        .collect();
-    if classified.iter().all(|kind| matches!(kind, TargetKind::Name(_))) {
-        return Ok(PreparedTargets { names, files: Vec::new() });
-    }
-
-    warn_about_ambiguous_targets(&classified, catalog);
+) -> Result<Targets, ExitCode> {
+    let kinds: Vec<TargetKind> = targets.iter().map(|target| piko_txn::classify(target)).collect();
+    warn_about_ambiguous_targets(&kinds, catalog);
 
     // Only now, and only because a URL has to be fetched before the prompt. A plain
     // `piko install ./foo.pkg.tar.zst` reads a local file and installs no handler here. So
     // Ctrl+C at its prompt still kills the process by the OS's default disposition.
-    let has_url = classified.iter().any(|kind| matches!(kind, TargetKind::Url(_)));
-    if has_url && pre_cancel.is_none() {
+    if kinds.iter().any(|kind| matches!(kind, TargetKind::Url(_))) && pre_cancel.is_none() {
         let (cancel, mode) = crate::signal::install_cancel_handler();
         *pre_cancel = Some(crate::signal::Handoff { cancel, mode });
     }
 
-    let package_limits = piko_txn::extract::PackageLimits::default();
-    let mut files = Vec::new();
-    for kind in &classified {
-        let loaded = match kind {
-            TargetKind::Name(_) => continue,
-            TargetKind::File(path) => file_target::load(
-                path,
-                Policy::for_package(options.local_file_sig_level),
-                &package_limits,
-            ),
-            TargetKind::Url(url) => {
-                let path = fetch_package_url(url, cache, options, pre_cancel, out)?;
-                file_target::load(
-                    &path,
-                    Policy::for_package(options.remote_file_sig_level),
-                    &package_limits,
-                )
-            }
-        };
-        match loaded {
-            Ok(target) => files.push(target),
-            Err(error) => {
-                report_error(&error);
-                return Err(ExitCode::FAILURE);
-            }
+    // Set when the "Fetching" line cannot be written. The error the callback returns then only
+    // stops the load. Nothing has been fetched yet, so the run ends quietly.
+    let mut stopped = false;
+    let mut fetch = |url: &str| {
+        if writeln!(out, "Fetching {url}").is_err() {
+            stopped = true;
+            return Err(piko_txn::Error::Cancelled { completed: 0, total: 0 });
         }
-    }
-
-    if let Err(error) = file_target::check_duplicates(&files) {
-        report_error(&error);
-        return Err(ExitCode::FAILURE);
-    }
-    if let Err(error) = file_target::check_architecture(&files, &options.architecture) {
-        report_error(&error);
-        return Err(ExitCode::FAILURE);
-    }
-
-    Ok(PreparedTargets { names, files })
-}
-
-/// Downloads one package named by URL, and reports where it landed.
-///
-/// # Errors
-///
-/// Returns the [`ExitCode`] to exit with, having reported the failure.
-fn fetch_package_url(
-    url: &str,
-    cache: &CacheDirSource,
-    options: &InstallOptions,
-    pre_cancel: &Option<crate::signal::Handoff>,
-    out: &mut impl std::io::Write,
-) -> Result<PathBuf, ExitCode> {
-    // A `Cancel` that no handler will ever request, for the path where no URL forced one to be
-    // installed. It cannot happen, because `prepare_file_targets` installs a handler before it
-    // calls this. Constructing one is cheaper than making the caller prove it.
-    let cancel =
-        pre_cancel.as_ref().map_or_else(piko_net::Cancel::new, |handoff| handoff.cancel.clone());
-
-    if writeln!(out, "Fetching {url}").is_err() {
-        // Nothing has been fetched yet, so a broken pipe here just ends the run quietly.
-        return Err(ExitCode::SUCCESS);
-    }
-    let policy = Policy::for_package(options.remote_file_sig_level);
-    match piko_txn::file_target::fetch_url(
-        url,
-        cache,
-        policy,
-        options.sandbox.clone(),
-        &cancel,
-        &|_| {},
-    ) {
-        Ok(path) => Ok(path),
+        fetch_package_url(url, cache, options, pre_cancel)
+    };
+    let policies = FilePolicies {
+        local: Policy::for_package(options.local_file_sig_level),
+        remote: Policy::for_package(options.remote_file_sig_level),
+    };
+    let loaded = file_target::load_targets(
+        &kinds,
+        policies,
+        &options.architecture,
+        Urls::Fetch(&mut fetch),
+        &piko_txn::extract::PackageLimits::default(),
+    );
+    match loaded {
+        Ok(loaded) => Ok(loaded),
+        Err(_) if stopped => Err(ExitCode::SUCCESS),
         Err(error) => {
             report_error(&error);
             Err(ExitCode::FAILURE)
         }
     }
+}
+
+/// Downloads one package named by URL, and returns where it landed.
+///
+/// # Errors
+///
+/// Whatever [`file_target::fetch_url`] returns.
+fn fetch_package_url(
+    url: &str,
+    cache: &CacheDirSource,
+    options: &InstallOptions,
+    pre_cancel: &Option<crate::signal::Handoff>,
+) -> piko_txn::Result<PathBuf> {
+    // A `Cancel` that no handler will ever request, for the path where no URL forced one to be
+    // installed. It cannot happen, because `prepare_file_targets` installs a handler before it
+    // calls this. Constructing one is cheaper than making the caller prove it.
+    let cancel =
+        pre_cancel.as_ref().map_or_else(piko_net::Cancel::new, |handoff| handoff.cancel.clone());
+    file_target::fetch_url(
+        url,
+        cache,
+        Policy::for_package(options.remote_file_sig_level),
+        options.sandbox.clone(),
+        &cancel,
+        &|_| {},
+    )
 }
 
 /// Names a target that could have been read as a package name as well as a path.
@@ -669,7 +597,7 @@ fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::Dow
     }
     steplist.suspend(|| {
         for rejected in dir.rejected() {
-            eprintln!("Warning: {rejected}");
+            crate::output::warn(rejected);
         }
         if dir.created() {
             eprintln!("Warning: no {} cache exists, creating...", dir.path().display());
@@ -693,7 +621,7 @@ fn report_space_problems(
     }
     steplist.suspend(|| {
         for problem in problems {
-            eprintln!("Warning: {problem}");
+            crate::output::warn(problem);
         }
     });
 }
@@ -840,19 +768,15 @@ pub fn remove(
     };
 
     let steplist = crate::progress::StepList::new();
-    let entries_to_remove = if options.nodeps {
-        match named_only(&local, entries, &options, out) {
-            Ok(found) => found,
-            Err(code) => return code,
-        }
+    let planned = if options.nodeps {
+        named_only(&local, entries, &options, out)
     } else {
-        match planned(&steplist, &local, entries, &options, out) {
-            Ok(found) => found,
-            Err(code) => return code,
-        }
+        planned(&steplist, &local, entries, &options, out)
     };
-
-    let plan = TransactionPlan::removal(entries_to_remove, options.no_save);
+    let plan = match planned {
+        Ok(plan) => plan,
+        Err(code) => return code,
+    };
 
     // `--overwrite` is install-side: a removal writes no file. A removal plan checks no
     // signature, because it installs no package. Scriptlets and hooks are not install-side.
@@ -881,50 +805,45 @@ pub fn remove(
 
 /// `--nodeps`: exactly the packages named, in the order named, with nothing checked.
 ///
-/// An explicit escape hatch, matching pacman's `-Rdd`. It can leave the system with
-/// unsatisfied dependencies, which is the user's stated intent when they pass it. There is no
-/// solved plan to show for it, since nothing was checked. So this prints the plain list of
-/// names instead of a full [`crate::cmd::plan::print_steps`] rendering.
+/// An explicit escape hatch, matching pacman's `-Rdd`. Which entries it names is
+/// [`piko_db::solve::named_removal`]'s. There is no solved plan to show for it, since nothing
+/// was checked. So this prints the plain list of names instead of a full
+/// [`crate::cmd::plan::print_steps`] rendering.
 fn named_only(
     local: &piko_db::LocalDatabase,
     entries: &[String],
     options: &RemoveOptions,
     out: &mut impl std::io::Write,
-) -> Result<Vec<EntryName>, ExitCode> {
-    // A pattern is rewritten into installed names before anything is looked up. Groups are
-    // deliberately left out here. This path resolves a target with `LocalDatabase::get_str`
-    // alone, and accepts no group name. So a pattern must not become the one spelling that does.
-    let (entries, expansions) =
-        match piko_db::solve::expand_installed_names(local, entries, &piko_db::Limits::default()) {
-            Ok(expanded) => expanded,
-            Err(failure) => {
-                crate::cmd::plan::report_expansion_failure(&failure);
-                return Err(ExitCode::FAILURE);
-            }
-        };
-    crate::cmd::plan::print_expansions(&expansions);
-
-    let mut found = Vec::new();
-    let mut names = Vec::new();
-    for name in &entries {
-        let Some(package) = local.get_str(name) else {
+) -> Result<TransactionPlan, ExitCode> {
+    let removal = match piko_db::solve::named_removal(local, entries, &piko_db::Limits::default()) {
+        Ok(removal) => removal,
+        Err(failure) => {
+            crate::cmd::plan::report_expansion_failure(&failure);
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    crate::cmd::plan::print_expansions(&removal.expansions);
+    let found = match removal.outcome {
+        Ok(found) => found,
+        Err(NamedRemovalFailure::NotInstalled(name)) => {
             eprintln!("Error: package {name} is not installed");
             return Err(ExitCode::FAILURE);
-        };
-        match EntryName::new(package.name(), package.version()) {
-            Ok(entry) => found.push(entry),
-            Err(error) => {
-                eprintln!("Error: {name} has no usable entry name: {error}");
-                return Err(ExitCode::FAILURE);
-            }
         }
-        names.push(package.name().to_string());
-    }
+        Err(NamedRemovalFailure::InvalidEntryName { name, reason }) => {
+            eprintln!(
+                "Error: {} has no usable entry name: {}",
+                crate::output::escaped(&name),
+                piko_db::printable_lines(&reason.to_string())
+            );
+            return Err(ExitCode::FAILURE);
+        }
+    };
 
     // `HoldPkg` is checked here too. pacman's guard sits in `pacman_remove`, above everything
     // the flags select, so `-Rdd` is no more exempt from it than `-Rcs` is. The names are the
     // ones the database holds, not the ones typed. A target may have been given as a
     // `%PROVIDES%`-style string that is not the package's own name.
+    let names: Vec<String> = found.iter().map(|entry| entry.name_str().to_owned()).collect();
     if !crate::cmd::removal::hold_pkg_allows(&names, &options.hold_pkg, options.noconfirm, out) {
         return Err(ExitCode::FAILURE);
     }
@@ -937,7 +856,7 @@ fn named_only(
         return Err(ExitCode::SUCCESS);
     }
 
-    Ok(found)
+    Ok(TransactionPlan::removal(found, options.no_save))
 }
 
 /// Plans the removal, printing what it will take away before it takes it.
@@ -952,7 +871,7 @@ fn planned(
     entries: &[String],
     options: &RemoveOptions,
     out: &mut impl std::io::Write,
-) -> Result<Vec<EntryName>, ExitCode> {
+) -> Result<TransactionPlan, ExitCode> {
     let resolving = steplist.spinner("Resolving dependencies");
     let limits = piko_db::Limits::default();
     let universe = match piko_db::solve::Universe::build(
@@ -1014,31 +933,18 @@ fn planned(
         return Err(ExitCode::FAILURE);
     }
 
-    let mut found = Vec::new();
-    for step in plan.steps() {
-        let piko_db::solve::Step::Remove { package } = step else {
-            // A removal-only request restricts candidates to what is installed, so the solver
-            // has nothing to install. Reaching here means that invariant broke. Refusing is
-            // the only safe answer, because the commit engine would carry out whatever this is.
-            eprintln!("Error: the removal plan contains a step that is not a removal");
-            eprintln!("Note: this is a bug; run `piko plan -R` to see the plan");
-            return Err(ExitCode::FAILURE);
-        };
-        let Some(solvable) = universe.get(*package) else {
-            eprintln!("Error: the plan names a package the universe does not know");
-            return Err(ExitCode::FAILURE);
-        };
-        match EntryName::new(solvable.name(), solvable.version()) {
-            Ok(entry) => found.push(entry),
-            Err(error) => {
-                eprintln!("Error: {} has no usable entry name: {error}", solvable.name());
-                return Err(ExitCode::FAILURE);
+    let transaction = match TransactionPlan::from_removal(&universe, &plan, options.no_save) {
+        Ok(transaction) => transaction,
+        Err(error) => {
+            report_error(&error);
+            if matches!(error, piko_txn::Error::NotARemoval) {
+                eprintln!("Note: this is a bug; run `piko plan -R` to see the plan");
             }
+            return Err(ExitCode::FAILURE);
         }
-    }
-
-    if found.is_empty() {
-        return Ok(found);
+    };
+    if transaction.steps().is_empty() {
+        return Ok(transaction);
     }
 
     // Blank line separating the settled "Resolving dependencies" row from the step list below.
@@ -1054,7 +960,7 @@ fn planned(
         return Err(ExitCode::SUCCESS);
     }
 
-    Ok(found)
+    Ok(transaction)
 }
 
 /// How a transaction is configured, apart from what it does.
@@ -1280,20 +1186,20 @@ fn report_side_effects(report: &piko_txn::Report) {
     // Printed after the run, not before it, because the hook files are read once per phase
     // inside the transaction. That is the same reason every other hook diagnostic here is late.
     for problem in &report.hook_problems {
-        eprintln!("Warning: {problem}");
+        crate::output::warn(problem);
     }
 
     // Neither record can fail a transaction, so a problem with one arrives here rather than
     // as an error. See `piko_txn::history`.
     for problem in &report.history_problems {
-        eprintln!("Warning: {problem}");
+        crate::output::warn(problem);
     }
 
     // A backup file that could not be preserved is a warning about that file. The package it
     // belonged to is gone either way, so failing the transaction over it would report a
     // completed removal as a broken one.
     for problem in &report.backup_problems {
-        eprintln!("Warning: {problem}");
+        crate::output::warn(problem);
     }
 
     // One place decides what a hook's failure is called. So this warning and the `AbortOnFail`
@@ -1306,17 +1212,6 @@ fn report_side_effects(report: &piko_txn::Report) {
             eprintln!("Warning: hook {} {}", run.name, run.failure_reason());
         }
     }
-}
-
-/// Turns `--overwrite` patterns into the predicate the commit engine takes.
-///
-/// Matched with `piko_db::resolve::matches_any`, which is libalpm's `_alpm_fnmatch_patterns`.
-/// This is the same function pacman uses for this flag, for `NoExtract`, and for `NoUpgrade`.
-fn overwrite_from(patterns: Vec<String>) -> Overwrite {
-    if patterns.is_empty() {
-        return Overwrite::default();
-    }
-    Overwrite::new(move |path| piko_db::resolve::matches_any(&patterns, &path.to_string_lossy()))
 }
 
 /// Reports an unfinished transaction, if the database records one, and the commands that
@@ -1348,7 +1243,7 @@ pub fn report(
             // transaction again, and only the user can decide that it is safe.
             emit!(out, "An unfinished transaction is recorded, but its journal cannot be read");
             emit!(out, "  Journal: {}", journal_path.display());
-            emit!(out, "  Reason:  {reason}");
+            emit!(out, "  Reason:  {}", piko_db::printable_lines(&reason.to_string()));
             emit!(out, "");
             emit!(out, "piko refuses every transaction while the journal is there. The system");
             emit!(out, "can be partly changed. Read the journal, and check the packages it names.");

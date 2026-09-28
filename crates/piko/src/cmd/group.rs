@@ -27,9 +27,9 @@ fn print_members(
 ) -> std::io::Result<()> {
     let count = members.len();
     if count == 1 {
-        writeln!(out, ":: There is 1 member in group {group}:")?;
+        writeln!(out, ":: There is 1 member in group {}:", piko_db::printable(group))?;
     } else {
-        writeln!(out, ":: There are {count} members in group {group}:")?;
+        writeln!(out, ":: There are {count} members in group {}:", piko_db::printable(group))?;
     }
 
     let mut current: Option<String> = None;

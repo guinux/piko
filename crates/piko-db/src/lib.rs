@@ -75,6 +75,7 @@ pub mod entry_name;
 pub mod error;
 pub mod fs_util;
 pub mod glob;
+pub mod groups;
 pub mod lazy;
 pub mod limits;
 pub mod printable;
@@ -102,7 +103,7 @@ pub use local::{
     ALPM_DB_VERSION, DescView, Diagnostic, EagerView, FileCheckReport, FileProblem, Inconsistency,
     LocalDatabase, LocalPackage, LocalSearchHit, OpenOptions,
 };
-pub use printable::{printable, printable_path};
+pub use printable::{printable, printable_lines, printable_path};
 pub use resolve::{IgnoreList, Resolved, SyncRepo, SyncRepos};
 pub use search::{LocalOrRepo, MatchKind, resolve_installed_or_repo};
-pub use updates::Update;
+pub use updates::{Update, Updates};

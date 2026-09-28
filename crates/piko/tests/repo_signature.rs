@@ -102,7 +102,7 @@ fn a_database_with_an_unusable_signature_is_refused_at_open() {
 /// `[core]` declares no `SigLevel`, so the global `Required DatabaseOptional` must apply to it.
 /// Reading `RepositoryConfig::sig_level` directly yields the `USE_DEFAULT` sentinel instead,
 /// whose `DATABASE` bit is clear. The check then does nothing and this command *succeeds*.
-/// Sharing `context::effective_sig_level` with the download path keeps it failing correctly.
+/// `PacmanConfig::database_sig_level`, shared with the download path, keeps it failing correctly.
 #[test]
 fn a_repository_that_declares_no_sig_level_is_still_verified() {
     let dir = tempfile::tempdir().unwrap();

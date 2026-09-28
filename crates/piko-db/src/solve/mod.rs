@@ -16,6 +16,7 @@ mod encode;
 mod explain;
 mod file;
 mod glob;
+mod install;
 mod justify;
 mod plan;
 mod removal;
@@ -38,9 +39,16 @@ pub use glob::{
     Expansion, ExpansionFailure, InstallableTargets, Side, expand_installable_targets,
     expand_installed_names, expand_installed_targets,
 };
+pub use install::{
+    Defaults, InstallFailure, InstallOptions, InstallPlan, InstallQuestions, ResolutionNotes,
+    plan_install,
+};
 pub use justify::{Alternative, Cause, PlanExplanation, Verdict, describe_cause, explain_plan};
 pub use plan::{Change, Plan, PlanDiagnostic, Step};
-pub use removal::{Removal, RemovalFailure, RemovalOptions, plan_removal, removal_names};
+pub use removal::{
+    NamedRemoval, NamedRemovalFailure, Removal, RemovalFailure, RemovalOptions, named_removal,
+    plan_removal, removal_names,
+};
 pub use solver::{Outcome, Solution, Solver, Unsatisfiable, core_kinds};
 pub use universe::{IgnoredCandidate, Origin, Solvable, SolvableId, Universe, UniverseOptions};
 pub use why::{Dependents, WhyResult, dependents, explain_why_installed, orphans};

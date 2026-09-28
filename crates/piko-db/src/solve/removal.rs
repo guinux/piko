@@ -27,12 +27,14 @@
 //! the user typed). The guard itself, its prompt, and its `pacman.conf` parsing are a
 //! frontend's concern.
 
-use crate::solve::glob::{Expansion, ExpansionFailure, expand_installed_targets};
+use crate::solve::glob::{
+    Expansion, ExpansionFailure, expand_installed_names, expand_installed_targets,
+};
 use crate::solve::{
     AmbiguityReport, Diagnosis, Plan, PlanExplanation, Request, Step, Universe, explain_plan,
     solve_with_removals,
 };
-use crate::{Error, Limits, LocalDatabase};
+use crate::{EntryName, Error, Limits, LocalDatabase};
 
 /// Which flavour of removal to plan.
 #[derive(Clone, Copy, Debug, Default)]
@@ -166,6 +168,72 @@ pub fn plan_removal(
         Err(error) => Err(RemovalFailure::Planner(Box::new(error))),
     };
     Ok(Removal { expansions, outcome, explanation })
+}
+
+/// Why a `--nodeps` removal could not name its entries.
+#[derive(Debug)]
+pub enum NamedRemovalFailure {
+    /// A target names no installed package.
+    NotInstalled(String),
+    /// An installed package's name and version form no entry name.
+    ///
+    /// The reason is stringified, as `piko_txn::Error::InvalidEntryName` stringifies it.
+    InvalidEntryName {
+        /// The target as the user named it.
+        name: String,
+        /// Why the name and version could not form an entry name.
+        reason: String,
+    },
+}
+
+/// The entries a `--nodeps` removal takes away, with what the glob targets selected.
+///
+/// The expansions sit beside the outcome, as on [`Removal`]: a caller needs them on both
+/// branches.
+#[derive(Debug)]
+pub struct NamedRemoval {
+    /// One entry per glob target, in the order the targets were given.
+    pub expansions: Vec<Expansion>,
+    /// The entries, in the order the targets were given, or the first target that has none.
+    pub outcome: Result<Vec<EntryName>, NamedRemovalFailure>,
+}
+
+/// Names the installed entries `targets` designate, and checks nothing else.
+///
+/// This is `piko remove --nodeps`, pacman's `-Rdd`: exactly the packages named, in the order
+/// named, with no dependency checked. It can leave the system with unsatisfied dependencies,
+/// which is the stated intent of the flag.
+///
+/// A glob target expands against installed package names only
+/// ([`expand_installed_names`]). A target resolves through [`LocalDatabase::get_str`] and
+/// nothing else, so no group name is accepted. A pattern must not become the one spelling that
+/// does.
+///
+/// # Errors
+///
+/// [`ExpansionFailure`], when a glob target could not be expanded. A target that names no
+/// entry is a [`NamedRemovalFailure`] on [`NamedRemoval::outcome`].
+pub fn named_removal(
+    local: &LocalDatabase,
+    targets: &[String],
+    limits: &Limits,
+) -> Result<NamedRemoval, ExpansionFailure> {
+    let (names, expansions) = expand_installed_names(local, targets, limits)?;
+    let outcome = names
+        .iter()
+        .map(|name| {
+            let package = local
+                .get_str(name)
+                .ok_or_else(|| NamedRemovalFailure::NotInstalled(name.clone()))?;
+            EntryName::new(package.name(), package.version()).map_err(|error| {
+                NamedRemovalFailure::InvalidEntryName {
+                    name: name.clone(),
+                    reason: error.to_string(),
+                }
+            })
+        })
+        .collect();
+    Ok(NamedRemoval { expansions, outcome })
 }
 
 /// The package names `plan_removal`'s removal steps refer to, in plan order.
@@ -320,5 +388,56 @@ mod tests {
             .build();
 
         assert_eq!(removed(&scenario, &["tools", "editor"]).unwrap(), ["editor", "linker"]);
+    }
+
+    fn named(scenario: &BuiltScenario, targets: &[&str]) -> NamedRemoval {
+        let owned: Vec<String> = targets.iter().map(|target| (*target).to_owned()).collect();
+        named_removal(scenario.local(), &owned, &Limits::default()).unwrap()
+    }
+
+    /// `--nodeps` names exactly the targets, in the order given, and checks no dependency.
+    #[test]
+    fn nodeps_names_the_targets_in_order_and_checks_nothing() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("app", "1.0.0-1").depends(["lib"]))
+            .installed(PackageSpec::new("lib", "2.0.0-1"))
+            .build();
+
+        let entries = named(&scenario, &["lib", "app"]).outcome.unwrap();
+        let spelled: Vec<&str> = entries.iter().map(EntryName::as_str).collect();
+        assert_eq!(spelled, ["lib-2.0.0-1", "app-1.0.0-1"], "`app` still needs `lib`");
+    }
+
+    /// A pattern expands against installed names, and says what it selected.
+    #[test]
+    fn nodeps_expands_a_pattern_against_installed_names() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("lib-a", "1.0.0-1"))
+            .installed(PackageSpec::new("lib-b", "1.0.0-1"))
+            .installed(PackageSpec::new("app", "1.0.0-1"))
+            .build();
+
+        let removal = named(&scenario, &["lib-*"]);
+        let mut entries: Vec<String> =
+            removal.outcome.unwrap().iter().map(|entry| entry.as_str().to_owned()).collect();
+        entries.sort();
+        assert_eq!(entries, ["lib-a-1.0.0-1", "lib-b-1.0.0-1"]);
+        assert_eq!(removal.expansions.len(), 1);
+    }
+
+    /// `--nodeps` has never accepted a group name, so a group is not installed.
+    #[test]
+    fn nodeps_accepts_no_group_and_no_missing_name() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("editor", "1.0.0-1").groups(["tools"]))
+            .build();
+
+        for target in ["tools", "absent"] {
+            let outcome = named(&scenario, &[target]).outcome;
+            assert!(
+                matches!(&outcome, Err(NamedRemovalFailure::NotInstalled(name)) if name == target),
+                "{target}: got {outcome:?}"
+            );
+        }
     }
 }

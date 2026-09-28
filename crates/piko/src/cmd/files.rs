@@ -21,7 +21,11 @@ use crate::output::{emit, report};
 /// This is a pure formatter, not a printer. [`emit`] must be called directly from the function
 /// that owns the loop, not from here. That way a broken-pipe write error stops that loop,
 /// rather than only returning from this helper.
+///
+/// `path` is escaped by [`crate::output::escaped`], because a package or a mirror chose it. An
+/// ordinary path prints unchanged, so the listing still diffs against `pacman -Ql`.
 fn file_line(name: impl std::fmt::Display, path: impl std::fmt::Display, quiet: bool) -> String {
+    let path = crate::output::escaped(path);
     if quiet {
         format!("/{path}")
     } else {
@@ -233,4 +237,19 @@ pub fn files_installed_then_repos(
     }
 
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A path from a `files` list cannot drive the terminal. An ordinary one is unchanged.
+    #[test]
+    fn a_file_line_escapes_what_could_drive_a_terminal() {
+        assert_eq!(file_line("foo", "usr/bin/foo", true), "/usr/bin/foo");
+        assert_eq!(
+            file_line("foo", "usr/bin/\u{1b}]52;c;cHduZWQ=\u{7}x", true),
+            "/usr/bin/\\u{1b}]52;c;cHduZWQ=\\u{7}x"
+        );
+    }
 }

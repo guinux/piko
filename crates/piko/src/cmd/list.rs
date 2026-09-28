@@ -7,12 +7,12 @@
 //! `pacman -Qq`/`pacman -Sql` equivalent. It also opens no package's `desc`. Only the
 //! directory-name-derived name and version are read.
 
-use std::collections::BTreeSet;
 use std::process::ExitCode;
 
 use alpm_types::PackageInstallReason;
 use piko_db::LocalDatabase;
 use piko_db::config::PacmanConfig;
+use piko_db::groups::GroupIndex;
 use piko_db::repo::RepoDatabase;
 use piko_db::solve::{Universe, UniverseOptions};
 
@@ -115,8 +115,10 @@ pub fn repo_names(config: &PacmanConfig, quiet: bool, out: &mut impl std::io::Wr
 
 /// `piko list -e`/`--explicit`: every explicitly installed package, `pacman -Qe`.
 ///
-/// Unlike [`installed`], this forces a `desc` read per installed package to check `%REASON%`,
-/// so it does not keep `list`'s directory-name-only laziness. A package whose `desc` cannot be
+/// Unlike [`installed`], this reads each installed package's `desc` to check `%REASON%`, so it
+/// does not keep `list`'s directory-name-only laziness. It reads the eager tier
+/// ([`piko_db::LocalPackage::eager`]), not the typed parse, so a `%LICENSE%` or `%PACKAGER%`
+/// that does not convert cannot drop a package from the list. A package whose `desc` cannot be
 /// read is reported to stderr and excluded. This is the same continue-past-a-miss convention
 /// [`crate::cmd::files::files_installed`] uses. The exit code is a failure only once something
 /// was unreadable.
@@ -125,8 +127,8 @@ pub fn explicit(db: &LocalDatabase, quiet: bool, out: &mut impl std::io::Write) 
     let mut ok = true;
 
     for package in db.iter() {
-        match package.desc() {
-            Ok(desc) if desc.install_reason() == PackageInstallReason::Explicit => {
+        match package.eager() {
+            Ok(eager) if eager.install_reason() == PackageInstallReason::Explicit => {
                 rows.push(Row::new(package.name().to_string(), package.version().to_string()));
             }
             Ok(_) => {}
@@ -186,30 +188,30 @@ pub fn foreign<'a>(
 }
 
 /// Prints group `names`, one per line, with `list`'s summary line.
-fn print_group_names(
-    names: &BTreeSet<String>,
+fn print_group_names<'a>(
+    names: impl Iterator<Item = &'a str>,
     quiet: bool,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
+    let mut count = 0_usize;
     for name in names {
-        emit!(out, "{name}");
+        emit!(out, "{}", piko_db::printable(name));
+        count = count.saturating_add(1);
     }
     if !quiet {
         emit!(out, "");
-        emit!(out, "{} group(s)", names.len());
+        emit!(out, "{count} group(s)");
     }
     ExitCode::SUCCESS
 }
 
-/// Reports every name in `wanted` that `seen` does not carry, the way pacman reports a group
-/// it cannot find. Returns whether every name was found.
-fn report_missing_groups(wanted: &[String], seen: &BTreeSet<String>) -> bool {
-    let mut ok = true;
-    for name in wanted.iter().filter(|name| !seen.contains(*name)) {
+/// Reports every name in `missing` the way pacman reports a group it cannot find. Returns
+/// whether nothing was missing.
+fn report_missing_groups(missing: &[&str]) -> bool {
+    for name in missing {
         eprintln!("Error: group {name} was not found");
-        ok = false;
     }
-    ok
+    missing.is_empty()
 }
 
 /// Whether a group listing should emit a row per member, rather than the group names alone.
@@ -217,16 +219,43 @@ const fn lists_members(names: &[String], with_members: bool) -> bool {
     with_members || !names.is_empty()
 }
 
+/// Prints a group listing from `index`: the group names alone, or a row per member of each
+/// group `names` asks for. `describe` gives a member's name and version.
+fn print_groups<P>(
+    index: &GroupIndex<'_, P>,
+    names: &[String],
+    with_members: bool,
+    with_icon: bool,
+    quiet: bool,
+    describe: impl Fn(&P) -> (String, String),
+    out: &mut impl std::io::Write,
+) -> ExitCode {
+    if !lists_members(names, with_members) {
+        return print_group_names(index.names(), quiet, out);
+    }
+
+    let ok = report_missing_groups(&index.missing(names));
+    let rows: Vec<Row> = index
+        .members(names)
+        .map(|(group, member)| {
+            let (name, version) = describe(member);
+            Row { group: Some(piko_db::printable(group)), name, version }
+        })
+        .collect();
+    let code = print_rows(&rows, with_icon, quiet, "listed", out);
+    if ok { code } else { ExitCode::FAILURE }
+}
+
 /// `piko list -g`/`--groups`: the groups installed packages belong to, `pacman -Qg`.
 ///
 /// With `names` given, prints each named group's installed members. With none, prints every
 /// group name at least one installed package belongs to. The exception is `with_members`,
 /// which asks for each group's members as well, and is what `pacman -Qg` alone prints. A named
-/// group nothing
-/// installed belongs to is reported to stderr, and makes the exit code a failure.
+/// group nothing installed belongs to is reported to stderr, and makes the exit code a failure.
 ///
-/// Forces a `desc` read per installed package, the same caveat as [`explicit`]. A package
-/// whose `desc` cannot be read is reported to stderr and excluded.
+/// The index is [`piko_db::groups::local_group_index`]. It reads each installed package's eager
+/// tier, the same caveat as [`explicit`]. A package whose `desc` cannot be read is reported to
+/// stderr and excluded.
 pub fn groups(
     db: &LocalDatabase,
     names: &[String],
@@ -234,41 +263,15 @@ pub fn groups(
     quiet: bool,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
-    let mut ok = true;
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut rows = Vec::new();
-    let members = lists_members(names, with_members);
-
-    for package in db.iter() {
-        match package.desc() {
-            Ok(desc) => {
-                for group in desc.groups() {
-                    seen.insert(group.clone());
-                    if members && (names.is_empty() || names.iter().any(|name| name == group)) {
-                        rows.push(Row {
-                            group: Some(group.clone()),
-                            name: package.name().to_string(),
-                            version: package.version().to_string(),
-                        });
-                    }
-                }
-            }
-            Err(error) => {
-                report(&*error);
-                ok = false;
-            }
-        }
+    let (index, unreadable) = piko_db::groups::local_group_index(db);
+    for (_, error) in &unreadable {
+        report(&**error);
     }
-
-    if !members {
-        let code = print_group_names(&seen, quiet, out);
-        return if ok { code } else { ExitCode::FAILURE };
-    }
-
-    ok &= report_missing_groups(names, &seen);
-    sort_group_rows(&mut rows);
-    let code = print_rows(&rows, true, quiet, "listed", out);
-    if ok { code } else { ExitCode::FAILURE }
+    let describe = |package: &piko_db::LocalPackage| {
+        (package.name().to_string(), package.version().to_string())
+    };
+    let code = print_groups(&index, names, with_members, true, quiet, describe, out);
+    if unreadable.is_empty() { code } else { ExitCode::FAILURE }
 }
 
 /// `piko list -g --repos`/`--repo <NAME>`: the groups `repos` define, `pacman -Sg`.
@@ -277,9 +280,6 @@ pub fn groups(
 /// groups' members, every group name, and, with `with_members`, every group and its members.
 /// The last is `pacman -Sgg`. A named group no repository defines is reported to stderr, and
 /// makes the exit code a failure.
-///
-/// Nothing here can fail to parse. A repository package's `%GROUPS%` is one of the eagerly
-/// converted fields, so this opens no deferred `desc`.
 pub fn repo_groups<'a>(
     repos: impl IntoIterator<Item = &'a RepoDatabase>,
     names: &[String],
@@ -287,47 +287,13 @@ pub fn repo_groups<'a>(
     quiet: bool,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut rows = Vec::new();
-    let members = lists_members(names, with_members);
-
-    for db in repos {
-        for package in db.iter() {
-            for group in package.groups() {
-                let group: &str = group.as_ref();
-                seen.insert(group.to_owned());
-                if members && (names.is_empty() || names.iter().any(|name| name == group)) {
-                    rows.push(Row {
-                        group: Some(group.to_owned()),
-                        name: package.name().to_string(),
-                        version: package.version().to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    if !members {
-        return print_group_names(&seen, quiet, out);
-    }
-
-    let ok = report_missing_groups(names, &seen);
-    sort_group_rows(&mut rows);
-    let code = print_rows(&rows, false, quiet, "listed", out);
-    if ok { code } else { ExitCode::FAILURE }
+    let index = piko_db::groups::repo_group_index(repos);
+    let describe = |package: &piko_db::repo::RepoPackage| {
+        (package.name().to_string(), package.version().to_string())
+    };
+    print_groups(&index, names, with_members, false, quiet, describe, out)
 }
 
-/// Orders a group listing by group, then by package name.
-///
-/// pacman prints its group cache in database and scan order instead. Sorting is what makes
-/// `piko list -g` reproducible across two runs. It is also already how the group *names* come
-/// out, since they are collected into a [`BTreeSet`].
-fn sort_group_rows(rows: &mut [Row]) {
-    rows.sort_by(|left, right| {
-        (left.group.as_deref(), left.name.as_str())
-            .cmp(&(right.group.as_deref(), right.name.as_str()))
-    });
-}
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -447,5 +413,24 @@ mod tests {
         let wanted = ["build".to_owned()];
         let (code, _) = lines(|out| repo_groups(repos.iter().copied(), &wanted, false, false, out));
         assert_eq!(code, ExitCode::FAILURE, "an installed-only group is not a repository group");
+    }
+
+    /// A `%PACKAGER%` the typed parse refuses does not drop an explicit package from `-e`.
+    #[test]
+    fn explicit_lists_a_package_only_the_typed_parse_refuses() {
+        let db = piko_db::fixture::DbFixture::new();
+        let refused = piko_db::fixture::MINIMAL_DESC_V1.replacen(
+            "Foobar McFooface <foobar@mcfooface.org>",
+            "Some One <not-an-email>",
+            1,
+        );
+        db.package("foo-1.0.0-1").desc(&refused).files(piko_db::fixture::MINIMAL_FILES).build();
+        let local = LocalDatabase::open(db.path()).unwrap();
+        assert!(local.iter().next().unwrap().desc().is_err(), "the fixture must be refused");
+
+        let (code, out) = lines(|out| explicit(&local, true, out));
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(out, ["foo"]);
     }
 }

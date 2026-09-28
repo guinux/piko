@@ -708,7 +708,8 @@ fn print_step_result(
                     writeln!(out, "  Warning: could not hash {}", piko_db::printable_path(path));
             }
             for problem in &extraction.xattr_problems {
-                let _ = writeln!(out, "  Warning: {problem}");
+                let _ =
+                    writeln!(out, "  Warning: {}", piko_db::printable_lines(&problem.to_string()));
             }
             // A `.pacnew` the user is never told about is a configuration change that never
             // happens, silently.

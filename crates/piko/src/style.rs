@@ -51,13 +51,16 @@ pub(crate) fn info_value(value: String) -> console::StyledObject<String> {
 /// libalpm prints the value verbatim. So reporting the field as absent would be a lie about
 /// the file's contents. Preferring the normalized form keeps the common line unchanged.
 ///
+/// The raw value is free text a mirror or a package chose, so it is escaped by
+/// [`fn@piko_db::printable`].
+///
 /// Shared for the same reason as [`info_label`]: both `info` renderers draw this field.
 pub(crate) fn info_url(
     normalized: Option<String>,
     raw: Option<&str>,
 ) -> console::StyledObject<String> {
     match normalized.or_else(|| raw.map(str::to_owned)) {
-        Some(url) => console::Style::new().blue().apply_to(url),
+        Some(url) => console::Style::new().blue().apply_to(piko_db::printable(&url)),
         None => info_value("None".to_owned()),
     }
 }
@@ -128,6 +131,9 @@ impl ChangeKind {
 /// A line past the first is indented to the column [`info_label`]'s value starts at, not to
 /// column zero. A wrapped list then still reads as one field rather than as loose trailing
 /// lines. An empty list prints `"None"`, dimmed via [`info_value`].
+///
+/// Each item is escaped by [`crate::output::escaped`]. A group name, a license or an optional
+/// dependency's description is free text a mirror or a package chose.
 pub(crate) fn render_list_field<T: std::fmt::Display>(
     out: &mut impl std::io::Write,
     label: &'static str,
@@ -143,7 +149,7 @@ pub(crate) fn render_list_field<T: std::fmt::Display>(
 
     let indent = " ".repeat(label.chars().count().saturating_add(1));
     for (index, chunk) in items.chunks(per_line.max(1)).enumerate() {
-        let rendered = chunk.iter().map(ToString::to_string).collect::<Vec<_>>().join("  ");
+        let rendered = chunk.iter().map(crate::output::escaped).collect::<Vec<_>>().join("  ");
         if index == 0 {
             emit!(out, "{} {rendered}", info_label(label));
         } else {
@@ -169,3 +175,34 @@ macro_rules! field_list {
 }
 
 pub(crate) use field_list;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+mod tests {
+    use super::*;
+
+    /// A payload no `console` style ever emits: an OSC 52 clipboard write, ended by a bell.
+    const CLIPBOARD: &str = "\u{1b}]52;c;cHduZWQ=\u{7}";
+
+    #[test]
+    fn a_raw_url_is_escaped() {
+        let url = info_url(None, Some(&format!("https://x.invalid/{CLIPBOARD}"))).to_string();
+        assert!(!url.contains('\u{7}'), "{url}");
+        assert!(url.contains("\\u{1b}]52"), "{url}");
+    }
+
+    /// A group name, a license or an optional dependency's description is escaped item by item.
+    #[test]
+    fn a_list_field_escapes_each_item() {
+        let items = vec!["plain".to_owned(), format!("bar: {CLIPBOARD}")];
+        let mut out = Vec::new();
+        assert_eq!(
+            render_list_field(&mut out, "Optional Deps   :", &items, 1),
+            std::process::ExitCode::SUCCESS
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains('\u{7}'), "{text}");
+        assert!(text.contains("plain"), "{text}");
+        assert!(text.contains("bar: \\u{1b}]52"), "{text}");
+    }
+}

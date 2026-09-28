@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use piko_db::repo::{RepoDatabase, RepoPackage};
 
-use crate::output::{emit, human_date, human_size, join, report};
+use crate::output::{emit, escaped, human_date, human_size, join, report};
 use crate::style::{field_list, info_label, info_url};
 
 /// Builds `pacman -Si`'s "Validated By" label.
@@ -53,8 +53,8 @@ pub fn repo_info(
     emit!(out, "{} {}", info_label("Repository      :"), bold.apply_to(db.name()));
     emit!(out, "{} {}", info_label("Name            :"), bold.apply_to(package.name()));
     emit!(out, "{} {}", info_label("Version         :"), version.apply_to(package.version()));
-    emit!(out, "{} {}", info_label("Description     :"), desc.description());
-    emit!(out, "{} {}", info_label("Architecture    :"), desc.architecture());
+    emit!(out, "{} {}", info_label("Description     :"), escaped(desc.description()));
+    emit!(out, "{} {}", info_label("Architecture    :"), escaped(desc.architecture()));
     emit!(out, "{} {url}", info_label("URL             :"));
     field_list!(out, "Licenses        :", desc.licenses(), 5);
     field_list!(out, "Groups          :", desc.groups(), 5);
@@ -65,7 +65,12 @@ pub fn repo_info(
     field_list!(out, "Replaces        :", desc.replaces(), 5);
     emit!(out, "{} {}", info_label("Download Size   :"), human_size(desc.compressed_size()));
     emit!(out, "{} {}", info_label("Installed Size  :"), human_size(desc.installed_size()));
-    emit!(out, "{} {}", info_label("Packager        :"), desc.packager_raw().unwrap_or_default());
+    emit!(
+        out,
+        "{} {}",
+        info_label("Packager        :"),
+        escaped(desc.packager_raw().unwrap_or_default())
+    );
     emit!(out, "{} {}", info_label("Build Date      :"), human_date(desc.build_date(), offset));
     emit!(
         out,

@@ -498,6 +498,9 @@ pub struct Universe<'a> {
     /// same test to an *installed* package. `check_literal` (`sync.c:93`) tests both sides,
     /// and only the repository side can be filtered at intern time.
     ignores: IgnoreList<'a>,
+    /// How many package files [`UniverseOptions::files`] gave, so a caller can check that
+    /// [`Universe::file_candidates`] lost none of them.
+    files_named: usize,
 }
 
 impl<'a> Universe<'a> {
@@ -571,6 +574,7 @@ impl<'a> Universe<'a> {
             repo_usage,
             ignored: ignored.into_boxed_slice(),
             ignores: options.ignores,
+            files_named: options.files.len(),
         };
         universe.index();
         Ok(universe)
@@ -671,6 +675,15 @@ impl<'a> Universe<'a> {
             .collect();
         found.sort_unstable();
         found.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// How many package files [`UniverseOptions::files`] gave this universe.
+    ///
+    /// [`Universe::file_candidates`] must return as many. The two are compared rather than
+    /// assumed equal.
+    #[must_use]
+    pub const fn files_named(&self) -> usize {
+        self.files_named
     }
 
     /// The `Usage` configured for the repository at `index`.

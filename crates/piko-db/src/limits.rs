@@ -75,6 +75,13 @@
 //! |------------------------------|-------------------------|---------------|
 //! | `journal_bytes`              | ~110 B per step         | 16 MiB |
 //!
+//! A keyring's trust list, `<name>-trusted` or `<name>-revoked` beside `<name>.gpg`, decides
+//! which keys root trusts. It holds one fingerprint per line.
+//!
+//! | file                        | largest observed              | default limit |
+//! |------------------------------|-------------------------------|---------------|
+//! | `keyring_list_bytes`         | 1.5 KB (`archlinux-revoked`)  | 1 MiB |
+//!
 //! Diagnostics are bounded separately (`max_diagnostics`, default 4096). They are the one
 //! part of an open whose size is attacker-controlled *without* the package count growing. A
 //! directory of a million badly-named entries yields no packages at all. So neither
@@ -123,6 +130,8 @@ pub enum Limit {
     MountTable,
     /// The maximum size of a transaction journal.
     Journal,
+    /// The maximum size of a keyring's trust list, `<name>-trusted` or `<name>-revoked`.
+    KeyringList,
 }
 
 impl Limit {
@@ -142,6 +151,7 @@ impl Limit {
             Self::Hook => "hook file",
             Self::MountTable => "mount table",
             Self::Journal => "transaction journal",
+            Self::KeyringList => "keyring trust list",
         }
     }
 }
@@ -287,6 +297,10 @@ pub struct Limits {
     ///
     /// 16 MiB holds a journal of well over a hundred thousand steps.
     pub journal_bytes: u64,
+    /// Maximum size in bytes of a keyring's trust list, `<name>-trusted` or `<name>-revoked`.
+    ///
+    /// 1 MiB holds more than 20,000 fingerprints.
+    pub keyring_list_bytes: u64,
     /// Maximum number of candidate packages a single planning run may consider.
     ///
     /// One candidate per installed package plus one per package in every configured
@@ -411,6 +425,7 @@ impl Default for Limits {
             hook_bytes: MIB,
             mount_table_bytes: 4 * MIB,
             journal_bytes: 16 * MIB,
+            keyring_list_bytes: MIB,
             solve_max_solvables: 1 << 21,
             solve_max_conflicts: 1 << 20,
             solve_max_clauses: 1 << 24,
@@ -442,6 +457,7 @@ impl Limits {
             Limit::Hook => self.hook_bytes,
             Limit::MountTable => self.mount_table_bytes,
             Limit::Journal => self.journal_bytes,
+            Limit::KeyringList => self.keyring_list_bytes,
         }
     }
 }

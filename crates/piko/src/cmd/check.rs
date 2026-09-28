@@ -213,7 +213,7 @@ fn check(
     match package.check_consistency() {
         Ok(found) => {
             for item in found {
-                emit!(out, "{}: {item}", package.name());
+                emit!(out, "{}: {}", package.name(), crate::output::escaped(item));
                 failed = true;
             }
         }
@@ -227,7 +227,13 @@ fn check(
         Ok(None) => emit!(out, "{}: no mtree file", package.name()),
         Ok(Some(file_report)) => {
             for problem in file_report.problems.iter().filter(|problem| problem.is_error()) {
-                emit!(out, "{}: {} ({})", package.name(), problem.path.display(), problem.error);
+                emit!(
+                    out,
+                    "{}: {} ({})",
+                    package.name(),
+                    piko_db::printable_path(&problem.path),
+                    crate::output::escaped(&problem.error)
+                );
             }
             let altered = file_report.altered_files();
             if altered > 0 {

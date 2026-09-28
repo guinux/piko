@@ -41,9 +41,10 @@ pub mod program;
 pub mod scan;
 
 pub use self::{
-    action::{Action, Outcome, apply, remove_if_identical},
+    action::{Action, Outcome, apply, is_identical, remove_if_identical},
     base::{
-        BaseCandidate, BaseCheck, BaseLimits, BaseSearch, RefusedBase, extract_member, find_base,
+        BaseCandidate, BaseCheck, BaseContents, BaseLimits, BaseLookup, BaseSearch, RefusedBase,
+        base_contents, extract_member, find_base,
     },
     program::{
         DEFAULT_DIFFPROG, DEFAULT_MERGEPROG, Invocation, parse_program, review_diff,

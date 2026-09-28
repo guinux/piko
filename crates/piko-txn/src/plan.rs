@@ -167,6 +167,37 @@ impl TransactionPlan {
         }
     }
 
+    /// A transaction that removes what `plan` removes, and installs nothing.
+    ///
+    /// `plan` is a removal plan, as [`piko_db::solve::plan_removal`] returns it, solved over
+    /// `universe`. Each step becomes the entry of the package it removes, in plan order.
+    /// `no_save` is pacman's `--nosave`, for every entry.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotARemoval`] if a step installs or changes a package.
+    /// [`Error::PlanInconsistent`] if a step names a package `universe` does not know.
+    /// [`Error::InvalidEntryName`] if a package's name and version form no entry name.
+    pub fn from_removal(universe: &Universe<'_>, plan: &Plan, no_save: bool) -> Result<Self> {
+        let mut entries = Vec::with_capacity(plan.steps().len());
+        for step in plan.steps() {
+            let piko_db::solve::Step::Remove { package } = step else {
+                return Err(Error::NotARemoval);
+            };
+            let Some(solvable) = universe.get(*package) else {
+                return Err(Error::PlanInconsistent { id: *package });
+            };
+            let entry = EntryName::new(solvable.name(), solvable.version()).map_err(|error| {
+                Error::InvalidEntryName {
+                    name: solvable.name().to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+            entries.push(entry);
+        }
+        Ok(Self::removal(entries, no_save))
+    }
+
     /// The steps, in the order the transaction runs them.
     #[must_use]
     pub fn steps(&self) -> &[Step] {
@@ -1053,5 +1084,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A removal plan becomes one `Remove` step per package, in plan order (a dependent before
+    /// its dependency), each carrying `--nosave`.
+    #[test]
+    fn a_removal_plan_becomes_its_entries() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("app", "1.0.0-1").depends(["lib"]))
+            .installed(PackageSpec::new("lib", "1.0.0-1"))
+            .build();
+        let universe =
+            Universe::build(scenario.local(), std::iter::empty(), UniverseOptions::new()).unwrap();
+        let removal = piko_db::solve::plan_removal(
+            scenario.local(),
+            &universe,
+            &["lib".to_owned(), "app".to_owned()],
+            piko_db::solve::RemovalOptions::default(),
+            &piko_db::Limits::default(),
+        )
+        .unwrap();
+        let plan = removal.outcome.unwrap();
+
+        let transaction = TransactionPlan::from_removal(&universe, &plan, true).unwrap();
+
+        let removed: Vec<(&str, bool)> = transaction
+            .steps()
+            .iter()
+            .map(|step| match step {
+                Step::Remove { entry, no_save } => (entry.as_str(), *no_save),
+                Step::Install { .. } => panic!("a removal plan installs nothing"),
+            })
+            .collect();
+        assert_eq!(removed, [("app-1.0.0-1", true), ("lib-1.0.0-1", true)]);
+    }
+
+    /// A plan that installs something is not a removal plan. The commit engine would carry
+    /// the install out, so it is refused.
+    #[test]
+    fn an_install_step_is_not_a_removal() {
+        let scenario = Scenario::new().repo("core", [PackageSpec::new("app", "1.0.0-1")]).build();
+        let universe = Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new(),
+        )
+        .unwrap();
+        let app = *universe.candidates_named("app").first().unwrap();
+        let request = piko_db::solve::Request::new().target(app);
+        let limits = piko_db::Limits::default();
+        let Ok(Ok(planned)) = piko_db::solve::solve_with_removals(&universe, &request, &limits)
+        else {
+            panic!("expected a solution");
+        };
+        let plan = Plan::assemble(
+            &universe,
+            &planned,
+            request.targets(),
+            &limits,
+            &piko_db::solve::NoCache,
+        );
+
+        let error = TransactionPlan::from_removal(&universe, &plan, false).unwrap_err();
+        assert!(matches!(error, Error::NotARemoval), "got {error:?}");
     }
 }

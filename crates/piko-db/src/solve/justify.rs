@@ -371,7 +371,11 @@ fn describe_removal(universe: &Universe<'_>, cause: RemovalCause) -> String {
 }
 
 /// One of `dependent`'s `%DEPENDS%` entries, verbatim, or `?` if it cannot be read.
-fn relation_text(universe: &Universe<'_>, dependent: SolvableId, dependency: usize) -> String {
+pub(crate) fn relation_text(
+    universe: &Universe<'_>,
+    dependent: SolvableId,
+    dependency: usize,
+) -> String {
     universe
         .get(dependent)
         .and_then(|solvable| solvable.depends().ok())

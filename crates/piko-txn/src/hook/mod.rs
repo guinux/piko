@@ -56,6 +56,34 @@ const HOOK_SUFFIX: &str = ".hook";
 /// So every caller building a directory list gets it, not only this crate's own CLI.
 pub const SYSTEM_HOOK_DIR: &str = "/usr/share/libalpm/hooks";
 
+/// The directories hooks are read from, in increasing priority.
+///
+/// `replacing` non-empty is pacman's `--hookdir`, and replaces the whole list as it is given.
+/// Otherwise the list is [`SYSTEM_HOOK_DIR`] followed by each `configured` `HookDir`. So a file
+/// in `/etc/pacman.d/hooks` overrides the system copy of the same name.
+///
+/// The system directory is resolved inside `root`; a configured `HookDir` is a host path.
+/// libalpm draws that same line. `alpm_initialize` builds its own default by joining the root
+/// to `SYSHOOKDIR`, so `pacman -r /mnt` reads `/mnt/usr/share/libalpm/hooks/`.
+/// `alpm_option_add_hookdir` joins nothing, so a `HookDir` from the configuration stays as
+/// written. A hook read from the host's system directory could run before the new root holds
+/// the program it calls.
+///
+/// `pacman-conf --root=/mnt HookDir` answers `/etc/pacman.d/hooks/`, which is not evidence
+/// against this. It reports the configured directive, never libalpm's root-joined default.
+#[must_use]
+pub fn directories(root: &Path, configured: &[PathBuf], replacing: &[PathBuf]) -> Vec<PathBuf> {
+    if !replacing.is_empty() {
+        return replacing.to_vec();
+    }
+    // `Path::join` replaces the whole path when its argument is absolute, which would hand back
+    // the host directory. Stripping the leading separator is what makes the join happen.
+    let system = Path::new(SYSTEM_HOOK_DIR);
+    let mut dirs = vec![root.join(system.strip_prefix("/").unwrap_or(system))];
+    dirs.extend(configured.iter().cloned());
+    dirs
+}
+
 /// Largest `.hook` file piko reads, from [`piko_db::Limits`].
 ///
 /// Every package that ships a hook writes into this directory. piko did not choose the file,
@@ -625,5 +653,41 @@ Exec = /bin/true
         let post = hooks.triggered(When::PostTransaction, &summary);
         assert_eq!(post.len(), 1);
         assert_eq!(post.first().unwrap().0.name, "post.hook");
+    }
+
+    /// libalpm joins its root to `SYSHOOKDIR`, so a new root reads its own copy. This is what
+    /// keeps a hook from running before the target owns the program it calls.
+    #[test]
+    fn the_system_hook_directory_is_resolved_inside_the_root() {
+        let dirs = directories(Path::new("/mnt"), &[], &[]);
+        assert_eq!(dirs, [PathBuf::from("/mnt/usr/share/libalpm/hooks")]);
+    }
+
+    /// A root of `/` must leave the system directory exactly where it already was.
+    #[test]
+    fn the_running_system_reads_the_unprefixed_system_hook_directory() {
+        let dirs = directories(Path::new("/"), &[], &[]);
+        assert_eq!(dirs, [PathBuf::from(SYSTEM_HOOK_DIR)]);
+    }
+
+    /// `alpm_option_add_hookdir` joins nothing, so a configured `HookDir` stays a host path
+    /// even under another root.
+    #[test]
+    fn a_configured_hookdir_is_not_resolved_inside_the_root() {
+        let configured = [PathBuf::from("/etc/pacman.d/hooks/")];
+        let dirs = directories(Path::new("/mnt"), &configured, &[]);
+        assert_eq!(
+            dirs,
+            [PathBuf::from("/mnt/usr/share/libalpm/hooks"), PathBuf::from("/etc/pacman.d/hooks/")]
+        );
+    }
+
+    /// `--hookdir` replaces the whole list, so the root never reaches it.
+    #[test]
+    fn hookdir_replaces_the_list_and_is_taken_as_written() {
+        let configured = [PathBuf::from("/etc/pacman.d/hooks/")];
+        let replacing = [PathBuf::from("/only/this/")];
+        let dirs = directories(Path::new("/mnt"), &configured, &replacing);
+        assert_eq!(dirs, [PathBuf::from("/only/this/")]);
     }
 }

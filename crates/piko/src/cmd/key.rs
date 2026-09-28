@@ -10,7 +10,7 @@ use std::{path::Path, process::ExitCode};
 use piko_sig_write::{KeyInfo, KeyringAdmin};
 
 use crate::cli::KeyCommand;
-use crate::output::{confirm, emit, report};
+use crate::output::{confirm, emit, escaped, report};
 
 /// Runs one `piko key` subcommand against the keyring at `gpgdir`.
 pub fn key(
@@ -105,7 +105,7 @@ fn populate(
                         "  {name}{}:{}: {}",
                         skipped.file.suffix(),
                         skipped.line,
-                        skipped.reason
+                        escaped(&skipped.reason)
                     );
                 }
             }
@@ -220,7 +220,7 @@ fn list_keys(gpgdir: &Path, keyids: &[String], out: &mut impl std::io::Write) ->
             expired_suffix(key)
         );
         for user_id in &key.user_ids {
-            emit!(out, "  Uid  {user_id}");
+            emit!(out, "  Uid  {}", escaped(user_id));
         }
     }
     if keys.is_empty() {
@@ -283,14 +283,6 @@ fn delete(
     ExitCode::SUCCESS
 }
 
-/// The policy `piko key verify` judges a signature against.
-///
-/// A signature is required, and its key must be fully trusted. That is pacman's own default for
-/// a package file: `SigLevel = Required` sets `check`, and `TrustedOnly` clears `marginal_ok`
-/// and `unknown_ok`. `TrustedOnly` applies whenever `pacman.conf` names no `TrustAll`.
-const VERIFY_POLICY: piko_sig::Policy =
-    piko_sig::Policy { check: true, optional: false, marginal_ok: false, unknown_ok: false };
-
 /// `piko key verify`.
 ///
 /// The exit code comes from [`piko_sig::decide`], the same function `piko install` and
@@ -306,50 +298,29 @@ fn verify(
     file: Option<&Path>,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
-    let keyring = match piko_sig::Keyring::open(gpgdir) {
-        Ok(keyring) => keyring,
+    let checked = match piko_sig_write::verify(gpgdir, signature, file) {
+        Ok(checked) => checked,
         Err(error) => {
             report(&error);
             return ExitCode::FAILURE;
         }
     };
-    let default_file;
-    let file = match file {
-        Some(file) => file,
-        None => {
-            default_file = signature.with_extension("");
-            &default_file
-        }
-    };
-
-    match keyring.verify_detached(file, signature) {
-        Ok(outcomes) => {
-            for outcome in &outcomes {
-                emit!(
-                    out,
-                    "{:?} (trust: {:?}){}",
-                    outcome.status,
-                    outcome.trust,
-                    outcome
-                        .fingerprint
-                        .as_deref()
-                        .map(|fpr| format!(", key {fpr}"))
-                        .unwrap_or_default(),
-                );
-            }
-            match piko_sig::decide(&outcomes, VERIFY_POLICY) {
-                piko_sig::Verdict::Accepted { .. } => ExitCode::SUCCESS,
-                piko_sig::Verdict::Rejected(rejection) => {
-                    eprintln!(
-                        "Error: the signature on {} was rejected: {rejection}",
-                        file.display()
-                    );
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        Err(error) => {
-            report(&error);
+    for outcome in &checked.outcomes {
+        emit!(
+            out,
+            "{:?} (trust: {:?}){}",
+            outcome.status,
+            outcome.trust,
+            outcome.fingerprint.as_deref().map(|fpr| format!(", key {fpr}")).unwrap_or_default(),
+        );
+    }
+    match checked.verdict {
+        piko_sig::Verdict::Accepted { .. } => ExitCode::SUCCESS,
+        piko_sig::Verdict::Rejected(rejection) => {
+            eprintln!(
+                "Error: the signature on {} was rejected: {rejection}",
+                checked.file.display()
+            );
             ExitCode::FAILURE
         }
     }
@@ -414,10 +385,35 @@ fn confirm_trust_action(
         }
     };
 
-    let _ = writeln!(out, "{}  {}", key.fingerprint, key.user_ids.join(", "));
+    let _ = writeln!(out, "{}", key_line(&key.fingerprint, &key.user_ids));
     if noconfirm || confirm(out, &format!("{verb} this key? [y/N] "), false) {
         Decision::Proceed(key.fingerprint)
     } else {
         Decision::Declined
+    }
+}
+
+/// The line naming a key before a trust question: its fingerprint, then its user IDs.
+///
+/// A user ID is whatever the key's owner wrote, so each one is escaped by [`escaped`].
+/// Unescaped, a carriage return or an escape sequence could redraw this line with another
+/// fingerprint, just before the user approves the one shown.
+fn key_line(fingerprint: &str, user_ids: &[String]) -> String {
+    let user_ids = user_ids.iter().map(escaped).collect::<Vec<_>>().join(", ");
+    format!("{fingerprint}  {user_ids}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A user ID cannot move the cursor back over the fingerprint the question names.
+    #[test]
+    fn a_user_id_cannot_redraw_the_key_line() {
+        let line = key_line(
+            "AAAA",
+            &["Mallory <m@example.invalid>\r\u{1b}[2KBBBB  Arch Linux".to_owned()],
+        );
+        assert_eq!(line, "AAAA  Mallory <m@example.invalid>\\r\\u{1b}[2KBBBB  Arch Linux");
     }
 }

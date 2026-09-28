@@ -92,25 +92,34 @@ impl KeyringAdmin {
     /// `<name>.gpg`. Every other failure stops the call. Such a failure means GnuPG itself is
     /// broken, or the keyring is unwritable. The next line would fail the same way.
     ///
+    /// All three files are instructions root follows: they decide which keys verify every
+    /// package. So `keyrings_dir` must pass `fs_util::ensure_trusted_directory`, and each file
+    /// must be owned by root or the effective user, with no group or other write bit. A file
+    /// may be a symbolic link. The file it leads to is tested, through the descriptor that
+    /// reads it. A trust list is bounded by `Limits::keyring_list_bytes`.
+    ///
     /// # Errors
     ///
-    /// [`Error::PopulateFile`] if `<name>.gpg` itself is missing or unreadable.
+    /// [`Error::PopulateFile`] if `keyrings_dir` or one of the three files fails the tests
+    /// above, if `<name>.gpg` itself is missing or unreadable, or if a trust list is too large.
     /// [`Error::NoMasterKey`] if [`KeyringAdmin::init`] was never run. That is checked up
     /// front, before anything is imported, so a populate that cannot finish does not leave a
     /// half-trusted keyring. Any other [`Error`] a keyring operation raises, per the rule
     /// above.
     pub fn populate(&self, keyrings_dir: &Path, name: &str) -> Result<PopulateSummary> {
+        piko_db::fs_util::ensure_trusted_directory(keyrings_dir)
+            .map_err(|source| populate_file(keyrings_dir, &source))?;
         let gpg_path = keyrings_dir.join(format!("{name}.gpg"));
-        if !gpg_path.is_file() {
-            return Err(Error::PopulateFile { path: gpg_path, reason: "not a file".to_owned() });
-        }
+        let gpg_file = open_trusted_keyring(&gpg_path)?;
         // Resolved up front and discarded. This proves a master key exists before anything
         // is imported. It matches `lsign`'s own check, but fails before the import step
         // rather than partway through the trusted-file loop.
         self.require_master_key()?;
 
-        let mut summary =
-            PopulateSummary { imported: self.import(&gpg_path)?, ..PopulateSummary::default() };
+        let mut summary = PopulateSummary {
+            imported: self.import_file(gpg_file, &gpg_path)?,
+            ..PopulateSummary::default()
+        };
 
         let revoked_path = keyrings_dir.join(format!("{name}-revoked"));
         if let Some(contents) = read_side_file(&revoked_path)? {
@@ -202,6 +211,30 @@ fn not_in_keyring(fingerprint: &str) -> String {
     format!("{fingerprint} is not in the keyring")
 }
 
+/// The [`Error::PopulateFile`] for `path`, from a `piko_db` failure.
+fn populate_file(path: &Path, source: &piko_db::Error) -> Error {
+    Error::PopulateFile { path: path.to_path_buf(), reason: source.to_string() }
+}
+
+/// Opens `<name>.gpg`, following a symbolic link, and refuses a file another user could change.
+///
+/// # Errors
+///
+/// [`Error::PopulateFile`] if the file cannot be opened, is not a regular file, or fails
+/// `fs_util::distrust`.
+fn open_trusted_keyring(path: &Path) -> Result<std::fs::File> {
+    let file = piko_db::fs_util::open_following_symlinks(path)
+        .map_err(|source| populate_file(path, &source))?;
+    let metadata = file.metadata().map_err(|source| Error::PopulateFile {
+        path: path.to_path_buf(),
+        reason: source.to_string(),
+    })?;
+    if let Some(distrust) = piko_db::fs_util::distrust(&metadata) {
+        return Err(Error::PopulateFile { path: path.to_path_buf(), reason: distrust.to_string() });
+    }
+    Ok(file)
+}
+
 /// Reads an optional `-trusted` or `-revoked` side file. `None` means the file does not exist,
 /// which is not an error. Many real keyrings ship no revocations.
 ///
@@ -212,14 +245,19 @@ fn not_in_keyring(fingerprint: &str) -> String {
 ///
 /// # Errors
 ///
+/// The read follows a symbolic link, refuses a file another user could change, and refuses one
+/// larger than `Limits::keyring_list_bytes`. The caller tests the directory once.
+///
 /// [`Error::PopulateFile`] for any failure other than the file not existing.
 fn read_side_file(path: &Path) -> Result<Option<String>> {
-    match std::fs::read_to_string(path) {
+    let limit = piko_db::Limit::KeyringList;
+    let max = piko_db::Limits::default().get(limit);
+    match piko_db::fs_util::read_trusted_file_utf8_following(path, limit, max) {
         Ok(contents) => Ok(Some(contents)),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => {
-            Err(Error::PopulateFile { path: path.to_path_buf(), reason: source.to_string() })
+        Err(piko_db::Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(None)
         }
+        Err(source) => Err(populate_file(path, &source)),
     }
 }
 
@@ -375,6 +413,11 @@ mod tests {
         .ok()?;
         // A stale entry that is not in `<name>.gpg` at all — `populate` must skip it, not fail.
         std::fs::write(keyrings_dir.path().join(format!("{name}-revoked")), "0".repeat(40)).ok()?;
+        // `populate` refuses a file its group may write, so the mode must not follow the umask.
+        for suffix in [".gpg", "-trusted", "-revoked"] {
+            let path = keyrings_dir.path().join(format!("{name}{suffix}"));
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).ok()?;
+        }
 
         Some((admin, keyrings_dir, fingerprint))
     }
@@ -464,6 +507,63 @@ mod tests {
         let Some((admin, keyrings_dir, _)) = populate_fixture("vendor") else { return };
         let err = admin.populate(keyrings_dir.path(), "no-such-keyring").unwrap_err();
         assert!(matches!(err, Error::PopulateFile { .. }), "{err:?}");
+    }
+
+    /// These test the trust rule for the three files: a directory, a key file and a trust list
+    /// another user could change are each refused, before anything is imported.
+    #[test]
+    fn populate_refuses_a_keyring_directory_others_can_write() {
+        let Some((admin, keyrings_dir, _)) = populate_fixture("vendor") else { return };
+        std::fs::set_permissions(keyrings_dir.path(), std::fs::Permissions::from_mode(0o777))
+            .unwrap();
+        let err = admin.populate(keyrings_dir.path(), "vendor").unwrap_err();
+        assert!(matches!(err, Error::PopulateFile { .. }), "{err:?}");
+        assert!(err.to_string().contains("writable by its group or others"), "{err}");
+    }
+
+    #[test]
+    fn populate_refuses_a_key_file_its_group_can_write() {
+        let Some((admin, keyrings_dir, _)) = populate_fixture("vendor") else { return };
+        let path = keyrings_dir.path().join("vendor.gpg");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let err = admin.populate(keyrings_dir.path(), "vendor").unwrap_err();
+        assert!(err.to_string().contains("writable by its group or others"), "{err}");
+        assert!(admin.list_keys().unwrap().len() < 2, "nothing is imported before the refusal");
+    }
+
+    #[test]
+    fn a_trust_list_its_group_can_write_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vendor-trusted");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let err = read_side_file(&path).unwrap_err();
+        assert!(err.to_string().contains("writable by its group or others"), "{err}");
+    }
+
+    /// A FIFO is refused rather than waited on. Skipped where `mkfifo` is unavailable.
+    #[test]
+    fn a_trust_list_that_is_a_fifo_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vendor-trusted");
+        // `mkfifo(3)` is `unsafe`, and this workspace forbids `unsafe_code`.
+        if !std::process::Command::new("mkfifo").arg(&path).status().is_ok_and(|s| s.success()) {
+            return;
+        }
+        let err = read_side_file(&path).unwrap_err();
+        assert!(matches!(err, Error::PopulateFile { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_trust_list_over_its_bound_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vendor-trusted");
+        let max = piko_db::Limits::default().get(piko_db::Limit::KeyringList);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(max.saturating_add(1)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = read_side_file(&path).unwrap_err();
+        assert!(err.to_string().contains("keyring trust list"), "{err}");
     }
 
     #[test]

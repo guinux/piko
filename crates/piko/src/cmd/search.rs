@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use piko_db::repo::RepoDatabase;
 use piko_db::{LocalDatabase, search::hide_installed};
 
-use crate::output::emit;
+use crate::output::{emit, escaped};
 use crate::style::checkmark;
 
 /// One result line, already reduced to exactly what [`print_rows`] needs to render it.
@@ -28,6 +28,7 @@ struct Row {
     prefix: String,
     name: String,
     version: String,
+    /// `%DESC%`, escaped by [`escaped`]. A mirror or a package chose it.
     description: String,
     installed: bool,
 }
@@ -104,7 +105,7 @@ fn local_rows(db: &LocalDatabase, terms: &[String]) -> Vec<Row> {
             version: package.version().to_string(),
             description: package
                 .desc()
-                .map_or_else(|_| "(desc unavailable)".to_owned(), |d| d.description().to_string()),
+                .map_or_else(|_| "(desc unavailable)".to_owned(), |d| escaped(d.description())),
             installed: true,
         })
         .collect()
@@ -121,10 +122,9 @@ fn repo_row(db: &RepoDatabase, package: &piko_db::repo::RepoPackage) -> Row {
         version: package.version().to_string(),
         // A hit whose deferred `desc` will not parse still matched on name, provides, or
         // groups, so it is still a result. Saying so beats dropping it silently.
-        description: package.desc().map_or_else(
-            |_| "<desc could not be parsed>".to_owned(),
-            |d| d.description().to_string(),
-        ),
+        description: package
+            .desc()
+            .map_or_else(|_| "<desc could not be parsed>".to_owned(), |d| escaped(d.description())),
         installed: false,
     }
 }

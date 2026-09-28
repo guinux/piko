@@ -764,8 +764,9 @@ pub enum Command {
         /// Show only transactions that started at or after this time, as `YYYY-MM-DD` or a
         /// full `YYYY-MM-DDTHH:MM:SS+ZZZZ`.
         ///
-        /// A bare date names the whole day, read in UTC, and both bounds include it. So
-        /// `--since D --until D` shows every transaction of day D.
+        /// A bare date names the whole day, in the local time the listing is shown in, and both
+        /// bounds include it. So `--since D --until D` shows every transaction the listing dates
+        /// D.
         #[arg(long, value_name = "WHEN")]
         since: Option<String>,
 

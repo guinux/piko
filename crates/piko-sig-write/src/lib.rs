@@ -61,7 +61,9 @@ pub mod admin;
 mod edit;
 pub mod error;
 pub mod populate;
+pub mod verify;
 
 pub use admin::{ImportSummary, InitOutcome, KeyInfo, KeyringAdmin, OwnerTrust};
 pub use error::{Error, Result};
 pub use populate::{PopulateSummary, SideFile, SkippedLine, discover_keyrings};
+pub use verify::{VERIFY_POLICY, Verification, verify};

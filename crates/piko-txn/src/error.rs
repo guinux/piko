@@ -18,7 +18,7 @@ const MAX_SHOWN: usize = 10;
 ///
 /// A member path, a `.PKGINFO` value quoted in a parse error and a file name on disk are all
 /// chosen outside piko, and every message here can reach a terminal. See
-/// [`piko_db::printable`].
+/// [`fn@piko_db::printable`].
 fn shown(path: &std::path::Path) -> String {
     piko_db::printable_path(path)
 }
@@ -481,6 +481,15 @@ pub enum Error {
         id: piko_db::solve::SolvableId,
     },
 
+    /// A removal plan holds a step that is not a removal.
+    ///
+    /// [`crate::plan::TransactionPlan::from_removal`] refuses it. A removal-only request
+    /// restricts the candidates to what is installed, so the solver has nothing to install.
+    /// Reaching this means that invariant broke, and the commit engine would carry out whatever
+    /// the step is.
+    #[error("the removal plan contains a step that is not a removal")]
+    NotARemoval,
+
     /// A plan step names a candidate with no repository package to install from.
     ///
     /// `Plan::assemble` only emits `Install`/`Change` for a candidate that is not already the
@@ -559,6 +568,17 @@ pub enum Error {
         url: String,
         /// Why it cannot be used.
         reason: String,
+    },
+
+    /// A target names a package URL, and the caller asked for no download.
+    ///
+    /// [`crate::file_target::load_targets`] returns this under
+    /// [`crate::file_target::Urls::Refuse`]. A command that must change nothing, such as a
+    /// preview, cannot read a package it would first have to download.
+    #[error("cannot read {} without downloading it", said(url))]
+    UrlNotLoaded {
+        /// The URL as the user wrote it.
+        url: String,
     },
 
     /// The keyring a verification policy needs could not be opened.

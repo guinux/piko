@@ -261,6 +261,28 @@ impl PacmanConfig {
     pub fn diagnostics(&self) -> &[ConfigDiagnostic] {
         &self.diagnostics
     }
+
+    /// The section that configures `repo`, if any.
+    #[must_use]
+    pub fn repository(&self, repo: &RepoName) -> Option<&RepositoryConfig> {
+        self.repositories.iter().find(|configured| configured.name == *repo)
+    }
+
+    /// The `SigLevel` `repo`'s database is held to when it is opened or downloaded.
+    ///
+    /// The repository's own level merged with `[options]`', through
+    /// [`RepositoryConfig::effective_sig_level`]. Never the raw `RepositoryConfig::sig_level`
+    /// field, which holds the parser's `USE_DEFAULT` sentinel for a repository that set nothing.
+    /// A repository no section configures is held to `[options]`' level alone.
+    ///
+    /// This is the level for a *database*. A package is held to its repository's level by
+    /// `piko_txn::TransactionPlan::new`, which refuses a repository no section configures rather
+    /// than falling back to `[options]`.
+    #[must_use]
+    pub fn database_sig_level(&self, repo: &RepoName) -> SigLevel {
+        let global = self.options.sig_level;
+        self.repository(repo).map_or(global, |configured| configured.effective_sig_level(global))
+    }
 }
 
 /// The in-progress `[options]` section while parsing, before defaults are resolved.
@@ -1177,6 +1199,28 @@ mod tests {
             effective.contains(SigLevel::PACKAGE),
             "the global PackageRequired should still apply to a repository that said nothing"
         );
+    }
+
+    /// A database is held to its repository's effective level, and a repository no section
+    /// configures to the global one.
+    #[test]
+    fn a_database_is_held_to_its_repository_s_effective_level() {
+        let dir = TempDir::new().unwrap();
+        let path = write_conf(
+            &dir,
+            "pacman.conf",
+            "[options]\nArchitecture = x86_64\nSigLevel = Required DatabaseRequired\n\n\
+             [core]\nServer = https://example.org/$repo/os/$arch\n\n\
+             [extra]\nSigLevel = Never\nServer = https://example.org/$repo/os/$arch\n",
+        );
+        let config = PacmanConfig::open(&path).unwrap();
+        let global = config.options.sig_level;
+        let name = |spelled: &str| RepoName::parse(spelled).unwrap();
+
+        assert_eq!(config.database_sig_level(&name("core")), global, "core sets nothing");
+        assert!(!config.database_sig_level(&name("extra")).contains(SigLevel::DATABASE));
+        assert_eq!(config.database_sig_level(&name("testing")), global, "no [testing] section");
+        assert!(config.repository(&name("testing")).is_none());
     }
 
     /// A repository that sets its own `SigLevel` keeps it rather than the global one.

@@ -36,8 +36,8 @@ pub fn history(
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let (since, until) = match (
-        parse_when(options.since.as_deref(), Bound::Start),
-        parse_when(options.until.as_deref(), Bound::End),
+        parse_when(options.since.as_deref(), Bound::Start, options.offset),
+        parse_when(options.until.as_deref(), Bound::End, options.offset),
     ) {
         (Ok(since), Ok(until)) => (since, until),
         (Err(bad), _) | (_, Err(bad)) => {
@@ -136,6 +136,10 @@ fn shown_actions<'a>(record: &'a Record, options: &'a Options) -> impl Iterator<
 /// Returns an [`ExitCode`] rather than nothing, following the convention
 /// [`crate::style::render_list_field`] sets. `emit!` returns from its enclosing function on a
 /// write failure, so a helper that writes hands that decision back to its caller.
+///
+/// Every free-text field is escaped by `piko_db::printable`: the command line, the caller, the
+/// failure reason, and the `.pacnew`/`.pacsave` paths. A package chose those paths, and any tool
+/// that writes `pacman.log` chose the rest.
 fn print_record(
     record: &Record,
     options: &Options,
@@ -168,7 +172,7 @@ fn print_record(
     // 16:30" is worth nothing.
     let inline = if options.quiet {
         match (&record.command, record.actions.as_slice()) {
-            (Some(command), _) => format!("  {command}"),
+            (Some(command), _) => format!("  {}", piko_db::printable(command)),
             (None, [action]) => format!("  {}", action.log_message()),
             (None, _) => String::new(),
         }
@@ -181,7 +185,7 @@ fn print_record(
         "{} {}  {}{inline}{}",
         outcome_mark(&record.outcome),
         console::Style::new().dim().apply_to(when),
-        console::Style::new().cyan().apply_to(format!("[{}]", record.tool)),
+        console::Style::new().cyan().apply_to(format!("[{}]", piko_db::printable(&record.tool))),
         console::Style::new().dim().apply_to(count),
     );
 
@@ -193,7 +197,7 @@ fn print_record(
     // rather than as one more action. It is never truncated. It records what was actually
     // typed, and a history that abbreviates that has to be double-checked.
     if let Some(command) = &record.command {
-        emit!(out, "    {}", console::Style::new().dim().apply_to(command));
+        emit!(out, "    {}", console::Style::new().dim().apply_to(piko_db::printable(command)));
     }
 
     let Widths { verb: verb_width, name: name_width } = widths;
@@ -208,13 +212,15 @@ fn print_record(
     }
 
     if let Outcome::Failed { reason } = &record.outcome {
-        emit!(out, "    {}", console::Style::new().red().apply_to(reason));
+        emit!(out, "    {}", console::Style::new().red().apply_to(piko_db::printable(reason)));
     }
     for path in &record.pacnew {
-        emit!(out, "    {} {}", console::Style::new().yellow().apply_to("pacnew"), path.display());
+        let path = piko_db::printable_path(path);
+        emit!(out, "    {} {path}", console::Style::new().yellow().apply_to("pacnew"));
     }
     for path in &record.pacsave {
-        emit!(out, "    {} {}", console::Style::new().yellow().apply_to("pacsave"), path.display());
+        let path = piko_db::printable_path(path);
+        emit!(out, "    {} {path}", console::Style::new().yellow().apply_to("pacsave"));
     }
     ExitCode::SUCCESS
 }
@@ -324,10 +330,15 @@ const DAY_END: i64 = 24 * 60 * 60 - 1;
 /// transaction of the 23rd. It would also make `--since D --until D` return nothing for any
 /// day. That is the one range a reader is most likely to ask for.
 ///
-/// A bare date is read in UTC rather than in the local zone. The alternative makes a filter's
-/// meaning depend on where the machine is. That is too much for a flag whose whole job is to
-/// cut a list roughly in half.
-fn parse_when(text: Option<&str>, bound: Bound) -> Result<Option<i64>, String> {
+/// A bare date is read in `offset`, the offset every time in the listing is rendered in. So
+/// `--since D` keeps exactly the transactions the listing dates D or later. A day read in UTC
+/// would, east of Greenwich, drop the first hours of day D the listing shows, and keep the last
+/// hours of the day before.
+fn parse_when(
+    text: Option<&str>,
+    bound: Bound,
+    offset: piko_txn::LocalOffset,
+) -> Result<Option<i64>, String> {
     let Some(text) = text else {
         return Ok(None);
     };
@@ -337,8 +348,10 @@ fn parse_when(text: Option<&str>, bound: Bound) -> Result<Option<i64>, String> {
         return piko_txn::history::parse_timestamp(text).map(Some).ok_or_else(|| text.to_owned());
     }
 
+    // Local midnight is UTC midnight moved back by the offset east of UTC.
     let midnight = piko_txn::history::parse_timestamp(&format!("{text}T00:00:00+0000"))
-        .ok_or_else(|| text.to_owned())?;
+        .ok_or_else(|| text.to_owned())?
+        .saturating_sub(i64::from(offset.seconds()));
     Ok(Some(match bound {
         Bound::Start => midnight,
         Bound::End => midnight.saturating_add(DAY_END),
@@ -354,23 +367,41 @@ fn parse_when(text: Option<&str>, bound: Bound) -> Result<Option<i64>, String> {
 mod tests {
     use super::*;
 
+    const UTC: piko_txn::LocalOffset = piko_txn::LocalOffset::UTC;
+
     #[test]
-    fn a_bare_date_starts_a_range_at_its_utc_midnight() {
-        assert_eq!(parse_when(Some("1970-01-01"), Bound::Start).unwrap(), Some(0));
+    fn a_bare_date_starts_a_range_at_its_midnight() {
+        assert_eq!(parse_when(Some("1970-01-01"), Bound::Start, UTC).unwrap(), Some(0));
+    }
+
+    /// The day is the listing's day. East of UTC, local midnight comes before UTC midnight,
+    /// and a transaction at 01:00 local time belongs to the day the listing shows it on.
+    #[test]
+    fn a_bare_date_is_the_day_in_the_offset_the_listing_uses() {
+        let paris = piko_txn::LocalOffset::from_seconds(2 * 3600);
+        let start = parse_when(Some("2026-09-27"), Bound::Start, paris).unwrap().unwrap();
+        let end = parse_when(Some("2026-09-27"), Bound::End, paris).unwrap().unwrap();
+
+        let early = piko_txn::history::parse_timestamp("2026-09-27T01:00:00+0200").unwrap();
+        let late = piko_txn::history::parse_timestamp("2026-09-27T23:30:00+0200").unwrap();
+        let day_before = piko_txn::history::parse_timestamp("2026-09-26T23:30:00+0200").unwrap();
+        assert!((start..=end).contains(&early), "01:00 local is on the 27th");
+        assert!((start..=end).contains(&late), "23:30 local is on the 27th");
+        assert!(!(start..=end).contains(&day_before), "23:30 local on the 26th is not");
     }
 
     /// The bug this pins: `--until <date>` read as midnight excluded the whole day it named.
     #[test]
     fn a_bare_date_ends_a_range_at_its_last_second() {
-        assert_eq!(parse_when(Some("1970-01-01"), Bound::End).unwrap(), Some(86_399));
+        assert_eq!(parse_when(Some("1970-01-01"), Bound::End, UTC).unwrap(), Some(86_399));
     }
 
     /// `--since D --until D` is the range a reader asks for most often, and it has to contain
     /// the whole of day D.
     #[test]
     fn one_bare_date_on_both_bounds_covers_that_whole_day() {
-        let start = parse_when(Some("2026-08-23"), Bound::Start).unwrap().unwrap();
-        let end = parse_when(Some("2026-08-23"), Bound::End).unwrap().unwrap();
+        let start = parse_when(Some("2026-08-23"), Bound::Start, UTC).unwrap().unwrap();
+        let end = parse_when(Some("2026-08-23"), Bound::End, UTC).unwrap().unwrap();
         // 16:29:28+0200 on that day — a real transaction from this machine's log.
         let inside = piko_txn::history::parse_timestamp("2026-08-23T16:29:28+0200").unwrap();
         assert!((start..=end).contains(&inside), "{start} ..= {end} misses {inside}");
@@ -386,20 +417,26 @@ mod tests {
     #[test]
     fn a_full_timestamp_is_read_as_written_at_either_bound() {
         for bound in [Bound::Start, Bound::End] {
-            assert_eq!(parse_when(Some("1970-01-01T02:00:00+0200"), bound).unwrap(), Some(0));
+            assert_eq!(parse_when(Some("1970-01-01T02:00:00+0200"), bound, UTC).unwrap(), Some(0));
         }
     }
 
     #[test]
     fn an_unparseable_time_names_itself() {
-        assert_eq!(parse_when(Some("last tuesday"), Bound::Start), Err("last tuesday".to_owned()));
-        assert_eq!(parse_when(Some("last tuesday"), Bound::End), Err("last tuesday".to_owned()));
+        assert_eq!(
+            parse_when(Some("last tuesday"), Bound::Start, UTC),
+            Err("last tuesday".to_owned())
+        );
+        assert_eq!(
+            parse_when(Some("last tuesday"), Bound::End, UTC),
+            Err("last tuesday".to_owned())
+        );
     }
 
     #[test]
     fn no_filter_is_no_bound() {
-        assert_eq!(parse_when(None, Bound::Start).unwrap(), None);
-        assert_eq!(parse_when(None, Bound::End).unwrap(), None);
+        assert_eq!(parse_when(None, Bound::Start, UTC).unwrap(), None);
+        assert_eq!(parse_when(None, Bound::End, UTC).unwrap(), None);
     }
 
     fn record_with(command: Option<&str>, actions: Vec<Action>) -> Record {
@@ -518,6 +555,38 @@ mod tests {
     /// `ChangeKind`'s to test.
     fn plain(action: &Action, kind: ChangeKind) -> String {
         console::strip_ansi_codes(&versions(action, kind)).into_owned()
+    }
+
+    /// A payload no `console` style ever emits: an OSC 52 clipboard write, ended by a bell.
+    const CLIPBOARD: &str = "\u{1b}]52;c;cHduZWQ=\u{7}";
+
+    /// Every free-text field of a record is escaped. The bell cannot come from styling, so its
+    /// absence shows the payload did not reach the output as it was.
+    #[test]
+    fn a_record_escapes_what_could_drive_a_terminal() {
+        let mut record = record_with(Some(&format!("piko install {CLIPBOARD}")), Vec::new());
+        record.tool = format!("X{CLIPBOARD}");
+        record.pacnew = vec![std::path::PathBuf::from(format!("etc/{CLIPBOARD}.pacnew"))];
+        record.pacsave = vec![std::path::PathBuf::from(format!("etc/{CLIPBOARD}.pacsave"))];
+        record.outcome = Outcome::Failed { reason: format!("refused {CLIPBOARD}") };
+        let options = Options {
+            last: None,
+            packages: Vec::new(),
+            since: None,
+            until: None,
+            quiet: false,
+            offset: UTC,
+        };
+
+        for quiet in [false, true] {
+            let options = Options { quiet, ..options.clone() };
+            let mut out = Vec::new();
+            let widths = Widths::over(std::slice::from_ref(&record), &options);
+            assert_eq!(print_record(&record, &options, widths, &mut out), ExitCode::SUCCESS);
+            let text = String::from_utf8(out).unwrap();
+            assert!(!text.contains('\u{7}'), "{text}");
+            assert!(text.contains("\\u{1b}]52;c;cHduZWQ=\\u{7}"), "{text}");
+        }
     }
 
     /// Both sides of a version change are shown.

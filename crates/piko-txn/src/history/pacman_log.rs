@@ -77,7 +77,11 @@ impl PacmanLog {
     /// Appends one line, stamped with the current time.
     ///
     /// A `\n` already ending `message` is not doubled, so a scriptlet line copied verbatim
-    /// reads the same as one composed here.
+    /// reads the same as one composed here. Every other line feed or carriage return in
+    /// `message` becomes a space. `message` can carry a command line argument or a package's
+    /// text, and a line break there would write a line with a leader piko never stamped: a
+    /// forged `[ALPM] installed` line, which `piko history` and every other reader of the
+    /// shared file would take as real.
     ///
     /// # Errors
     ///
@@ -93,7 +97,7 @@ impl PacmanLog {
     /// [`std::io::Error`] if the line cannot be written.
     pub fn line_at(&mut self, epoch: i64, caller: &str, message: &str) -> std::io::Result<()> {
         let stamp = time_fmt::render(epoch, self.offset);
-        let message = message.strip_suffix('\n').unwrap_or(message);
+        let message = message.strip_suffix('\n').unwrap_or(message).replace(['\n', '\r'], " ");
         // One `write_all`, so a concurrent writer on the same `O_APPEND` file cannot land
         // between the leader and the message.
         self.file.write_all(format!("[{stamp}] [{caller}] {message}\n").as_bytes())?;
@@ -369,6 +373,25 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "[1970-01-01T00:00:00+0000] [PIKO-SCRIPTLET] creating a user\n"
+        );
+    }
+
+    /// A line break inside a message cannot start a line of its own.
+    #[test]
+    fn a_message_cannot_forge_a_line() {
+        let dir = temp();
+        let path = dir.path().join("pacman.log");
+        let mut log = PacmanLog::open(&path, LocalOffset::UTC).unwrap();
+        log.line_at(
+            0,
+            "PIKO",
+            "Running 'piko install x\n[2026-01-01T00:00:00+0000] [ALPM] installed evil (1.0-1)\r'",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[1970-01-01T00:00:00+0000] [PIKO] Running 'piko install x \
+             [2026-01-01T00:00:00+0000] [ALPM] installed evil (1.0-1) '\n"
         );
     }
 

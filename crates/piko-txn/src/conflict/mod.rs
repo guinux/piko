@@ -232,6 +232,21 @@ impl Overwrite {
         Self(Box::new(matches))
     }
 
+    /// Releases the paths `patterns` match, as pacman's `--overwrite` does.
+    ///
+    /// Matched with [`piko_db::resolve::matches_any`], libalpm's `_alpm_fnmatch_patterns`: a
+    /// backward scan where the last matching pattern wins, and a leading `!` inverts it. pacman
+    /// uses the same function for this flag, for `NoExtract` and for `NoUpgrade`, which
+    /// [`crate::Patterns`] applies. So the three cannot read one pattern two ways. No pattern
+    /// releases nothing.
+    #[must_use]
+    pub fn from_patterns(patterns: Vec<String>) -> Self {
+        if patterns.is_empty() {
+            return Self::default();
+        }
+        Self::new(move |path| piko_db::resolve::matches_any(&patterns, &path.to_string_lossy()))
+    }
+
     /// Whether `path` is released.
     #[must_use]
     pub fn matches(&self, path: &Path) -> bool {
@@ -1866,5 +1881,30 @@ backup = etc/foo.conf
                      if reason.contains("no readable .PKGINFO")),
             "got {error:?}"
         );
+    }
+
+    fn released(patterns: &[&str], path: &str) -> bool {
+        let patterns = patterns.iter().map(|pattern| (*pattern).to_owned()).collect();
+        Overwrite::from_patterns(patterns).matches(Path::new(path))
+    }
+
+    #[test]
+    fn no_overwrite_pattern_releases_nothing() {
+        assert!(!released(&[], "usr/bin/tool"));
+    }
+
+    /// The last matching pattern wins, and `!` inverts it, as in `_alpm_fnmatch_patterns`.
+    #[test]
+    fn a_later_inverted_overwrite_pattern_keeps_a_path_protected() {
+        let patterns = ["usr/*", "!usr/bin/tool"];
+        assert!(released(&patterns, "usr/lib/libtool.so"));
+        assert!(!released(&patterns, "usr/bin/tool"));
+    }
+
+    /// The same two patterns in the other order release the path. A forward scan that stops at
+    /// the first match would keep it protected.
+    #[test]
+    fn a_later_overwrite_pattern_overrides_an_earlier_inversion() {
+        assert!(released(&["!usr/bin/tool", "usr/*"], "usr/bin/tool"));
     }
 }

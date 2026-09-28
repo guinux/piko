@@ -108,6 +108,21 @@ pub fn apply(root: &RootDir, pending: &Pending, action: Action<'_>) -> Result<Ou
     }
 }
 
+/// Whether the pending file holds the target's bytes, read now rather than taken from a scan.
+///
+/// A viewer can have edited either file since the scan. A caller that asks again after running
+/// one learns whether the pair has become a pair [`remove_if_identical`] may delete. `false`
+/// when either file is gone.
+///
+/// # Errors
+///
+/// As [`remove_if_identical`].
+pub fn is_identical(root: &RootDir, pending: &Pending, max: u64) -> Result<bool> {
+    let resolved = root.resolve_parent(&pending.target)?;
+    let pacname = self::pacname(pending)?;
+    Ok(hash::same_contents_at(resolved.dir(), resolved.name(), &pacname, max)? == Some(true))
+}
+
 /// Deletes the pending file, and only if it still holds the target's bytes.
 ///
 /// [`apply`] does what it is told. This asks the question and acts on the answer through one
@@ -205,6 +220,18 @@ mod tests {
             installed_version: "1.0.0-1".parse().unwrap(),
             verdict: Verdict::Differs,
         }
+    }
+
+    #[test]
+    fn is_identical_reads_the_pair_now() {
+        let (dir, root) = root(b"same", b"same");
+        assert!(is_identical(&root, &pending(), 1024).unwrap());
+
+        std::fs::write(dir.path().join("etc/foo.conf.pacnew"), b"edited").unwrap();
+        assert!(!is_identical(&root, &pending(), 1024).unwrap());
+
+        std::fs::remove_file(dir.path().join("etc/foo.conf.pacnew")).unwrap();
+        assert!(!is_identical(&root, &pending(), 1024).unwrap(), "a missing file is not the same");
     }
 
     #[test]

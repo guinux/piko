@@ -122,8 +122,13 @@ pub struct Solver<'p> {
     trail: Vec<Lit>,
     /// Index into `trail` where each decision level began.
     level_starts: Vec<usize>,
-    /// For each literal (by `watch_index`), the clauses watching it.
+    /// For each literal (by `watch_index`), the clauses watching it. A clause is filed under
+    /// the negation of each watched literal, so it is visited when that literal becomes false.
     watches: Vec<Vec<ClauseId>>,
+    /// For each clause of two or more literals, the positions of its two watched literals.
+    /// The clause's own literal order is never changed, because [`Solver::decide`] reads it
+    /// as `resolvedep` preference order.
+    watched: Vec<[usize; 2]>,
     /// Next unpropagated position in `trail`.
     propagated: usize,
     conflicts: usize,
@@ -144,6 +149,7 @@ impl<'p> Solver<'p> {
             trail: Vec::new(),
             level_starts: Vec::new(),
             watches: vec![Vec::new(); solvables.saturating_mul(2)],
+            watched: vec![[0, 1]; problem.len()],
             propagated: 0,
             conflicts: 0,
             limits,
@@ -187,7 +193,7 @@ impl<'p> Solver<'p> {
                     self.level_starts.push(self.trail.len());
                     self.assign(literal, None);
                 }
-                None => return Ok(Outcome::Satisfied(self.finish())),
+                None => return self.finish().map(Outcome::Satisfied),
             }
         }
     }
@@ -213,18 +219,23 @@ impl<'p> Solver<'p> {
                         self.assign(unit, Some(id));
                     }
                 }
-                _ => self.watch(id, clause.literals()),
+                literals => self.watch(id, literals, [0, 1]),
             }
         }
         None
     }
 
-    /// Watches a clause's first two literals.
-    fn watch(&mut self, id: ClauseId, literals: &[Lit]) {
-        for literal in literals.iter().take(2) {
+    /// Watches the literals at `positions` in a clause of two or more literals.
+    fn watch(&mut self, id: ClauseId, literals: &[Lit], positions: [usize; 2]) {
+        for position in positions {
+            let Some(literal) = literals.get(position) else { continue };
             if let Some(list) = self.watches.get_mut(literal.negate().watch_index()) {
                 list.push(id);
             }
+        }
+        match self.watched.get_mut(id.index()) {
+            Some(slot) => *slot = positions,
+            None => self.watched.push(positions),
         }
     }
 
@@ -293,19 +304,27 @@ impl<'p> Solver<'p> {
             // watching its own literals. So whatever arrived while it was taken is merged
             // back, not dropped.
             let Some(slot) = self.watches.get_mut(literal.watch_index()) else { continue };
-            let mut watching = std::mem::take(slot);
+            let watching = std::mem::take(slot);
+            let mut kept = Vec::with_capacity(watching.len());
 
             let mut conflict = None;
-            for id in &watching {
-                if let Some(found) = self.visit_watch(*id) {
-                    conflict = Some(found);
-                    break;
+            let mut pending = watching.into_iter();
+            for id in pending.by_ref() {
+                match self.visit_watch(id, literal.negate()) {
+                    Visit::Moved => {}
+                    Visit::Kept => kept.push(id),
+                    Visit::Conflict => {
+                        kept.push(id);
+                        conflict = Some(id);
+                        break;
+                    }
                 }
             }
+            kept.extend(pending);
 
             if let Some(slot) = self.watches.get_mut(literal.watch_index()) {
-                watching.append(slot);
-                *slot = watching;
+                kept.append(slot);
+                *slot = kept;
             }
             if conflict.is_some() {
                 return conflict;
@@ -314,33 +333,55 @@ impl<'p> Solver<'p> {
         None
     }
 
-    /// Re-examines a watched clause after one of its watches became false.
+    /// Re-examines a watched clause after its watched literal `falsified` became false.
     ///
-    /// Deliberately re-scans the whole clause instead of maintaining the usual "swap the
-    /// watch to a new literal" invariant. Clauses here are short — a requirement's satisfier
-    /// list, or a two-literal conflict. The simpler form has no invariant to get wrong.
-    fn visit_watch(&mut self, id: ClauseId) -> Option<ClauseId> {
-        let literals = self.literals_of(id).to_vec();
-        let mut unassigned = None;
-        for literal in &literals {
-            match self.value_of(*literal) {
-                Value::True => return None,
-                Value::Unassigned => {
-                    if unassigned.is_some() {
-                        // Two or more unassigned: nothing to propagate yet.
-                        return None;
-                    }
-                    unassigned = Some(*literal);
-                }
-                Value::False => {}
-            }
+    /// The two-watched-literal invariant: a clause's two watches are its last two literals to
+    /// become false. So a clause is false, or forces its last literal, only after a watch
+    /// becomes false, and this visit sees it. The false watch moves to another literal that is
+    /// not false. If there is none, the other watch is forced, or the clause is false.
+    ///
+    /// Moving the watch is what keeps a clause of three or more literals honest. A clause
+    /// that kept its first two watches forever would never be visited again once both were
+    /// false, whatever became of the rest.
+    fn visit_watch(&mut self, id: ClauseId, falsified: Lit) -> Visit {
+        let Some(&[first, second]) = self.watched.get(id.index()) else { return Visit::Kept };
+        let literals = self.literals_of(id);
+        let (moving, other) = if literals.get(first) == Some(&falsified) {
+            (first, second)
+        } else if literals.get(second) == Some(&falsified) {
+            (second, first)
+        } else {
+            return Visit::Kept;
+        };
+        let Some(other_literal) = literals.get(other).copied() else { return Visit::Kept };
+        let other_value = self.value_of(other_literal);
+        if other_value == Value::True {
+            return Visit::Kept;
         }
-        match unassigned {
-            Some(unit) => {
-                self.assign(unit, Some(id));
-                None
+
+        let replacement = literals
+            .iter()
+            .enumerate()
+            .find(|(position, literal)| {
+                *position != first && *position != second && self.value_of(**literal) != Value::False
+            })
+            .map(|(position, literal)| (position, *literal));
+        if let Some((position, literal)) = replacement {
+            if let Some(list) = self.watches.get_mut(literal.negate().watch_index()) {
+                list.push(id);
             }
-            None => Some(id),
+            if let Some(slot) = self.watched.get_mut(id.index()) {
+                *slot = if moving == first { [position, second] } else { [first, position] };
+            }
+            return Visit::Moved;
+        }
+
+        match other_value {
+            Value::Unassigned => {
+                self.assign(other_literal, Some(id));
+                Visit::Kept
+            }
+            Value::False | Value::True => Visit::Conflict,
         }
     }
 
@@ -443,8 +484,19 @@ impl<'p> Solver<'p> {
         }
 
         // The asserting literal must come first so the clause propagates after the backjump.
+        // The second watch must be the literal assigned deepest, which the backjump keeps
+        // false. It becomes unassigned first on a later backtrack, before any other one.
         let last = learned.len().saturating_sub(1);
         learned.swap(0, last);
+        let deepest = learned
+            .iter()
+            .enumerate()
+            .skip(1)
+            .max_by_key(|(_, literal)| self.levels.get(literal.solvable().index()).copied())
+            .map_or(0, |(position, _)| position);
+        if deepest > 1 {
+            learned.swap(1, deepest);
+        }
 
         let backjump = learned
             .iter()
@@ -468,7 +520,9 @@ impl<'p> Solver<'p> {
                 .unwrap_or(u32::MAX),
         );
         if literals.len() >= 2 {
-            self.watch(id, &literals);
+            self.watch(id, &literals, [0, 1]);
+        } else {
+            self.watched.push([0, 1]);
         }
         self.learned.push(literals);
         id
@@ -538,7 +592,26 @@ impl<'p> Solver<'p> {
     }
 
     /// Collects the selected candidates once every clause is satisfied.
-    fn finish(self) -> Solution {
+    ///
+    /// Checks the selection against every problem clause before returning it, with an
+    /// unassigned candidate read as not selected. A plan is installed as root, so a selection
+    /// that breaks a clause is refused rather than trusted.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SolveInconsistent`] if a problem clause does not hold.
+    fn finish(self) -> Result<Solution> {
+        let holds = |literal: &Lit| match self.value_of(*literal) {
+            Value::True => true,
+            Value::False => false,
+            Value::Unassigned => literal.is_negative(),
+        };
+        if let Some((id, _)) =
+            self.problem.iter().find(|(_, clause)| !clause.literals().iter().any(holds))
+        {
+            return Err(Error::SolveInconsistent { clause: id.index() });
+        }
+
         let mut selected: Vec<SolvableId> = self
             .values
             .iter()
@@ -547,8 +620,19 @@ impl<'p> Solver<'p> {
             .filter_map(|(index, _)| u32::try_from(index).ok().map(SolvableId::from_raw))
             .collect();
         selected.sort_unstable();
-        Solution { selected, conflicts: self.conflicts }
+        Ok(Solution { selected, conflicts: self.conflicts })
     }
+}
+
+/// What a visit to a watched clause did with the watch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Visit {
+    /// The clause still watches the literal that became false.
+    Kept,
+    /// The watch moved to another literal, which is not false.
+    Moved,
+    /// Every literal of the clause is false.
+    Conflict,
 }
 
 /// Kinds of clause a core is made of, for a caller rendering an explanation.
@@ -817,5 +901,93 @@ mod tests {
 
         let chosen = selected(&problem);
         assert_eq!(chosen, [0, 2, 3]);
+    }
+
+    /// A requirement of four literals whose first two watches become false before the rest.
+    ///
+    /// Candidates: 0 = `d`, 1 = `z`, 2 = `w`, 3 = `v`, 4 = `u`, 5..=7 = `p1`..`p3`. `d` needs
+    /// one of `p1`..`p3`. Deciding `z` rules out `p1`, and deciding `v` rules out `p2` and
+    /// `p3`, so the requirement is false with its first two watches (`¬d`, `p1`) false long
+    /// before its last literal is. Only a watch that moves to `p2`, then `p3`, sees it.
+    #[test]
+    fn a_requirement_whose_watches_fell_first_is_still_enforced() {
+        let mut problem = Problem::new(8);
+        problem.add([pos(0)], ClauseKind::Target { target: id(0) });
+        requires(&mut problem, 0, [pos(1), pos(2)]);
+        problem.add([neg(1), neg(5)], ClauseKind::Conflicts { declarer: id(1), other: id(5) });
+        requires(&mut problem, 0, [pos(3), pos(4)]);
+        problem.add([neg(3), neg(6)], ClauseKind::Conflicts { declarer: id(3), other: id(6) });
+        problem.add([neg(3), neg(7)], ClauseKind::Conflicts { declarer: id(3), other: id(7) });
+        requires(&mut problem, 0, [neg(0), pos(5), pos(6), pos(7)]);
+
+        let chosen = selected(&problem);
+        assert!(
+            [5, 6, 7].iter().any(|provider| chosen.contains(provider)),
+            "the requirement of 0 must have a provider: {chosen:?}"
+        );
+        assert_holds(&problem, &chosen);
+    }
+
+    /// Every clause holds under `chosen`, with a candidate not listed read as not selected.
+    fn assert_holds(problem: &Problem, chosen: &[u32]) {
+        for (clause, content) in problem.iter() {
+            let holds = content
+                .literals()
+                .iter()
+                .any(|literal| chosen.contains(&literal.solvable().get()) == literal.expects());
+            assert!(holds, "clause {clause:?} is broken by {chosen:?}");
+        }
+    }
+
+    /// The solver against an exhaustive search, over random clause sets small enough to
+    /// enumerate. A selection it returns must satisfy every clause, and it may report no
+    /// solution only when no selection exists.
+    #[test]
+    fn the_answer_agrees_with_an_exhaustive_search() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            u32::try_from(state % bound).unwrap()
+        };
+
+        let mut satisfied = 0;
+        let mut refused = 0;
+        for _ in 0..20_000 {
+            let solvables = 2 + next(7);
+            let mut problem = Problem::new(solvables as usize);
+            for _ in 0..1 + next(14) {
+                let literals: Vec<Lit> = (0..1 + next(5))
+                    .map(|_| {
+                        let candidate = next(u64::from(solvables));
+                        if next(3) == 0 { neg(candidate) } else { pos(candidate) }
+                    })
+                    .collect();
+                requires(&mut problem, 0, literals);
+            }
+
+            let exists = (0..1_u32 << solvables).any(|mask| {
+                let chosen: Vec<u32> = (0..solvables).filter(|bit| mask & (1 << bit) != 0).collect();
+                problem.iter().all(|(_, clause)| {
+                    clause.literals().iter().any(|literal| {
+                        chosen.contains(&literal.solvable().get()) == literal.expects()
+                    })
+                })
+            });
+
+            match solve(&problem) {
+                Outcome::Satisfied(solution) => {
+                    let chosen: Vec<u32> = solution.selected().iter().map(|id| id.get()).collect();
+                    assert_holds(&problem, &chosen);
+                    satisfied += 1;
+                }
+                Outcome::Unsatisfiable(_) => {
+                    assert!(!exists, "a solution exists for {problem:?}");
+                    refused += 1;
+                }
+            }
+        }
+        assert!(satisfied > 1_000 && refused > 1_000, "{satisfied} satisfied, {refused} refused");
     }
 }

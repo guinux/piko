@@ -4,6 +4,9 @@
 //! pair, picks the three-way ancestor and carries out an answer. This module asks the question,
 //! writes the temporary files a merge program needs, and starts the programs.
 //!
+//! Every pending path it prints is escaped by `piko_db::printable_path`. A package chose the
+//! name of the file its `%BACKUP%` entry names.
+//!
 //! # What a finished transaction does
 //!
 //! [`report_pending`] names the files the transaction left, and stops there. It asks nothing.
@@ -20,8 +23,8 @@ use std::{
 use piko_db::LocalDatabase;
 use piko_txn::{
     merge::{
-        self, Action, BaseLimits, DEFAULT_DIFFPROG, DEFAULT_MERGEPROG, Invocation, Outcome,
-        Pending, PendingKind, ScanLimits, Verdict,
+        self, Action, BaseContents, BaseLimits, DEFAULT_DIFFPROG, DEFAULT_MERGEPROG, Invocation,
+        Outcome, Pending, PendingKind, ScanLimits, Verdict,
     },
     rootfs::RootDir,
 };
@@ -88,7 +91,7 @@ pub fn merge(
 
     let scan = merge::scan(&root_dir, db, &ScanLimits::default());
     for problem in scan.problems() {
-        eprintln!("Warning: {problem}");
+        crate::output::warn(problem);
     }
     report_dropped_diagnostics(scan.problems_dropped());
     if scan.pending_dropped() > 0 {
@@ -100,7 +103,7 @@ pub fn merge(
 
     if options.output {
         for entry in &pending {
-            emit!(out, "{}", root.join(&entry.pacfile).display());
+            emit!(out, "{}", piko_db::printable_path(&root.join(&entry.pacfile)));
         }
         return ExitCode::SUCCESS;
     }
@@ -178,7 +181,7 @@ fn resolve_all(
         if let PendingKind::NumberedPacsave(_) = entry.kind {
             // A historical copy with no current version to merge it against. `pacdiff`
             // collects these and warns once at the end; so does this.
-            numbered.push(root.join(&entry.pacfile).display().to_string());
+            numbered.push(piko_db::printable_path(&root.join(&entry.pacfile)));
             continue;
         }
 
@@ -189,7 +192,7 @@ fn resolve_all(
                 emit!(
                     out,
                     "{}: skipped, it could not be read",
-                    root.join(&entry.pacfile).display()
+                    piko_db::printable_path(&root.join(&entry.pacfile))
                 );
                 continue;
             }
@@ -237,8 +240,8 @@ fn drop_identical(
             let _ = writeln!(
                 out,
                 "{}: removed, it holds the same bytes as {}",
-                root.join(&entry.pacfile).display(),
-                root.join(&entry.target).display()
+                piko_db::printable_path(&root.join(&entry.pacfile)),
+                piko_db::printable_path(&root.join(&entry.target))
             );
             Decided::Done
         }
@@ -246,7 +249,7 @@ fn drop_identical(
             let _ = writeln!(
                 out,
                 "{}: kept, it changed since the scan",
-                root.join(&entry.pacfile).display()
+                piko_db::printable_path(&root.join(&entry.pacfile))
             );
             Decided::Done
         }
@@ -268,8 +271,8 @@ fn offer_removal(
 ) -> Decided {
     let prompt = format!(
         "{} does not exist. Remove {}? [y/N] ",
-        root.join(&entry.target).display(),
-        root.join(&entry.pacfile).display()
+        piko_db::printable_path(&root.join(&entry.target)),
+        piko_db::printable_path(&root.join(&entry.pacfile))
     );
     if !confirm(out, &prompt, false) {
         return Decided::Done;
@@ -296,8 +299,8 @@ fn ask(
     let _ = writeln!(
         out,
         "\n{} and {} differ ({}).",
-        target.display(),
-        pacfile.display(),
+        piko_db::printable_path(&target),
+        piko_db::printable_path(&pacfile),
         entry.package
     );
 
@@ -384,7 +387,7 @@ fn merge_one(
     // The installed file, the ancestor, then the pending one. `piko_txn::merge::program` owns
     // that order; reversing the first and the last keeps the wrong side.
     let invocation = merge::three_way_merge(&programs.mergeprog, &target, &base, &pacfile)?;
-    let destination = match std::fs::File::create(&merged) {
+    let destination = match self::create_private(&merged) {
         Ok(file) => file,
         Err(error) => {
             eprintln!("Error: {} cannot be written: {error}", merged.display());
@@ -407,7 +410,7 @@ fn merge_one(
     if !confirm(out, "Keep the merged file? [y/N] ", false) {
         return None;
     }
-    let contents = match std::fs::read(&merged) {
+    let contents = match self::read_private(&merged, piko_txn::hash::MAX_BACKUP_BYTES) {
         Ok(contents) => contents,
         Err(error) => {
             eprintln!("Error: {} cannot be read back: {error}", merged.display());
@@ -434,21 +437,14 @@ fn write_base(
         );
         return None;
     };
-    let limits = BaseLimits::default();
-    let search = match merge::find_base(
-        cache_dirs,
-        &entry.package,
-        &entry.installed_version,
-        &limits,
-        check,
-    ) {
-        Ok(search) => search,
+    let lookup = match merge::base_contents(cache_dirs, entry, &BaseLimits::default(), check) {
+        Ok(lookup) => lookup,
         Err(error) => {
             report(&error);
             return None;
         }
     };
-    for refused in &search.refused {
+    for refused in &lookup.refused {
         let _ = writeln!(
             out,
             "Not using {} as a base: {}",
@@ -456,46 +452,99 @@ fn write_base(
             piko_db::printable(&refused.reason)
         );
     }
-    let Some(candidate) = search.base else {
-        let _ = writeln!(
-            out,
-            "No signed cached build of {} older than {} was found, so there is no base to merge \
-             against.",
-            entry.package, entry.installed_version
-        );
-        return None;
-    };
-
-    let contents = match merge::extract_member(&candidate.path, &entry.target, &limits) {
-        Ok(Some(contents)) => contents,
-        Ok(None) => {
+    let contents = match lookup.contents {
+        BaseContents::Found { contents, .. } => contents,
+        BaseContents::NoBase => {
             let _ = writeln!(
                 out,
-                "{} does not ship {}, so there is no base to merge against.",
-                candidate.file_name,
-                entry.target.display()
+                "No signed cached build of {} older than {} was found, so there is no base to \
+                 merge against.",
+                entry.package, entry.installed_version
             );
             return None;
         }
-        Err(error) => {
+        BaseContents::NotShipped { base } => {
+            let _ = writeln!(
+                out,
+                "{} does not ship {}, so there is no base to merge against.",
+                base.file_name,
+                piko_db::printable_path(&entry.target)
+            );
+            return None;
+        }
+        BaseContents::Unreadable { error, .. } => {
             report(&error);
             return None;
         }
     };
 
-    let scratch = match tempfile::Builder::new().prefix("piko-merge-").tempdir() {
+    let scratch = match self::scratch_dir() {
         Ok(scratch) => scratch,
         Err(error) => {
-            eprintln!("Error: a scratch directory cannot be created: {error}");
+            eprintln!("Error: a scratch directory cannot be used: {error}");
             return None;
         }
     };
     let base = scratch.path().join("base");
-    if let Err(error) = std::fs::write(&base, &contents) {
+    if let Err(error) = self::create_private(&base).and_then(|mut file| file.write_all(&contents)) {
         eprintln!("Error: {} cannot be written: {error}", base.display());
         return None;
     }
     Some((scratch, base))
+}
+
+/// Creates the private directory that holds a merge's base and result, under `$TMPDIR`.
+///
+/// piko writes the base there, the merge program writes the result there, and piko reads the
+/// result back from there into a file root owns. So no other user may be able to change the
+/// directory, nor any directory above it. `mkdtemp` makes the directory `0700`, and
+/// `fs_util::ensure_trusted_directory` tests the whole path. A sticky ancestor such as `/tmp`
+/// passes. A `$TMPDIR` that others can write and that is not sticky fails: its writers could
+/// rename the directory away and put their own in its place, between the review and the keep.
+fn scratch_dir() -> Result<tempfile::TempDir, String> {
+    self::scratch_dir_in(&std::env::temp_dir())
+}
+
+/// [`scratch_dir`], under `parent` rather than `$TMPDIR`.
+fn scratch_dir_in(parent: &Path) -> Result<tempfile::TempDir, String> {
+    let scratch = tempfile::Builder::new()
+        .prefix("piko-merge-")
+        .tempdir_in(parent)
+        .map_err(|error| error.to_string())?;
+    piko_db::fs_util::ensure_trusted_directory(scratch.path())
+        .map_err(|error| crate::output::escaped(&error))?;
+    Ok(scratch)
+}
+
+/// Creates `path` for writing, `0600`, and fails if anything already has that name.
+///
+/// `O_EXCL` also refuses a symbolic link at `path`, rather than following it.
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::File::options().write(true).create_new(true).mode(0o600).open(path)
+}
+
+/// Reads the regular file at `path`, refusing a symbolic link, a FIFO or a device, and anything
+/// larger than `max` bytes.
+///
+/// The merge program wrote this file. It is read back by name, not through the descriptor the
+/// program wrote into, because the review step may have edited it in an editor that saves by
+/// renaming.
+fn read_private(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read as _;
+
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = std::fs::File::from(rustix::fs::open(path, flags, Mode::empty())?);
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    let mut contents = Vec::new();
+    file.take(max.saturating_add(1)).read_to_end(&mut contents)?;
+    if u64::try_from(contents.len()).unwrap_or(u64::MAX) > max {
+        return Err(std::io::Error::other(format!("larger than {max} bytes")));
+    }
+    Ok(contents)
 }
 
 /// Starts one program, with this terminal.
@@ -563,12 +612,14 @@ fn carry_out(
 fn describe(root: &Path, outcome: &Outcome) -> String {
     match outcome {
         Outcome::Skipped => "Left both files in place.".to_owned(),
-        Outcome::Removed { pacfile } => format!("Removed {}.", root.join(pacfile).display()),
+        Outcome::Removed { pacfile } => {
+            format!("Removed {}.", piko_db::printable_path(&root.join(pacfile)))
+        }
         Outcome::Overwritten { target, .. } => {
-            format!("Overwrote {}.", root.join(target).display())
+            format!("Overwrote {}.", piko_db::printable_path(&root.join(target)))
         }
         Outcome::Merged { target, .. } => {
-            format!("Wrote the merged file to {}.", root.join(target).display())
+            format!("Wrote the merged file to {}.", piko_db::printable_path(&root.join(target)))
         }
         _ => "Done.".to_owned(),
     }
@@ -578,21 +629,10 @@ fn describe(root: &Path, outcome: &Outcome) -> String {
 ///
 /// Asked after a difference program ran, because the user may have edited them into agreement
 /// inside it.
+///
+/// A pair that cannot be compared counts as different, so nothing is deleted on its account.
 fn now_identical(root_dir: &RootDir, entry: &Pending) -> bool {
-    let Ok(resolved) = root_dir.resolve_parent(&entry.target) else {
-        return false;
-    };
-    let mut pacname = resolved.name().to_os_string();
-    pacname.push(entry.kind.suffix());
-    piko_txn::hash::same_contents_at(
-        resolved.dir(),
-        resolved.name(),
-        &pacname,
-        piko_txn::hash::MAX_BACKUP_BYTES,
-    )
-    .ok()
-    .flatten()
-    .unwrap_or(false)
+    merge::is_identical(root_dir, entry, piko_txn::hash::MAX_BACKUP_BYTES).unwrap_or(false)
 }
 
 /// The programs to start, from the command line, then the environment, then the defaults.
@@ -608,7 +648,9 @@ fn programs(options: &Options) -> Result<Programs, String> {
         match merge::BaseCheck::new(signing.sig_level, &signing.gpg_dir) {
             Ok(check) => Some(check),
             Err(error) => {
-                eprintln!("Warning: {error}; no cached build can serve as a merge base");
+                crate::output::warn(format_args!(
+                    "{error}; no cached build can serve as a merge base"
+                ));
                 None
             }
         }
@@ -643,5 +685,86 @@ fn strip(path: &Path, suffix: &str) -> PathBuf {
     match text.rfind(suffix) {
         Some(index) => PathBuf::from(text.get(..index).unwrap_or_default()),
         None => path.to_path_buf(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    fn set_mode(path: &Path, mode: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// A parent others can write is refused unless it is sticky, as `/tmp` is.
+    #[test]
+    fn a_scratch_directory_needs_a_parent_no_other_user_can_swap() {
+        let parent = tempfile::tempdir().unwrap();
+        set_mode(parent.path(), 0o777);
+        let error = scratch_dir_in(parent.path()).unwrap_err();
+        assert!(error.contains("writable by its group or others"), "{error}");
+
+        set_mode(parent.path(), 0o1777);
+        assert!(scratch_dir_in(parent.path()).is_ok());
+        set_mode(parent.path(), 0o700);
+    }
+
+    /// A name that already exists, a symbolic link included, is never written through.
+    #[test]
+    fn a_private_file_is_never_created_through_an_existing_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"kept").unwrap();
+        let link = dir.path().join("merged");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        assert!(create_private(&link).is_err());
+        assert!(create_private(&victim).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"kept");
+
+        let fresh = dir.path().join("base");
+        create_private(&fresh).unwrap();
+        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// The merged result is read only from a regular file, and only up to its bound.
+    #[test]
+    fn a_merged_result_is_read_back_bounded_and_without_following_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let merged = dir.path().join("merged");
+        std::fs::write(&merged, b"12345").unwrap();
+        assert_eq!(read_private(&merged, 5).unwrap(), b"12345");
+        assert!(read_private(&merged, 4).is_err());
+
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&merged, &link).unwrap();
+        assert!(read_private(&link, 5).is_err());
+        assert!(read_private(dir.path(), 5).is_err());
+    }
+
+    /// A pending path is spelled by a package, so what a resolution reports is escaped.
+    #[test]
+    fn an_outcome_escapes_what_could_drive_a_terminal() {
+        let pacfile = PathBuf::from("etc/\u{1b}]52;c;cHduZWQ=\u{7}.pacnew");
+        let target = PathBuf::from("etc/\u{1b}[2J");
+        let root = Path::new("/");
+        assert_eq!(
+            describe(root, &Outcome::Removed { pacfile: pacfile.clone() }),
+            "Removed /etc/\\u{1b}]52;c;cHduZWQ=\\u{7}.pacnew."
+        );
+        assert_eq!(
+            describe(
+                root,
+                &Outcome::Overwritten { target: target.clone(), pacfile: pacfile.clone() }
+            ),
+            "Overwrote /etc/\\u{1b}[2J."
+        );
+        assert_eq!(
+            describe(root, &Outcome::Merged { target, pacfile }),
+            "Wrote the merged file to /etc/\\u{1b}[2J."
+        );
     }
 }

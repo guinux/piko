@@ -12,9 +12,27 @@
 /// Everything else is kept as it reads, so an ordinary path or message is unchanged.
 #[must_use]
 pub fn printable(text: &str) -> String {
+    escape(text, false)
+}
+
+/// `text` escaped as [`printable`] does, except that a line feed is kept.
+///
+/// This is for a message that is several lines by design. A parse error from an upstream parser
+/// quotes the input on one line and marks the column on the next. Its line feeds are its format,
+/// and a line feed alone cannot move the cursor back over a line already written. A carriage
+/// return can, so it is escaped here too.
+#[must_use]
+pub fn printable_lines(text: &str) -> String {
+    escape(text, true)
+}
+
+/// Escapes every control character and every bidirectional formatting character in `text`,
+/// except a line feed when `keep_line_feed` is set.
+fn escape(text: &str, keep_line_feed: bool) -> String {
     let mut out = String::with_capacity(text.len());
     for character in text.chars() {
-        if character.is_control() || is_bidi_control(character) {
+        let kept = keep_line_feed && character == '\n';
+        if !kept && (character.is_control() || is_bidi_control(character)) {
             out.extend(character.escape_debug());
         } else {
             out.push(character);
@@ -47,6 +65,18 @@ mod tests {
         assert_eq!(printable("one\nWarning: two"), "one\\nWarning: two");
         assert_eq!(printable("\u{9b}31m"), "\\u{9b}31m");
         assert_eq!(printable("abc\u{202e}fed"), "abc\\u{202e}fed");
+    }
+
+    /// A multi-line message keeps its lines, and loses everything else that could drive a
+    /// terminal.
+    #[test]
+    fn printable_lines_keeps_only_the_line_feed() {
+        assert_eq!(printable_lines("line 1\n   ^ here"), "line 1\n   ^ here");
+        assert_eq!(
+            printable_lines("a\u{1b}]52;c;cHduZWQ=\u{7}\rb\n"),
+            "a\\u{1b}]52;c;cHduZWQ=\\u{7}\\rb\n"
+        );
+        assert_eq!(printable_lines("abc\u{202e}fed"), "abc\\u{202e}fed");
     }
 
     #[test]

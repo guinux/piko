@@ -649,6 +649,78 @@ fn answering_every_question_with_the_default_leaves_the_plan_unchanged() {
     eprintln!("examined {examined} target(s), {asked} provider question(s) in total");
 }
 
+/// `plan_install`'s ask-and-solve-again loop, answered with the default every time, plans what
+/// asking nothing plans.
+///
+/// The test above checks one answered round by hand. This one runs the loop `piko install`
+/// runs, round after round, on real targets. It ends, and it ends on the plan `piko plan`
+/// prints for the same targets.
+#[test]
+#[ignore = "requires a real ALPM sync database"]
+fn the_install_loop_answered_with_defaults_plans_what_a_preview_plans() {
+    use piko_db::solve::{
+        Ambiguity, Defaults, GroupChoice, GroupTarget, InstallOptions, InstallQuestions, NoCache,
+        SolvableId, plan_install,
+    };
+
+    /// Asks every provider question, and answers each with libalpm's `use_index = 0`.
+    struct FirstEveryTime(usize);
+    impl InstallQuestions for FirstEveryTime {
+        fn groups(&mut self, _: &Universe<'_>, _: &[GroupTarget]) -> Option<Vec<GroupChoice>> {
+            None
+        }
+        fn asks_providers(&self) -> bool {
+            true
+        }
+        fn provider(&mut self, _: &Universe<'_>, question: &Ambiguity, _: &str) -> SolvableId {
+            self.0 += 1;
+            question.providers[0]
+        }
+    }
+
+    let repos = open_repos();
+    if repos.is_empty() {
+        return;
+    }
+    let Ok(local) = LocalDatabase::open("/var/lib/pacman/local") else {
+        eprintln!("skipping: no local database");
+        return;
+    };
+    let limits = piko_db::Limits::default();
+    let universe =
+        Universe::build(&local, repos.iter().map(|db| (DbUsage::ALL, db)), UniverseOptions::new())
+            .unwrap();
+
+    let mut examined = 0_usize;
+    for target in ["plasma-meta", "gimp", "firefox", "base-devel", "texlive-most"] {
+        let names = [target.to_owned()];
+        let options = InstallOptions::default();
+        let Ok(preview) =
+            plan_install(&universe, &names, options, &mut Defaults, &NoCache, &limits)
+        else {
+            continue;
+        };
+        examined += 1;
+
+        let mut asking = FirstEveryTime(0);
+        let answered = plan_install(&universe, &names, options, &mut asking, &NoCache, &limits)
+            .unwrap_or_else(|failure| panic!("{target}: {failure:?}"));
+
+        assert_eq!(
+            plan_names(&universe, &preview.plan),
+            plan_names(&universe, &answered.plan),
+            "{target}: the default answers must reproduce the preview"
+        );
+        assert!(answered.defaulted.is_empty(), "{target}: a frontend that asks defaults nothing");
+        eprintln!(
+            "{target}: {} question(s) asked, {} step(s)",
+            asking.0,
+            answered.plan.steps().len()
+        );
+    }
+    eprintln!("examined {examined} target(s)");
+}
+
 /// A group target expands to exactly the members `pacman -Sgq` lists.
 ///
 /// This is the acceptance gate for `Universe::group_members`, which is what a group prompt

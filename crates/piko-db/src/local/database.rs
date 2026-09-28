@@ -440,6 +440,17 @@ impl LocalDatabase {
         crate::updates::check_updates(self, repos)
     }
 
+    /// [`LocalDatabase::check_updates`], with each update `ignores` covers set apart. See
+    /// [`crate::updates::Updates`].
+    #[must_use]
+    pub fn check_updates_ignoring<'a>(
+        &'a self,
+        repos: impl IntoIterator<Item = &'a crate::repo::RepoDatabase>,
+        ignores: crate::resolve::IgnoreList<'_>,
+    ) -> crate::updates::Updates<'a> {
+        crate::updates::check_updates_ignoring(self, repos, ignores)
+    }
+
     /// Every installed package whose name is not found in any of `repos` — mirrors
     /// `pacman -Qm`.
     ///

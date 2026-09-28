@@ -48,7 +48,7 @@ impl ConfigCache {
                 PacmanConfig::open(&cli.config)
                     .inspect(|config| {
                         for diagnostic in config.diagnostics() {
-                            eprintln!("Warning: {diagnostic}");
+                            crate::output::warn(diagnostic);
                         }
                     })
                     .map_err(|error| error.to_string())
@@ -96,7 +96,7 @@ pub fn cache_dirs(config: &ConfigCache, cli: &Cli) -> Vec<PathBuf> {
 pub struct SigningPolicy {
     /// `GPGDir`: where the keyring lives.
     pub gpg_dir: PathBuf,
-    /// `SigLevel`: the fallback for a package whose repository could not be resolved.
+    /// `SigLevel`: what a repository with no `SigLevel` of its own inherits.
     pub sig_level: piko_db::config::SigLevel,
     /// `LocalFileSigLevel`: for a package file named by path on the command line.
     pub local_file_sig_level: piko_db::config::SigLevel,
@@ -110,10 +110,10 @@ pub struct SigningPolicy {
 /// was written:
 ///
 /// - A package resolved through a repository is held to *that repository's* own `SigLevel`
-///   (`piko_db::config::RepositoryConfig::effective_sig_level`). `cmd::txn::install` resolves
-///   it per candidate and feeds it to `Transaction::policy_overrides`.
-///   [`SigningPolicy::sig_level`] is only the fallback, for a candidate whose repository could
-///   not be resolved.
+///   (`piko_db::config::RepositoryConfig::effective_sig_level`), which inherits
+///   [`SigningPolicy::sig_level`] when the section sets none. `piko_txn::TransactionPlan::new`
+///   resolves it per candidate. A package from a repository no section configures is refused
+///   there, never held to [`SigningPolicy::sig_level`] instead, which may check nothing.
 /// - A package file named by path is held to `LocalFileSigLevel`.
 /// - A package file named by URL is held to `RemoteFileSigLevel`.
 ///
@@ -142,46 +142,20 @@ pub fn signing_policy_if_readable(cli: &Cli, config: &ConfigCache) -> Option<Sig
     config.get(cli).ok().map(signing_policy)
 }
 
-/// The directories hooks are read from, in increasing priority.
+/// The directories hooks are read from, in increasing priority: `--hookdir` if given, else the
+/// system directory inside `root` followed by every configured `HookDir`.
 ///
-/// `--hookdir` replaces the whole list, matching pacman. Otherwise the list is the system
-/// directory followed by every configured `HookDir`. So a file in `/etc/pacman.d/hooks` overrides
-/// the system copy of the same name.
-///
-/// The system directory is resolved inside `root`; a configured `HookDir` is a host path.
-/// libalpm draws that same line. `alpm_initialize` builds its own default by joining the root
-/// to `SYSHOOKDIR`, so `pacman -r /mnt` reads `/mnt/usr/share/libalpm/hooks/`.
-/// `alpm_option_add_hookdir` joins nothing, so a `HookDir` from the config stays as written.
-///
-/// `pacman-conf --root=/mnt HookDir` answers `/etc/pacman.d/hooks/`, which is not evidence
-/// against this. It reports the configured directive, never libalpm's root-joined default.
+/// [`piko_txn::hook::directories`] decides the list, and why the system directory is joined
+/// onto the root while a `HookDir` is not. This only reads `HookDir`, and reads none from a
+/// configuration that cannot be read, the fallback every directive here takes.
 pub fn hook_dirs(
     cli: &Cli,
     config: &ConfigCache,
     override_dirs: &[PathBuf],
     root: &Path,
 ) -> Vec<PathBuf> {
-    if !override_dirs.is_empty() {
-        return override_dirs.to_vec();
-    }
-
-    let mut dirs = vec![join_root(root, Path::new(piko_txn::hook::SYSTEM_HOOK_DIR))];
-    if let Ok(parsed) = config.get(cli) {
-        dirs.extend(parsed.options.hook_dirs.iter().cloned());
-    }
-    dirs
-}
-
-/// Joins an absolute system path onto `root`, the way libalpm concatenates its root with
-/// `SYSHOOKDIR`.
-///
-/// `Path::join` replaces the whole path when the argument is absolute, which would hand back
-/// the host directory. Stripping the leading separator first is what makes the join happen.
-fn join_root(root: &Path, path: &Path) -> PathBuf {
-    match path.strip_prefix("/") {
-        Ok(relative) => root.join(relative),
-        Err(_) => root.join(path),
-    }
+    let configured = config.get(cli).map(|parsed| parsed.options.hook_dirs.as_slice());
+    piko_txn::hook::directories(root, configured.unwrap_or_default(), override_dirs)
 }
 
 /// The `NoExtract` and `NoUpgrade` patterns from the parsed `pacman.conf`.
@@ -357,7 +331,7 @@ pub fn open_local_db(cli: &Cli, config: &ConfigCache) -> Result<LocalDatabase, p
 
     let db = LocalDatabase::open_with(&root, OpenOptions::new())?;
     for diagnostic in db.diagnostics() {
-        eprintln!("Warning: {diagnostic}");
+        crate::output::warn(diagnostic);
     }
     report_dropped_diagnostics(db.diagnostics_dropped());
     Ok(db)
@@ -365,7 +339,7 @@ pub fn open_local_db(cli: &Cli, config: &ConfigCache) -> Result<LocalDatabase, p
 
 fn print_repo_diagnostics(db: &RepoDatabase) {
     for diagnostic in db.diagnostics() {
-        eprintln!("Warning: {diagnostic}");
+        crate::output::warn(diagnostic);
     }
     report_dropped_diagnostics(db.diagnostics_dropped());
 }
@@ -491,7 +465,7 @@ fn verify_repo_archive(
         // falls back the same way; see `signing_policy`.
         return Ok(());
     };
-    let level = database_sig_level(parsed, repo);
+    let level = parsed.database_sig_level(repo);
 
     match piko_sig::verify_database(archive, &parsed.options.gpg_dir, level) {
         // An unverifiable archive is not a bad archive. Both stop the read. The two errors keep
@@ -505,22 +479,6 @@ fn verify_repo_archive(
         }
         Ok(piko_sig::Verdict::Accepted { .. }) => Ok(()),
     }
-}
-
-/// The `SigLevel` a configured repository's database is held to.
-///
-/// Through `RepositoryConfig::effective_sig_level`, never by reading `sig_level` directly. A
-/// repository that declares no `SigLevel` of its own keeps the parser's `USE_DEFAULT` sentinel
-/// (bit 31) rather than the global value. Using the raw field would read a sentinel as though
-/// it were a policy. Every caller must share the rule rather than restate it.
-fn database_sig_level(parsed: &PacmanConfig, repo: &RepoName) -> piko_db::config::SigLevel {
-    parsed
-        .repositories
-        .iter()
-        .find(|configured| configured.name == *repo)
-        .map_or(parsed.options.sig_level, |configured| {
-            configured.effective_sig_level(parsed.options.sig_level)
-        })
 }
 
 /// When an opened repository database was published, for a command that warns about an old
@@ -537,7 +495,7 @@ pub fn repo_publication(
     config: &ConfigCache,
 ) -> Option<piko_db::repo::freshness::Publication> {
     let signed_at = config.get(cli).ok().and_then(|parsed| {
-        let level = database_sig_level(parsed, db.name());
+        let level = parsed.database_sig_level(db.name());
         piko_sig::verify_database_dated(db.path(), &parsed.options.gpg_dir, level).ok()?.signed_at
     });
     piko_db::repo::freshness::Publication::new(signed_at, db.newest_member_time())
@@ -576,7 +534,7 @@ pub fn open_all_repos(
         match open_repo_by_name(&dbpath, &repo.name, cli, config) {
             Ok(db) => opened.push((repo.usage, db)),
             Err(error) => {
-                eprintln!("Warning: skipping repository {}: {error}", repo.name);
+                crate::output::warn(format_args!("skipping repository {}: {error}", repo.name));
             }
         }
     }
@@ -624,7 +582,7 @@ pub fn open_repos_for_packages(
                 opened.push(db);
             }
             Err(error) => {
-                eprintln!("Warning: skipping repository {}: {error}", repo.name);
+                crate::output::warn(format_args!("skipping repository {}: {error}", repo.name));
             }
         }
     }
@@ -719,33 +677,8 @@ mod tests {
         assert_eq!(dirs, vec![PathBuf::from("/from/config/")]);
     }
 
-    /// libalpm joins its root to `SYSHOOKDIR`, so a new root reads its own copy. This is what
-    /// keeps a hook from running before the target owns the program it calls.
-    #[test]
-    fn the_system_hook_directory_is_resolved_inside_the_root() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_conf(dir.path(), "[options]\n");
-        let cli = cli(&["--config", &path]);
-
-        let dirs = hook_dirs(&cli, &ConfigCache::default(), &[], Path::new("/mnt"));
-
-        assert_eq!(dirs.first().unwrap(), &PathBuf::from("/mnt/usr/share/libalpm/hooks"));
-    }
-
-    /// A root of `/` must leave the system directory exactly where it already was.
-    #[test]
-    fn the_running_system_reads_the_unprefixed_system_hook_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_conf(dir.path(), "[options]\n");
-        let cli = cli(&["--config", &path]);
-
-        let dirs = hook_dirs(&cli, &ConfigCache::default(), &[], Path::new("/"));
-
-        assert_eq!(dirs.first().unwrap(), &PathBuf::from(piko_txn::hook::SYSTEM_HOOK_DIR));
-    }
-
-    /// `alpm_option_add_hookdir` joins nothing, so a configured `HookDir` stays a host path
-    /// even under `--root`.
+    /// The configured `HookDir` reaches the list, after the root-joined system directory.
+    /// `piko_txn::hook::directories` tests the rest of the rule.
     #[test]
     fn a_configured_hookdir_is_not_resolved_inside_the_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -761,19 +694,6 @@ mod tests {
                 PathBuf::from("/etc/pacman.d/hooks/"),
             ]
         );
-    }
-
-    /// `--hookdir` replaces the whole list, so the root never reaches it.
-    #[test]
-    fn hookdir_replaces_the_list_and_is_taken_as_written() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_conf(dir.path(), "[options]\nHookDir = /etc/pacman.d/hooks/\n");
-        let cli = cli(&["--config", &path]);
-        let override_dirs = [PathBuf::from("/only/this/")];
-
-        let dirs = hook_dirs(&cli, &ConfigCache::default(), &override_dirs, Path::new("/mnt"));
-
-        assert_eq!(dirs, vec![PathBuf::from("/only/this/")]);
     }
 
     /// The flag must not need a readable config. A caller installing into a new root names both

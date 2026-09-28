@@ -367,14 +367,26 @@ impl KeyringAdmin {
     ///
     /// [`Error::Gpgme`] if `path` cannot be read or does not hold key material GnuPG accepts.
     pub fn import(&self, path: &Path) -> Result<ImportSummary> {
+        // The open refuses a FIFO or device node rather than blocking on it or reading it
+        // without end.
+        let file = piko_db::fs_util::open_following_symlinks(path).map_err(|source| {
+            Error::Gpgme { path: path.to_path_buf(), action: "read", message: source.to_string() }
+        })?;
+        self.import_file(file, path)
+    }
+
+    /// Imports OpenPGP key material from `file`, already opened from `path` and checked by the
+    /// caller.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Gpgme`] if `file` cannot be read or does not hold key material GnuPG accepts.
+    pub(crate) fn import_file(&self, file: std::fs::File, path: &Path) -> Result<ImportSummary> {
         let mut context = self.context()?;
         // Streamed, not loaded: `gpgme::Data::load` allocates the whole file up front, and the
-        // path is whatever the caller names. The open refuses a FIFO or device node rather
-        // than blocking on it or reading it without end.
+        // file is as large as its writer chose.
         let describe =
             |message: String| Error::Gpgme { path: path.to_path_buf(), action: "read", message };
-        let file = piko_db::fs_util::open_following_symlinks(path)
-            .map_err(|source| describe(source.to_string()))?;
         let data = gpgme::Data::from_seekable_reader(file)
             .map_err(|wrapped| describe(wrapped.error().to_string()))?;
         let result = context.import(data).map_err(|source| Error::Gpgme {

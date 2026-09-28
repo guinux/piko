@@ -11,6 +11,7 @@
 use crate::{
     local::{database::LocalDatabase, package::LocalPackage},
     repo::{RepoDatabase, RepoPackage},
+    resolve::{IgnoreList, IgnoreReason},
 };
 
 /// An installed package for which a newer version is available in a repository.
@@ -68,6 +69,39 @@ pub(crate) fn check_updates<'a>(
             (available.version() > installed.version()).then_some(Update { installed, available })
         })
         .collect()
+}
+
+/// The updates [`crate::LocalDatabase::check_updates_ignoring`] found, split by
+/// `IgnorePkg`/`IgnoreGroup`.
+#[derive(Clone, Debug)]
+pub struct Updates<'a> {
+    /// The updates a system upgrade would make, sorted by name.
+    pub available: Vec<Update<'a>>,
+    /// The updates an ignore list holds back, sorted by name, each with the pattern that
+    /// covered it.
+    pub ignored: Vec<(Update<'a>, IgnoreReason)>,
+}
+
+/// [`check_updates`], with each update `ignores` covers set apart.
+///
+/// libalpm's `alpm_sync_get_new_version` applies no ignore list, and `pacman -Qu` prints an
+/// ignored row suffixed `[ignored]`. piko sets the row apart instead: the list answers "what
+/// changes if I upgrade", and an ignored package does not change. The test is the one a
+/// sysupgrade applies to the repository package ([`IgnoreList::reason_for`]), so the two
+/// agree on what is held back.
+pub(crate) fn check_updates_ignoring<'a>(
+    local: &'a LocalDatabase,
+    repos: impl IntoIterator<Item = &'a RepoDatabase>,
+    ignores: IgnoreList<'_>,
+) -> Updates<'a> {
+    let mut updates = Updates { available: Vec::new(), ignored: Vec::new() };
+    for update in check_updates(local, repos) {
+        match ignores.reason_for(update.available()) {
+            Some(reason) => updates.ignored.push((update, reason)),
+            None => updates.available.push(update),
+        }
+    }
+    updates
 }
 
 /// Every installed package whose name is not found in any of `repos` — mirrors `pacman -Qm`.
@@ -307,5 +341,46 @@ Foobar McFooface <foobar@mcfooface.org>
             local.foreign([&repo]).iter().map(|package| package.name().as_ref()).collect();
 
         assert_eq!(names, ["alpha", "zeta"]);
+    }
+
+    /// An update an ignore list covers is set apart with its reason, and the rest stay listed.
+    #[test]
+    fn an_ignored_update_is_set_apart_with_its_reason() {
+        let scenario = crate::fixture::Scenario::new()
+            .installed(crate::fixture::PackageSpec::new("gedit", "46.2-1"))
+            .installed(crate::fixture::PackageSpec::new("bash", "5.2-1"))
+            .installed(crate::fixture::PackageSpec::new("gcc", "1.0.0-1"))
+            .repo(
+                "core",
+                [
+                    crate::fixture::PackageSpec::new("gedit", "47.0-1"),
+                    crate::fixture::PackageSpec::new("bash", "5.3-1"),
+                    crate::fixture::PackageSpec::new("gcc", "2.0.0-1").groups(["base-devel"]),
+                ],
+            )
+            .build();
+        let packages = vec!["gedit".to_owned()];
+        let groups = vec!["base-devel".to_owned()];
+
+        let updates = scenario
+            .local()
+            .check_updates_ignoring(scenario.repos(), IgnoreList::new(&packages, &groups));
+
+        let available: Vec<String> =
+            updates.available.iter().map(|update| update.installed().name().to_string()).collect();
+        assert_eq!(available, ["bash"]);
+        let ignored: Vec<(String, IgnoreReason)> = updates
+            .ignored
+            .iter()
+            .map(|(update, reason)| (update.installed().name().to_string(), reason.clone()))
+            .collect();
+        assert!(
+            matches!(
+                ignored.as_slice(),
+                [(gcc, IgnoreReason::Group { .. }), (gedit, IgnoreReason::Package { .. })]
+                    if gcc == "gcc" && gedit == "gedit"
+            ),
+            "{ignored:?}"
+        );
     }
 }

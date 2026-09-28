@@ -8,11 +8,11 @@ use piko_db::{
     repo::RepoDatabase,
     resolve::IgnoreList,
     solve::{
-        Change, Diagnosis, Encoded, Expansion, ExpansionFailure, Fidelity, IgnoredChange,
-        IgnoredTarget, IgnoredUpgrade, PackageCache, Plan, PlanDiagnostic, PlanExplanation,
-        RemovalOptions, Request, Side, SolvableId, Step, TargetResolutionFailure, Universe,
-        UniverseOptions, describe_cause, explain_plan, plan_removal, removal_names,
-        resolve_targets, solve_with_removals,
+        Ambiguity, Change, Diagnosis, Expansion, ExpansionFailure, Fidelity, GroupChoice,
+        GroupTarget, IgnoredChange, IgnoredTarget, IgnoredUpgrade, InstallFailure, InstallOptions,
+        InstallQuestions, PackageCache, Plan, PlanDiagnostic, PlanExplanation, RemovalOptions,
+        ResolutionNotes, Side, SolvableId, Step, TargetResolutionFailure, Universe,
+        UniverseOptions, describe_cause, plan_install, plan_removal, removal_names,
     },
 };
 
@@ -53,7 +53,7 @@ pub enum Mode<'a> {
     },
 }
 
-/// Prints why [`resolve_targets`] could not resolve a target.
+/// Prints why [`piko_db::solve::resolve_targets`] could not resolve a target.
 pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure) {
     match failure {
         TargetResolutionFailure::InvalidDependencyString(target) => {
@@ -248,14 +248,48 @@ fn ignore_detail(name: &str, reason: &piko_db::resolve::IgnoreReason) -> Option<
     }
 }
 
-/// Reports why a request had no solution, re-solving once to recover the unsatisfiable core.
+/// Reports why an install could not be planned.
 ///
-/// The failure carries the encoding rather than the core itself, so recovering the core costs
-/// one more solve. That solve is fast, because the problem is already compiled. This is shared
-/// with `cmd::txn::install`, which fails the same way `piko plan` does when its targets have
-/// no valid plan.
-pub(crate) fn report_unsatisfiable(universe: &Universe<'_>, encoded: Encoded, limits: &Limits) {
-    print_diagnosis(&encoded.diagnose(universe, limits));
+/// Shared by `piko plan` and `cmd::txn::install`, which plan through the same
+/// [`plan_install`] and fail the same ways.
+pub(crate) fn report_install_failure(failure: &InstallFailure) {
+    match failure {
+        InstallFailure::Target(failure) => report_target_resolution_failure(failure),
+        InstallFailure::Unsatisfiable(diagnosis) => print_diagnosis(diagnosis),
+        InstallFailure::LostFileCandidate => {
+            eprintln!("Internal error: the universe lost a package file candidate");
+        }
+        InstallFailure::Planner(error) => report(error.as_ref()),
+    }
+}
+
+/// How `piko plan` answers the questions a plan raises: it asks none, and says what it took.
+///
+/// A group target is taken whole, and every provider question takes its default. The notes go
+/// to stderr, so a piped `--names` listing stays machine-readable.
+struct Preview;
+
+impl InstallQuestions for Preview {
+    fn resolved(&mut self, universe: &Universe<'_>, notes: &ResolutionNotes<'_>) {
+        print_expansions(notes.expansions);
+        print_ignored_targets(notes.ignored);
+        // A group target is taken whole here. The reason is the one that answers a provider
+        // question with its default: a preview never asks.
+        crate::cmd::group::report_defaults(universe, notes.groups);
+        print_ignored_upgrades(universe, notes.ignored_upgrades);
+    }
+
+    fn groups(&mut self, _: &Universe<'_>, _: &[GroupTarget]) -> Option<Vec<GroupChoice>> {
+        None
+    }
+
+    fn asks_providers(&self) -> bool {
+        false
+    }
+
+    fn provider(&mut self, _: &Universe<'_>, question: &Ambiguity, _: &str) -> SolvableId {
+        question.providers.first().copied().unwrap_or(question.dependent)
+    }
 }
 
 /// Prints a diagnosis: what kind of failure it is, then the facts supporting it.
@@ -419,8 +453,9 @@ fn print_divergences(universe: &Universe<'_>, built: &Plan) {
 
 /// Splits `targets` into names to resolve and package files to read.
 ///
-/// The same classification `piko install` uses (`piko_txn::classify`), minus the one thing a
-/// preview must not do: fetching a URL. `piko plan` reads nothing but what is already here.
+/// The same reading `piko install` uses ([`piko_txn::file_target::load_targets`]), minus the
+/// one thing a preview must not do: fetching a URL. `piko plan` reads nothing but what is
+/// already here.
 ///
 /// # Errors
 ///
@@ -428,47 +463,33 @@ fn print_divergences(universe: &Universe<'_>, built: &Plan) {
 fn read_file_targets(
     targets: &[String],
     architecture: &[alpm_types::Architecture],
-) -> Result<(Vec<String>, Vec<piko_txn::FileTarget>), ExitCode> {
-    let limits = piko_txn::extract::PackageLimits::default();
+) -> Result<piko_txn::file_target::Targets, ExitCode> {
     // A preview verifies nothing, so the policy it loads a file under is never consulted.
     // `SigLevel::default()` names that plainly rather than picking a directive that would
     // suggest otherwise.
     let policy = piko_sig::Policy::for_package(piko_db::config::SigLevel::default());
-
-    let mut names = Vec::new();
-    let mut files = Vec::new();
-    for target in targets {
-        match piko_txn::classify(target) {
-            piko_txn::TargetKind::Name(name) => names.push(name),
-            piko_txn::TargetKind::File(path) => {
-                match piko_txn::file_target::load(&path, policy, &limits) {
-                    Ok(loaded) => files.push(loaded),
-                    Err(error) => {
-                        report(&error);
-                        return Err(ExitCode::FAILURE);
-                    }
-                }
-            }
-            piko_txn::TargetKind::Url(url) => {
-                eprintln!(
-                    "Error: cannot plan {url}: previewing a package URL would have to \
-                     download it; use `piko install` instead"
-                );
-                return Err(ExitCode::FAILURE);
-            }
+    let kinds: Vec<piko_txn::TargetKind> =
+        targets.iter().map(|target| piko_txn::classify(target)).collect();
+    match piko_txn::file_target::load_targets(
+        &kinds,
+        piko_txn::file_target::FilePolicies { local: policy, remote: policy },
+        architecture,
+        piko_txn::file_target::Urls::Refuse,
+        &piko_txn::extract::PackageLimits::default(),
+    ) {
+        Ok(loaded) => Ok(loaded),
+        Err(piko_txn::Error::UrlNotLoaded { url }) => {
+            eprintln!(
+                "Error: cannot plan {url}: previewing a package URL would have to \
+                 download it; use `piko install` instead"
+            );
+            Err(ExitCode::FAILURE)
+        }
+        Err(error) => {
+            report(&error);
+            Err(ExitCode::FAILURE)
         }
     }
-    // The same two refusals `piko install` makes, in the same order. A preview that plans
-    // what the install would refuse is worse than no preview: it is a wrong answer.
-    if let Err(error) = piko_txn::file_target::check_duplicates(&files) {
-        report(&error);
-        return Err(ExitCode::FAILURE);
-    }
-    if let Err(error) = piko_txn::file_target::check_architecture(&files, architecture) {
-        report(&error);
-        return Err(ExitCode::FAILURE);
-    }
-    Ok((names, files))
 }
 
 /// Plans a transaction over `targets`, printing what would change.
@@ -502,16 +523,15 @@ pub fn plan(
     let limits = Limits::default();
     // Not in `-R` mode. A removal names installed packages, so every target there is a name.
     // A path-shaped one is a mistake to report as "not installed" rather than to open.
-    let (names, files) = if matches!(mode, Mode::Remove { .. }) {
-        (targets.to_vec(), Vec::new())
+    let loaded = if matches!(mode, Mode::Remove { .. }) {
+        piko_txn::file_target::Targets { names: targets.to_vec(), files: Vec::new() }
     } else {
         match read_file_targets(targets, architecture) {
-            Ok(split) => split,
+            Ok(loaded) => loaded,
             Err(code) => return code,
         }
     };
-    let file_candidates: Vec<&piko_db::solve::FilePackage> =
-        files.iter().map(piko_txn::FileTarget::candidate).collect();
+    let file_candidates = loaded.candidates();
     let universe = match Universe::build(
         local,
         repos.iter().map(|(usage, db)| (*usage, db)),
@@ -566,63 +586,30 @@ pub fn plan(
         };
     }
 
-    let request = Request::new().needed(matches!(mode, Mode::Install { needed: true, .. }));
-    let resolution = match resolve_targets(&universe, request, &names, &limits) {
-        Ok(resolved) => resolved,
-        Err(failure) => {
-            report_target_resolution_failure(&failure);
-            return ExitCode::FAILURE;
-        }
+    let options = InstallOptions {
+        needed: matches!(mode, Mode::Install { needed: true, .. }),
+        sysupgrade: match mode {
+            Mode::Install { sysupgrade: true, downgrade, .. } => Some(downgrade),
+            Mode::Install { .. } | Mode::Remove { .. } => None,
+        },
+        explain,
     };
-    let mut request = resolution.request;
-    print_expansions(&resolution.expansions);
-    print_ignored_targets(&resolution.ignored);
-    // A group target is taken whole here. The reason is the one that answers a provider
-    // question with its default below: a preview never asks.
-    crate::cmd::group::report_defaults(&universe, &resolution.groups);
-    // Targeted by id, for the reason `cmd::txn::install` gives. A name finds whichever
-    // candidate the universe prefers, rather than the file that was named.
-    let file_ids = universe.file_candidates();
-    if file_ids.len() != files.len() {
-        eprintln!("Internal error: the universe lost a package file candidate");
-        return ExitCode::FAILURE;
-    }
-    for id in file_ids {
-        request = request.target(id);
-    }
-
-    // `-Su`: everything the repositories have moved on from becomes a target too. Each
-    // `%REPLACES%` pair becomes a target plus the removal it displaces.
-    if let Mode::Install { sysupgrade: true, downgrade, .. } = mode {
-        request = request.with_sysupgrade(&universe, downgrade);
-        print_ignored_upgrades(&universe, request.ignored_upgrades());
-    }
-
-    let planned = match solve_with_removals(&universe, &request, &limits) {
-        Ok(Ok(planned)) => planned,
-        Ok(Err(encoded)) => {
-            report_unsatisfiable(&universe, encoded, &limits);
-            return ExitCode::FAILURE;
-        }
-        Err(error) => {
-            report(&error);
-            return ExitCode::FAILURE;
-        }
-    };
+    let planned =
+        match plan_install(&universe, &loaded.names, options, &mut Preview, cache, &limits) {
+            Ok(planned) => planned,
+            Err(failure) => {
+                report_install_failure(&failure);
+                return ExitCode::FAILURE;
+            }
+        };
 
     // A preview never asks. Blocking on stdin would make `--names` unusable in a pipe, and
     // `pacman.c` forces `noconfirm` for its own `--print` runs. Stating the assumption keeps
     // the plan honest. It is one of several valid plans, and `piko install` is where the
     // choice is actually made. On stderr, so `--names` stays diffable against `pacman -Sp`.
-    let ambiguities =
-        piko_db::solve::ambiguities(&universe, &planned.encoded, &planned.selected, &limits);
-    crate::cmd::provider::report_defaults(&universe, &ambiguities);
+    crate::cmd::provider::report_defaults(&universe, &planned.defaulted);
 
-    // The same report both consumers read. A second `ambiguities` call could return a second
-    // list, and the two could disagree about what was asked.
-    let explanation = explain.then(|| explain_plan(&universe, &planned, &request, &ambiguities));
-
-    let built = Plan::assemble(&universe, &planned, request.targets(), &limits, cache);
+    let built = planned.plan;
     // `piko install` refuses these in `TransactionPlan::new`, before it downloads anything.
     if let Err(error) = piko_txn::plan::check_compression(&universe, &built) {
         report(&error);
@@ -635,7 +622,7 @@ pub fn plan(
     } else {
         Reach::NamedTargets
     };
-    render(&universe, &built, format, reach, explanation.as_ref(), out)
+    render(&universe, &built, format, reach, planned.explanation.as_ref(), out)
 }
 
 /// Prints a plan's diagnostics and steps.

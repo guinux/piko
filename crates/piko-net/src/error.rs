@@ -33,6 +33,17 @@ pub enum Error {
         repo: String,
     },
 
+    /// A repository's `SigLevel` asks for a signature check, and the keyring cannot be used.
+    ///
+    /// [`crate::RefreshTargets::new`] returns this before any download. Failing open here
+    /// would install every database unverified the day the keyring broke.
+    #[error("a repository's SigLevel requires a signature check, and the keyring cannot be used")]
+    KeyringUnusable {
+        /// Why the keyring could not be opened.
+        #[source]
+        source: piko_sig::Error,
+    },
+
     /// A batch was asked to fetch the same file twice.
     ///
     /// Refused rather than deduplicated. `<destination>.new` is derived from the destination
@@ -166,7 +177,7 @@ impl Error {
 }
 
 /// Text a server or the download helper wrote, escaped before it reaches a terminal. The rule
-/// is shared with every other crate: see [`piko_db::printable`].
+/// is shared with every other crate: see [`fn@piko_db::printable`].
 pub(crate) use piko_db::printable;
 
 /// Renders `error` followed by every cause in its chain, joined by `": "`.

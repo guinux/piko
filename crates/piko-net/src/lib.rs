@@ -128,6 +128,7 @@ mod pool;
 pub mod progress;
 pub mod refresh;
 pub mod sandbox;
+pub mod targets;
 mod transport;
 
 pub use cancel::Cancel;
@@ -137,3 +138,4 @@ pub use freshness::{FreshnessNote, FreshnessPolicy, Refreshed};
 pub use progress::{Event, Kind};
 pub use refresh::{DatabaseKind, Outcome, PackageFetch, Refresher, RepoRefresh, refresh};
 pub use sandbox::{Sandbox, run_helper_if_requested};
+pub use targets::RefreshTargets;

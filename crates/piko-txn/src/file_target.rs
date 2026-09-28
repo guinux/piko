@@ -221,6 +221,104 @@ pub fn check_duplicates(targets: &[FileTarget]) -> Result<()> {
     Ok(())
 }
 
+/// The signature policies a package file named as a target is loaded under.
+///
+/// pacman's `-U` splits its targets on `strstr(i->data, "://")` and loads each half under its
+/// own directive (`upgrade.c`). [`crate::classify`] makes the same split.
+#[derive(Clone, Copy, Debug)]
+pub struct FilePolicies {
+    /// `LocalFileSigLevel`: the policy for a file named by path.
+    pub local: Policy,
+    /// `RemoteFileSigLevel`: the policy for a file named by URL.
+    pub remote: Policy,
+}
+
+/// What [`load_targets`] does with a target that names a URL.
+pub enum Urls<'a> {
+    /// Refuse it with [`Error::UrlNotLoaded`]. A command that must not reach the network,
+    /// such as a preview, takes this.
+    Refuse,
+    /// Fetch it through the callback, which returns where the file landed.
+    ///
+    /// The caller owns the download: its progress, its cancellation, and what it prints. The
+    /// callback is expected to call [`fetch_url`].
+    Fetch(&'a mut dyn FnMut(&str) -> Result<PathBuf>),
+}
+
+impl std::fmt::Debug for Urls<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refuse => f.write_str("Refuse"),
+            Self::Fetch(_) => f.write_str("Fetch(..)"),
+        }
+    }
+}
+
+/// The targets of an install, split into what the solver resolves and what was read from a
+/// file.
+#[derive(Debug)]
+pub struct Targets {
+    /// Targets to resolve through the repositories, in the order they were given.
+    pub names: Vec<String>,
+    /// Every package file named, path and URL alike, in the order they were given.
+    pub files: Vec<FileTarget>,
+}
+
+impl Targets {
+    /// The solver's view of each named file, in the order they were given.
+    ///
+    /// A `Universe` borrows these for as long as it lives. So the caller collects them once and
+    /// keeps them beside it.
+    #[must_use]
+    pub fn candidates(&self) -> Vec<&FilePackage> {
+        self.files.iter().map(FileTarget::candidate).collect()
+    }
+}
+
+/// Reads every target that names a package file, and keeps every other target as a name.
+///
+/// `kinds` is each target as [`crate::classify`] read it, in the order given. A path is loaded
+/// under `policies.local`. A URL is refused or fetched, as `urls` says, and the file it
+/// fetched is loaded under `policies.remote`. The files are then checked together:
+/// [`check_duplicates`] first, [`check_architecture`] second.
+///
+/// `piko plan` and `piko install` both read their targets through this function. So a preview
+/// refuses what the install refuses, in the same order. A preview that plans what the install
+/// refuses is a wrong answer.
+///
+/// # Errors
+///
+/// [`Error::UrlNotLoaded`] for a URL under [`Urls::Refuse`]. Whatever [`load`], the fetch
+/// callback, [`check_duplicates`] or [`check_architecture`] return, from the first target that
+/// fails.
+pub fn load_targets(
+    kinds: &[crate::TargetKind],
+    policies: FilePolicies,
+    architecture: &[Architecture],
+    mut urls: Urls<'_>,
+    limits: &PackageLimits,
+) -> Result<Targets> {
+    let mut targets = Targets { names: Vec::new(), files: Vec::new() };
+    for kind in kinds {
+        match kind {
+            crate::TargetKind::Name(name) => targets.names.push(name.clone()),
+            crate::TargetKind::File(path) => {
+                targets.files.push(load(path, policies.local, limits)?)
+            }
+            crate::TargetKind::Url(url) => {
+                let Urls::Fetch(fetch) = &mut urls else {
+                    return Err(Error::UrlNotLoaded { url: url.clone() });
+                };
+                let path = fetch(url)?;
+                targets.files.push(load(&path, policies.remote, limits)?);
+            }
+        }
+    }
+    check_duplicates(&targets.files)?;
+    check_architecture(&targets.files, architecture)?;
+    Ok(targets)
+}
+
 /// Fetches a package named by URL, and returns where it landed.
 ///
 /// This is `alpm_fetch_pkgurl` (`dload.c:1324`), including its cache rule. A copy already in
@@ -440,6 +538,97 @@ mod tests {
             load(&second, policy(), &PackageLimits::default()).unwrap(),
         ];
         check_duplicates(&targets).unwrap();
+    }
+
+    fn policies() -> FilePolicies {
+        FilePolicies {
+            local: Policy::for_package(piko_db::config::SigLevel::default()),
+            remote: Policy { check: true, optional: false, marginal_ok: false, unknown_ok: false },
+        }
+    }
+
+    /// Names stay names, files are read, and both keep the order they were given in.
+    #[test]
+    fn load_targets_splits_names_from_files_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let foo = package(dir.path(), "foo.pkg.tar", &pkginfo("foo", "1.0.0-1", "x86_64"));
+        let bar = package(dir.path(), "bar.pkg.tar", &pkginfo("bar", "1.0.0-1", "x86_64"));
+        let kinds = [
+            crate::TargetKind::Name("vim".to_owned()),
+            crate::TargetKind::File(foo.clone()),
+            crate::TargetKind::Name("git".to_owned()),
+            crate::TargetKind::File(bar.clone()),
+        ];
+
+        let targets =
+            load_targets(&kinds, policies(), &[], Urls::Refuse, &PackageLimits::default()).unwrap();
+
+        assert_eq!(targets.names, ["vim", "git"]);
+        let paths: Vec<&Path> = targets.files.iter().map(FileTarget::path).collect();
+        assert_eq!(paths, [foo.as_path(), bar.as_path()]);
+        assert_eq!(targets.candidates().len(), 2);
+    }
+
+    /// A preview must not reach the network, so a URL is refused rather than fetched.
+    #[test]
+    fn load_targets_refuses_a_url_under_refuse() {
+        let kinds = [crate::TargetKind::Url("https://host/foo-1.0.0-1-x86_64.pkg.tar".to_owned())];
+
+        let error = load_targets(&kinds, policies(), &[], Urls::Refuse, &PackageLimits::default())
+            .unwrap_err();
+        assert!(matches!(error, Error::UrlNotLoaded { .. }), "got {error:?}");
+    }
+
+    /// A fetched file is read from where the callback put it, under the remote policy.
+    #[test]
+    fn load_targets_reads_a_fetched_url_under_the_remote_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let fetched = package(dir.path(), "foo.pkg.tar", &pkginfo("foo", "1.0.0-1", "x86_64"));
+        let url = "https://host/foo-1.0.0-1-x86_64.pkg.tar";
+        let kinds = [crate::TargetKind::Url(url.to_owned())];
+        let mut asked = Vec::new();
+        let mut fetch = |requested: &str| {
+            asked.push(requested.to_owned());
+            Ok(fetched.clone())
+        };
+
+        let targets = load_targets(
+            &kinds,
+            policies(),
+            &[],
+            Urls::Fetch(&mut fetch),
+            &PackageLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(asked, [url]);
+        let file = targets.files.first().unwrap();
+        assert_eq!(file.path(), fetched);
+        assert!(file.policy().check, "a URL target takes RemoteFileSigLevel");
+    }
+
+    /// The same checks as on their own, after every file is read.
+    #[test]
+    fn load_targets_refuses_duplicates_and_foreign_architectures() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = pkginfo("foo", "1.0.0-1", "x86_64");
+        let first = package(dir.path(), "one.pkg.tar", &info);
+        let second = package(dir.path(), "two.pkg.tar", &info);
+        let twice = [crate::TargetKind::File(first.clone()), crate::TargetKind::File(second)];
+        let error = load_targets(&twice, policies(), &[], Urls::Refuse, &PackageLimits::default())
+            .unwrap_err();
+        assert!(matches!(error, Error::DuplicateTarget { .. }), "got {error:?}");
+
+        let once = [crate::TargetKind::File(first)];
+        let error = load_targets(
+            &once,
+            policies(),
+            &[arch("aarch64")],
+            Urls::Refuse,
+            &PackageLimits::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::WrongArchitecture { .. }), "got {error:?}");
     }
 
     /// A URL whose last component is not a package file name has nothing to fetch. This is

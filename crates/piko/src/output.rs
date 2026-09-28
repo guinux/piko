@@ -21,14 +21,34 @@ pub fn report(error: &dyn std::error::Error) {
 ///
 /// Write failures are dropped. This is the reporting path; a caller whose stderr is gone has
 /// nowhere left to say so.
+///
+/// Every message in the chain is escaped by [`piko_db::printable_lines`]. An error from an
+/// upstream parser quotes the bytes it refused, and those bytes came from a mirror or a
+/// package.
 pub fn write_report(out: &mut impl std::io::Write, error: &dyn std::error::Error) {
-    let _ = writeln!(out, "Error: {error}");
+    let _ = writeln!(out, "Error: {}", piko_db::printable_lines(&error.to_string()));
 
     let mut source = error.source();
     while let Some(cause) = source {
-        let _ = writeln!(out, "  Caused by: {cause}");
+        let _ = writeln!(out, "  Caused by: {}", piko_db::printable_lines(&cause.to_string()));
         source = cause.source();
     }
+}
+
+/// Prints `message` on stderr as a warning, escaped by [`piko_db::printable_lines`].
+///
+/// A diagnostic can quote a database member, a parse error, or a server's answer. None of
+/// these is text piko wrote.
+pub fn warn(message: impl std::fmt::Display) {
+    eprintln!("Warning: {}", piko_db::printable_lines(&message.to_string()));
+}
+
+/// `value` as text, escaped by [`fn@piko_db::printable`].
+///
+/// For a value a package, a mirror or a key chose, printed on one line of output: a
+/// description, a URL, a file path, a user ID.
+pub fn escaped(value: impl std::fmt::Display) -> String {
+    piko_db::printable(&value.to_string())
 }
 
 /// Reports how many diagnostics the `max_diagnostics` bound withheld, if any.
@@ -488,6 +508,44 @@ mod tests {
     use piko_txn::LocalOffset;
 
     use super::*;
+
+    /// An error whose message and cause quote bytes a mirror chose.
+    #[derive(Debug)]
+    struct Quoting(&'static str, Option<Box<Quoting>>);
+
+    impl std::fmt::Display for Quoting {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Quoting {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|cause| cause as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    /// A parse error quotes the refused input. Its line feeds stay, and nothing else that could
+    /// drive a terminal reaches it.
+    #[test]
+    fn a_reported_error_escapes_what_could_drive_a_terminal() {
+        let error = Quoting(
+            "failed to parse desc",
+            Some(Box::new(Quoting("14 | nice \u{1b}]52;c;cHduZWQ=\u{7}\rfake\n   ^", None))),
+        );
+        let mut out = Vec::new();
+        write_report(&mut out, &error);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "Error: failed to parse desc\n  Caused by: 14 | nice \\u{1b}]52;c;cHduZWQ=\\u{7}\\rfake\n   ^\n"
+        );
+    }
+
+    #[test]
+    fn an_escaped_value_keeps_ordinary_text() {
+        assert_eq!(escaped("usr/bin/ls"), "usr/bin/ls");
+        assert_eq!(escaped("a\u{1b}[2Jb"), "a\\u{1b}[2Jb");
+    }
 
     #[test]
     fn a_letter_answers_whatever_its_case() {

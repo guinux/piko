@@ -32,9 +32,9 @@ use crate::output::emit;
 ///
 /// # `IgnorePkg`/`IgnoreGroup` rows are withheld, and warned about
 ///
-/// [`LocalDatabase::check_updates`] applies no filter, matching `alpm_sync_get_new_version`,
-/// which is also what `pacman -Qu` is built on. pacman then *prints* an ignored row, suffixed
-/// `[ignored]`. piko withholds it from the listing and warns about it on stderr instead.
+/// [`LocalDatabase::check_updates_ignoring`] sets the ignored updates apart. pacman *prints* an
+/// ignored row, suffixed `[ignored]`. piko withholds it from the listing and warns about it on
+/// stderr instead.
 ///
 /// The reason is what the list is for. `piko check-updates` answers "what will change if I
 /// upgrade", and an ignored package will not change. Listing it puts the row a user is about
@@ -55,14 +55,8 @@ pub fn check_updates(
     quiet: bool,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
-    let mut updates = Vec::new();
-    let mut ignored = Vec::new();
-    for update in local.check_updates(repos) {
-        match ignores.reason_for(update.available()) {
-            Some(reason) => ignored.push((update, reason)),
-            None => updates.push(update),
-        }
-    }
+    let piko_db::Updates { available: updates, ignored } =
+        local.check_updates_ignoring(repos, ignores);
 
     if quiet {
         for update in &updates {

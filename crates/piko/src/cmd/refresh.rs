@@ -4,7 +4,7 @@ use std::{path::Path, process::ExitCode};
 
 use piko_db::config::PacmanConfig;
 use piko_net::{
-    Cancel, Concurrency, DatabaseKind, FreshnessPolicy, Outcome, Refresher, RepoRefresh,
+    Cancel, Concurrency, DatabaseKind, FreshnessPolicy, Outcome, RefreshTargets, Refresher,
 };
 
 use crate::{cmd::freshness, output::report};
@@ -68,62 +68,33 @@ pub fn refresh(
         }
     };
 
-    // Opened once, only if some repository will actually use it. A system with no keyring can
-    // still refresh repositories whose SigLevel asks for nothing.
-    let wants_signatures = config.repositories.iter().any(|repo| {
-        piko_sig::Policy::for_database(repo.effective_sig_level(config.options.sig_level)).check
-    });
-    let keyring = if wants_signatures {
-        match piko_sig::Keyring::open(&config.options.gpg_dir) {
-            Ok(keyring) => Some(keyring),
-            Err(error) => {
-                report(&error);
-                eprintln!(
-                    "Note: a repository's SigLevel requires a signature, so refreshing \
-                     cannot continue without a usable keyring"
-                );
-                return ExitCode::FAILURE;
-            }
+    // Which archives, under which policy, checked by which keyring: `RefreshTargets`
+    // decides all three from the configuration.
+    let targets = match RefreshTargets::new(config, only, files, freshness) {
+        Ok(targets) => targets,
+        Err(piko_net::Error::KeyringUnusable { source }) => {
+            report(&source);
+            eprintln!(
+                "Note: a repository's SigLevel requires a signature, so refreshing \
+                 cannot continue without a usable keyring"
+            );
+            return ExitCode::FAILURE;
         }
-    } else {
-        None
+        Err(error) => {
+            report(&error);
+            return ExitCode::FAILURE;
+        }
     };
-
-    let selected: Vec<&piko_db::config::RepositoryConfig> = config
-        .repositories
-        .iter()
-        .filter(|repo| only.is_empty() || only.contains(&repo.name.to_string()))
-        .collect();
-    // One entry per file, not per repository: with `--files` a repository contributes two.
-    // Its `.db` and its `.files` are separate downloads, each with its own result, its own
-    // row, and its own `Last-Modified`. The two entries sit next to each other, so the output
-    // reads repository by repository. The pool schedules them in any order.
-    let kinds: &[DatabaseKind] =
-        if files { &[DatabaseKind::Db, DatabaseKind::Files] } else { &[DatabaseKind::Db] };
-    let expanded: Vec<(&piko_db::config::RepositoryConfig, DatabaseKind)> =
-        selected.iter().flat_map(|repo| kinds.iter().map(|kind| (*repo, *kind))).collect();
-    let targets: Vec<(String, DatabaseKind)> =
-        expanded.iter().map(|(repo, kind)| (repo.name.to_string(), *kind)).collect();
-    let requests: Vec<RepoRefresh<'_>> = expanded
-        .iter()
-        .zip(&targets)
-        .map(|((repo, kind), (name, _))| RepoRefresh {
-            name,
-            kind: *kind,
-            servers: &repo.servers,
-            policy: piko_sig::Policy::for_database(
-                repo.effective_sig_level(config.options.sig_level),
-            ),
-            freshness,
-        })
-        .collect();
+    let requests = targets.requests();
 
     // One list holds every repository's row, rather than one list per repository. With
     // several refreshes in flight there is no longer a single row at a time to draw.
     let steps = crate::progress::StepList::new();
-    let rows: Vec<crate::progress::Row> = targets
+    let rows: Vec<crate::progress::Row> = requests
         .iter()
-        .map(|(name, kind)| steps.download(&format!("Synchronizing {}", label(name, *kind)), 0))
+        .map(|request| {
+            steps.download(&format!("Synchronizing {}", label(request.name, request.kind)), 0)
+        })
         .collect();
     let sinks: Vec<_> =
         rows.iter().map(|row| crate::progress::database_download_sink(row.clone())).collect();
@@ -136,8 +107,8 @@ pub fn refresh(
     let results = refresher.refresh_all(
         &sync_dir,
         &lock,
-        &requests,
-        keyring.as_ref(),
+        requests,
+        targets.keyring(),
         Concurrency::new(config.options.parallel_downloads),
         force,
         cancel,
@@ -146,7 +117,8 @@ pub fn refresh(
 
     let mut failed = false;
     let mut notes = Vec::new();
-    for (((name, kind), row), result) in targets.iter().zip(rows).zip(results) {
+    for ((request, row), result) in requests.iter().zip(rows).zip(results) {
+        let (name, kind) = (request.name, &request.kind);
         let file = kind.file_name(name);
         match result {
             Ok(refreshed) => {
@@ -186,13 +158,9 @@ pub fn refresh(
 
     // Through `suspend`, as every other line this function prints. The finished rows still
     // belong to the `MultiProgress`. A bare `eprintln!` writes into the region it draws.
-    if !only.is_empty() {
-        for wanted in only {
-            if !config.repositories.iter().any(|repo| repo.name.to_string() == *wanted) {
-                steps.suspend(|| eprintln!("Error: {wanted} is not a configured repository"));
-                failed = true;
-            }
-        }
+    for wanted in targets.unknown() {
+        steps.suspend(|| eprintln!("Error: {wanted} is not a configured repository"));
+        failed = true;
     }
 
     if failed {

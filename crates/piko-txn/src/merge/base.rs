@@ -70,6 +70,71 @@ pub struct BaseSearch {
     pub refused: Vec<RefusedBase>,
 }
 
+/// The ancestor a three-way merge of one pending file can use.
+#[derive(Debug)]
+pub enum BaseContents {
+    /// No accepted cached build is older than the installed version: a two-way view.
+    NoBase,
+    /// The chosen build does not ship the file.
+    NotShipped {
+        /// The build.
+        base: BaseCandidate,
+    },
+    /// The chosen build could not be read.
+    Unreadable {
+        /// The build.
+        base: BaseCandidate,
+        /// Why.
+        error: Error,
+    },
+    /// The file as the chosen build ships it.
+    Found {
+        /// The build.
+        base: BaseCandidate,
+        /// The file's contents.
+        contents: Vec<u8>,
+    },
+}
+
+/// What [`base_contents`] found, and the builds it passed over on the way.
+#[derive(Debug)]
+pub struct BaseLookup {
+    /// Newer builds passed over on the way to the base, newest first, as [`BaseSearch`] lists
+    /// them. Reported on every outcome.
+    pub refused: Vec<RefusedBase>,
+    /// The ancestor, or why there is none.
+    pub contents: BaseContents,
+}
+
+/// The ancestor of `pending`, read out of the cache: [`find_base`], then [`extract_member`].
+///
+/// The build is the newest one strictly below the installed version whose signature `check`
+/// accepts, and the member is `pending.target`. A failure to read the chosen build is
+/// [`BaseContents::Unreadable`] rather than an error, so the builds passed over on the way are
+/// still reported.
+///
+/// # Errors
+///
+/// As [`find_base`].
+pub fn base_contents(
+    directories: &[PathBuf],
+    pending: &crate::merge::Pending,
+    limits: &BaseLimits,
+    check: &BaseCheck,
+) -> Result<BaseLookup> {
+    let search =
+        find_base(directories, &pending.package, &pending.installed_version, limits, check)?;
+    let contents = match search.base {
+        None => BaseContents::NoBase,
+        Some(base) => match extract_member(&base.path, &pending.target, limits) {
+            Ok(Some(contents)) => BaseContents::Found { base, contents },
+            Ok(None) => BaseContents::NotShipped { base },
+            Err(error) => BaseContents::Unreadable { base, error },
+        },
+    };
+    Ok(BaseLookup { refused: search.refused, contents })
+}
+
 /// How a cached build's signature is checked before its bytes can reach a merge.
 ///
 /// A base is read out of a cache, and every cache holds whatever was downloaded into it: a
@@ -693,5 +758,62 @@ mod tests {
         let found =
             extract_member(&path, Path::new("etc/foo.conf"), &BaseLimits::default()).unwrap();
         assert_eq!(found.as_deref(), Some(b"contents".as_slice()));
+    }
+
+    fn pending_for(target: &str, installed: &str) -> crate::merge::Pending {
+        crate::merge::Pending {
+            pacfile: PathBuf::from(format!("{target}.pacnew")),
+            target: PathBuf::from(target),
+            kind: crate::merge::PendingKind::Pacnew,
+            package: name("foo"),
+            installed_version: version(installed),
+            verdict: crate::merge::Verdict::Differs,
+        }
+    }
+
+    /// The three outcomes a merge tells apart: no older build, a build without the file, and
+    /// the file itself.
+    #[test]
+    fn base_contents_reads_the_member_out_of_the_chosen_build() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("foo-1.0.0-1-x86_64.pkg.tar.gz"),
+            gzip_tar(&[("etc/foo.conf", b"ancestor")]),
+        )
+        .unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        let lookup = |target: &str, installed: &str| {
+            base_contents(
+                &dirs,
+                &pending_for(target, installed),
+                &BaseLimits::default(),
+                &BaseCheck::Unchecked,
+            )
+            .unwrap()
+            .contents
+        };
+
+        assert!(matches!(
+            lookup("etc/foo.conf", "2.0.0-1"),
+            BaseContents::Found { contents, .. } if contents == b"ancestor"
+        ));
+        assert!(matches!(lookup("etc/bar.conf", "2.0.0-1"), BaseContents::NotShipped { .. }));
+        assert!(matches!(lookup("etc/foo.conf", "1.0.0-1"), BaseContents::NoBase));
+    }
+
+    /// A build that cannot be read is an outcome, not an error.
+    #[test]
+    fn an_unreadable_base_is_reported_as_such() {
+        let dir = cache(&["foo-1.0.0-1-x86_64.pkg.tar.gz"]);
+        let dirs = vec![dir.path().to_path_buf()];
+
+        let lookup = base_contents(
+            &dirs,
+            &pending_for("etc/foo.conf", "2.0.0-1"),
+            &BaseLimits::default(),
+            &BaseCheck::Unchecked,
+        )
+        .unwrap();
+        assert!(matches!(lookup.contents, BaseContents::Unreadable { .. }), "{lookup:?}");
     }
 }
