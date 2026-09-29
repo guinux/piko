@@ -43,20 +43,6 @@ pub(crate) struct FilesArena {
     index: HashMap<Name, (FullVersion, Range<u32>)>,
 }
 
-/// What [`FilesArena::insert`] did with the package it was handed.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Inserted {
-    /// The package was appended; it is the only one under that name.
-    Yes,
-    /// A package of that name was already present, so this one was discarded. It carries the
-    /// version of the entry that was **kept**. A diagnostic needs to name that version; the
-    /// caller only knows the one it just tried to insert.
-    Duplicate {
-        /// The version of the entry already in the arena.
-        kept: FullVersion,
-    },
-}
-
 impl FilesArena {
     /// Creates an empty arena.
     pub(crate) fn new() -> Self {
@@ -67,10 +53,11 @@ impl FilesArena {
     ///
     /// `name` can already be present: the same package name appearing twice in one `.files`
     /// archive. The spec's uniqueness guarantee rules this out, but a corrupt archive could
-    /// still contain it. The existing entry is then kept, and [`Inserted::Duplicate`] is
-    /// returned. It carries the kept version, so the caller can record a diagnostic naming
-    /// both sides. This is a same-archive duplicate, not the cross-archive version skew
-    /// [`Self::file_list`] detects.
+    /// still contain it. The existing entry, the first in archive order, is then kept and this
+    /// one discarded. The `desc` side keeps the same one and reports the pair
+    /// (`RepoDiagnostic::DuplicatePackage`), so the kept package gets its own file list. This
+    /// is a same-archive duplicate, not the cross-archive version skew [`Self::file_list`]
+    /// detects.
     ///
     /// # Errors
     ///
@@ -89,9 +76,9 @@ impl FilesArena {
         paths: &[std::path::PathBuf],
         max_bytes: u64,
         max_paths: usize,
-    ) -> Result<Inserted> {
-        if let Some((kept, _)) = self.index.get(&name) {
-            return Ok(Inserted::Duplicate { kept: kept.clone() });
+    ) -> Result<()> {
+        if self.index.contains_key(&name) {
+            return Ok(());
         }
 
         // The byte bound does not count the 8 bytes of offsets each path adds, so a list of
@@ -115,7 +102,7 @@ impl FilesArena {
 
         let range_end = self.path_count_as_u32(archive_path, max_bytes)?;
         self.index.insert(name, (version, range_start..range_end));
-        Ok(Inserted::Yes)
+        Ok(())
     }
 
     /// Discards every path from index `count` onwards, along with its bytes.
@@ -356,26 +343,18 @@ mod tests {
         assert_eq!(found.count(), 0);
     }
 
-    /// A duplicate name within one archive keeps the first entry and reports it, mirroring
-    /// `LocalDatabase`'s duplicate-entry handling.
+    /// A duplicate name within one archive keeps the first entry, never the later one.
     #[test]
-    fn a_duplicate_name_keeps_the_first_and_signals_it() {
+    fn a_duplicate_name_keeps_the_first() {
         let mut arena = FilesArena::new();
-        let first = arena
+        arena
             .insert(Path::new("x"), name("foo"), version("1-1"), &paths(&["a"]), 1024, usize::MAX)
             .unwrap();
-        let second = arena
+        arena
             .insert(Path::new("x"), name("foo"), version("2-1"), &paths(&["b"]), 1024, usize::MAX)
             .unwrap();
 
-        assert_eq!(first, Inserted::Yes, "the first insert must succeed");
-        assert_eq!(
-            second,
-            Inserted::Duplicate { kept: version("1-1") },
-            "the second must be reported as a duplicate naming the version that was kept, \
-             not silently override"
-        );
-
+        assert!(arena.file_list(&name("foo"), &version("2-1")).is_err());
         let found: Vec<_> = arena.file_list(&name("foo"), &version("1-1")).unwrap().collect();
         assert_eq!(found, [Path::new("a")], "the first entry must be the one kept");
     }

@@ -205,11 +205,10 @@ pub fn install(
 
     archive::walk(package, limits, |member, contents| {
         if member.kind == MemberKind::Metadata {
-            capture_metadata(member, contents, &mut result);
-            return Ok(());
+            return capture_metadata(package, member, contents, &mut result);
         }
 
-        let existing = probe(root, &member.path)?;
+        let existing = probe_existing(root, &member.path);
         let old_hash = (filters.old_backup_hash)(&member.path);
         let context = EntryContext {
             entry: member.entry,
@@ -350,8 +349,18 @@ fn claim(result: &mut Extraction, claimed: &mut BTreeSet<PathBuf>, path: &Path) 
     }
 }
 
-/// Buffers a metadata member for the database entry.
-fn capture_metadata(member: &Member, contents: &mut dyn std::io::Read, into: &mut Extraction) {
+/// Buffers a metadata member of `package` for the database entry.
+///
+/// # Errors
+///
+/// [`crate::Error::Io`] if the member cannot be read. Dropped instead, an unreadable `.INSTALL`
+/// would leave the entry with no scriptlet for the removal to run.
+fn capture_metadata(
+    package: &Path,
+    member: &Member,
+    contents: &mut dyn std::io::Read,
+    into: &mut Extraction,
+) -> Result<()> {
     let name = member.path.to_string_lossy().into_owned();
     let mut buffer = Vec::new();
     // A metadata member too large to buffer is dropped, not treated as a failed install. It
@@ -359,28 +368,23 @@ fn capture_metadata(member: &Member, contents: &mut dyn std::io::Read, into: &mu
     // kept cut short: the entry would then hold bytes the package did not ship. One byte past
     // the bound is what tells the two apart.
     let mut limited = contents.take((MAX_METADATA_BYTES as u64).saturating_add(1));
-    if std::io::Read::read_to_end(&mut limited, &mut buffer).is_ok()
-        && buffer.len() <= MAX_METADATA_BYTES
-    {
+    std::io::Read::read_to_end(&mut limited, &mut buffer)
+        .map_err(|source| crate::Error::io(package, crate::error::IoAction::Read, source))?;
+    if buffer.len() <= MAX_METADATA_BYTES {
         into.metadata.insert(name, MetadataMember { contents: buffer, mtime: member.mtime });
     }
+    Ok(())
 }
 
 /// What is at `path` inside `root`, from an `lstat` that follows nothing.
 ///
-/// Public as [`probe_existing`] because removal asks the same question of the same paths.
+/// Public because removal asks the same question of the same paths.
 pub fn probe_existing(root: &RootDir, path: &Path) -> Existing {
-    probe(root, path).unwrap_or(Existing::Absent)
-}
-
-/// What is at `path` inside `root`, from an `lstat` that follows nothing.
-fn probe(root: &RootDir, path: &Path) -> Result<Existing> {
     let Ok(resolved) = root.resolve_parent(path) else {
         // The parent does not exist yet, so nothing can be at the path.
-
-        return Ok(Existing::Absent);
+        return Existing::Absent;
     };
-    Ok(existing_in(&resolved))
+    existing_in(&resolved)
 }
 
 /// What is at `resolved`'s name, from an `lstat` that follows nothing.
@@ -554,6 +558,40 @@ mod tests {
             captured.modified(),
             Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
         );
+    }
+
+    /// A metadata member that cannot be read fails the extraction. Dropped, an `.INSTALL` would
+    /// leave the entry with no scriptlet for the removal to run.
+    #[test]
+    fn a_metadata_member_that_cannot_be_read_is_an_error() {
+        struct Failing;
+        impl std::io::Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("the stream broke"))
+            }
+        }
+        let member = Member {
+            path: PathBuf::from(".INSTALL"),
+            kind: MemberKind::Metadata,
+            entry: crate::extract::decision::EntryKind::Other,
+            link: None,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            size: 1,
+            xattrs: Vec::new(),
+        };
+        let package = Path::new("foo-1.0.0-1-x86_64.pkg.tar");
+        let mut into = Extraction::default();
+
+        let error = capture_metadata(package, &member, &mut Failing, &mut into).unwrap_err();
+
+        assert!(
+            matches!(&error, crate::Error::Io { path, .. } if path == package),
+            "got {error:?}"
+        );
+        assert!(into.metadata.is_empty());
     }
 
     /// A member listed twice is owned once, because `%FILES%` is a set.

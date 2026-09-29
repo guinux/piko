@@ -16,14 +16,12 @@
 //! the data before the rename. Otherwise a crash can make the rename durable while the
 //! contents are not, leaving an empty file where a good one belongs.
 
-use std::{
-    fs::File,
-    io::Write,
-    path::{Path, PathBuf},
-    time::SystemTime,
-};
+use std::{io::Write, path::Path, time::SystemTime};
 
-use crate::error::{Error, IoAction, Result};
+use crate::{
+    error::{Error, IoAction, Result},
+    local::Temporary,
+};
 
 /// A file that becomes visible at its destination only when [`Self::commit`] is called.
 ///
@@ -42,10 +40,7 @@ use crate::error::{Error, IoAction, Result};
 /// permanently.
 #[derive(Debug)]
 pub struct AtomicFile {
-    temp: PathBuf,
-    destination: PathBuf,
-    /// `None` once committed, so `Drop` knows not to clean up.
-    file: Option<File>,
+    temporary: Temporary,
     /// The mtime the committed file should carry, if the caller asked for one.
     modified: Option<SystemTime>,
 }
@@ -58,9 +53,7 @@ impl AtomicFile {
     /// Returns [`Error`] if the temporary cannot be created. This includes the case where
     /// something already exists at its path; the write is refused rather than overwriting it.
     pub fn create(destination: &Path) -> Result<Self> {
-        let temp = crate::local::temp_path(destination);
-        let file = crate::local::create_temp(&temp)?;
-        Ok(Self { temp, destination: destination.to_path_buf(), file: Some(file), modified: None })
+        Ok(Self { temporary: Temporary::create(destination)?, modified: None })
     }
 
     /// The temporary's path.
@@ -69,7 +62,7 @@ impl AtomicFile {
     /// signature check while the destination still holds the previous, known-good file.
     #[must_use]
     pub fn path(&self) -> &Path {
-        &self.temp
+        self.temporary.path()
     }
 
     /// Sets the modification time the committed file will carry.
@@ -89,71 +82,31 @@ impl AtomicFile {
     /// Returns [`Error`] if any step fails. The temporary is removed on failure, so a partial
     /// write is never left where a later run could rename it into place.
     pub fn commit(mut self) -> Result<()> {
-        let Some(mut file) = self.file.take() else {
-            // Unreachable: only this call takes `file`, and `self` is consumed here.
-            return Ok(());
-        };
-
-        if let Err(source) = file.flush().and_then(|()| file.sync_all()) {
-            drop(file);
-            let _ = std::fs::remove_file(&self.temp);
-            return Err(Error::io(&self.temp, IoAction::Sync, source));
+        self.temporary
+            .file_mut()
+            .flush()
+            .map_err(|source| Error::io(self.temporary.path(), IoAction::Write, source))?;
+        // After the last write, which would otherwise move the mtime forward again, and before
+        // the sync, which makes it durable with the contents. The rename does not touch the
+        // mtime; it travels with the inode.
+        if let Some(time) = self.modified {
+            self.temporary.set_modified(time)?;
         }
-        // This runs after the write and the fsync. Setting the mtime earlier would let a
-        // later write move it forward again. The mode change and the rename below do not touch
-        // the mtime; it travels with the inode.
-        if let Some(source) = self.modified.and_then(|time| file.set_modified(time).err()) {
-            drop(file);
-            let _ = std::fs::remove_file(&self.temp);
-            return Err(Error::io(&self.temp, IoAction::Metadata, source));
-        }
-        // The caller's umask masks the mode set at open time, so this sets it explicitly,
-        // through the descriptor. Then the temporary must still be the file written through
-        // it: the caller verified the file at `path`, and that is the one to rename.
-        if let Err(error) = crate::local::set_file_mode(&file, &self.temp)
-            .and_then(|()| crate::local::ensure_unreplaced(&file, &self.temp))
-        {
-            drop(file);
-            let _ = std::fs::remove_file(&self.temp);
-            return Err(error);
-        }
-        drop(file);
-
-        if let Err(source) = std::fs::rename(&self.temp, &self.destination) {
-            let _ = std::fs::remove_file(&self.temp);
-            return Err(Error::io(&self.destination, IoAction::Rename, source));
-        }
-
-        let directory = self.destination.parent().unwrap_or(Path::new("."));
-        crate::local::sync_directory(directory)
+        self.temporary.sync()?;
+        let directory =
+            self.temporary.destination().parent().unwrap_or(Path::new(".")).to_path_buf();
+        self.temporary.publish()?;
+        crate::local::sync_directory(&directory)
     }
 }
 
 impl Write for AtomicFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self.file.as_mut() {
-            Some(file) => file.write(buf),
-            None => Err(std::io::Error::other("the atomic file has already been committed")),
-        }
+        self.temporary.file_mut().write(buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        match self.file.as_mut() {
-            Some(file) => file.flush(),
-            None => Ok(()),
-        }
-    }
-}
-
-impl Drop for AtomicFile {
-    /// Removes the temporary unless it was committed.
-    ///
-    /// This makes a rejected download cost nothing. The caller returns an error, the value
-    /// drops, and the destination stays exactly as it was.
-    fn drop(&mut self) {
-        if self.file.take().is_some() {
-            let _ = std::fs::remove_file(&self.temp);
-        }
+        self.temporary.file_mut().flush()
     }
 }
 
@@ -164,6 +117,8 @@ impl Drop for AtomicFile {
     reason = "a failing assertion in a test should abort it loudly"
 )]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]

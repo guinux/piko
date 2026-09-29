@@ -69,7 +69,7 @@ impl FilePackage {
                 conflicts: conflicts.into_boxed_slice(),
                 replaces: replaces.into_boxed_slice(),
                 groups: groups.into_boxed_slice(),
-                depends_text: None,
+                depends_text: Box::default(),
             },
             installed_size,
         }

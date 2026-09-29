@@ -383,6 +383,34 @@ mod tests {
         );
     }
 
+    /// The time the archive check vouched for dates the database, before the member time. It
+    /// is the check that accepted these bytes, so no second check is needed to date them.
+    #[test]
+    fn the_time_the_check_vouched_for_dates_the_database() {
+        let fixture = RepoFixture::new();
+        let path = fixture.write_gzip_archive_at(
+            "core.db",
+            &[(DESC_PATH, MINIMAL_REPO_DESC_V2.as_bytes())],
+            1_758_480_000,
+        );
+        let signed = UNIX_EPOCH + Duration::from_secs(1_758_000_000);
+        let check: crate::repo::ArchiveCheck = std::sync::Arc::new(move |_| Ok(Some(signed)));
+
+        let database =
+            RepoDatabase::open_with(&path, crate::repo::RepoOpenOptions::new().check(check))
+                .unwrap();
+        assert_eq!(
+            database.publication(),
+            Some(Publication { at: 1_758_000_000, tier: Tier::Authenticated })
+        );
+
+        let unchecked = RepoDatabase::open(&path).unwrap();
+        assert_eq!(
+            unchecked.publication(),
+            Some(Publication { at: 1_758_480_000, tier: Tier::Unauthenticated })
+        );
+    }
+
     /// A member that the reader skips still dates the archive. The date says when the archive
     /// was written, not which members piko could use.
     #[test]

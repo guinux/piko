@@ -1337,52 +1337,37 @@ fn local_stamp(path: &Path) -> Option<u64> {
     Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs()).filter(|secs| *secs > 0)
 }
 
+/// The day names of an IMF-fixdate, from Monday, as [`time::Weekday::number_days_from_monday`]
+/// counts them.
+const HTTP_DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/// The month names of an IMF-fixdate, from January.
+const HTTP_MONTHS: [&str; 12] =
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
 /// Formats seconds-since-epoch as an RFC 7231 IMF-fixdate.
 ///
-/// Hand-rolled rather than pulling in a date library for one format string. This is the only date
-/// piko ever renders for the wire, and the format is fixed and fully specified. The nearest
-/// well-known formatter (`Rfc2822`) emits `+0000` where HTTP wants `GMT`.
+/// The calendar arithmetic is `time`'s. The text is written here: the nearest well-known
+/// format `time` offers (`Rfc2822`) writes `+0000` where HTTP wants `GMT`.
 ///
 /// The input is a file mtime, so it is disk-derived and therefore attacker-influenced. It is
-/// clamped to \[1970, 9999\] before any arithmetic. That clamp lets the civil-from-days algorithm
-/// below use plain operators without risking overflow. Every intermediate is then bounded by
-/// roughly 3 million, against an `i64`. A clamped date makes the conditional request wrong at
-/// worst, never unsound, and a mtime outside that range is already nonsense.
+/// clamped to \[1970, 9999\]. A clamped date makes the conditional request wrong at worst, and a
+/// mtime outside that range is already nonsense.
 fn http_date(seconds: u64) -> String {
-    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] =
-        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     /// 9999-12-31T23:59:59Z, past which the four-digit year would not fit anyway.
-    const MAX: u64 = 253_402_300_799;
+    const MAX: i64 = 253_402_300_799;
 
-    let seconds = seconds.min(MAX);
-    let days_total = seconds / 86_400;
-    let time = seconds % 86_400;
-    let (hour, minute, second) = (time / 3600, (time % 3600) / 60, time % 60);
-    let weekday = DAYS.get((days_total % 7) as usize).copied().unwrap_or("Thu");
+    let seconds = i64::try_from(seconds).unwrap_or(MAX).min(MAX);
+    let moment = time::OffsetDateTime::from_unix_timestamp(seconds)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    let weekday = usize::from(moment.weekday().number_days_from_monday());
+    let weekday = HTTP_DAYS.get(weekday).copied().unwrap_or("Thu");
+    let month = usize::from(u8::from(moment.month()).saturating_sub(1));
+    let month = HTTP_MONTHS.get(month).copied().unwrap_or("Jan");
+    let (day, year) = (moment.day(), moment.year());
+    let (hour, minute, second) = moment.to_hms();
 
-    // Civil-from-days (Howard Hinnant's algorithm), shifted so the era starts at 0000-03-01.
-    // Every value here is bounded by the clamp above, so the plain operators cannot overflow.
-    // Operators are spelled as saturating to satisfy the workspace's `arithmetic_side_effects`
-    // wall. Given the clamp above, none of them can actually saturate. The tests against
-    // `date -u` demonstrate the arithmetic is still the algorithm, not a mangling of it.
-    let z = days_total.saturating_add(719_468) as i64;
-    let era = z / 146_097;
-    let doe = z % 146_097;
-    let yoe =
-        doe.saturating_sub(doe / 1460).saturating_add(doe / 36_524).saturating_sub(doe / 146_096)
-            / 365;
-    let doy = doe.saturating_sub(
-        365_i64.saturating_mul(yoe).saturating_add(yoe / 4).saturating_sub(yoe / 100),
-    );
-    let mp = 5_i64.saturating_mul(doy).saturating_add(2) / 153;
-    let day =
-        doy.saturating_sub(153_i64.saturating_mul(mp).saturating_add(2) / 5).saturating_add(1);
-    let month = if mp < 10 { mp.saturating_add(3) } else { mp.saturating_sub(9) };
-    let year = yoe.saturating_add(era.saturating_mul(400)).saturating_add(i64::from(month <= 2));
-    let name = MONTHS.get(month.saturating_sub(1) as usize).copied().unwrap_or("Jan");
-
-    format!("{weekday}, {day:02} {name} {year:04} {hour:02}:{minute:02}:{second:02} GMT")
+    format!("{weekday}, {day:02} {month} {year:04} {hour:02}:{minute:02}:{second:02} GMT")
 }
 
 /// Parses an RFC 7231 IMF-fixdate into seconds since the epoch.
@@ -1391,65 +1376,35 @@ fn http_date(seconds: u64) -> String {
 /// a recipient is meant to accept do not appear on `Last-Modified` from any real mirror.
 /// Failing to parse simply means the file is not stamped, so the next refresh re-downloads
 /// rather than misbehaving.
+///
+/// A date that does not exist, such as 31 February, is refused. So is a leap second
+/// (`23:59:60`): [`http_date`] cannot produce one, so accepting it would parse to the next
+/// minute and render back differently, and the conditional request would stop matching.
 fn parse_http_date(value: &str) -> Option<u64> {
-    const MONTHS: [&str; 12] =
-        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
     // "Wed, 19 Aug 2026 09:57:55 GMT"
     let rest = value.split_once(", ")?.1;
     let mut parts = rest.split(' ');
-    let day: i64 = parts.next()?.parse().ok()?;
+    let day: u8 = parts.next()?.parse().ok()?;
     let month_name = parts.next()?;
-    let year: i64 = parts.next()?.parse().ok()?;
+    let year: i32 = parts.next()?.parse().ok()?;
     let clock = parts.next()?;
-    if parts.next() != Some("GMT") {
+    if parts.next() != Some("GMT") || !(1970..=9999).contains(&year) {
         return None;
     }
-    let month = MONTHS.iter().position(|name| *name == month_name)? as i64;
-    let month = month.saturating_add(1);
+    let month = HTTP_MONTHS.iter().position(|name| *name == month_name)?;
+    let month = time::Month::try_from(u8::try_from(month).ok()?.saturating_add(1)).ok()?;
 
     let mut clock = clock.split(':');
-    let hour: u64 = clock.next()?.parse().ok()?;
-    let minute: u64 = clock.next()?.parse().ok()?;
-    let second: u64 = clock.next()?.parse().ok()?;
-    // `second == 60` is a leap second. Rejected rather than accepted, because this function is
-    // documented as the inverse of `http_date`, and `http_date` cannot produce it. Accepting it
-    // would parse to the next minute and render back differently. That quietly breaks the round
-    // trip the conditional request depends on. This is theoretical either way, because
-    // `Last-Modified` comes from a file mtime, which is POSIX time and has no leap seconds. The
-    // consequence of refusing is only that the file is not stamped, exactly as for any date that
-    // fails to parse.
-    if clock.next().is_some() || hour > 23 || minute > 59 || second >= 60 {
-        return None;
-    }
-    if !(1970..=9999).contains(&year) || !(1..=31).contains(&day) {
+    let hour: u8 = clock.next()?.parse().ok()?;
+    let minute: u8 = clock.next()?.parse().ok()?;
+    let second: u8 = clock.next()?.parse().ok()?;
+    if clock.next().is_some() {
         return None;
     }
 
-    // days-from-civil, the inverse of the era arithmetic in `http_date`. Bounded by the range
-    // check above, so the saturating operators never actually saturate.
-    let shifted = year.saturating_sub(i64::from(month <= 2));
-    let era = shifted / 400;
-    let yoe = shifted.saturating_sub(era.saturating_mul(400));
-    let mp = if month > 2 { month.saturating_sub(3) } else { month.saturating_add(9) };
-    let doy =
-        (153_i64.saturating_mul(mp).saturating_add(2) / 5).saturating_add(day.saturating_sub(1));
-    let doe = yoe
-        .saturating_mul(365)
-        .saturating_add(yoe / 4)
-        .saturating_sub(yoe / 100)
-        .saturating_add(doy);
-    let days = era.saturating_mul(146_097).saturating_add(doe).saturating_sub(719_468);
-    if days < 0 {
-        return None;
-    }
-
-    let seconds = (days as u64)
-        .saturating_mul(86_400)
-        .saturating_add(hour.saturating_mul(3600))
-        .saturating_add(minute.saturating_mul(60))
-        .saturating_add(second);
-    Some(seconds)
+    let date = time::Date::from_calendar_date(year, month, day).ok()?;
+    let time = time::Time::from_hms(hour, minute, second).ok()?;
+    u64::try_from(time::PrimitiveDateTime::new(date, time).assume_utc().unix_timestamp()).ok()
 }
 
 /// Refreshes one repository with default bounds.
@@ -1542,6 +1497,8 @@ mod tests {
             // round trip this pair is documented to be. It would parse to the next minute and
             // render back differently, so the conditional request would stop matching.
             "Tue, 18 Aug 2026 23:59:60 GMT",
+            // A day the month does not have.
+            "Sat, 31 Feb 2026 00:00:00 GMT",
         ] {
             assert_eq!(parse_http_date(bad), None, "{bad} was accepted");
         }

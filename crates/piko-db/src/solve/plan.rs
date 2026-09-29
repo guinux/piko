@@ -22,11 +22,13 @@
 //! installs every day. Cycles are common and benign in practice, because the scriptlets that
 //! would care about ordering rarely exist.
 
+use std::collections::HashMap;
+
 use alpm_types::PackageInstallReason;
 
 use crate::Limits;
 use crate::diagnostics::Sink;
-use crate::solve::encode::{BrokenDependency, Divergence, Fidelity, Planned};
+use crate::solve::encode::{BrokenDependency, Divergence, Fidelity, Planned, RemovalCause};
 use crate::solve::{PackageCache, Solvable, SolvableId, Universe};
 
 /// What a plan does to one package.
@@ -53,6 +55,31 @@ pub enum Step {
         /// Which direction the version moved.
         kind: Change,
     },
+}
+
+impl Step {
+    /// The candidate this step puts on the system: the one installed, or the one an installed
+    /// package changes to. `None` for a removal.
+    #[must_use]
+    pub const fn incoming(&self) -> Option<SolvableId> {
+        match self {
+            Self::Install { candidate, .. } => Some(*candidate),
+            Self::Change { to, .. } => Some(*to),
+            Self::Remove { .. } => None,
+        }
+    }
+
+    /// The package this step is about: the incoming candidate, or the installed package a
+    /// removal takes away. It is the package `pacman -Sp` or `pacman -R --print` prints for the
+    /// step.
+    #[must_use]
+    pub const fn subject(&self) -> SolvableId {
+        match self {
+            Self::Install { candidate, .. } => *candidate,
+            Self::Change { to, .. } => *to,
+            Self::Remove { package } => *package,
+        }
+    }
 }
 
 /// Which way a [`Step::Change`] moves the version.
@@ -198,10 +225,11 @@ impl Plan {
 
     /// Assembles a plan from a solved request.
     ///
-    /// `targets` are the candidates the user named. This is what distinguishes an `Explicit`
-    /// install reason from a `Depend` one. `_alpm_sync_prepare` applies the same rule: it
-    /// marks everything in `resolved` but not in the original `trans->add` as a dependency
-    /// (`sync.c`).
+    /// `targets` are the candidates the user named, without the ones a system upgrade added.
+    /// A new install is `Explicit` when it is named. A `%REPLACES%` replacement nobody named
+    /// takes the reason of what it replaces: `Explicit` if any package it replaces is, as
+    /// `check_replacers` copies it (`sync.c:181-188`). Everything else is `Depend`, as
+    /// `_alpm_sync_prepare` marks everything outside the original `trans->add` (`sync.c:488`).
     ///
     /// `cache` answers what is already downloaded. Only [`Plan::download_size`] consults it;
     /// the steps themselves do not change. Pass [`NoCache`](crate::solve::NoCache) when there
@@ -265,7 +293,12 @@ impl Plan {
 
         for id in ordered {
             let Some(candidate) = universe.get(id) else { continue };
-            let reason = if targets.contains(&id) {
+            let replaces_explicit = planned.removal_causes.iter().any(|(replaced, cause)| {
+                matches!(cause, RemovalCause::Replaced { replacement } if *replacement == id)
+                    && universe.get(*replaced).and_then(|replaced| replaced.install_reason())
+                        == Some(PackageInstallReason::Explicit)
+            });
+            let reason = if targets.contains(&id) || replaces_explicit {
                 PackageInstallReason::Explicit
             } else {
                 PackageInstallReason::Depend
@@ -363,8 +396,13 @@ fn topological_order(
         Done,
     }
 
-    // Positions within `members`, so the graph is dense and the traversal deterministic.
-    let position = |id: SolvableId| members.iter().position(|candidate| *candidate == id);
+    // Positions within `members`, so the graph is dense and the traversal deterministic. An id
+    // listed twice keeps its first position.
+    let mut positions: HashMap<SolvableId, usize> = HashMap::with_capacity(members.len());
+    for (index, id) in members.iter().enumerate() {
+        positions.entry(*id).or_insert(index);
+    }
+    let position = |id: SolvableId| positions.get(&id).copied();
 
     // Edge list: vertex -> the vertices it depends on, in the order its `%DEPENDS%` names
     // them. A tie breaks the same way every run.
@@ -482,11 +520,7 @@ mod tests {
             .steps()
             .iter()
             .map(|step| {
-                let id = match step {
-                    Step::Remove { package } => *package,
-                    Step::Install { candidate, .. } => *candidate,
-                    Step::Change { to, .. } => *to,
-                };
+                let id = step.subject();
                 universe.get(id).unwrap().name().to_string()
             })
             .collect();
@@ -536,11 +570,7 @@ mod tests {
             .steps()
             .iter()
             .map(|step| {
-                let id = match step {
-                    Step::Remove { package } => *package,
-                    Step::Install { candidate, .. } => *candidate,
-                    Step::Change { to, .. } => *to,
-                };
+                let id = step.subject();
                 universe.get(id).unwrap().name().to_string()
             })
             .collect();

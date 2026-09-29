@@ -232,7 +232,7 @@ impl Record {
             // The line count bounds `index`, so this cannot overflow.
             let line_number = index.saturating_add(1);
 
-            if let Some(keyword) = section_keyword(line) {
+            if let Some(keyword) = piko_db::desc_compat::section_keyword(line) {
                 if let Some(section) = current.take() {
                     sections.push(section);
                 }
@@ -260,7 +260,7 @@ impl Record {
                 None => {
                     return Err(RecordError::ValueOutsideSection {
                         line: line_number,
-                        content: truncate(line),
+                        content: piko_db::excerpt(line),
                     });
                 }
             }
@@ -373,7 +373,11 @@ impl Record {
 /// Refuses a keyword that would not read back as the `%KEYWORD%` header it is written as.
 fn check_keyword(keyword: &str) -> Result<(), RecordError> {
     let fits = !keyword.is_empty() && !keyword.contains(['%', '\n', '\r']);
-    if fits { Ok(()) } else { Err(RecordError::InvalidKeyword { keyword: truncate(keyword) }) }
+    if fits {
+        Ok(())
+    } else {
+        Err(RecordError::InvalidKeyword { keyword: piko_db::excerpt(keyword) })
+    }
 }
 
 /// Refuses a value that would not read back as the one value line it is written as.
@@ -386,37 +390,16 @@ fn check_value(keyword: &str, value: &str) -> Result<(), RecordError> {
         "an empty line ends a section"
     } else if value.contains(['\n', '\r']) {
         "a line break would read back as several values"
-    } else if section_keyword(value).is_some() {
+    } else if piko_db::desc_compat::section_keyword(value).is_some() {
         "it would read back as a section header"
     } else {
         return Ok(());
     };
     Err(RecordError::UnrepresentableValue {
         keyword: keyword.to_owned(),
-        value: truncate(value),
+        value: piko_db::excerpt(value),
         reason,
     })
-}
-
-/// Extracts `KEYWORD` from a `%KEYWORD%` header line, if the line is one.
-///
-/// This deliberately follows the same rule as [`piko_db::desc_compat`]'s reader-side
-/// splitter. A header is `%`, then a non-empty keyword containing no further `%`, then `%`.
-fn section_keyword(line: &str) -> Option<&str> {
-    let inner = line.strip_prefix('%')?.strip_suffix('%')?;
-    (!inner.is_empty() && !inner.contains('%')).then_some(inner)
-}
-
-/// Shortens untrusted content so a hostile file cannot flood an error message.
-fn truncate(content: &str) -> String {
-    const MAX: usize = 32;
-    match content.char_indices().nth(MAX) {
-        Some((index, _)) => {
-            let head = content.get(..index).unwrap_or_default();
-            format!("{head}…")
-        }
-        None => content.to_owned(),
-    }
 }
 
 #[cfg(test)]

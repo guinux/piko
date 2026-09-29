@@ -878,11 +878,7 @@ pub(crate) fn print_steps(
         for step in built.steps() {
             // For an install this is what `pacman -Sp` prints. For a removal it is what
             // `pacman -R --print` prints. Each is that subcommand's own oracle.
-            let id = match step {
-                Step::Install { candidate, .. } => *candidate,
-                Step::Change { to, .. } => *to,
-                Step::Remove { package } => *package,
-            };
+            let id = step.subject();
             emit!(out, "{}", render_id(universe, id).0);
         }
         return ExitCode::SUCCESS;

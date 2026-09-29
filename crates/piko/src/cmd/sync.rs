@@ -11,7 +11,7 @@ use piko_db::{
     solve::IgnoredChange,
 };
 
-use crate::output::emit;
+use crate::output::{emit, report};
 
 /// Prints every installed package with a newer version available in `repos`, then a summary.
 ///
@@ -56,7 +56,13 @@ pub fn check_updates(
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let piko_db::Updates { available: updates, ignored } =
-        local.check_updates_ignoring(repos, ignores);
+        match local.check_updates_ignoring(repos, ignores) {
+            Ok(updates) => updates,
+            Err(error) => {
+                report(&error);
+                return ExitCode::FAILURE;
+            }
+        };
 
     if quiet {
         for update in &updates {

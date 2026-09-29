@@ -162,6 +162,15 @@ pub fn refresh(
         steps.suspend(|| eprintln!("Error: {wanted} is not a configured repository"));
         failed = true;
     }
+    // Only a repository the command line named. A full refresh skips one silently, as
+    // `pacman -Sy` does.
+    if !only.is_empty() {
+        for skipped in targets.unsynced() {
+            steps.suspend(|| {
+                eprintln!("Note: {skipped} is not refreshed: its Usage does not include Sync");
+            });
+        }
+    }
 
     if failed {
         return ExitCode::FAILURE;

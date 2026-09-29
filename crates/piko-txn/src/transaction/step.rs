@@ -465,8 +465,8 @@ fn save_as_pacsave(
     };
 
     for (from, to) in crate::remove::pacsave_rotation(&numbers, plain_exists) {
-        let source = with_suffix(resolved.name(), &from);
-        let destination = with_suffix(resolved.name(), &to);
+        let source = resolved.with_suffix(&from);
+        let destination = resolved.with_suffix(&to);
         if let Err(error) = rustix::fs::renameat(
             resolved.dir(),
             source.as_os_str(),
@@ -484,7 +484,7 @@ fn save_as_pacsave(
         }
     }
 
-    let saved = with_suffix(resolved.name(), ".pacsave");
+    let saved = resolved.with_suffix(".pacsave");
     if let Err(error) =
         rustix::fs::renameat(resolved.dir(), resolved.name(), resolved.dir(), saved.as_os_str())
     {
@@ -508,55 +508,22 @@ fn save_as_pacsave(
 /// rename `.pacsave.1` to `.pacsave.2` while `.pacsave.01` stayed put, leaving two files that
 /// claim one rank.
 fn existing_pacsaves(resolved: &Resolved) -> std::result::Result<(Vec<u32>, bool), String> {
-    let handle = rustix::fs::openat(
-        resolved.dir(),
-        ".",
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|source| source.to_string())?;
+    let names = resolved.list_directory(MAX_PACSAVE_DIR_ENTRIES)?;
+    let plain_exists = names.contains(&resolved.with_suffix(".pacsave"));
+    let prefix = resolved.with_suffix(".pacsave.");
 
-    let plain = with_suffix(resolved.name(), ".pacsave");
-    let prefix = with_suffix(resolved.name(), ".pacsave.");
     let mut numbers = Vec::new();
-    let mut plain_exists = false;
-    let mut seen = 0_usize;
-
-    for entry in rustix::fs::Dir::read_from(&handle).map_err(|source| source.to_string())? {
-        let entry = entry.map_err(|source| source.to_string())?;
-        seen = seen.saturating_add(1);
-        if seen > MAX_PACSAVE_DIR_ENTRIES {
-            return Err(format!("the directory holds more than {MAX_PACSAVE_DIR_ENTRIES} entries"));
-        }
-        let name = std::ffi::OsStr::from_bytes(entry.file_name().to_bytes());
-        if name == plain {
-            plain_exists = true;
-            continue;
-        }
+    for name in &names {
         let Some(digits) = name.as_bytes().strip_prefix(prefix.as_bytes()) else {
             continue;
         };
         let digits =
             std::str::from_utf8(digits).map_err(|_| "a .pacsave number is not text".to_owned())?;
-        match digits.parse::<u32>() {
-            Ok(number) if number.to_string() == digits => numbers.push(number),
-            _ => {
-                return Err(format!(".pacsave.{digits} does not carry a usable number"));
-            }
-        }
+        let number = crate::remove::pacsave_number(digits)
+            .ok_or_else(|| format!(".pacsave.{digits} does not carry a usable number"))?;
+        numbers.push(number);
     }
-
     Ok((numbers, plain_exists))
-}
-
-/// `name` with `suffix` appended.
-fn with_suffix(name: &std::ffi::OsStr, suffix: &str) -> std::ffi::OsString {
-    let mut joined = name.to_os_string();
-    joined.push(suffix);
-    joined
 }
 
 /// A path without tar's trailing slash on directories.

@@ -4,12 +4,18 @@
 //! database path it names, and how to open a local or repository database. Databases open with the
 //! options the global flags requested. Each scan diagnostic is printed exactly once.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use piko_db::{
     LocalDatabase, OpenOptions,
-    config::{DbUsage, PacmanConfig},
-    repo::{RepoDatabase, RepoName, RepoOpenOptions},
+    config::{
+        DEFAULT_DB_PATH, DEFAULT_GPG_DIR, DEFAULT_LOG_FILE, DEFAULT_ROOT_DIR, DbUsage,
+        PacmanConfig, SigLevel,
+    },
+    repo::{ArchiveCheck, RepoDatabase, RepoName, RepoOpenOptions},
 };
 
 use crate::cli::Cli;
@@ -49,6 +55,13 @@ impl ConfigCache {
                     .inspect(|config| {
                         for diagnostic in config.diagnostics() {
                             crate::output::warn(diagnostic);
+                        }
+                        // pacman reports each refusal of `alpm_register_syncdb` and continues.
+                        for (repo, refusal) in config.unregistered_repositories() {
+                            crate::output::warn(format_args!(
+                                "repository [{}] is not used: {refusal}",
+                                repo.name
+                            ));
                         }
                     })
                     .map_err(|error| error.to_string())
@@ -169,8 +182,8 @@ pub fn path_patterns(cli: &Cli, config: &ConfigCache) -> piko_txn::Patterns {
         return piko_txn::Patterns::default();
     };
     piko_txn::Patterns {
-        no_extract: parsed.options.no_extract.clone(),
-        no_upgrade: parsed.options.no_upgrade.clone(),
+        no_extract: piko_db::resolve::PatternList::new(parsed.options.no_extract.clone()),
+        no_upgrade: piko_db::resolve::PatternList::new(parsed.options.no_upgrade.clone()),
     }
 }
 
@@ -205,38 +218,14 @@ pub fn ignore_lists(cli: &Cli, config: &ConfigCache) -> (Vec<String>, Vec<String
 /// Used by `check`, which has no `--root` flag at all. Also used by `install`/`update`/`remove`
 /// when `--root` is omitted, the same way [`resolve_dbpath`] resolves `DBPath`.
 pub fn resolve_root_dir(cli: &Cli, config: &ConfigCache) -> PathBuf {
-    match config.get(cli) {
-        Ok(config) => config.options.root_dir.clone(),
-        Err(error) => {
-            eprintln!(
-                "Warning: failed to read {} ({error}); falling back to {}",
-                cli.config.display(),
-                piko_db::config::DEFAULT_ROOT_DIR
-            );
-            PathBuf::from(piko_db::config::DEFAULT_ROOT_DIR)
-        }
-    }
+    configured_path(None, cli, config, |options| &options.root_dir, DEFAULT_ROOT_DIR)
 }
 
 /// Resolves the effective database root, in three steps. `--dbpath` if given, else `DBPath` from
 /// the parsed pacman.conf, else the hardcoded default with a warning if that cannot be read
 /// either. `--config` names the file, and defaults to `/etc/pacman.conf`.
 pub fn resolve_dbpath(cli: &Cli, config: &ConfigCache) -> PathBuf {
-    if let Some(dbpath) = &cli.dbpath {
-        return dbpath.clone();
-    }
-
-    match config.get(cli) {
-        Ok(config) => config.options.db_path.clone(),
-        Err(error) => {
-            eprintln!(
-                "Warning: failed to read {} ({error}); falling back to {}",
-                cli.config.display(),
-                piko_db::config::DEFAULT_DB_PATH
-            );
-            PathBuf::from(piko_db::config::DEFAULT_DB_PATH)
-        }
-    }
+    configured_path(cli.dbpath.as_deref(), cli, config, |options| &options.db_path, DEFAULT_DB_PATH)
 }
 
 /// Resolves the keyring `piko key` administers, in three steps. `--gpgdir` if given, else
@@ -246,21 +235,7 @@ pub fn resolve_dbpath(cli: &Cli, config: &ConfigCache) -> PathBuf {
 /// without a warning, because a transaction states its weakened verification on its own. An
 /// administration command has no such line, so it says here which keyring it changes.
 pub fn resolve_gpg_dir(gpgdir: Option<&Path>, cli: &Cli, config: &ConfigCache) -> PathBuf {
-    if let Some(gpgdir) = gpgdir {
-        return gpgdir.to_path_buf();
-    }
-
-    match config.get(cli) {
-        Ok(config) => config.options.gpg_dir.clone(),
-        Err(error) => {
-            eprintln!(
-                "Warning: failed to read {} ({error}); falling back to {}",
-                cli.config.display(),
-                piko_db::config::DEFAULT_GPG_DIR
-            );
-            PathBuf::from(piko_db::config::DEFAULT_GPG_DIR)
-        }
-    }
+    configured_path(gpgdir, cli, config, |options| &options.gpg_dir, DEFAULT_GPG_DIR)
 }
 
 /// Resolves the effective transaction log, in three steps. `--logfile` if given, else `LogFile`
@@ -269,19 +244,30 @@ pub fn resolve_gpg_dir(gpgdir: Option<&Path>, cli: &Cli, config: &ConfigCache) -
 /// The same three-step resolution [`resolve_dbpath`] uses, and for the same reason. A transaction
 /// should still be recorded when the config is unreadable, rather than silently recorded nowhere.
 pub fn resolve_log_file(cli: &Cli, config: &ConfigCache) -> PathBuf {
-    if let Some(log_file) = &cli.log_file {
-        return log_file.clone();
-    }
+    let flag = cli.log_file.as_deref();
+    configured_path(flag, cli, config, |options| &options.log_file, DEFAULT_LOG_FILE)
+}
 
+/// The three-step resolution the `resolve_*` functions share: `flag` if given, else the
+/// directive `field` reads from the parsed pacman.conf, else `default` with a warning.
+fn configured_path(
+    flag: Option<&Path>,
+    cli: &Cli,
+    config: &ConfigCache,
+    field: impl FnOnce(&piko_db::config::Options) -> &PathBuf,
+    default: &str,
+) -> PathBuf {
+    if let Some(path) = flag {
+        return path.to_path_buf();
+    }
     match config.get(cli) {
-        Ok(config) => config.options.log_file.clone(),
+        Ok(parsed) => field(&parsed.options).clone(),
         Err(error) => {
-            eprintln!(
-                "Warning: failed to read {} ({error}); falling back to {}",
-                cli.config.display(),
-                piko_db::config::DEFAULT_LOG_FILE
-            );
-            PathBuf::from(piko_db::config::DEFAULT_LOG_FILE)
+            crate::output::warn(format_args!(
+                "failed to read {} ({error}); falling back to {default}",
+                cli.config.display()
+            ));
+            PathBuf::from(default)
         }
     }
 }
@@ -373,8 +359,9 @@ pub fn parse_repo_arg(repo: &str) -> Result<RepoName, Error> {
 /// This is the config-driven counterpart to [`open_repo_db`], used to resolve a repository
 /// configured in pacman.conf rather than an explicit archive path.
 ///
-/// The archive's signature is checked against the repository's effective `SigLevel` before the
-/// database is handed back. So no caller can use an unverified one. See [`verify_repo_archive`].
+/// Each archive's signature is checked against the repository's effective `SigLevel` before any
+/// of it is read: the archive opened, and a sibling `<repo>.files` when its file lists are first
+/// asked for. So no caller can use an unverified one. See [`archive_check`].
 ///
 /// # Errors
 ///
@@ -386,13 +373,27 @@ pub fn open_repo_by_name(
     cli: &Cli,
     config: &ConfigCache,
 ) -> Result<RepoDatabase, Error> {
-    let db = RepoDatabase::open_repo_with(dbpath.join(SYNC_DB_DIR), repo, RepoOpenOptions::new())?;
-    verify_repo_archive(db.path(), repo, config, cli)?;
+    let mut options = RepoOpenOptions::new();
+    if let Some(check) = archive_check(repo, config, cli) {
+        options = options.check(check);
+    }
+    let db =
+        RepoDatabase::open_repo_with(dbpath.join(SYNC_DB_DIR), repo, options).map_err(|error| {
+            match error {
+                // The refusal is this module's own error, boxed to cross the library. Unbox it, so
+                // the caller sees the verdict and not a wrapper around it.
+                piko_db::Error::ArchiveRefused { source } => match source.downcast::<Error>() {
+                    Ok(refusal) => *refusal,
+                    Err(source) => Error::Db(piko_db::Error::ArchiveRefused { source }),
+                },
+                other => Error::Db(other),
+            }
+        })?;
     print_repo_diagnostics(&db);
     Ok(db)
 }
 
-/// Checks a repository archive against the `SigLevel` configured for that repository.
+/// The check of a repository archive against the `SigLevel` configured for that repository.
 ///
 /// # This is what libalpm does, measured rather than assumed
 ///
@@ -408,17 +409,16 @@ pub fn open_repo_by_name(
 /// So a database tampered with after `piko refresh`, the window a download-time check cannot
 /// close, is caught here, and piko is no longer weaker than pacman about it.
 ///
-/// # Why after opening rather than before
+/// # Why before reading, and on the path the reader takes
 ///
-/// The check runs on `db.path()`, the archive that was actually opened, rather than on a path
-/// recomputed from the repository name. Recomputing would reintroduce a gap: `open_repo`
-/// prefers `<repo>.db` and falls back to `<repo>.files`, so a check that guessed `.db` could
-/// verify one file while the reader opened another.
+/// Registration validates the database before libalpm reads a package out of it. The check
+/// runs at the same point: [`RepoOpenOptions::check`] runs it on each archive before the
+/// decompressor or a parser sees a byte. A refused archive is never decompressed.
 ///
-/// The cost is that the archive has been parsed by the time it is rejected. That is the
-/// lesser trade. The repository reader is the bounded, hardened path (`repo_hardening.rs`
-/// covers compression bombs, entry floods, and oversized members), and a rejected database is
-/// still never used: the error propagates before any caller sees a package from it.
+/// It runs on the path the reader is about to read, not on one recomputed from the repository
+/// name. `open_repo` prefers `<repo>.db` and falls back to `<repo>.files`, so a check that
+/// guessed `.db` could verify one file while the reader opened another. The same check covers
+/// the sibling `<repo>.files`, which the reader reads only when a file list is asked for.
 ///
 /// # What it costs, and where that cost is not
 ///
@@ -439,66 +439,50 @@ pub fn open_repo_by_name(
 ///
 /// [`Error::SignatureRejected`] and [`Error::SignatureUncheckable`] exist so that both
 /// spellings are accurate. Do not route either back through [`piko_db::Error::Io`] to save a
-/// type, however convenient it is that [`open_repo_by_name`] already returns one. A rejected
-/// database would then announce itself as:
+/// type. A rejected database would then announce itself as:
 ///
 /// ```text
 /// Error: failed to open /var/lib/pacman/sync/core.db
 ///   Caused by: signature rejected: the signature is invalid
 /// ```
 ///
-/// The archive opened fine. That first line names the wrong failure, for the one message in
-/// the program that says a mirror may be tampered with. [`open_all_repos`] then makes it
-/// worse: it prints only the top line of a skipped repository's error, so the signature is
-/// never mentioned at all.
+/// That first line names the wrong failure, for the one message in the program that says a
+/// mirror may be tampered with. [`open_all_repos`] then makes it worse: it prints only the top
+/// line of a skipped repository's error, so the signature is never mentioned at all.
 ///
 /// Caching the `Keyring` in [`ConfigCache`] to avoid opening it once per repository would
 /// save about 3 µs per extra repository, not enough to justify the complexity.
-fn verify_repo_archive(
-    archive: &Path,
-    repo: &RepoName,
-    config: &ConfigCache,
-    cli: &Cli,
-) -> Result<(), Error> {
-    let Ok(parsed) = config.get(cli) else {
-        // No readable config means no configured SigLevel to enforce. Every other setting
-        // falls back the same way; see `signing_policy`.
-        return Ok(());
-    };
+fn archive_check(repo: &RepoName, config: &ConfigCache, cli: &Cli) -> Option<ArchiveCheck> {
+    // No readable config means no configured SigLevel to enforce. Every other setting falls
+    // back the same way; see `signing_policy`.
+    let parsed = config.get(cli).ok()?;
     let level = parsed.database_sig_level(repo);
+    let gpg_dir = parsed.options.gpg_dir.clone();
+    Some(Arc::new(move |archive: &Path| {
+        verify_archive(archive, &gpg_dir, level).map_err(Into::into)
+    }))
+}
 
-    match piko_sig::verify_database(archive, &parsed.options.gpg_dir, level) {
+/// Checks `archive` against `level`, with the keyring at `gpg_dir`, and returns when the
+/// accepted signature was made.
+fn verify_archive(
+    archive: &Path,
+    gpg_dir: &Path,
+    level: SigLevel,
+) -> Result<Option<std::time::SystemTime>, Error> {
+    let checked = piko_sig::verify_database_dated(archive, gpg_dir, level);
+    match checked.map(|checked| (checked.verdict, checked.signed_at)) {
         // An unverifiable archive is not a bad archive. Both stop the read. The two errors keep
         // them apart, so the user knows whether to fix a keyring or a mirror.
         // `piko_sig::Error`'s own message says which. A keyring that could not be opened names
         // the keyring directory; a check that could not run names the archive. It is kept as a
         // `source` rather than stringified, so `output::report` prints it in the chain.
         Err(source) => Err(Error::SignatureUncheckable { archive: archive.to_path_buf(), source }),
-        Ok(piko_sig::Verdict::Rejected(rejection)) => {
+        Ok((piko_sig::Verdict::Rejected(rejection), _)) => {
             Err(Error::SignatureRejected { archive: archive.to_path_buf(), rejection })
         }
-        Ok(piko_sig::Verdict::Accepted { .. }) => Ok(()),
+        Ok((piko_sig::Verdict::Accepted { .. }, signed_at)) => Ok(signed_at),
     }
-}
-
-/// When an opened repository database was published, for a command that warns about an old
-/// one without refreshing it.
-///
-/// A signature that verifies under the repository's `SigLevel` dates it; otherwise the
-/// archive's newest member does, recorded when the database was opened. This checks the
-/// signature a second time, after [`open_repo_by_name`] already did. That costs nothing on a
-/// repository with no `.sig`, which is every Arch repository, and one hash of the archive on a
-/// signed one. A check that fails, or no readable config, leaves only the archive date.
-pub fn repo_publication(
-    db: &RepoDatabase,
-    cli: &Cli,
-    config: &ConfigCache,
-) -> Option<piko_db::repo::freshness::Publication> {
-    let signed_at = config.get(cli).ok().and_then(|parsed| {
-        let level = parsed.database_sig_level(db.name());
-        piko_sig::verify_database_dated(db.path(), &parsed.options.gpg_dir, level).ok()?.signed_at
-    });
-    piko_db::repo::freshness::Publication::new(signed_at, db.newest_member_time())
 }
 
 /// Opens every repository configured in `pacman.conf`, in file (priority) order, skipping any that
@@ -530,7 +514,7 @@ pub fn open_all_repos(
     let dbpath = cli.dbpath.clone().unwrap_or_else(|| parsed.options.db_path.clone());
 
     let mut opened = Vec::with_capacity(parsed.repositories.len());
-    for repo in &parsed.repositories {
+    for repo in parsed.registered_repositories() {
         match open_repo_by_name(&dbpath, &repo.name, cli, config) {
             Ok(db) => opened.push((repo.usage, db)),
             Err(error) => {
@@ -572,7 +556,7 @@ pub fn open_repos_for_packages(
     let mut remaining: std::collections::HashSet<&str> =
         packages.iter().map(String::as_str).collect();
     let mut opened = Vec::new();
-    for repo in &parsed.repositories {
+    for repo in parsed.registered_repositories() {
         if remaining.is_empty() {
             break;
         }
@@ -643,6 +627,14 @@ mod tests {
         Cli::parse_from(argv)
     }
 
+    /// Creates the directory `name` under `dir`, and returns its resolved path as a string: the
+    /// value `--cachedir` gives after `realpath`.
+    fn directory(dir: &Path, name: &str) -> String {
+        let path = dir.join(name);
+        std::fs::create_dir(&path).unwrap();
+        std::fs::canonicalize(path).unwrap().display().to_string()
+    }
+
     /// Writes `text` as a `pacman.conf` under `dir`, and returns its path as a string.
     fn write_conf(dir: &Path, text: &str) -> String {
         let path = dir.join("pacman.conf");
@@ -655,15 +647,13 @@ mod tests {
     #[test]
     fn cachedir_comes_before_the_configured_list_rather_than_replacing_it() {
         let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (directory(dir.path(), "a"), directory(dir.path(), "b"));
         let path = write_conf(dir.path(), "[options]\nCacheDir = /from/config/\n");
-        let cli = cli(&["--config", &path, "--cachedir", "/a/", "--cachedir", "/b/"]);
+        let cli = cli(&["--config", &path, "--cachedir", &a, "--cachedir", &b]);
 
         let dirs = cache_dirs(&ConfigCache::default(), &cli);
 
-        assert_eq!(
-            dirs,
-            vec![PathBuf::from("/a/"), PathBuf::from("/b/"), PathBuf::from("/from/config/")]
-        );
+        assert_eq!(dirs, vec![PathBuf::from(a), PathBuf::from(b), PathBuf::from("/from/config/")]);
     }
 
     #[test]
@@ -703,10 +693,11 @@ mod tests {
     fn cachedir_applies_even_when_the_config_cannot_be_read() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.conf");
-        let cli = cli(&["--config", &missing.display().to_string(), "--cachedir", "/a/"]);
+        let a = directory(dir.path(), "a");
+        let cli = cli(&["--config", &missing.display().to_string(), "--cachedir", &a]);
 
         let dirs = cache_dirs(&ConfigCache::default(), &cli);
 
-        assert_eq!(dirs, vec![PathBuf::from("/a/")]);
+        assert_eq!(dirs, vec![PathBuf::from(a)]);
     }
 }

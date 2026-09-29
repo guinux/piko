@@ -39,9 +39,8 @@ impl<T> Lazy<T> {
     /// If `load` fails, the failure is cached and returned by every later call. `load` is
     /// not retried.
     ///
-    /// Under contention two threads may both run `load`, since [`OnceLock::get_or_init`]
-    /// gives no exclusion guarantee, and one result is discarded. That is harmless here:
-    /// every loader is a pure read of an immutable file.
+    /// Under contention `load` still runs once: [`OnceLock::get_or_init`] runs exactly one
+    /// initializer, and the other threads block until its result is stored.
     ///
     /// # Errors
     ///

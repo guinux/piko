@@ -9,6 +9,7 @@
 //! `foreign` mirrors `pacman -Qm`: the inverse presence check, with no version comparison at all.
 
 use crate::{
+    Error, Result,
     local::{database::LocalDatabase, package::LocalPackage},
     repo::{RepoDatabase, RepoPackage},
     resolve::{IgnoreList, IgnoreReason},
@@ -87,21 +88,42 @@ pub struct Updates<'a> {
 /// libalpm's `alpm_sync_get_new_version` applies no ignore list, and `pacman -Qu` prints an
 /// ignored row suffixed `[ignored]`. piko sets the row apart instead: the list answers "what
 /// changes if I upgrade", and an ignored package does not change. The test is the one a
-/// sysupgrade applies to the repository package ([`IgnoreList::reason_for`]), so the two
-/// agree on what is held back.
+/// sysupgrade applies, `check_literal`'s `alpm_pkg_should_ignore(spkg) ||
+/// alpm_pkg_should_ignore(lpkg)`: the repository package first, then the installed one. So
+/// an `IgnoreGroup` that only the installed `desc` carries holds the update back here as it
+/// does in `piko update`.
+///
+/// The installed `desc` is read only when `IgnoreGroup` is set and the repository side is not
+/// already covered. The installed name is the repository name, so `IgnorePkg` needs no read.
+///
+/// # Errors
+///
+/// [`Error::UpdateLocalDescUnreadable`] if an installed `desc` the group test needs cannot be
+/// read.
 pub(crate) fn check_updates_ignoring<'a>(
     local: &'a LocalDatabase,
     repos: impl IntoIterator<Item = &'a RepoDatabase>,
     ignores: IgnoreList<'_>,
-) -> Updates<'a> {
+) -> Result<Updates<'a>> {
     let mut updates = Updates { available: Vec::new(), ignored: Vec::new() };
     for update in check_updates(local, repos) {
-        match ignores.reason_for(update.available()) {
+        let reason = match ignores.reason_for(update.available()) {
+            Some(reason) => Some(reason),
+            None if ignores.has_groups() => {
+                let installed = update.installed();
+                let eager = installed.eager().map_err(|source| {
+                    Error::UpdateLocalDescUnreadable { name: installed.name().clone(), source }
+                })?;
+                ignores.reason(installed.name().as_ref(), eager.groups())
+            }
+            None => None,
+        };
+        match reason {
             Some(reason) => updates.ignored.push((update, reason)),
             None => updates.available.push(update),
         }
     }
-    updates
+    Ok(updates)
 }
 
 /// Every installed package whose name is not found in any of `repos` — mirrors `pacman -Qm`.
@@ -364,7 +386,8 @@ Foobar McFooface <foobar@mcfooface.org>
 
         let updates = scenario
             .local()
-            .check_updates_ignoring(scenario.repos(), IgnoreList::new(&packages, &groups));
+            .check_updates_ignoring(scenario.repos(), IgnoreList::new(&packages, &groups))
+            .unwrap();
 
         let available: Vec<String> =
             updates.available.iter().map(|update| update.installed().name().to_string()).collect();
@@ -382,5 +405,32 @@ Foobar McFooface <foobar@mcfooface.org>
             ),
             "{ignored:?}"
         );
+    }
+
+    /// An `IgnoreGroup` only the installed `desc` carries holds the update back, as the same
+    /// group holds it back in a system upgrade.
+    #[test]
+    fn a_group_only_the_installed_package_carries_holds_the_update_back() {
+        let scenario = crate::fixture::Scenario::new()
+            .installed(crate::fixture::PackageSpec::new("gcc", "1.0.0-1").groups(["base-devel"]))
+            .repo("core", [crate::fixture::PackageSpec::new("gcc", "2.0.0-1")])
+            .build();
+        let groups = vec!["base-devel".to_owned()];
+
+        let updates = scenario
+            .local()
+            .check_updates_ignoring(scenario.repos(), IgnoreList::new(&[], &groups))
+            .unwrap();
+
+        assert!(updates.available.is_empty());
+        let groups: Vec<String> = updates
+            .ignored
+            .iter()
+            .map(|(_, reason)| match reason {
+                IgnoreReason::Group { group, .. } => group.to_string(),
+                IgnoreReason::Package { .. } => panic!("expected a group reason: {reason:?}"),
+            })
+            .collect();
+        assert_eq!(groups, ["base-devel"]);
     }
 }

@@ -40,7 +40,7 @@ use std::collections::{HashMap, HashSet};
 use alpm_types::{FullVersion, Name, PackageRelation, RelationOrSoname};
 
 use crate::{
-    EagerView, Error, Limits, LocalDatabase, LocalPackage, Result,
+    EagerView, EntryName, Error, Limits, LocalDatabase, LocalPackage, Result,
     config::DbUsage,
     depcmp,
     repo::{RepoDatabase, RepoName, RepoPackage},
@@ -149,6 +149,17 @@ impl<'a> Solvable<'a> {
             Source::Local { package, .. } => package.version(),
             Source::Repo { package, .. } => package.version(),
             Source::File { package, .. } => package.version(),
+        }
+    }
+
+    /// The entry directory name, `<name>-<version>`, that [`Self::name`] and [`Self::version`]
+    /// come from.
+    #[must_use]
+    pub const fn entry(&self) -> &'a EntryName {
+        match self.source {
+            Source::Local { package, .. } => package.entry(),
+            Source::Repo { package, .. } => package.entry(),
+            Source::File { package, .. } => package.entry(),
         }
     }
 
@@ -277,15 +288,6 @@ impl<'a> Solvable<'a> {
         depcmp::satisfies(self.name(), self.version(), self.provides(), dep)
     }
 
-    /// The installed package this candidate is, or `None` if it comes from a repository.
-    #[must_use]
-    pub const fn as_installed(&self) -> Option<&'a LocalPackage> {
-        match self.source {
-            Source::Local { package, .. } => Some(package),
-            Source::Repo { .. } | Source::File { .. } => None,
-        }
-    }
-
     /// The repository package this candidate is, or `None` if it is the installed copy.
     #[must_use]
     pub const fn as_repository(&self) -> Option<&'a RepoPackage> {
@@ -392,7 +394,7 @@ pub struct UniverseOptions<'a> {
 impl Default for UniverseOptions<'_> {
     fn default() -> Self {
         Self {
-            usage: DbUsage::INSTALL,
+            usage: DbUsage::INSTALL.union(DbUsage::UPGRADE),
             ignores: IgnoreList::default(),
             limits: Limits::default(),
             files: &[],
@@ -475,7 +477,6 @@ pub struct Universe<'a> {
     /// matches them. Any key finer than the name misses exactly the pairs the index exists to
     /// find. The key is only a hash bucket; [`crate::depcmp::provides_satisfies`] still decides.
     provides: HashMap<Box<str>, Vec<SolvableId>>,
-    conflicts_on: HashMap<&'a str, Vec<SolvableId>>,
     /// `%GROUPS%` membership, for a target that names a group rather than a package.
     groups: HashMap<&'a str, Vec<SolvableId>>,
     /// `%REPLACES%` entries, keyed by the name being replaced.
@@ -566,7 +567,6 @@ impl<'a> Universe<'a> {
         let mut universe = Self {
             by_name: HashMap::new(),
             provides: HashMap::new(),
-            conflicts_on: HashMap::new(),
             groups: HashMap::new(),
             replaces: HashMap::new(),
             sources,
@@ -604,10 +604,6 @@ impl<'a> Universe<'a> {
 
             for provided in solvable.provides() {
                 self.provides.entry(Self::provides_key(provided)).or_default().push(id);
-            }
-
-            for conflict in solvable.conflicts() {
-                self.conflicts_on.entry(conflict.name.as_ref()).or_default().push(id);
             }
 
             // Installed and repository members share one bucket, and the two accessors filter
@@ -926,17 +922,6 @@ impl<'a> Universe<'a> {
         self.groups.get(name).into_iter().flatten().filter_map(|id| self.get(*id))
     }
 
-    /// Every candidate declaring a `%CONFLICTS%` entry against `name`.
-    ///
-    /// The reverse direction of `_alpm_outerconflicts` (`conflict.c`). An installed package may
-    /// name an incoming one, rather than the other way round, and libalpm checks both. Whether the
-    /// conflict actually applies still needs `depcmp`, because a conflict matches through
-    /// `%PROVIDES%` as well as literally.
-    #[must_use]
-    pub fn conflicting_with(&self, name: &str) -> &[SolvableId] {
-        self.conflicts_on.get(name).map_or(&[], Vec::as_slice)
-    }
-
     /// The installed candidate named `name`, if there is one.
     #[must_use]
     pub fn installed_named(&self, name: &str) -> Option<Solvable<'a>> {
@@ -1006,16 +991,8 @@ impl<'a> Universe<'a> {
 /// Any overlapping bit admits it, matching libalpm's
 /// `db->usage & (ALPM_DB_USAGE_INSTALL|ALPM_DB_USAGE_UPGRADE)`. An empty `required` admits
 /// everything — `alpm_sync_get_new_version`'s ungated policy.
-fn admits(usage: DbUsage, required: DbUsage) -> bool {
-    for flag in [DbUsage::SYNC, DbUsage::SEARCH, DbUsage::INSTALL, DbUsage::UPGRADE] {
-        if required.contains(flag) && usage.contains(flag) {
-            return true;
-        }
-    }
-    !(required.contains(DbUsage::SYNC)
-        || required.contains(DbUsage::SEARCH)
-        || required.contains(DbUsage::INSTALL)
-        || required.contains(DbUsage::UPGRADE))
+const fn admits(usage: DbUsage, required: DbUsage) -> bool {
+    required.is_empty() || usage.intersects(required)
 }
 
 #[cfg(test)]
@@ -1258,6 +1235,27 @@ mod tests {
         assert!(universe.satisfiers(&relation("foo")).is_empty());
     }
 
+    /// `resolvedep`'s mask is `Install|Upgrade`, so a repository marked `Usage = Upgrade` alone
+    /// is a candidate source by default, and `-Su` takes its upgrades.
+    #[test]
+    fn a_repository_marked_upgrade_only_is_admitted_by_default() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("foo", "1.0.0-1"))
+            .repo("core", [PackageSpec::new("foo", "2.0.0-1")])
+            .build();
+        let universe = Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::UPGRADE, db)),
+            UniverseOptions::new(),
+        )
+        .unwrap();
+
+        assert_eq!(universe.candidates_named("foo").len(), 2);
+        let upgrade = crate::solve::sysupgrade(&universe, false, &[]);
+        assert_eq!(upgrade.upgrades.len(), 1);
+        assert_eq!(universe.get(upgrade.upgrades[0]).unwrap().version().to_string(), "2.0.0-1");
+    }
+
     /// `IgnorePkg` hides a repository candidate but must never hide an installed one. Otherwise
     /// a planner would decide the package is missing and install it again.
     #[test]
@@ -1337,20 +1335,6 @@ mod tests {
         let held: Vec<_> = universe.ignored_in_group("base-devel").collect();
         assert_eq!(held.len(), 1);
         assert_eq!(held[0].package().name().as_ref(), "gcc");
-    }
-
-    /// `_alpm_outerconflicts` checks both directions, so the index must find the declarer
-    /// from the name it names.
-    #[test]
-    fn conflicts_are_indexed_by_the_name_they_target() {
-        let scenario = Scenario::new()
-            .installed(PackageSpec::new("old", "1.0.0-1").conflicts(["new"]))
-            .repo("core", [PackageSpec::new("new", "1.0.0-1")])
-            .build();
-        let universe = universe(&scenario);
-
-        assert_eq!(names(&universe, universe.conflicting_with("new")), ["old"]);
-        assert!(universe.conflicting_with("unrelated").is_empty());
     }
 
     /// `check_conflict` calls `_alpm_depcmp`, so a conflict matches a provider too.

@@ -32,7 +32,7 @@ use std::{
 
 use alpm_pkginfo::PackageInfo;
 use alpm_types::{PackageFileName, PackageInstallReason, PackageValidation};
-use piko_db::{EntryName, LocalDatabase, LocalPackage};
+use piko_db::{EntryName, LocalDatabase, LocalPackage, resolve::PatternList};
 use piko_db_write::DbLock;
 use piko_sig::{Keyring, Policy, Verdict};
 
@@ -406,8 +406,7 @@ struct Superseded {
 
 /// The `pacman.conf` path patterns a transaction obeys.
 ///
-/// Shell globs, matched with [`piko_db::resolve::matches_any`] — the same function the hook
-/// triggers use. That is the point. `NoExtract` decides both what extraction writes and what a
+/// Shell globs, each list a [`PatternList`] — the same matcher the hook triggers use. That is the point. `NoExtract` decides both what extraction writes and what a
 /// hook is told changed. Those two answers have to come from one matcher, or they will
 /// eventually disagree about a `!` inversion.
 ///
@@ -424,23 +423,23 @@ pub struct Patterns {
     /// which charges for a `NoExtract` path regardless. piko does not count what it will not
     /// write. Neither implementation consults it in conflict detection, so a `NoExtract` path
     /// is still checked for conflicts.
-    pub no_extract: Vec<String>,
+    pub no_extract: PatternList,
     /// `NoUpgrade`: never overwritten; the packaged version lands beside it as `.pacnew`.
     ///
     /// Consulted by extraction (`add.c:303`) *and* by removal (`remove.c:592`). A file the
     /// user asked piko never to touch is not one a removal may delete either.
-    pub no_upgrade: Vec<String>,
+    pub no_upgrade: PatternList,
 }
 
 impl Patterns {
     /// Whether `path` is never extracted.
     pub(crate) fn skips(&self, path: &Path) -> bool {
-        piko_db::resolve::matches_any(&self.no_extract, &path.to_string_lossy())
+        self.no_extract.matches(&path.to_string_lossy())
     }
 
     /// Whether `path` is never overwritten or removed.
     fn preserves(&self, path: &Path) -> bool {
-        piko_db::resolve::matches_any(&self.no_upgrade, &path.to_string_lossy())
+        self.no_upgrade.matches(&path.to_string_lossy())
     }
 }
 
@@ -531,6 +530,32 @@ pub struct Transaction<S> {
     check_space: bool,
     cancel: Option<piko_net::Cancel>,
     state: S,
+}
+
+impl<S> Transaction<S> {
+    /// This transaction in the state `next` makes of its current one, with its configuration
+    /// unchanged.
+    fn map_state<T>(self, next: impl FnOnce(S) -> T) -> Transaction<T> {
+        Transaction {
+            root_path: self.root_path,
+            dbpath: self.dbpath,
+            limits: self.limits,
+            ownership: self.ownership,
+            overwrite: self.overwrite,
+            walk_limits: self.walk_limits,
+            verification: self.verification,
+            policy_overrides: self.policy_overrides,
+            expectations: self.expectations,
+            published: self.published,
+            patterns: self.patterns,
+            scriptlets: self.scriptlets,
+            hook_dirs: self.hook_dirs,
+            recording: self.recording,
+            check_space: self.check_space,
+            cancel: self.cancel,
+            state: next(self.state),
+        }
+    }
 }
 
 impl Transaction<Planned> {
@@ -836,7 +861,7 @@ impl Transaction<Planned> {
         if lock.path().parent() != Some(self.dbpath.as_path()) {
             return Err(Error::Database(piko_db_write::Error::WrongLock {
                 lock: lock.path().to_path_buf(),
-                dbpath: self.dbpath.clone(),
+                dbpath: self.dbpath,
             }));
         }
         // First, before anything is downloaded or read. `stage` refuses again, under `db.lck`,
@@ -879,6 +904,10 @@ impl Transaction<Planned> {
             self.stop_if_cancelled(total_steps)?;
             match step {
                 Step::Install { package, .. } => {
+                    // Before the download: a stale plan is refused without fetching anything.
+                    if let Some(expected) = self.expectations.get(&package.to_string()) {
+                        self::check_installed(&local, package.name(), expected.replaced())?;
+                    }
                     let location = source.locate(package)?;
                     // Runs before the archive is opened for any other purpose. A package that
                     // fails this is not read further, so a hostile archive gets no chance to
@@ -901,10 +930,12 @@ impl Transaction<Planned> {
                     });
                 }
                 Step::Remove { entry, .. } => {
-                    let Some(package) = local.get(entry.name()) else {
-                        return Err(Error::UnusableSource {
-                            path: PathBuf::from(entry.as_str()),
-                            reason: "not installed".to_owned(),
+                    let Some(package) = self::check_installed(&local, entry.name(), Some(entry))?
+                    else {
+                        return Err(Error::PlanStale {
+                            name: entry.name().to_string(),
+                            planned: Some(entry.as_str().to_owned()),
+                            installed: None,
                         });
                     };
                     // Read here rather than left to the removal step, so the step needs no
@@ -919,13 +950,6 @@ impl Transaction<Planned> {
                     doomed_entries.push(doomed);
                 }
             }
-        }
-
-        {
-            let removed: BTreeSet<&str> = removals.iter().map(String::as_str).collect();
-            let mut taken_apart: Vec<&mut Superseded> =
-                doomed_entries.iter_mut().map(|doomed| &mut doomed.installed).collect();
-            self::mark_shared_directories(&local, &mut taken_apart, &removed);
         }
 
         // Reading each archive answers two questions, and nothing else can answer either. What
@@ -1002,8 +1026,13 @@ impl Transaction<Planned> {
 
         {
             let removed: BTreeSet<&str> = removals.iter().map(String::as_str).collect();
-            let mut taken_apart: Vec<&mut Superseded> =
-                packages.iter_mut().filter_map(|package| package.replaces.as_mut()).collect();
+            // Every entry a step takes apart, removed or replaced, in one pass over the file
+            // lists.
+            let mut taken_apart: Vec<&mut Superseded> = doomed_entries
+                .iter_mut()
+                .map(|doomed| &mut doomed.installed)
+                .chain(packages.iter_mut().filter_map(|package| package.replaces.as_mut()))
+                .collect();
             self::mark_shared_directories(&local, &mut taken_apart, &removed);
         }
 
@@ -1012,14 +1041,8 @@ impl Transaction<Planned> {
         self.stop_if_cancelled(total_steps)?;
         let root = RootDir::open(&self.root_path)?;
         progress(VerifyEvent::ConflictCheckStarted);
-        let check = conflict::check(
-            &root,
-            &local,
-            &targets,
-            &removals,
-            &self.overwrite,
-            &self.walk_limits,
-        )?;
+        let check =
+            conflict::check(&root, &local, &targets, &removals, &self.overwrite, &self.walk_limits);
         if !check.is_clear() {
             return Err(Error::FileConflicts { conflicts: check.conflicts });
         }
@@ -1034,33 +1057,15 @@ impl Transaction<Planned> {
             Vec::new()
         };
 
-        Ok(Transaction {
-            root_path: self.root_path,
-            dbpath: self.dbpath,
-            limits: self.limits,
-            ownership: self.ownership,
-            overwrite: self.overwrite,
-            walk_limits: self.walk_limits,
-            verification: self.verification,
-            policy_overrides: self.policy_overrides,
-            expectations: self.expectations,
-            published: self.published,
-            patterns: self.patterns,
-            scriptlets: self.scriptlets,
-            hook_dirs: self.hook_dirs,
-            recording: self.recording,
-            check_space: self.check_space,
-            cancel: self.cancel,
-            state: Verified {
-                steps: self.state.steps,
-                packages,
-                removals: doomed_entries,
-                skip_remove: check.skip_remove,
-                summary,
-                space_problems,
-                lock,
-            },
-        })
+        Ok(self.map_state(|planned| Verified {
+            steps: planned.steps,
+            packages,
+            removals: doomed_entries,
+            skip_remove: check.skip_remove,
+            summary,
+            space_problems,
+            lock,
+        }))
     }
 
     /// Weighs what this transaction will write against what each filesystem has free.
@@ -1118,16 +1123,44 @@ impl Transaction<Planned> {
 ///
 /// [`Error::UnusableSource`] naming what was planned and what the archive holds, or every
 /// field that differs from the plan.
+/// Refuses a step when the entry installed under `name` is not `planned`.
+///
+/// The plan is read and confirmed before `verify` takes `db.lck`, so another package manager
+/// may have changed the database in between. A removal of a version no longer installed would
+/// delete the files of the version that is, and then fail to remove its entry. An upgrade from a
+/// version no longer installed could turn into a downgrade no one confirmed. `planned` is `None`
+/// for a fresh install, which expects the name not to be installed. The entries are compared as
+/// directory names, the local database's own source of truth.
+///
+/// Returns the installed package, which is `Some` whenever `planned` is.
+///
+/// # Errors
+///
+/// [`Error::PlanStale`] naming both entries.
+fn check_installed<'a>(
+    local: &'a LocalDatabase,
+    name: &alpm_types::Name,
+    planned: Option<&EntryName>,
+) -> Result<Option<&'a LocalPackage>> {
+    let installed = local.get(name);
+    let entry = installed.map(LocalPackage::entry);
+    if entry.map(EntryName::as_str) == planned.map(EntryName::as_str) {
+        return Ok(installed);
+    }
+    Err(Error::PlanStale {
+        name: name.to_string(),
+        planned: planned.map(|entry| entry.as_str().to_owned()),
+        installed: entry.map(|entry| entry.as_str().to_owned()),
+    })
+}
+
 fn matches_plan(
     planned: &PackageFileName,
     expected: Option<&Expected>,
     path: &Path,
     info: &PackageInfo,
 ) -> Result<()> {
-    let (name, version) = match info {
-        PackageInfo::V1(v1) => (&v1.pkgname, &v1.pkgver),
-        PackageInfo::V2(v2) => (&v2.pkgname, &v2.pkgver),
-    };
+    let (name, version) = crate::pkginfo::name_and_version(info);
     if name != planned.name() || version != planned.version() {
         return Err(Error::UnusableSource {
             path: path.to_path_buf(),
@@ -1192,10 +1225,7 @@ pub(crate) fn discard(
 /// name and version that do not form an entry mean the package cannot be recorded. That has to
 /// be known before anything is written.
 fn entry_name(package: &Path, info: &PackageInfo) -> Result<EntryName> {
-    let (name, version) = match info {
-        PackageInfo::V1(v1) => (&v1.pkgname, &v1.pkgver),
-        PackageInfo::V2(v2) => (&v2.pkgname, &v2.pkgver),
-    };
+    let (name, version) = crate::pkginfo::name_and_version(info);
     EntryName::new(name, version).map_err(|error| Error::UnusableSource {
         path: package.to_path_buf(),
         reason: format!("its name and version do not form an entry: {error}"),
@@ -1221,13 +1251,7 @@ fn spell(files: &[PathBuf]) -> Vec<String> {
 /// makes. The commit does not fail for something that could have been read up front.
 fn superseded(installed: Option<&LocalPackage>) -> Result<Option<Superseded>> {
     let Some(package) = installed else { return Ok(None) };
-    // Unreachable in practice. The database produced this name and version by parsing a
-    // directory name that `EntryName` itself accepted. This is not worth an error of its own.
-    // Without an entry name there is no directory to remove, and nothing to remove it from.
-    let Ok(entry) = EntryName::new(package.name(), package.version()) else {
-        return Ok(None);
-    };
-    self::installed_state(&entry, package).map(Some)
+    self::installed_state(package.entry(), package).map(Some)
 }
 
 /// One installed entry's `%FILES%` and `%BACKUP%`, read while it is still on disk.
@@ -1390,34 +1414,16 @@ impl<'lock> Transaction<Verified<'lock>> {
         let recorder =
             Recorder::open(&self.recording, &self.root_path, &self.dbpath, crate::history::now());
 
-        Ok(Transaction {
-            root_path: self.root_path,
-            dbpath: self.dbpath,
-            limits: self.limits,
-            ownership: self.ownership,
-            overwrite: self.overwrite,
-            walk_limits: self.walk_limits,
-            verification: self.verification,
-            policy_overrides: self.policy_overrides,
-            expectations: self.expectations,
-            published: self.published,
-            patterns: self.patterns,
-            scriptlets: self.scriptlets,
-            hook_dirs: self.hook_dirs,
-            recording: self.recording,
-            check_space: self.check_space,
-            cancel: self.cancel,
-            state: Staged {
-                steps: self.state.steps,
-                packages: self.state.packages,
-                removals: self.state.removals,
-                skip_remove: self.state.skip_remove,
-                summary: self.state.summary,
-                journal,
-                recorder: Some(recorder),
-                lock: self.state.lock,
-            },
-        })
+        Ok(self.map_state(|verified| Staged {
+            steps: verified.steps,
+            packages: verified.packages,
+            removals: verified.removals,
+            skip_remove: verified.skip_remove,
+            summary: verified.summary,
+            journal,
+            recorder: Some(recorder),
+            lock: verified.lock,
+        }))
     }
 }
 
@@ -2284,6 +2290,62 @@ mod tests {
         assert!(!root.path().join("usr/bin/foo").exists());
         let local = LocalDatabase::open(db.path().join("local")).unwrap();
         assert!(local.get_str("foo").is_none(), "the entry survived removal");
+    }
+
+    /// A step planned against an installed state that changed before `verify` is refused,
+    /// before any file is deleted: another package manager changed the database after the plan.
+    #[test]
+    fn a_step_planned_against_another_installed_state_is_refused() {
+        let name = "foo-2.0.0-1-x86_64.pkg.tar";
+        let cache = tempfile::tempdir().unwrap();
+        write_package(cache.path(), name, "2.0.0-1", &[], &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let lock = DbLock::acquire(db.path()).unwrap();
+        Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Install {
+                package: name.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+        )
+        .ownership(Ownership::Inherit)
+        .verify(&lock, &source)
+        .unwrap()
+        .stage()
+        .unwrap()
+        .commit()
+        .unwrap();
+
+        let stale = EntryName::parse("foo-1.0.0-1").unwrap();
+        let Err(error) = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Remove { entry: stale, no_save: false }],
+        )
+        .verify(&lock, &source) else {
+            panic!("a stale removal must be refused");
+        };
+
+        assert!(
+            matches!(&error, Error::PlanStale { planned: Some(planned), installed: Some(installed), .. }
+                if planned == "foo-1.0.0-1" && installed == "foo-2.0.0-1"),
+            "got {error:?}"
+        );
+        assert!(root.path().join("usr/bin/foo").exists(), "no file may be removed");
+
+        // The install side: a fresh install expects the name not to be installed, and an
+        // upgrade expects the version it was planned from.
+        let local = LocalDatabase::open(db.path().join("local")).unwrap();
+        let foo: alpm_types::Name = "foo".parse().unwrap();
+        assert!(matches!(
+            check_installed(&local, &foo, None),
+            Err(Error::PlanStale { planned: None, installed: Some(_), .. })
+        ));
+        let current = EntryName::parse("foo-2.0.0-1").unwrap();
+        assert!(check_installed(&local, &foo, Some(&current)).unwrap().is_some());
     }
 
     /// Writes package `name` at `version` into `dir`, with `members` spelled byte for byte.
@@ -3552,8 +3614,10 @@ mod tests {
         let lock = DbLock::acquire(db.path()).unwrap();
         let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
 
-        let patterns =
-            Patterns { no_extract: vec!["usr/share/locale/*".to_owned()], no_upgrade: Vec::new() };
+        let patterns = Patterns {
+            no_extract: PatternList::new(vec!["usr/share/locale/*".to_owned()]),
+            no_upgrade: PatternList::default(),
+        };
         let verified = Transaction::new(
             root.path(),
             db.path(),
@@ -3603,8 +3667,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let lock = DbLock::acquire(db.path()).unwrap();
         let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
-        let patterns =
-            Patterns { no_extract: Vec::new(), no_upgrade: vec!["etc/foo.conf".to_owned()] };
+        let patterns = Patterns {
+            no_extract: PatternList::default(),
+            no_upgrade: PatternList::new(vec!["etc/foo.conf".to_owned()]),
+        };
 
         let install = |version: &str| {
             Transaction::new(

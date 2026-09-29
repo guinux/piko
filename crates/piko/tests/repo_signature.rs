@@ -134,3 +134,44 @@ fn never_does_not_check_the_signature_at_all() {
     let output = list_repo(&config);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
+
+/// The archive is not a tar stream at all, so reading it fails on its bytes. The refusal names
+/// the signature, so the check ran before the decompressor saw them, as registration validates
+/// a database before libalpm reads it.
+#[test]
+fn a_database_is_verified_before_it_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("sync")).unwrap();
+    std::fs::write(dir.path().join("sync/core.db"), b"not an archive").unwrap();
+    std::fs::write(dir.path().join("sync/core.db.sig"), b"not a real signature").unwrap();
+    let config = write_config(dir.path(), "Required DatabaseOptional");
+
+    let output = list_repo(&config);
+    assert!(!output.status.success(), "an unreadable database was accepted");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("signature on"), "{stderr}");
+    assert!(!stderr.contains("format"), "the archive was read first: {stderr}");
+}
+
+/// The sibling `<repo>.files` is read only when a file list is asked for, and is checked then
+/// against the same `SigLevel`.
+#[test]
+fn the_files_sibling_is_verified_before_its_file_lists_are_read() {
+    let dir = tempfile::tempdir().unwrap();
+    dbpath_with_core(dir.path());
+    std::fs::write(dir.path().join("sync/core.files"), b"not an archive").unwrap();
+    std::fs::write(dir.path().join("sync/core.files.sig"), b"not a real signature").unwrap();
+    let config = write_config(dir.path(), "Required DatabaseOptional");
+
+    let output = Command::new(PIKO)
+        .arg("--config")
+        .arg(&config)
+        .args(["files", "--repo", "core", "acl"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "an unverified .files archive was read");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("signature on"), "{stderr}");
+    assert!(stderr.contains("core.files"), "{stderr}");
+    assert!(!stderr.contains("format"), "the archive was read first: {stderr}");
+}

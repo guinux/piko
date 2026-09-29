@@ -1,8 +1,7 @@
 //! The compression formats piko decodes: gzip, zstd, and none.
 //!
 //! This is the one decoder for every archive piko reads, repository databases and package
-//! files alike. Both callers bound what comes out of it themselves; this module decides only
-//! which bytes are decoded, and by what.
+//! files alike, and [`BoundedReader`], the bound both put on what comes out of it.
 //!
 //! # Two formats, deliberately
 //!
@@ -31,6 +30,10 @@
 use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek as _};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, AtomicU64, Ordering},
+};
 
 use alpm_types::CompressionAlgorithmFileExtension;
 
@@ -230,6 +233,98 @@ impl fmt::Debug for Decoder {
             Inner::Uncompressed(_) => Format::Uncompressed,
         };
         f.debug_tuple("Decoder").field(&format).finish()
+    }
+}
+
+/// Which bound a [`BoundedReader`] refused a read on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Overrun {
+    /// More bytes than the reader's fixed limit.
+    Limit,
+    /// More bytes than the declared bound in force.
+    Declared,
+}
+
+/// The state a [`BoundedReader`] shares with the walk that drives it.
+///
+/// `tar` returns a reader's error as an opaque [`std::io::Error`], so the walk reads here which
+/// bound tripped, to report a limit rather than a read failure.
+#[derive(Debug)]
+pub struct Bounds {
+    /// The declared bound in force. The walk can raise it as it reads.
+    declared: AtomicU64,
+    /// [`Bounds::CLEAR`], or the [`Overrun`] a read was refused on.
+    tripped: AtomicU8,
+}
+
+impl Bounds {
+    const CLEAR: u8 = 0;
+    const LIMIT: u8 = 1;
+    const DECLARED: u8 = 2;
+
+    /// Bounds with `declared` as the declared bound in force. `u64::MAX` declares nothing.
+    #[must_use]
+    pub fn new(declared: u64) -> Arc<Self> {
+        Arc::new(Self { declared: AtomicU64::new(declared), tripped: AtomicU8::new(Self::CLEAR) })
+    }
+
+    /// Sets the declared bound in force.
+    pub fn set_declared(&self, declared: u64) {
+        self.declared.store(declared, Ordering::Relaxed);
+    }
+
+    /// The declared bound in force.
+    #[must_use]
+    pub fn declared(&self) -> u64 {
+        self.declared.load(Ordering::Relaxed)
+    }
+
+    /// The bound a read was refused on, if one was.
+    #[must_use]
+    pub fn tripped(&self) -> Option<Overrun> {
+        match self.tripped.load(Ordering::Relaxed) {
+            Self::LIMIT => Some(Overrun::Limit),
+            Self::DECLARED => Some(Overrun::Declared),
+            _ => None,
+        }
+    }
+}
+
+/// A reader that refuses to yield more than `limit` bytes in total, or more than the declared
+/// bound its [`Bounds`] holds.
+///
+/// A compressed archive can inflate to arbitrarily more than its own size. Without this, a few
+/// kilobytes on disk can exhaust memory or fill a filesystem. `alpm-compress`'s `TarballReader`
+/// cannot be bounded this way: its field is concretely `Archive<CompressionDecoder>`, not generic
+/// over `Read`. Driving `tar::Archive` over this reader is why piko reads archives itself.
+#[derive(Debug)]
+pub struct BoundedReader<R> {
+    inner: R,
+    limit: u64,
+    read_so_far: u64,
+    bounds: Arc<Bounds>,
+}
+
+impl<R> BoundedReader<R> {
+    /// Bounds `inner` to `limit` bytes and to the declared bound in `bounds`.
+    pub const fn new(inner: R, limit: u64, bounds: Arc<Bounds>) -> Self {
+        Self { inner, limit, read_so_far: 0, bounds }
+    }
+}
+
+impl<R: Read> Read for BoundedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.read_so_far = self.read_so_far.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        let tripped = if self.read_so_far > self.limit {
+            Bounds::LIMIT
+        } else if self.read_so_far > self.bounds.declared() {
+            Bounds::DECLARED
+        } else {
+            return Ok(read);
+        };
+        self.bounds.tripped.store(tripped, Ordering::Relaxed);
+        Err(std::io::Error::other("decompressed size limit exceeded"))
     }
 }
 

@@ -175,15 +175,6 @@ pub fn plan_removal(
 pub enum NamedRemovalFailure {
     /// A target names no installed package.
     NotInstalled(String),
-    /// An installed package's name and version form no entry name.
-    ///
-    /// The reason is stringified, as `piko_txn::Error::InvalidEntryName` stringifies it.
-    InvalidEntryName {
-        /// The target as the user named it.
-        name: String,
-        /// Why the name and version could not form an entry name.
-        reason: String,
-    },
 }
 
 /// The entries a `--nodeps` removal takes away, with what the glob targets selected.
@@ -222,15 +213,10 @@ pub fn named_removal(
     let outcome = names
         .iter()
         .map(|name| {
-            let package = local
+            local
                 .get_str(name)
-                .ok_or_else(|| NamedRemovalFailure::NotInstalled(name.clone()))?;
-            EntryName::new(package.name(), package.version()).map_err(|error| {
-                NamedRemovalFailure::InvalidEntryName {
-                    name: name.clone(),
-                    reason: error.to_string(),
-                }
-            })
+                .map(|package| package.entry().clone())
+                .ok_or_else(|| NamedRemovalFailure::NotInstalled(name.clone()))
         })
         .collect();
     Ok(NamedRemoval { expansions, outcome })

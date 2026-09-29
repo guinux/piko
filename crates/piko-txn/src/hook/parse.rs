@@ -104,6 +104,9 @@ pub struct Hook {
     pub abort_on_fail: bool,
     /// `NeedsTargets`: the matched targets are fed to the command on stdin.
     pub needs_targets: bool,
+    /// What libalpm warns about in a hook it still accepts: a directive given twice, where the
+    /// last one wins, and `AbortOnFail` on a `PostTransaction` hook, where it does nothing.
+    pub warnings: Vec<String>,
 }
 
 impl Hook {
@@ -148,9 +151,9 @@ pub fn parse(name: &str, text: &str) -> Result<Hook, ParseError> {
         when: None,
         abort_on_fail: false,
         needs_targets: false,
+        warnings: Vec::new(),
     };
     let mut section: Option<Section> = None;
-    let mut warnings = Vec::new();
 
     for token in tokenize(text) {
         let fail = |reason: String| ParseError {
@@ -185,10 +188,12 @@ pub fn parse(name: &str, text: &str) -> Result<Hook, ParseError> {
                         let Some(trigger) = hook.triggers.last_mut() else {
                             return Err(fail("a trigger directive with no [Trigger]".to_owned()));
                         };
-                        trigger_directive(trigger, key, text, &mut warnings).map_err(&fail)?;
+                        let overwritten = trigger_directive(trigger, key, text).map_err(&fail)?;
+                        overwritten_warning(&mut hook.warnings, token.line, overwritten);
                     }
                     Section::Action => {
-                        action_directive(&mut hook, key, text, &mut warnings).map_err(fail)?;
+                        let overwritten = action_directive(&mut hook, key, text).map_err(fail)?;
+                        overwritten_warning(&mut hook.warnings, token.line, overwritten);
                     }
                 }
             }
@@ -196,7 +201,17 @@ pub fn parse(name: &str, text: &str) -> Result<Hook, ParseError> {
     }
 
     validate(&hook).map_err(|reason| ParseError { file: name.to_owned(), reason })?;
+    if hook.abort_on_fail && hook.when == Some(When::PostTransaction) {
+        hook.warnings.push("AbortOnFail set for a PostTransaction hook".to_owned());
+    }
     Ok(hook)
+}
+
+/// Records that the directive on `line` replaced an earlier definition, as `hook.c:188` warns.
+fn overwritten_warning(warnings: &mut Vec<String>, line: usize, overwritten: Option<&str>) {
+    if let Some(directive) = overwritten {
+        warnings.push(format!("line {line}: overwriting previous definition of {directive}"));
+    }
 }
 
 /// Which section directives are being read into.
@@ -207,12 +222,14 @@ enum Section {
 }
 
 /// One directive inside `[Trigger]`.
+///
+/// Returns the directive's name when it replaced an earlier definition.
 fn trigger_directive(
     trigger: &mut Trigger,
     key: &str,
     value: &str,
-    warnings: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<Option<&'static str>, String> {
+    let mut overwritten = None;
     match key {
         "Operation" => {
             let operation = match value {
@@ -225,7 +242,7 @@ fn trigger_directive(
         }
         "Type" => {
             if trigger.kind.is_some() {
-                warnings.push("overwriting previous definition of Type".to_owned());
+                overwritten = Some("Type");
             }
             trigger.kind = Some(match value {
                 "Package" => TriggerKind::Package,
@@ -237,20 +254,22 @@ fn trigger_directive(
         "Target" => trigger.targets.push(value.to_owned()),
         other => return Err(format!("invalid option {other}")),
     }
-    Ok(())
+    Ok(overwritten)
 }
 
 /// One directive inside `[Action]`.
+///
+/// Returns the directive's name when it replaced an earlier definition.
 fn action_directive(
     hook: &mut Hook,
     key: &str,
     value: &str,
-    warnings: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<Option<&'static str>, String> {
+    let mut overwritten = None;
     match key {
         "When" => {
             if hook.when.is_some() {
-                warnings.push("overwriting previous definition of When".to_owned());
+                overwritten = Some("When");
             }
             hook.when = Some(match value {
                 "PreTransaction" => When::PreTransaction,
@@ -260,7 +279,7 @@ fn action_directive(
         }
         "Description" => {
             if hook.description.is_some() {
-                warnings.push("overwriting previous definition of Description".to_owned());
+                overwritten = Some("Description");
             }
             hook.description = Some(value.to_owned());
         }
@@ -269,14 +288,14 @@ fn action_directive(
         "NeedsTargets" => hook.needs_targets = true,
         "Exec" => {
             if !hook.exec.is_empty() {
-                warnings.push("overwriting previous definition of Exec".to_owned());
+                overwritten = Some("Exec");
             }
             hook.exec =
                 wordsplit::split(value).map_err(|error| format!("invalid value: {error}"))?;
         }
         other => return Err(format!("invalid option {other}")),
     }
-    Ok(())
+    Ok(overwritten)
 }
 
 /// `_alpm_hook_validate` (`hook.c:113`).
@@ -305,8 +324,8 @@ fn validate(hook: &Hook) -> Result<(), String> {
     }
     match hook.when {
         None => Err("it has no When".to_owned()),
-        // libalpm warns rather than refusing. The hook is still runnable; the flag is simply
-        // meaningless after the transaction has already happened.
+        // `AbortOnFail` on a `PostTransaction` hook is a warning, not a refusal. The hook is
+        // still runnable; the flag is simply meaningless after the transaction has happened.
         Some(_) => Ok(()),
     }
 }
@@ -399,6 +418,54 @@ NeedsTargets
         let hook = parse("x.hook", text).unwrap();
         assert!(hook.abort_on_fail);
         assert!(hook.needs_targets);
+    }
+
+    /// A directive given twice keeps its last value, and says so on the line that replaced it,
+    /// as `hook.c:188` warns.
+    #[test]
+    fn a_repeated_directive_keeps_the_last_value_and_warns() {
+        let text = "\
+[Trigger]
+Operation = Install
+Type = Path
+Type = Package
+Target = *
+
+[Action]
+When = PreTransaction
+Exec = /bin/false
+Exec = /bin/true
+";
+        let hook = parse("x.hook", text).unwrap();
+        assert_eq!(hook.triggers.first().unwrap().kind, Some(TriggerKind::Package));
+        assert_eq!(hook.exec, [std::ffi::OsStr::new("/bin/true")]);
+        assert_eq!(
+            hook.warnings,
+            [
+                "line 4: overwriting previous definition of Type",
+                "line 10: overwriting previous definition of Exec",
+            ]
+        );
+    }
+
+    /// `AbortOnFail` means nothing after the transaction. libalpm warns and runs the hook.
+    #[test]
+    fn abort_on_fail_after_the_transaction_warns() {
+        let text = "\
+[Trigger]
+Operation = Install
+Type = Package
+Target = *
+
+[Action]
+When = PostTransaction
+Exec = /bin/true
+AbortOnFail
+";
+        let hook = parse("x.hook", text).unwrap();
+        assert!(hook.is_active());
+        assert_eq!(hook.warnings, ["AbortOnFail set for a PostTransaction hook"]);
+        assert!(parse("x.hook", REAL).unwrap().warnings.is_empty());
     }
 
     /// The documented way to disable a hook: shadow it with a symlink to `/dev/null`. That

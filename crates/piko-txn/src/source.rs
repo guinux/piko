@@ -330,14 +330,15 @@ pub fn select_download_dir(directories: &[PathBuf]) -> Result<DownloadDir> {
     for directory in directories {
         // The stat follows a final symlink, as libalpm's does. The path comes from
         // configuration, not from an untrusted directory entry.
-        let metadata = match std::fs::metadata(directory) {
-            Ok(metadata) => metadata,
+        let (metadata, created) = match std::fs::metadata(directory) {
+            Ok(metadata) => (metadata, false),
             // libalpm does not separate "absent" from "unstatable" here either. Both mean
-            // there is nothing usable yet, and creating is the only way to find out.
-            Err(_) => match create_cache_dir(directory) {
-                Ok(()) => {
-                    return Ok(DownloadDir { path: directory.clone(), created: true, rejected });
-                }
+            // there is nothing usable yet, and creating is the only way to find out. A created
+            // directory then gets every test an existing one gets: the ancestors it was created
+            // under decide who can rename it away.
+            Err(_) => match create_cache_dir(directory).and_then(|()| std::fs::metadata(directory))
+            {
+                Ok(metadata) => (metadata, true),
                 Err(source) => {
                     let reason = RejectionReason::CreateFailed(source.kind());
                     rejected.push(RejectedCacheDir { path: directory.clone(), reason });
@@ -379,7 +380,7 @@ pub fn select_download_dir(directories: &[PathBuf]) -> Result<DownloadDir> {
             }
         }
 
-        return Ok(DownloadDir { path: directory.clone(), created: false, rejected });
+        return Ok(DownloadDir { path: directory.clone(), created, rejected });
     }
 
     Err(Error::NoWritableCacheDir { rejected })
@@ -1275,6 +1276,30 @@ mod tests {
         assert_eq!(mode & !0o755, 0, "{mode:o} has a bit 0o755 does not");
     }
 
+    /// A directory created under an ancestor another user could write is tested as an existing
+    /// one is: that user can rename it away and put another in its place.
+    #[test]
+    fn a_created_cache_directory_under_an_untrusted_ancestor_is_passed_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = dir.path().join("open");
+        std::fs::create_dir(&open).unwrap();
+        chmod(&open, 0o777);
+        let wanted = open.join("pkg");
+        let good = tempfile::tempdir().unwrap();
+
+        let chosen = select_download_dir(&[wanted.clone(), good.path().to_path_buf()]).unwrap();
+
+        assert_eq!(chosen.path(), good.path());
+        assert!(!chosen.created());
+        assert_eq!(chosen.rejected().len(), 1);
+        let rejected = chosen.rejected().first().unwrap();
+        assert_eq!(rejected.path, wanted);
+        assert!(
+            matches!(&rejected.reason, RejectionReason::Untrusted { path, .. } if *path == open),
+            "got {rejected:?}"
+        );
+    }
+
     #[test]
     fn a_cache_directory_that_is_a_file_is_passed_over() {
         let dir = tempfile::tempdir().unwrap();
@@ -1331,7 +1356,7 @@ mod tests {
         }
         let good = tempfile::tempdir().unwrap();
 
-        let chosen = select_download_dir(&[wanted.clone(), good.path().to_path_buf()]).unwrap();
+        let chosen = select_download_dir(&[wanted, good.path().to_path_buf()]).unwrap();
 
         assert_eq!(chosen.path(), good.path());
         assert_eq!(chosen.rejected().len(), 1);

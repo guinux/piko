@@ -787,7 +787,7 @@ pub fn remove(
         // `NoUpgrade` is not install-only. `should_skip_file` (`remove.c:592`) consults it
         // before deleting, so a file the user told piko never to touch survives a removal.
         patterns: options.patterns,
-        recording: side_effects.recording.clone(),
+        recording: side_effects.recording,
         // A removal writes no file, but it does save modified configuration files.
         report_pending: true,
         ..Settings::default()
@@ -827,14 +827,6 @@ fn named_only(
         Ok(found) => found,
         Err(NamedRemovalFailure::NotInstalled(name)) => {
             eprintln!("Error: package {name} is not installed");
-            return Err(ExitCode::FAILURE);
-        }
-        Err(NamedRemovalFailure::InvalidEntryName { name, reason }) => {
-            eprintln!(
-                "Error: {} has no usable entry name: {}",
-                crate::output::escaped(&name),
-                piko_db::printable_lines(&reason.to_string())
-            );
             return Err(ExitCode::FAILURE);
         }
     };

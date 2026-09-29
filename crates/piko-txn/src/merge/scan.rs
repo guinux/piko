@@ -189,7 +189,7 @@ fn collect(
     limits: &ScanLimits,
 ) {
     for kind in [PendingKind::Pacnew, PendingKind::Pacsave] {
-        let candidate = self::with_suffix(resolved.name(), &kind.suffix());
+        let candidate = resolved.with_suffix(&kind.suffix());
         if !hash::exists_at(resolved.dir(), &candidate) {
             continue;
         }
@@ -219,7 +219,7 @@ fn describe(
     limits: &ScanLimits,
 ) -> Pending {
     let suffix = kind.suffix();
-    let candidate = self::with_suffix(resolved.name(), &suffix);
+    let candidate = resolved.with_suffix(&suffix);
     let pacfile = self::append_suffix(target, &suffix);
 
     let verdict = if hash::exists_at(resolved.dir(), resolved.name()) {
@@ -266,7 +266,7 @@ fn numbered(
 ) -> Vec<u32> {
     let parent = target.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
     let listing = listings.entry(parent.clone()).or_insert_with(|| {
-        match self::list_directory(resolved, limits.max_dir_entries) {
+        match resolved.list_directory(limits.max_dir_entries) {
             Ok(names) => Some(names),
             Err(reason) => {
                 // Recorded once per directory, not once per entry in it.
@@ -279,7 +279,7 @@ fn numbered(
         return Vec::new();
     };
 
-    let prefix = self::with_suffix(resolved.name(), &format!("{PACSAVE_SUFFIX}."));
+    let prefix = resolved.with_suffix(&format!("{PACSAVE_SUFFIX}."));
     let mut numbers = Vec::new();
     for name in names {
         let Some(digits) = self::strip_prefix(name, &prefix) else {
@@ -288,12 +288,9 @@ fn numbered(
         let Some(digits) = digits.to_str() else {
             continue;
         };
-        // The number must round-trip. `.pacsave.01` reads as `1`, and acting on that would
-        // rename `.pacsave.1` to `.pacsave.2` while `.pacsave.01` stayed put, leaving two
-        // files that claim one rank.
-        match digits.parse::<u32>() {
-            Ok(number) if number.to_string() == digits => numbers.push(number),
-            _ => found.note(
+        match crate::remove::pacsave_number(digits) {
+            Some(number) => numbers.push(number),
+            None => found.note(
                 Problem::UnusableNumber {
                     path: self::append_suffix(target, &format!("{PACSAVE_SUFFIX}.{digits}")),
                 },
@@ -303,49 +300,6 @@ fn numbered(
     }
     numbers.sort_unstable();
     numbers
-}
-
-/// Lists the directory `resolved` names, through the descriptor that resolved it.
-///
-/// The bound fires while the entries arrive, so an oversized directory costs the bound rather
-/// than the whole listing.
-fn list_directory(
-    resolved: &Resolved,
-    max_entries: usize,
-) -> std::result::Result<BTreeSet<OsString>, String> {
-    let handle = rustix::fs::openat(
-        resolved.dir(),
-        ".",
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|source| source.to_string())?;
-
-    let mut names = BTreeSet::new();
-    let mut seen = 0_usize;
-    for entry in rustix::fs::Dir::read_from(&handle).map_err(|source| source.to_string())? {
-        let entry = entry.map_err(|source| source.to_string())?;
-        seen = seen.saturating_add(1);
-        if seen > max_entries {
-            return Err(format!("it holds more than {max_entries} entries"));
-        }
-        let name = OsStr::from_bytes(entry.file_name().to_bytes());
-        if name == "." || name == ".." {
-            continue;
-        }
-        names.insert(name.to_os_string());
-    }
-    Ok(names)
-}
-
-/// `name` with `suffix` appended.
-fn with_suffix(name: &OsStr, suffix: &str) -> OsString {
-    let mut joined = name.to_os_string();
-    joined.push(suffix);
-    joined
 }
 
 /// `path` with `suffix` appended to its final component.

@@ -43,14 +43,6 @@ impl Concurrency {
         Self { downloads, per_host: Self::DEFAULT_PER_HOST }
     }
 
-    /// The same concurrency with a different per-host cap, for a caller that measured its own.
-    ///
-    /// Clamps to at least one, since zero would spread nothing anywhere.
-    #[must_use]
-    pub const fn with_per_host(self, per_host: usize) -> Self {
-        Self { downloads: self.downloads, per_host: if per_host < 1 { 1 } else { per_host } }
-    }
-
     /// How many transfers may run at once.
     #[must_use]
     pub const fn downloads(self) -> usize {
@@ -178,10 +170,5 @@ mod tests {
     fn an_empty_list_yields_nothing_rather_than_dividing_by_zero() {
         let servers: Vec<String> = Vec::new();
         assert_eq!(Concurrency::new(5).servers_for(&servers, 3).count(), 0);
-    }
-
-    #[test]
-    fn a_per_host_cap_of_zero_is_refused() {
-        assert_eq!(Concurrency::new(5).with_per_host(0).per_host(), 1);
     }
 }

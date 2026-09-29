@@ -218,15 +218,22 @@ impl<'a> IgnoreList<'a> {
     /// covered by both reports the name match.
     #[must_use]
     pub fn reason(&self, name: &str, groups: &[alpm_types::Group]) -> Option<IgnoreReason> {
-        if let Some(pattern) = matching_pattern(self.packages, name) {
+        let packages = PatternList::new(self.packages.to_vec());
+        if let Some(pattern) = packages.matching_pattern(name) {
             return Some(IgnoreReason::Package { pattern: pattern.to_owned() });
         }
+        let patterns = PatternList::new(self.groups.to_vec());
         groups.iter().find_map(|group| {
-            matching_pattern(self.groups, group).map(|pattern| IgnoreReason::Group {
+            patterns.matching_pattern(group).map(|pattern| IgnoreReason::Group {
                 group: group.clone(),
                 pattern: pattern.to_owned(),
             })
         })
+    }
+
+    /// Whether `IgnoreGroup` names any pattern, so that a group test can match at all.
+    pub(crate) const fn has_groups(&self) -> bool {
+        !self.groups.is_empty()
     }
 
     /// [`Self::reason`] for a repository package.
@@ -294,6 +301,20 @@ impl std::fmt::Display for IgnoreReason {
 
 /// Whether `patterns` selects `text`, as libalpm's `_alpm_fnmatch_patterns` does (`util.c:1528`).
 ///
+/// This compiles `patterns` for one test. A caller that tests many strings against one list
+/// builds a [`PatternList`] once instead, which is the same rule.
+///
+/// Public because `--overwrite`, `NoExtract`, `NoUpgrade` and a hook's `Target` are the same
+/// `fnmatch` against a path, rather than against a package name. libalpm uses the one function
+/// for all of them. A second copy would be a second chance for these rules to drift.
+#[must_use]
+pub fn matches_any(patterns: &[String], text: &str) -> bool {
+    PatternList::new(patterns.to_vec()).matches(text)
+}
+
+/// A list of shell-glob patterns, compiled once, and scanned as libalpm's
+/// `_alpm_fnmatch_patterns` scans it (`util.c:1528`).
+///
 /// # The list is scanned backwards, and a `!` inverts
 ///
 /// Neither is decoration, and the obvious `patterns.iter().any(..)` gets both wrong:
@@ -311,43 +332,88 @@ impl std::fmt::Display for IgnoreReason {
 /// `/usr/share/libalpm/hooks/gtk-update-icon-cache.hook` and `60-depmod.hook` are both built out
 /// of on a real Arch system.
 ///
-/// Only the scan is here. Whether one pattern covers one string is [`crate::glob::matches`],
-/// which every pattern rule in the crate shares. That includes its fallback to an exact-string
-/// match for a malformed glob.
+/// Only the scan is here. Whether one pattern covers one string is [`crate::glob::Glob`], which
+/// every pattern rule in the crate shares. That includes its fallback to an exact-string match
+/// for a malformed glob.
 ///
-/// Public because `--overwrite`, `NoExtract`, `NoUpgrade` and a hook's `Target` are the same
-/// `fnmatch` against a path, rather than against a package name. libalpm uses the one function
-/// for all of them. A second copy would be a second chance for these rules to drift.
-#[must_use]
-pub fn matches_any(patterns: &[String], text: &str) -> bool {
-    matching_pattern(patterns, text).is_some()
+/// # Compiled once
+///
+/// A hook's `Target` list is tested against every path a transaction adds or removes, and
+/// `NoExtract` against every member extraction reads. Compiling a pattern costs about 15 times
+/// a match. On this machine, matching the installed hooks against an upgrade of every installed
+/// package took 18 s when each test compiled its patterns again.
+#[derive(Clone, Debug, Default)]
+pub struct PatternList {
+    /// The patterns as given, sigils included.
+    given: Vec<String>,
+    /// Each pattern with its sigil stripped and compiled, and whether it inverts.
+    compiled: Box<[(bool, crate::glob::Glob)]>,
 }
 
-/// The pattern [`matches_any`] selected `text` with, or `None` when nothing selects it.
-///
-/// The whole backwards-with-inversion scan lives here, and [`matches_any`] is a `is_some()`
-/// over it. Two copies of `_alpm_fnmatch_patterns` would be two chances to disagree. The `!`
-/// rule is exactly the part that is easy to get subtly wrong.
-///
-/// The pattern returned is always a selecting one. A scan that stops on an inverted pattern
-/// answers `None`, since that entry de-selects `text` rather than choosing it. The `!` or `\`
-/// sigil is stripped from what comes back, so the caller quotes the glob that was compiled.
-#[must_use]
-pub fn matching_pattern<'p>(patterns: &'p [String], text: &str) -> Option<&'p str> {
-    for pattern in patterns.iter().rev() {
-        let inverted = pattern.starts_with('!');
-        // `_alpm_fnmatch_patterns` strips one leading character for either sigil. `!` because
-        // it was consumed as the inversion marker, `\` because it escapes a literal one.
-        let bare = if inverted || pattern.starts_with('\\') {
-            pattern.get(1..).unwrap_or_default()
-        } else {
-            pattern.as_str()
-        };
-        if crate::glob::matches(bare, text) {
-            return (!inverted).then_some(bare);
-        }
+/// Two lists are equal when they were given the same patterns: the compiled form follows.
+impl PartialEq for PatternList {
+    fn eq(&self, other: &Self) -> bool {
+        self.given == other.given
     }
-    None
+}
+
+impl Eq for PatternList {}
+
+impl PatternList {
+    /// Compiles `patterns`, in the order given.
+    #[must_use]
+    pub fn new(patterns: Vec<String>) -> Self {
+        let compiled = patterns
+            .iter()
+            .map(|pattern| {
+                let inverted = pattern.starts_with('!');
+                // `_alpm_fnmatch_patterns` strips one leading character for either sigil. `!`
+                // because it was consumed as the inversion marker, `\` because it escapes a
+                // literal one.
+                let bare = if inverted || pattern.starts_with('\\') {
+                    pattern.get(1..).unwrap_or_default()
+                } else {
+                    pattern.as_str()
+                };
+                (inverted, crate::glob::Glob::new(bare))
+            })
+            .collect();
+        Self { given: patterns, compiled }
+    }
+
+    /// The patterns as given, sigils included.
+    #[must_use]
+    pub fn as_slice(&self) -> &[String] {
+        &self.given
+    }
+
+    /// Whether the list holds no pattern, and so selects nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.given.is_empty()
+    }
+
+    /// Whether this list selects `text`.
+    #[must_use]
+    pub fn matches(&self, text: &str) -> bool {
+        self.matching_pattern(text).is_some()
+    }
+
+    /// The pattern this list selected `text` with, or `None` when nothing selects it.
+    ///
+    /// The whole backwards-with-inversion scan lives here, and [`Self::matches`] is a
+    /// `is_some()` over it. Two copies of `_alpm_fnmatch_patterns` would be two chances to
+    /// disagree. The `!` rule is exactly the part that is easy to get subtly wrong.
+    ///
+    /// The pattern returned is always a selecting one. A scan that stops on an inverted pattern
+    /// answers `None`, since that entry de-selects `text` rather than choosing it. The `!` or
+    /// `\` sigil is stripped from what comes back, so the caller quotes the glob that was
+    /// compiled.
+    #[must_use]
+    pub fn matching_pattern(&self, text: &str) -> Option<&str> {
+        let (inverted, glob) = self.compiled.iter().rev().find(|(_, glob)| glob.matches(text))?;
+        (!inverted).then_some(glob.as_str())
+    }
 }
 
 /// An ordered set of sync repositories — `pacman.conf`'s file order, which **is** repository
@@ -731,10 +797,14 @@ Foobar McFooface <foobar@mcfooface.org>
 
     /// The pattern list, exercised directly rather than through `IgnorePkg`.
     mod fnmatch_patterns {
-        use super::super::{matches_any, matching_pattern};
+        use super::super::{PatternList, matches_any};
 
         fn patterns(list: &[&str]) -> Vec<String> {
             list.iter().map(|entry| (*entry).to_owned()).collect()
+        }
+
+        fn matching_pattern<'a>(list: &'a PatternList, text: &str) -> Option<&'a str> {
+            list.matching_pattern(text)
         }
 
         #[test]
@@ -791,7 +861,7 @@ Foobar McFooface <foobar@mcfooface.org>
             let list = patterns(&["foo[bar"]);
             assert!(matches_any(&list, "foo[bar"));
             assert!(!matches_any(&list, "foob"));
-            assert_eq!(matching_pattern(&list, "foo[bar"), Some("foo[bar"));
+            assert_eq!(matching_pattern(&PatternList::new(list), "foo[bar"), Some("foo[bar"));
         }
 
         /// The pattern that comes back is the one that decided, not merely one that matches.
@@ -799,14 +869,14 @@ Foobar McFooface <foobar@mcfooface.org>
         /// not be the one reported.
         #[test]
         fn the_pattern_reported_is_the_one_the_backwards_scan_stopped_on() {
-            let list = patterns(&["linux*", "lin*"]);
+            let list = PatternList::new(patterns(&["linux*", "lin*"]));
             assert_eq!(matching_pattern(&list, "linux-firmware"), Some("lin*"));
         }
 
         /// An inverted entry de-selects, so there is no selecting pattern to name.
         #[test]
         fn an_inverted_match_names_no_pattern() {
-            let list = patterns(&["linux*", "!linux-firmware"]);
+            let list = PatternList::new(patterns(&["linux*", "!linux-firmware"]));
             assert_eq!(matching_pattern(&list, "linux-firmware"), None);
             assert_eq!(matching_pattern(&list, "linux"), Some("linux*"));
         }
@@ -815,7 +885,8 @@ Foobar McFooface <foobar@mcfooface.org>
         /// actually compiled.
         #[test]
         fn the_escaping_backslash_is_not_reported() {
-            assert_eq!(matching_pattern(&patterns(&[r"\!odd"]), "!odd"), Some("!odd"));
+            let list = PatternList::new(patterns(&[r"\!odd"]));
+            assert_eq!(matching_pattern(&list, "!odd"), Some("!odd"));
         }
     }
 

@@ -9,8 +9,8 @@
 //!    necessary and stronger than trusting the name. [`crate::compression`] does it, and
 //!    decodes gzip and zstd only.
 //! 2. **Bounded decompression.** The decoder caps nothing but zstd's window.
-//!    [`BoundedReader`] wraps it and trips a shared flag on overrun. That flag is what tells a
-//!    limit violation apart from a genuinely corrupt archive after `tar` fails.
+//!    [`BoundedReader`] wraps it and records the overrun in the shared [`Bounds`]. That record
+//!    is what tells a limit violation apart from a genuinely corrupt archive after `tar` fails.
 //! 3. **`tar::Archive` driven directly, not through `alpm-compress::TarballReader`.**
 //!    `TarballReader`'s field is concretely `Archive<CompressionDecoder>`, not generic over
 //!    `Read`. So a bounding wrapper cannot be inserted into it. Its `read_entry` also re-calls
@@ -22,13 +22,13 @@ use std::{
     collections::HashSet,
     io::Read as _,
     path::{Component, Path},
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 
 use alpm_types::Name;
 
 use crate::{
-    compression::{self, Decoder},
+    compression::{self, BoundedReader, Bounds, Decoder},
     entry_name::{EntryName, EntryNameError},
     error::{Error, IoAction, Result},
     fs_util,
@@ -95,8 +95,8 @@ pub(crate) fn walk(
     mut on_item: impl FnMut(ArchiveItem) -> Result<()>,
     mut on_skip: impl FnMut(Skipped),
 ) -> Result<Option<u64>> {
-    let (mut archive, tripped) = open_bounded(path, limits)?;
-    let classify = |source: std::io::Error| classify_io_error(path, source, &tripped, limits);
+    let (mut archive, bounds) = open_bounded(path, limits)?;
+    let classify = |source: std::io::Error| classify_io_error(path, source, &bounds, limits);
 
     let entries = archive.entries().map_err(classify)?;
     let mut newest = NewestMember::default();
@@ -149,30 +149,7 @@ pub(crate) fn walk(
             continue;
         }
 
-        let declared_size = entry.header().size().map_err(classify)?;
-        if declared_size > limits.repo_entry_bytes {
-            return Err(Error::LimitExceeded {
-                path: path.to_path_buf(),
-                limit: Limit::RepoEntry,
-                max: limits.repo_entry_bytes,
-            });
-        }
-
-        let ceiling = limits.repo_entry_bytes.saturating_add(1);
-        let mut buf = Vec::new();
-        (&mut entry).take(ceiling).read_to_end(&mut buf).map_err(classify)?;
-        if buf.len() as u64 > limits.repo_entry_bytes {
-            return Err(Error::LimitExceeded {
-                path: path.to_path_buf(),
-                limit: Limit::RepoEntry,
-                max: limits.repo_entry_bytes,
-            });
-        }
-
-        let text = String::from_utf8(buf).map_err(|error| Error::NotUtf8 {
-            path: path.to_path_buf(),
-            source: error.utf8_error(),
-        })?;
+        let text = read_member(&mut entry, path, &bounds, limits)?;
 
         if member == Member::Files {
             check_file_list_length(path, &entry_name, &text, limits)?;
@@ -203,8 +180,8 @@ pub(crate) fn walk(
 ///
 /// As [`walk`], except that no member is read, so [`Limits::repo_entry_bytes`] never applies.
 pub(crate) fn newest_member_time(path: &Path, limits: &Limits) -> Result<Option<u64>> {
-    let (mut archive, tripped) = open_bounded(path, limits)?;
-    let classify = |source: std::io::Error| classify_io_error(path, source, &tripped, limits);
+    let (mut archive, bounds) = open_bounded(path, limits)?;
+    let classify = |source: std::io::Error| classify_io_error(path, source, &bounds, limits);
     let mut newest = NewestMember::default();
     for entry in archive.entries().map_err(classify)? {
         newest.observe(entry.map_err(classify)?.header());
@@ -238,7 +215,10 @@ impl NewestMember {
 ///
 /// Returns the tar reader and the flag a decoding bound trips on overrun. `classify_io_error`
 /// reads that flag to tell a limit violation apart from a corrupt archive.
-fn open_bounded(path: &Path, limits: &Limits) -> Result<(tar::Archive<BoundedReader>, Tripped)> {
+fn open_bounded(
+    path: &Path,
+    limits: &Limits,
+) -> Result<(tar::Archive<BoundedReader<Decoder>>, Arc<Bounds>)> {
     let mut file = fs_util::open_following_symlinks(path)?;
 
     let compressed_len =
@@ -255,18 +235,11 @@ fn open_bounded(path: &Path, limits: &Limits) -> Result<(tar::Archive<BoundedRea
     let decoder = Decoder::new(file, format)
         .map_err(|source| Error::io(path, IoAction::Decompress, source))?;
 
-    let tripped: Tripped = Arc::new(OnceLock::new());
-    let bounded = BoundedReader {
-        inner: decoder,
-        limit: limits.repo_inflated_bytes,
-        read_so_far: 0,
-        tripped: Arc::clone(&tripped),
-    };
-    Ok((tar::Archive::new(bounded), tripped))
+    // A repository archive declares no size, so only the fixed limit applies.
+    let bounds = Bounds::new(u64::MAX);
+    let bounded = BoundedReader::new(decoder, limits.repo_inflated_bytes, Arc::clone(&bounds));
+    Ok((tar::Archive::new(bounded), bounds))
 }
-
-/// Which decoding bound an archive overran, set by whichever reader detects it.
-type Tripped = Arc<OnceLock<Limit>>;
 
 /// Which of an entry directory's two metadata members a tar member is.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -378,8 +351,8 @@ pub(crate) fn walk_matching(
         return Ok(());
     }
 
-    let (mut archive, tripped) = open_bounded(path, limits)?;
-    let classify = |source: std::io::Error| classify_io_error(path, source, &tripped, limits);
+    let (mut archive, bounds) = open_bounded(path, limits)?;
+    let classify = |source: std::io::Error| classify_io_error(path, source, &bounds, limits);
 
     let entries = archive.entries().map_err(classify)?;
     let mut still_wanted: HashSet<&Name> = wanted.clone();
@@ -409,30 +382,7 @@ pub(crate) fn walk_matching(
             continue;
         }
 
-        let declared_size = entry.header().size().map_err(classify)?;
-        if declared_size > limits.repo_entry_bytes {
-            return Err(Error::LimitExceeded {
-                path: path.to_path_buf(),
-                limit: Limit::RepoEntry,
-                max: limits.repo_entry_bytes,
-            });
-        }
-
-        let ceiling = limits.repo_entry_bytes.saturating_add(1);
-        let mut buf = Vec::new();
-        (&mut entry).take(ceiling).read_to_end(&mut buf).map_err(classify)?;
-        if buf.len() as u64 > limits.repo_entry_bytes {
-            return Err(Error::LimitExceeded {
-                path: path.to_path_buf(),
-                limit: Limit::RepoEntry,
-                max: limits.repo_entry_bytes,
-            });
-        }
-
-        let text = String::from_utf8(buf).map_err(|error| Error::NotUtf8 {
-            path: path.to_path_buf(),
-            source: error.utf8_error(),
-        })?;
+        let text = read_member(&mut entry, path, &bounds, limits)?;
 
         check_file_list_length(path, &entry_name, &text, limits)?;
         on_item(entry_name, text)?;
@@ -443,6 +393,39 @@ pub(crate) fn walk_matching(
     }
 
     Ok(())
+}
+
+/// Reads one member whole, as text, refusing one larger than [`Limits::repo_entry_bytes`].
+///
+/// The size the header declares is tested first, so an oversized member is refused before it is
+/// read. The read stops one byte past the bound, which tells a member at the limit from one
+/// over it, whatever the header said.
+fn read_member(
+    entry: &mut tar::Entry<'_, BoundedReader<Decoder>>,
+    path: &Path,
+    bounds: &Bounds,
+    limits: &Limits,
+) -> Result<String> {
+    let classify = |source: std::io::Error| classify_io_error(path, source, bounds, limits);
+    let too_large = || Error::LimitExceeded {
+        path: path.to_path_buf(),
+        limit: Limit::RepoEntry,
+        max: limits.repo_entry_bytes,
+    };
+
+    if entry.header().size().map_err(classify)? > limits.repo_entry_bytes {
+        return Err(too_large());
+    }
+    let mut buf = Vec::new();
+    entry
+        .take(limits.repo_entry_bytes.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(classify)?;
+    if u64::try_from(buf.len()).unwrap_or(u64::MAX) > limits.repo_entry_bytes {
+        return Err(too_large());
+    }
+    String::from_utf8(buf)
+        .map_err(|error| Error::NotUtf8 { path: path.to_path_buf(), source: error.utf8_error() })
 }
 
 /// Refuses a `files` member with more lines than [`Limits::repo_entry_paths`].
@@ -505,45 +488,21 @@ fn sniff_file(file: &mut std::fs::File, path: &Path) -> Result<compression::Form
 
 /// Tells a genuine bound violation apart from an unrelated I/O or tar-format failure.
 ///
-/// `tar` propagates [`BoundedReader`]'s error as an opaque [`std::io::Error`]. So the shared
-/// `tripped` flag is what lets this be reported as [`Error::LimitExceeded`] rather than a generic
-/// parse failure. That flag is set only when the configured limit was actually exceeded.
+/// `tar` propagates [`BoundedReader`]'s error as an opaque [`std::io::Error`]. So `bounds` is
+/// what lets this be reported as [`Error::LimitExceeded`] rather than a generic parse failure.
 fn classify_io_error(
     path: &Path,
     source: std::io::Error,
-    tripped: &OnceLock<Limit>,
+    bounds: &Bounds,
     limits: &Limits,
 ) -> Error {
-    match tripped.get() {
-        Some(&limit) => {
-            Error::LimitExceeded { path: path.to_path_buf(), limit, max: limits.get(limit) }
-        }
+    match bounds.tripped() {
+        Some(_) => Error::LimitExceeded {
+            path: path.to_path_buf(),
+            limit: Limit::RepoInflated,
+            max: limits.repo_inflated_bytes,
+        },
         None => Error::io(path, IoAction::Read, source),
-    }
-}
-
-/// Wraps a [`Read`](std::io::Read) and fails once more than `limit` bytes have passed
-/// through it.
-///
-/// `alpm-compress::tarball::TarballReader` cannot be bounded this way: its field is
-/// concretely `Archive<CompressionDecoder>`, not generic over `Read`. Driving `tar::Archive`
-/// directly over this wrapper is why this module exists instead of using that type.
-struct BoundedReader {
-    inner: Decoder,
-    limit: u64,
-    read_so_far: u64,
-    tripped: Tripped,
-}
-
-impl std::io::Read for BoundedReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.read_so_far = self.read_so_far.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
-        if self.read_so_far > self.limit {
-            let _ = self.tripped.set(Limit::RepoInflated);
-            return Err(std::io::Error::other("decompressed size exceeded the configured limit"));
-        }
-        Ok(n)
     }
 }
 

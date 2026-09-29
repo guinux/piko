@@ -5,7 +5,7 @@
 //! themselves differ, because the two package types do, and live in [`crate::local::search`] and
 //! `repo::search`. [`hide_installed`] combines the two.
 
-use alpm_types::RelationOrSoname;
+use alpm_types::{Name, RelationOrSoname};
 
 use crate::glob::{Glob, is_pattern};
 use crate::local::{LocalDatabase, LocalPackage};
@@ -86,6 +86,77 @@ pub(crate) fn prepare<'q>(terms: impl IntoIterator<Item = &'q str>) -> Vec<Term>
         .map(str::to_lowercase)
         .map(|term| if is_pattern(&term) { Term::Glob(Glob::new(&term)) } else { Term::Text(term) })
         .collect()
+}
+
+/// Scores every package in `packages` against `terms`, returning only those that matched
+/// **every** term.
+///
+/// Comparisons are case-insensitive. Blank (or all-whitespace) terms are dropped. If nothing
+/// is left after that, nothing matches. That covers an empty `terms` and every term blank
+/// alike. "No term" is never treated as an automatic pass.
+///
+/// A term carrying `*`, `?` or `[` is a glob pattern. It is matched against the whole name,
+/// `%PROVIDES%` name or `%GROUPS%` entry. See [`MatchKind::Glob`]. Each package appears at most
+/// once, scored by the single highest [`MatchKind`] any one of its (all-matching) terms
+/// achieved. The AND requirement above already guarantees every term matched *something*, so
+/// this score is purely a ranking signal. A package that matches one term exactly stays ranked
+/// at [`MatchKind::ExactName`], even if a second term only matched its description. Results are
+/// sorted most-relevant-first, then by name to break ties deterministically.
+///
+/// `searchable` builds a package's `desc` text, or `None` when its `desc` cannot be read. It is
+/// called only when some term is not the package's exact name.
+pub(crate) fn rank<'a, 'q, P>(
+    packages: &'a [P],
+    terms: impl IntoIterator<Item = &'q str>,
+    name: impl Fn(&P) -> &Name,
+    searchable: impl Fn(&P) -> Option<Searchable>,
+) -> Vec<(&'a P, MatchKind)> {
+    let terms = prepare(terms);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut hits: Vec<(&'a P, MatchKind)> = packages
+        .iter()
+        .filter_map(|package| {
+            combined_match(name(package), || searchable(package), &terms)
+                .map(|kind| (package, kind))
+        })
+        .collect();
+
+    hits.sort_by(|(left, left_kind), (right, right_kind)| {
+        right_kind.cmp(left_kind).then_with(|| name(left).cmp(name(right)))
+    });
+    hits
+}
+
+/// The best [`MatchKind`] achieved across `terms`, if the package matches every one of them.
+///
+/// `terms` must be non-empty. Returns `None` as soon as any term fails to match at all, which
+/// is the AND requirement, without evaluating the remaining terms.
+///
+/// The package's own lowercased text is built **here**, once, rather than inside
+/// [`best_match`] per term. Matching is case-insensitive. The lowercasing covers the name,
+/// every `%PROVIDES%` entry, the description and every group. Doing it once per (package, term)
+/// pair would allocate `terms.len()` times more than the search needs. On the real `extra`
+/// repository (about 15 000 packages), a three-term search allocates a third as much this way.
+fn combined_match(
+    name: &Name,
+    searchable: impl FnOnce() -> Option<Searchable>,
+    terms: &[Term],
+) -> Option<MatchKind> {
+    let name = name.as_ref().to_lowercase();
+
+    // An exact name match outranks everything and needs nothing from `desc`. A search whose
+    // every term hits the name never builds a `Searchable`.
+    let searchable = if every_term_is_the_name(terms, &name) { None } else { searchable() };
+
+    let mut best: Option<MatchKind> = None;
+    for term in terms {
+        let kind = best_match(&name, searchable.as_ref(), term)?;
+        best = Some(best.map_or(kind, |current| current.max(kind)));
+    }
+    best
 }
 
 /// Whether every term in `terms` is the plain text `name`.

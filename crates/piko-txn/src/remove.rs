@@ -181,6 +181,15 @@ pub fn pacsave_rotation(existing_numbers: &[u32], plain_exists: bool) -> Vec<(St
     renames
 }
 
+/// The `N` of a `<name>.pacsave.N` file, from the text after `<name>.pacsave.`.
+///
+/// `None` unless the text is a `u32` that renders back to the same digits. `.pacsave.01` read as
+/// `1` would make the rotation rename `.pacsave.1` to `.pacsave.2` while `.pacsave.01` stayed
+/// put, leaving two files that claim one rank.
+pub(crate) fn pacsave_number(digits: &str) -> Option<u32> {
+    digits.parse::<u32>().ok().filter(|number| number.to_string() == digits)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

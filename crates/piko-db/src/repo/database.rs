@@ -5,6 +5,7 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
+    time::SystemTime,
 };
 
 use alpm_repo_db::files::RepoFilesV1;
@@ -13,7 +14,7 @@ use alpm_types::Name;
 use super::{
     archive::{self, ArchiveItem, SkipReason, Skipped},
     desc_compat,
-    files_arena::{FilesArena, Inserted},
+    files_arena::FilesArena,
     package::{FilesSource, RepoPackage},
     repo_name::RepoName,
     search::{self, SearchHit},
@@ -175,10 +176,36 @@ impl std::fmt::Display for RepoDiagnostic {
 ///     .limits(Limits::default())
 ///     .unknown_sections(UnknownSectionPolicy::Reject);
 /// ```
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct RepoOpenOptions {
     limits: Limits,
     unknown_sections: UnknownSectionPolicy,
+    check: Option<ArchiveCheck>,
+}
+
+/// A test run on a repository archive before any of its bytes are read.
+///
+/// It gets the path of the archive about to be read, and refuses it with an error of its own.
+/// The typical check is a signature check. An accepted archive comes back with the time the
+/// check can vouch it was made, a verified signature's creation time, or `None`. The database
+/// keeps it: see [`RepoDatabase::publication`].
+pub type ArchiveCheck = Arc<
+    dyn Fn(
+            &Path,
+        )
+            -> std::result::Result<Option<SystemTime>, Box<dyn std::error::Error + Send + Sync>>
+        + Send
+        + Sync,
+>;
+
+impl std::fmt::Debug for RepoOpenOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepoOpenOptions")
+            .field("limits", &self.limits)
+            .field("unknown_sections", &self.unknown_sections)
+            .field("check", &self.check.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 impl RepoOpenOptions {
@@ -200,6 +227,26 @@ impl RepoOpenOptions {
     pub const fn unknown_sections(mut self, policy: UnknownSectionPolicy) -> Self {
         self.unknown_sections = policy;
         self
+    }
+
+    /// Sets the test run on each archive before it is read.
+    ///
+    /// It covers every archive the database reads: the one opened, and a sibling `<repo>.files`
+    /// when its file lists are first asked for. libalpm validates a database when it registers
+    /// it, before it reads a package out of it (`be_sync.c:758`). A check here runs at the same
+    /// point, so the decompressor and the parsers never see bytes the check refuses.
+    #[must_use]
+    pub fn check(mut self, check: ArchiveCheck) -> Self {
+        self.check = Some(check);
+        self
+    }
+}
+
+/// Runs `check` on `path`, if there is one, and returns the time it vouched for.
+pub(super) fn run_check(check: Option<&ArchiveCheck>, path: &Path) -> Result<Option<SystemTime>> {
+    match check {
+        Some(check) => check(path).map_err(|source| Error::ArchiveRefused { source }),
+        None => Ok(None),
     }
 }
 
@@ -225,6 +272,8 @@ pub struct RepoDatabase {
     diagnostics_dropped: usize,
     /// The newest member modification time in the archive, recorded during the open.
     newest_member_time: Option<u64>,
+    /// The time the [`ArchiveCheck`] vouched for when it accepted the archive.
+    signed_at: Option<SystemTime>,
     /// The same `Arc` every [`RepoPackage`] in `packages` holds a clone of. Kept here too so
     /// [`Self::file_lists`] can recognise a package that was **not** produced by this
     /// database — see there.
@@ -308,19 +357,27 @@ impl RepoDatabase {
         repo: &RepoName,
         options: RepoOpenOptions,
     ) -> Result<Self> {
-        let dir = dir.as_ref();
-        let db_path = dir.join(format!("{repo}.db"));
-        let files_path = dir.join(format!("{repo}.files"));
+        let path = Self::locate(dir.as_ref(), repo)?;
+        Self::open_with(path, options)
+    }
 
-        // `open_with` on `db_path` already wires up `files_path` as a deferred source when
-        // it exists (see `sibling_files_path`). The only thing this adds is falling back to
-        // `.files` outright when `.db` is missing entirely.
-        let db_result = Self::open_with(&db_path, options);
-        let Err(Error::Io { action: IoAction::Open, source, .. }) = &db_result else {
-            return db_result;
+    /// The archive [`RepoDatabase::open_repo`] opens for `repo` in `dir`: `<repo>.db`, or
+    /// `<repo>.files` when `<repo>.db` does not exist.
+    ///
+    /// Only the presence of each is tested, with one `stat` each. Nothing is read.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if `<repo>.db` cannot be tested, or if neither archive exists. When neither
+    /// exists, the error names `<repo>.db`, as [`RepoDatabase::open_repo`] documents.
+    pub fn locate(dir: &Path, repo: &RepoName) -> Result<PathBuf> {
+        let db_path = dir.join(format!("{repo}.db"));
+        let db_error = match std::fs::metadata(&db_path) {
+            Ok(_) => return Ok(db_path),
+            Err(error) => error,
         };
-        if source.kind() != ErrorKind::NotFound {
-            return db_result;
+        if db_error.kind() != ErrorKind::NotFound {
+            return Err(Error::io(db_path, IoAction::Open, db_error));
         }
 
         // `.db` itself does not exist. Some repositories publish only the combined `.files`
@@ -328,14 +385,13 @@ impl RepoDatabase {
         // error rather than this one. `.db` is the name every caller actually asked for.
         // `.files` is an internal fallback the caller never requested. Blaming it makes a plain
         // "no such repository" read as if piko needed a file list just to search.
-        match Self::open_with(&files_path, options) {
-            Ok(database) => Ok(database),
-            Err(Error::Io { action: IoAction::Open, source: files_source, .. })
-                if files_source.kind() == ErrorKind::NotFound =>
-            {
-                db_result
+        let files_path = dir.join(format!("{repo}.files"));
+        match std::fs::metadata(&files_path) {
+            Ok(_) => Ok(files_path),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                Err(Error::io(db_path, IoAction::Open, db_error))
             }
-            Err(files_error) => Err(files_error),
+            Err(error) => Err(Error::io(files_path, IoAction::Open, error)),
         }
     }
 
@@ -351,6 +407,8 @@ impl RepoDatabase {
         options: RepoOpenOptions,
         deferred_files_path: Option<PathBuf>,
     ) -> Result<Self> {
+        let signed_at = run_check(options.check.as_ref(), path)?;
+
         let mut entries: Vec<StagedDesc> = Vec::new();
         let mut arena = FilesArena::new();
         let mut saw_files_member = false;
@@ -367,7 +425,7 @@ impl RepoDatabase {
             |item| {
                 handle_item(
                     item,
-                    options,
+                    &options,
                     &mut entries,
                     &mut arena,
                     &mut relations,
@@ -381,16 +439,23 @@ impl RepoDatabase {
 
         let mut diagnostics = diagnostics.into_inner();
 
-        entries.sort_by(|left, right| {
-            let (left, right) = (&left.entry, &right.entry);
-            left.name().cmp(right.name()).then_with(|| left.as_str().cmp(right.as_str()))
-        });
-        drop_duplicates(&mut entries, &mut diagnostics);
+        // A stable sort by name alone: of two entries of one name, the first in archive order
+        // stays first, and `drop_duplicates` keeps it, as the files arena does.
+        entries.sort_by(|left, right| left.entry.name().cmp(right.entry.name()));
+        crate::diagnostics::drop_duplicates(
+            &mut entries,
+            |staged| &staged.entry,
+            &mut diagnostics,
+            |name, kept, ignored| RepoDiagnostic::DuplicatePackage { name, kept, ignored },
+        );
 
         let (variant, files_source) = if saw_files_member {
             (Variant::DefaultWithFiles, FilesSource::preloaded(repo.clone(), options.limits, arena))
         } else if let Some(deferred) = deferred_files_path {
-            (Variant::Default, FilesSource::deferred(repo.clone(), deferred, options.limits))
+            (
+                Variant::Default,
+                FilesSource::deferred(repo.clone(), deferred, options.limits, options.check),
+            )
         } else {
             (Variant::Default, FilesSource::unavailable(repo.clone(), options.limits))
         };
@@ -413,6 +478,7 @@ impl RepoDatabase {
             diagnostics,
             diagnostics_dropped,
             newest_member_time,
+            signed_at,
             files_source,
         })
     }
@@ -448,6 +514,16 @@ impl RepoDatabase {
     #[must_use]
     pub const fn newest_member_time(&self) -> Option<u64> {
         self.newest_member_time
+    }
+
+    /// When this database was published, as [`crate::repo::freshness::Publication`] dates it.
+    ///
+    /// The signature time comes from the [`ArchiveCheck`] that accepted the archive, before it
+    /// was read. So it dates the same bytes the packages came from, with no second check. With
+    /// no check, or a check that vouched for no time, the newest member time dates it.
+    #[must_use]
+    pub fn publication(&self) -> Option<super::freshness::Publication> {
+        super::freshness::Publication::new(self.signed_at, self.newest_member_time)
     }
 
     /// Looks up a package by name.
@@ -600,7 +676,7 @@ struct StagedDesc {
 )]
 fn handle_item(
     item: ArchiveItem,
-    options: RepoOpenOptions,
+    options: &RepoOpenOptions,
     entries: &mut Vec<StagedDesc>,
     arena: &mut FilesArena,
     relations: &mut RelationBudget,
@@ -664,7 +740,9 @@ fn handle_item(
             *saw_files_member = true;
             match RepoFilesV1::from_str(&text) {
                 Ok(parsed) => {
-                    let inserted = arena.insert(
+                    // A second entry of one name is dropped here and reported once, by
+                    // `drop_duplicates`, which keeps the same entry.
+                    arena.insert(
                         archive_path,
                         entry.name().clone(),
                         entry.version().clone(),
@@ -672,15 +750,6 @@ fn handle_item(
                         options.limits.repo_inflated_bytes,
                         options.limits.repo_max_paths,
                     )?;
-                    if let Inserted::Duplicate { kept } = inserted {
-                        // `kept` comes back from the arena because only the arena knows which
-                        // entry won. `entry` here is always the one being discarded.
-                        diagnostics.borrow_mut().push(|| RepoDiagnostic::DuplicatePackage {
-                            name: entry.name().clone(),
-                            kept: format!("{}-{kept}", entry.name()),
-                            ignored: entry.as_str().to_owned(),
-                        });
-                    }
                 }
                 Err(source) => {
                     diagnostics.borrow_mut().push(|| RepoDiagnostic::InvalidFiles {
@@ -739,28 +808,6 @@ fn translate_skip(skipped: Skipped) -> RepoDiagnostic {
         SkipReason::NotARegularFile => RepoDiagnostic::NotARegularFile { path: skipped.path },
         SkipReason::Duplicate => RepoDiagnostic::DuplicateMember { path: skipped.path },
     }
-}
-
-/// Removes entries whose package name repeats, keeping the first of each run.
-///
-/// `entries` must already be sorted by name.
-fn drop_duplicates(entries: &mut Vec<StagedDesc>, diagnostics: &mut Sink<RepoDiagnostic>) {
-    let mut kept: Option<(Name, String)> = None;
-
-    entries.retain(|staged| match &kept {
-        Some((name, kept_entry)) if name == staged.entry.name() => {
-            diagnostics.push(|| RepoDiagnostic::DuplicatePackage {
-                name: name.clone(),
-                kept: kept_entry.clone(),
-                ignored: staged.entry.as_str().to_owned(),
-            });
-            false
-        }
-        _ => {
-            kept = Some((staged.entry.name().clone(), staged.entry.as_str().to_owned()));
-            true
-        }
-    });
 }
 
 #[cfg(test)]
@@ -865,6 +912,42 @@ mod tests {
         }
     }
 
+    /// With the higher version first in the archive, the `desc` side and the files arena keep
+    /// the same entry, the first in archive order. The kept package then reads its own file
+    /// list, and the pair is reported once.
+    #[test]
+    fn both_sides_keep_the_first_duplicate_in_archive_order() {
+        let fixture = RepoFixture::new();
+        let first = desc_text("foo", "2.0.0-1");
+        let second = desc_text("foo", "1.0.0-1");
+        let path = fixture.write_gzip_archive(
+            "core.files",
+            &[
+                ("foo-2.0.0-1/desc", first.as_bytes()),
+                ("foo-2.0.0-1/files", b"%FILES%\nusr/\nusr/bin/\n\n"),
+                ("foo-1.0.0-1/desc", second.as_bytes()),
+                ("foo-1.0.0-1/files", b"%FILES%\nusr/\n\n"),
+            ],
+        );
+
+        let db = RepoDatabase::open(&path).unwrap();
+
+        let foo = db.get(&"foo".parse().unwrap()).unwrap();
+        assert_eq!(foo.version().to_string(), "2.0.0-1");
+        assert_eq!(foo.file_list().unwrap().count(), 2, "the kept package reads its own files");
+        let duplicates: Vec<(&str, &str)> = db
+            .diagnostics()
+            .iter()
+            .filter_map(|diagnostic| match diagnostic {
+                RepoDiagnostic::DuplicatePackage { kept, ignored, .. } => {
+                    Some((kept.as_str(), ignored.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(duplicates, [("foo-2.0.0-1", "foo-1.0.0-1")]);
+    }
+
     #[test]
     fn nothing_is_dropped_when_diagnostics_stay_under_the_bound() {
         let fixture = RepoFixture::new();
@@ -901,5 +984,104 @@ mod tests {
         let db = RepoDatabase::open_repo(fixture.path(), &repo).unwrap();
 
         assert_eq!(db.len(), 1);
+    }
+
+    /// A check that refuses every archive whose name ends in `suffix`, and records every path
+    /// it was asked about.
+    fn refusing(suffix: &'static str) -> (ArchiveCheck, Arc<std::sync::Mutex<Vec<PathBuf>>>) {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = Arc::clone(&asked);
+        let check: ArchiveCheck = Arc::new(move |path: &Path| {
+            record.lock().unwrap().push(path.to_path_buf());
+            if path.to_string_lossy().ends_with(suffix) {
+                Err("refused by the test".into())
+            } else {
+                Ok(None)
+            }
+        });
+        (check, asked)
+    }
+
+    /// The archive is not a tar stream at all, so any read of it fails on the bytes. A refusal
+    /// is what comes back, so the check ran before the decompressor saw them.
+    #[test]
+    fn a_refused_archive_is_never_read() {
+        let fixture = RepoFixture::new();
+        let path = fixture.path().join("core.db");
+        std::fs::write(&path, b"not an archive").unwrap();
+        let (check, asked) = refusing(".db");
+
+        let repo = RepoName::parse("core").unwrap();
+        let error = RepoDatabase::open_repo_with(
+            fixture.path(),
+            &repo,
+            RepoOpenOptions::new().check(check),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::ArchiveRefused { .. }), "got {error:?}");
+        assert_eq!(error.to_string(), "refused by the test");
+        assert_eq!(*asked.lock().unwrap(), [path]);
+    }
+
+    /// The `.files`-only fallback is the archive read, so it is the one checked.
+    #[test]
+    fn the_files_fallback_is_checked_before_it_is_read() {
+        let fixture = RepoFixture::new();
+        let path = fixture.path().join("core.files");
+        std::fs::write(&path, b"not an archive").unwrap();
+        let (check, asked) = refusing(".files");
+
+        let repo = RepoName::parse("core").unwrap();
+        let error = RepoDatabase::open_repo_with(
+            fixture.path(),
+            &repo,
+            RepoOpenOptions::new().check(check),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::ArchiveRefused { .. }), "got {error:?}");
+        assert_eq!(*asked.lock().unwrap(), [path]);
+    }
+
+    /// The sibling `.files` is read later than the `.db`, on the first file-list request. It is
+    /// checked then, on both ways in, and the open itself does not check it.
+    #[test]
+    fn the_files_sibling_is_checked_when_its_file_lists_are_first_read() {
+        let fixture = RepoFixture::new();
+        let db_path = archive_of(&fixture, "core.db", &[("foo", "1.0.0-1")]);
+        let files_path = fixture.path().join("core.files");
+        std::fs::write(&files_path, b"not an archive").unwrap();
+        let (check, asked) = refusing(".files");
+
+        let db = RepoDatabase::open_with(&db_path, RepoOpenOptions::new().check(check)).unwrap();
+        assert_eq!(*asked.lock().unwrap(), std::slice::from_ref(&db_path));
+
+        let package = db.get_str("foo").unwrap();
+        let batch = db.file_lists([package]);
+        let Some((_, Err(error))) = batch.first() else { panic!("got {batch:?}") };
+        assert!(matches!(**error, Error::ArchiveRefused { .. }), "got {error:?}");
+
+        let Err(error) = package.file_list() else { panic!("a refused archive was read") };
+        assert!(matches!(*error, Error::ArchiveRefused { .. }), "got {error:?}");
+
+        assert_eq!(*asked.lock().unwrap(), [db_path, files_path.clone(), files_path]);
+    }
+
+    /// With no `<repo>.db`, [`RepoDatabase::locate`] names `<repo>.files`; with neither, the
+    /// error names `<repo>.db`.
+    #[test]
+    fn locate_prefers_db_then_files() {
+        let fixture = RepoFixture::new();
+        let repo = RepoName::parse("core").unwrap();
+
+        let error = RepoDatabase::locate(fixture.path(), &repo).unwrap_err();
+        assert!(error.to_string().ends_with("core.db"), "got {error}");
+
+        let files = archive_of(&fixture, "core.files", &[("foo", "1.0.0-1")]);
+        assert_eq!(RepoDatabase::locate(fixture.path(), &repo).unwrap(), files);
+
+        let db = archive_of(&fixture, "core.db", &[("foo", "1.0.0-1")]);
+        assert_eq!(RepoDatabase::locate(fixture.path(), &repo).unwrap(), db);
     }
 }

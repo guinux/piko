@@ -313,6 +313,53 @@ impl Resolved {
     pub fn name(&self) -> &OsStr {
         &self.name
     }
+
+    /// [`Self::name`] with `suffix` appended: the name of a file beside it, such as its
+    /// `.pacnew`.
+    pub(crate) fn with_suffix(&self, suffix: &str) -> OsString {
+        let mut joined = self.name.clone();
+        joined.push(suffix);
+        joined
+    }
+
+    /// The names in [`Self::dir`], without `.` and `..`, read through the descriptor.
+    ///
+    /// The bound fires while the entries arrive, so an oversized directory costs the bound
+    /// rather than the whole listing.
+    ///
+    /// # Errors
+    ///
+    /// The reason, as text, if the directory cannot be read or holds more than `max_entries`
+    /// entries.
+    pub(crate) fn list_directory(
+        &self,
+        max_entries: usize,
+    ) -> std::result::Result<std::collections::BTreeSet<OsString>, String> {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let handle = rustix::fs::openat(
+            &self.dir,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|source| source.to_string())?;
+
+        let mut names = std::collections::BTreeSet::new();
+        let mut seen = 0_usize;
+        for entry in rustix::fs::Dir::read_from(&handle).map_err(|source| source.to_string())? {
+            let entry = entry.map_err(|source| source.to_string())?;
+            seen = seen.saturating_add(1);
+            if seen > max_entries {
+                return Err(format!("it holds more than {max_entries} entries"));
+            }
+            let name = OsStr::from_bytes(entry.file_name().to_bytes());
+            if name != "." && name != ".." {
+                names.insert(name.to_os_string());
+            }
+        }
+        Ok(names)
+    }
 }
 
 #[cfg(test)]

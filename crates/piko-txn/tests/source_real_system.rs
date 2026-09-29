@@ -33,7 +33,7 @@ fn configured_cache_dirs() -> Option<Vec<PathBuf>> {
             return None;
         }
     };
-    let dirs = config.options.cache_dirs.clone();
+    let dirs = config.options.cache_dirs;
     if dirs.iter().all(|dir| !dir.is_dir()) {
         eprintln!("skipping: no configured CacheDir exists: {dirs:?}");
         return None;
@@ -76,7 +76,7 @@ fn every_cached_package_is_locatable() {
         return;
     }
 
-    let source = CacheDirSource::new(dirs.clone()).unwrap();
+    let source = CacheDirSource::new(dirs).unwrap();
     let mut failures = Vec::new();
 
     for (file_name, path) in &cached {

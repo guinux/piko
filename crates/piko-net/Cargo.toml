@@ -23,11 +23,13 @@ piko-db.workspace = true
 piko-db-write.workspace = true
 piko-sig.workspace = true
 thiserror.workspace = true
+# The calendar arithmetic of an HTTP date.
+time.workspace = true
 landlock.workspace = true
 libseccomp.workspace = true
 nix = { version = "0.31", default-features = false, features = ["user"] }
 rustix = { workspace = true, features = ["process", "thread"] }
-ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+ureq.workspace = true
 
 [dev-dependencies]
 # A refresh dates what it downloads by reading it as a repository archive, so a test mirror has

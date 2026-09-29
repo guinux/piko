@@ -344,8 +344,14 @@ pub fn read_trusted_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> 
     decode(path, read_open(file, &metadata, path, limit, max)?)
 }
 
-/// Reads `path` in full as UTF-8, **following a final symlink**, as
-/// [`read_capped_utf8_following`] does, and refuses a file another user could change.
+/// Reads `path` in full as UTF-8, **following a final symlink**, and refuses a file another
+/// user could change.
+///
+/// This is the door for alpm `.hook` files. `alpm-hooks(5)` documents disabling a hook by
+/// shadowing it with a symlink to `/dev/null`, so refusing to follow the link would break the
+/// feature instead of protecting anything. A hook directory is host configuration named by
+/// `pacman.conf`, not a package-controlled entry directory. The rest of the door is unchanged:
+/// `O_NONBLOCK`, an `fstat` that refuses anything but a regular file, and a bounded read.
 ///
 /// Only the file is tested, on its descriptor: the one the link resolves to. The directory
 /// holding the link is the caller's to test, with [`ensure_trusted_directory`], once for every
@@ -358,8 +364,9 @@ pub fn read_trusted_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> 
 ///
 /// # Errors
 ///
-/// As [`read_capped_utf8_following`], plus [`Error::Untrusted`] naming the file if it fails
-/// [`distrust`].
+/// As `read_capped`, except that a final symlink is resolved rather than refused. Also
+/// [`Error::NotUtf8`] if the contents are not valid UTF-8, and [`Error::Untrusted`] naming the
+/// file if it fails [`distrust`].
 pub fn read_trusted_file_utf8_following(path: &Path, limit: Limit, max: u64) -> Result<String> {
     let file = open_following_symlinks(path)?;
     let metadata = ensure_regular_file(&file, path)?;
@@ -379,32 +386,9 @@ pub fn read_capped_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
     decode(path, bytes)
 }
 
-/// Reads `path` in full and decodes it as UTF-8, **following a final symlink**.
-///
-/// Exposes the `open_following_symlinks` door for alpm `.hook` files. `alpm-hooks(5)` documents
-/// disabling a hook by shadowing it with a symlink to `/dev/null`. Refusing to follow that
-/// symlink would break the feature instead of protecting anything. A hook directory is host
-/// configuration named by `pacman.conf`, not a package-controlled entry directory. And the file
-/// is one of an enumerated set whose whole population is trusted the same way.
-///
-/// The rest of the door is unchanged: `O_NONBLOCK`, an `fstat` that refuses anything but a
-/// regular file, and a bounded read. A FIFO planted in a hook directory still cannot hang the
-/// process. The caller distinguishes [`Error::NotARegularFile`] and decides what a non-file
-/// means for it. For hooks it means "no content", exactly what `/dev/null` would have
-/// yielded.
-///
-/// # Errors
-///
-/// As `read_capped`, except that a final symlink is resolved rather than refused.
-pub fn read_capped_utf8_following(path: &Path, limit: Limit, max: u64) -> Result<String> {
-    let bytes = read_capped_following(path, limit, max)?;
-    decode(path, bytes)
-}
-
 /// Reads `path` in full as bytes, **following a final symlink**.
 ///
-/// The bytes counterpart of [`read_capped_utf8_following`], for a file whose contents are
-/// paths rather than text. The kernel's mount table is that case. `/etc/mtab` is a symlink to
+/// For a file whose contents are paths rather than text. The kernel's mount table is that case. `/etc/mtab` is a symlink to
 /// `/proc/self/mounts`, and a mount directory is a byte string the filesystem never promised
 /// would decode as UTF-8. Refusing the whole table over one such directory would disable the
 /// disk-space check on the system that needs it.

@@ -88,7 +88,7 @@ fn parse(contents: &str) -> std::result::Result<u32, SchemaVersionError> {
     let trimmed = contents.trim();
     let found = trimmed
         .parse::<u32>()
-        .map_err(|_| SchemaVersionError::Malformed { contents: truncate(trimmed) })?;
+        .map_err(|_| SchemaVersionError::Malformed { contents: crate::excerpt(trimmed) })?;
 
     if found == ALPM_DB_VERSION {
         Ok(found)
@@ -116,18 +116,6 @@ pub fn root_is_unpopulated(root: &Path) -> Result<bool> {
         Ok(mut entries) => Ok(entries.next().is_none()),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(source) => Err(Error::io(root, IoAction::ReadDir, source)),
-    }
-}
-
-/// Shortens untrusted contents so a hostile file cannot flood an error message.
-fn truncate(contents: &str) -> String {
-    const MAX: usize = 32;
-    match contents.char_indices().nth(MAX) {
-        Some((index, _)) => {
-            let head = contents.get(..index).unwrap_or_default();
-            format!("{head}…")
-        }
-        None => contents.to_owned(),
     }
 }
 
@@ -183,7 +171,7 @@ mod tests {
     #[test]
     fn truncate_is_char_boundary_safe() {
         let text = "é".repeat(100);
-        assert!(truncate(&text).ends_with('…'));
+        assert!(crate::excerpt(&text).ends_with('…'));
     }
 
     #[test]

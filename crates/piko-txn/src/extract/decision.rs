@@ -222,9 +222,8 @@ pub fn resolve_backup(
     original: Option<&str>,
     pacnew_is_new: bool,
 ) -> BackupAction {
-    // This uses `a.is_some() && a == b` rather than a let-chain: let-chains are stable only
-    // from Rust 1.88, and the workspace MSRV is 1.85. The guard is load-bearing either way. It
-    // stops two *unreadable* files (both `None`) from comparing equal.
+    // The `is_some()` guard is load-bearing. It stops two *unreadable* files (both `None`) from
+    // comparing equal.
     if local.is_some() && local == packaged {
         // The user already has exactly this content. libalpm still installs, to get the
         // timestamps right. The rename is harmless because the bytes are identical.

@@ -52,9 +52,10 @@ pub(crate) struct Relations {
     pub(crate) replaces: Box<[PackageRelation]>,
     /// `%GROUPS%`.
     pub(crate) groups: Box<[Group]>,
-    /// Where `%DEPENDS%` lives in the scanned text, as a `(start, end)` byte range, when it
-    /// was deferred. `None` means it was parsed into `depends`, or the section was absent.
-    pub(crate) depends_text: Option<(usize, usize)>,
+    /// Where `%DEPENDS%` lives in the scanned text, as one `(start, end)` byte range per
+    /// section, when it was deferred. Empty means it was parsed into `depends`, or the section
+    /// was absent.
+    pub(crate) depends_text: Box<[(usize, usize)]>,
 }
 
 /// Whether [`scan`] converts `%DEPENDS%` or only records where it is.
@@ -262,6 +263,11 @@ impl<'a> Section<'a> {
 /// Walks `text` once, collecting the relation sections and handing every other section's
 /// value lines to `other` as `(keyword, line)`.
 ///
+/// This is libalpm's reader (`be_sync.c:595`, `be_local.c`). A section's values run to the
+/// first blank line (`READ_AND_STORE_ALL`). A line after it and before the next header belongs
+/// to no section and is skipped. A section that appears twice adds to the first, as
+/// `alpm_list_add` does. A header is what `desc_compat::section_keyword` reads as one.
+///
 /// `text` is the *filtered* text. [`crate::desc_compat::filter_unknown_sections`] has already
 /// removed the unknown sections. So a keyword reaching `other` is one this build knows but
 /// this module does not read.
@@ -283,7 +289,7 @@ pub(crate) fn scan<'a>(
     mut other: impl FnMut(&'a str, &'a str) -> Result<(), DescFieldError>,
 ) -> Result<Relations, ScanError> {
     let mut depends = Vec::new();
-    let mut depends_text: Option<(usize, usize)> = None;
+    let mut depends_text: Vec<(usize, usize)> = Vec::new();
     // Byte offsets into `text`, so a deferred `%DEPENDS%` can be re-read without a second
     // scan of the whole entry. `str::lines` yields borrowed slices of `text`, so each line's
     // offset is recoverable from its pointer without tracking a running counter.
@@ -298,17 +304,18 @@ pub(crate) fn scan<'a>(
     let mut section = Section::None;
 
     for line in text.lines() {
-        if let Some(keyword) = line.strip_prefix('%').and_then(|rest| rest.strip_suffix('%')) {
+        if let Some(keyword) = crate::desc_compat::section_keyword(line) {
             section = Section::classify(keyword);
             if section == Section::Depends && depends_mode == Depends::Deferred {
                 // The section body starts on the next line; its end is fixed up by every
                 // subsequent line that still belongs to it.
                 let start = offset_of(line).saturating_add(line.len());
-                depends_text = Some((start, start));
+                depends_text.push((start, start));
             }
             continue;
         }
         if line.is_empty() {
+            section = Section::None;
             continue;
         }
 
@@ -326,7 +333,7 @@ pub(crate) fn scan<'a>(
 
         match section {
             Section::Depends if depends_mode == Depends::Deferred => {
-                if let Some(range) = depends_text.as_mut() {
+                if let Some(range) = depends_text.last_mut() {
                     range.1 = offset_of(line).saturating_add(line.len());
                 }
             }
@@ -350,13 +357,14 @@ pub(crate) fn scan<'a>(
         conflicts: conflicts.into_boxed_slice(),
         replaces: replaces.into_boxed_slice(),
         groups: groups.into_boxed_slice(),
-        depends_text,
+        depends_text: depends_text.into_boxed_slice(),
     })
 }
 
 /// Converts a `%DEPENDS%` section that [`scan`] deferred.
 ///
-/// `text` is the same text that was scanned, and `range` the `(start, end)` [`scan`] recorded.
+/// `text` is the same text that was scanned, and `ranges` the `(start, end)` ranges [`scan`]
+/// recorded, one per `%DEPENDS%` section, in order.
 ///
 /// # Errors
 ///
@@ -364,17 +372,17 @@ pub(crate) fn scan<'a>(
 /// the same parser, that an eager scan would have reported at open time.
 pub(crate) fn parse_depends(
     text: &str,
-    range: Option<(usize, usize)>,
+    ranges: &[(usize, usize)],
 ) -> Result<Box<[RelationOrSoname]>, DescFieldError> {
-    let Some((start, end)) = range else { return Ok(Box::default()) };
-    let Some(section) = text.get(start..end) else { return Ok(Box::default()) };
-
     let mut depends = Vec::new();
-    for line in section.lines() {
-        if line.is_empty() {
-            continue;
+    for (start, end) in ranges {
+        let Some(section) = text.get(*start..*end) else { continue };
+        for line in section.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            depends.push(entry(line, "DEPENDS", relation_or_soname)?);
         }
-        depends.push(entry(line, "DEPENDS", relation_or_soname)?);
     }
     Ok(depends.into_boxed_slice())
 }
@@ -410,6 +418,45 @@ pub(crate) fn scalar<T: FromStr>(value: &str, section: &'static str) -> Result<T
 )]
 mod tests {
     use super::*;
+
+    /// `%DEPENDS%` of `text`, read the way `mode` reads it.
+    fn depends_of(text: &str, mode: Depends) -> Vec<String> {
+        let relations = scan(text, mode, None, |_, _| Ok(())).unwrap();
+        let depends = match mode {
+            Depends::Eager => relations.depends,
+            Depends::Deferred => parse_depends(text, &relations.depends_text).unwrap(),
+        };
+        depends.iter().map(ToString::to_string).collect()
+    }
+
+    /// A section's values run to the first blank line, as `READ_AND_STORE_ALL` reads them. A
+    /// line after it and before the next header belongs to no section.
+    #[test]
+    fn a_blank_line_ends_a_section() {
+        let text = "%DEPENDS%\nfoo\n\nbar\n\n%PROVIDES%\nbaz\n";
+        for mode in [Depends::Eager, Depends::Deferred] {
+            assert_eq!(depends_of(text, mode), ["foo"], "{mode:?}");
+        }
+    }
+
+    /// A section that appears twice adds to the first, as `alpm_list_add` does, whether the
+    /// section is converted during the scan or deferred.
+    #[test]
+    fn a_repeated_section_adds_to_the_first() {
+        let text = "%DEPENDS%\nfoo\n\n%PROVIDES%\nbaz\n\n%DEPENDS%\nbar\n";
+        for mode in [Depends::Eager, Depends::Deferred] {
+            assert_eq!(depends_of(text, mode), ["foo", "bar"], "{mode:?}");
+        }
+    }
+
+    /// A header is what `desc_compat::section_keyword` reads as one. `%A%B%` is not, so it is
+    /// not a header here either, and it does not end the section before it.
+    #[test]
+    fn a_header_is_read_as_the_text_filters_read_it() {
+        let text = "%GROUPS%\nbase\n%A%B%\n\n%DEPENDS%\nfoo\n";
+        let relations = scan(text, Depends::Eager, None, |_, _| Ok(())).unwrap();
+        assert_eq!(relations.groups.as_ref(), ["base".to_owned(), "%A%B%".to_owned()]);
+    }
 
     /// The screen must not change which variant a value parses into. This is the property the
     /// whole optimisation rests on, so it is asserted per variant rather than in aggregate.

@@ -11,7 +11,9 @@
 //! diagnostics and counts the rest. The count is surfaced through `diagnostics_dropped`
 //! rather than hidden, so a caller cannot mistake a truncated result for a complete one.
 
-use crate::limits::Limits;
+use alpm_types::Name;
+
+use crate::{entry_name::EntryName, limits::Limits};
 
 /// Collects at most [`Limits::max_diagnostics`] items, counting the overflow.
 #[derive(Debug)]
@@ -59,6 +61,34 @@ impl<T> Sink<T> {
     pub(crate) fn as_slice(&self) -> &[T] {
         &self.collected
     }
+}
+
+/// Removes the items whose package name repeats, keeping the first of each run.
+///
+/// `items` must already be sorted by name. Each item removed is reported through `duplicate`,
+/// with the name, the entry kept and the entry ignored.
+pub(crate) fn drop_duplicates<T, D>(
+    items: &mut Vec<T>,
+    entry: impl Fn(&T) -> &EntryName,
+    diagnostics: &mut Sink<D>,
+    duplicate: impl Fn(Name, String, String) -> D,
+) {
+    let mut kept: Option<(Name, String)> = None;
+    items.retain(|item| {
+        let entry = entry(item);
+        match &kept {
+            Some((name, kept_entry)) if name == entry.name() => {
+                diagnostics.push(|| {
+                    duplicate(name.clone(), kept_entry.clone(), entry.as_str().to_owned())
+                });
+                false
+            }
+            _ => {
+                kept = Some((entry.name().clone(), entry.as_str().to_owned()));
+                true
+            }
+        }
+    });
 }
 
 #[cfg(test)]

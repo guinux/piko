@@ -5,7 +5,7 @@
 //! to, and whether a keyring is needed at all. [`RefreshTargets`] makes them, so a second
 //! frontend refreshes what `piko refresh` refreshes and checks what it checks.
 
-use piko_db::config::{PacmanConfig, RepositoryConfig};
+use piko_db::config::{DbUsage, PacmanConfig, RepositoryConfig};
 use piko_sig::{Keyring, Policy};
 
 use crate::{DatabaseKind, Error, FreshnessPolicy, RepoRefresh, Result};
@@ -17,6 +17,7 @@ pub struct RefreshTargets<'a> {
     requests: Vec<RepoRefresh<'a>>,
     keyring: Option<Keyring>,
     unknown: Vec<String>,
+    unsynced: Vec<&'a str>,
 }
 
 impl<'a> RefreshTargets<'a> {
@@ -27,6 +28,10 @@ impl<'a> RefreshTargets<'a> {
     /// [`RefreshTargets::unknown`] lists the names no section configures. `files` adds each
     /// selected repository's `<repo>.files` beside its `<repo>.db`. The two sit next to each
     /// other, so a caller's output reads repository by repository.
+    ///
+    /// A repository whose `Usage` does not include `Sync` is never refreshed, as
+    /// `alpm_db_update` skips it (`be_sync.c:174`). [`RefreshTargets::unsynced`] lists the
+    /// selected repositories skipped so.
     ///
     /// Each archive is held to its repository's effective database policy
     /// ([`RepositoryConfig::effective_sig_level`]), never to the raw `sig_level` field, which
@@ -49,10 +54,12 @@ impl<'a> RefreshTargets<'a> {
         let global = config.options.sig_level;
         let kinds: &[DatabaseKind] =
             if files { &[DatabaseKind::Db, DatabaseKind::Files] } else { &[DatabaseKind::Db] };
-        let requests = config
-            .repositories
-            .iter()
+        let (selected, unsynced): (Vec<&'a RepositoryConfig>, Vec<&'a RepositoryConfig>) = config
+            .registered_repositories()
             .filter(|repo| only.is_empty() || only.iter().any(|name| name == repo.name.as_str()))
+            .partition(|repo| repo.usage.contains(DbUsage::SYNC));
+        let requests = selected
+            .into_iter()
             .flat_map(|repo| {
                 kinds.iter().map(move |kind| RepoRefresh {
                     name: repo.name.as_str(),
@@ -73,11 +80,15 @@ impl<'a> RefreshTargets<'a> {
         };
         let unknown = only
             .iter()
-            .filter(|name| !config.repositories.iter().any(|repo| repo.name.as_str() == *name))
+            .filter(|name| {
+                !config.registered_repositories().any(|repo| repo.name.as_str() == *name)
+            })
             .cloned()
             .collect();
 
-        Ok(Self { requests, keyring, unknown })
+        let unsynced = unsynced.into_iter().map(|repo| repo.name.as_str()).collect();
+
+        Ok(Self { requests, keyring, unknown, unsynced })
     }
 
     /// One request per archive, in the order a caller should report them.
@@ -97,6 +108,13 @@ impl<'a> RefreshTargets<'a> {
     #[must_use]
     pub fn unknown(&self) -> &[String] {
         &self.unknown
+    }
+
+    /// The selected repositories left out because their `Usage` does not include `Sync`, in
+    /// priority order.
+    #[must_use]
+    pub fn unsynced(&self) -> &[&'a str] {
+        &self.unsynced
     }
 }
 
@@ -123,10 +141,11 @@ mod tests {
         PacmanConfig::open(&path).unwrap()
     }
 
-    /// Three repositories that ask for no signature, and a keyring directory that does not
-    /// exist.
+    /// Three repositories that ask for no signature, and a `GPGDir` that is a file, not
+    /// a keyring.
     fn unsigned(dir: &Path) -> PacmanConfig {
-        let missing = dir.join("no-keyring");
+        let not_a_keyring = dir.join("not-a-keyring");
+        std::fs::write(&not_a_keyring, "").unwrap();
         config(
             dir,
             &format!(
@@ -134,7 +153,7 @@ mod tests {
                  [core]\nServer = https://example.invalid/core\n\
                  [extra]\nServer = https://example.invalid/extra\n\
                  [multilib]\nServer = https://example.invalid/multilib\n",
-                missing.display()
+                not_a_keyring.display()
             ),
         )
     }
@@ -186,6 +205,48 @@ mod tests {
         assert_eq!(targets.unknown(), ["testing"]);
     }
 
+    /// A repository whose `Usage` leaves out `Sync` is not refreshed, named or not, and is
+    /// reported as left out.
+    #[test]
+    fn a_repository_without_sync_usage_is_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(
+            dir.path(),
+            "[options]\nSigLevel = Never\n\
+             [core]\nServer = https://example.invalid/core\n\
+             [local-mirror]\nUsage = Install Upgrade\nServer = https://example.invalid/mirror\n",
+        );
+
+        let all = RefreshTargets::new(&config, &[], false, freshness()).unwrap();
+        assert_eq!(selected(&all), ["core.db"]);
+        assert_eq!(all.unsynced(), ["local-mirror"]);
+
+        let only = ["local-mirror".to_owned()];
+        let named = RefreshTargets::new(&config, &only, false, freshness()).unwrap();
+        assert!(selected(&named).is_empty());
+        assert_eq!(named.unsynced(), ["local-mirror"]);
+        assert!(named.unknown().is_empty());
+    }
+
+    /// A second `[core]` is not refreshed: its first section is the one pacman registers. A
+    /// batch naming `core.db` twice would be refused whole.
+    #[test]
+    fn a_duplicate_section_is_refreshed_once_from_its_first_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(
+            dir.path(),
+            "[options]\nSigLevel = Never\n\
+             [core]\nServer = https://a.invalid/core\n\
+             [core]\nServer = https://b.invalid/core\n\
+             [local]\nServer = https://c.invalid/local\n",
+        );
+
+        let targets = RefreshTargets::new(&config, &[], false, freshness()).unwrap();
+
+        assert_eq!(selected(&targets), ["core.db"]);
+        assert_eq!(targets.requests().first().unwrap().servers, ["https://a.invalid/core"]);
+    }
+
     /// `--files` adds each `.files` beside its `.db`, so the output reads repository by
     /// repository.
     #[test]
@@ -211,18 +272,19 @@ mod tests {
         assert!(targets.requests().iter().all(|request| !request.policy.check));
     }
 
-    /// One repository that asks for a signature is enough to need the keyring. A missing one
+    /// One repository that asks for a signature is enough to need the keyring. An unusable one
     /// is then an error, never a silent pass.
     #[test]
     fn a_repository_asking_for_a_check_needs_a_usable_keyring() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("no-keyring");
+        let not_a_keyring = dir.path().join("not-a-keyring");
+        std::fs::write(&not_a_keyring, "").unwrap();
         let config = config(
             dir.path(),
             &format!(
                 "[options]\nSigLevel = Never\nGPGDir = {}\n\
                  [core]\nSigLevel = DatabaseRequired\nServer = https://example.invalid/core\n",
-                missing.display()
+                not_a_keyring.display()
             ),
         );
 
@@ -235,14 +297,15 @@ mod tests {
     #[test]
     fn a_repository_that_is_not_selected_does_not_need_the_keyring() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("no-keyring");
+        let not_a_keyring = dir.path().join("not-a-keyring");
+        std::fs::write(&not_a_keyring, "").unwrap();
         let config = config(
             dir.path(),
             &format!(
                 "[options]\nSigLevel = Never\nGPGDir = {}\n\
                  [core]\nServer = https://example.invalid/core\n\
                  [extra]\nSigLevel = DatabaseRequired\nServer = https://example.invalid/extra\n",
-                missing.display()
+                not_a_keyring.display()
             ),
         );
 
@@ -259,13 +322,14 @@ mod tests {
     #[test]
     fn a_repository_with_no_sig_level_inherits_the_global_one() {
         let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("no-keyring");
+        let not_a_keyring = dir.path().join("not-a-keyring");
+        std::fs::write(&not_a_keyring, "").unwrap();
         let config = config(
             dir.path(),
             &format!(
                 "[options]\nSigLevel = Required DatabaseRequired\nGPGDir = {}\n\
                  [core]\nServer = https://example.invalid/core\n",
-                missing.display()
+                not_a_keyring.display()
             ),
         );
 

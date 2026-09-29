@@ -24,7 +24,7 @@ use piko_db::LocalDatabase;
 use piko_txn::{
     merge::{
         self, Action, BaseContents, BaseLimits, DEFAULT_DIFFPROG, DEFAULT_MERGEPROG, Invocation,
-        Outcome, Pending, PendingKind, ScanLimits, Verdict,
+        Outcome, Pending, ScanLimits, Verdict,
     },
     rootfs::RootDir,
 };
@@ -178,7 +178,7 @@ fn resolve_all(
     let mut failed = false;
 
     for entry in pending {
-        if let PendingKind::NumberedPacsave(_) = entry.kind {
+        if !entry.kind.is_mergeable() {
             // A historical copy with no current version to merge it against. `pacdiff`
             // collects these and warns once at the end; so does this.
             numbered.push(piko_db::printable_path(&root.join(&entry.pacfile)));

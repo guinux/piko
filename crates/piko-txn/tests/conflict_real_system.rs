@@ -94,7 +94,6 @@ fn check(
     removals: &[String],
 ) -> conflict::Check {
     conflict::check(root, local, targets, removals, &Overwrite::default(), &WalkLimits::default())
-        .unwrap()
 }
 
 /// The gate: reinstalling what is already installed must never report a conflict.

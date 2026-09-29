@@ -230,6 +230,20 @@ pub enum Error {
         source: SharedError,
     },
 
+    /// An installed package's `desc` could not be read while checking for updates.
+    ///
+    /// Read only when `IgnoreGroup` is set, to test the installed package's own `%GROUPS%`.
+    /// An unreadable entry cannot be told apart from one outside every ignored group, so the
+    /// check refuses rather than guesses.
+    #[error("failed to read the installed package {name}")]
+    UpdateLocalDescUnreadable {
+        /// The installed package whose `desc` could not be read.
+        name: Name,
+        /// The underlying failure.
+        #[source]
+        source: SharedError,
+    },
+
     /// A repository candidate's `%DEPENDS%` could not be converted while planning.
     ///
     /// Fatal for the same reason [`Self::PlanLocalDescUnreadable`] is. A candidate whose
@@ -340,6 +354,16 @@ pub enum Error {
     UnrecognisedArchiveName {
         /// The archive path with the unrecognised name.
         path: PathBuf,
+    },
+
+    /// The caller's [`ArchiveCheck`](crate::repo::ArchiveCheck) refused an archive, so nothing
+    /// was read from it.
+    ///
+    /// Transparent: the refusal is the caller's own error, which names the archive and says why.
+    #[error(transparent)]
+    ArchiveRefused {
+        /// The refusal, as the check returned it.
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     /// A repository archive uses a compression format piko does not decode.
@@ -464,6 +488,28 @@ pub enum Error {
         value: String,
         /// Why the value was rejected.
         reason: String,
+    },
+
+    /// A `RootDir`, `DBPath` or `GPGDir` value that `realpath` cannot resolve: it does not
+    /// exist, or a component on the way cannot be read.
+    ///
+    /// Mirrors `conf.c`'s `"failed to resolve path '%s' passed to '%s'"`.
+    #[error(
+        "{} line {line}: failed to resolve path '{value}' passed to '{directive}': {source}",
+        path.display()
+    )]
+    ConfigPathUnresolved {
+        /// The config file being parsed.
+        path: PathBuf,
+        /// The 1-based line number of the offending directive.
+        line: usize,
+        /// The directive name, e.g. `RootDir`.
+        directive: String,
+        /// The value that could not be resolved.
+        value: String,
+        /// Why `realpath` failed.
+        #[source]
+        source: std::io::Error,
     },
 
     /// An `Include` chain nested more than 10 levels deep.

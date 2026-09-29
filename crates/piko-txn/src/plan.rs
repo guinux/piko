@@ -116,7 +116,7 @@ impl TransactionPlan {
     /// # Errors
     ///
     /// [`Error::PlanInconsistent`], [`Error::NoRepositoryCandidate`],
-    /// [`Error::RepositoryPackageUnreadable`], or [`Error::InvalidEntryName`] if `built` and
+    /// or [`Error::RepositoryPackageUnreadable`] if `built` and
     /// `universe` disagree about what a step names. This should not happen, since `built` was
     /// assembled from `universe`. It is checked rather than assumed.
     /// [`Error::RepositoryPackageUnreadable`] also if a candidate's `desc` or `%DEPENDS%` cannot
@@ -177,7 +177,6 @@ impl TransactionPlan {
     ///
     /// [`Error::NotARemoval`] if a step installs or changes a package.
     /// [`Error::PlanInconsistent`] if a step names a package `universe` does not know.
-    /// [`Error::InvalidEntryName`] if a package's name and version form no entry name.
     pub fn from_removal(universe: &Universe<'_>, plan: &Plan, no_save: bool) -> Result<Self> {
         let mut entries = Vec::with_capacity(plan.steps().len());
         for step in plan.steps() {
@@ -187,13 +186,7 @@ impl TransactionPlan {
             let Some(solvable) = universe.get(*package) else {
                 return Err(Error::PlanInconsistent { id: *package });
             };
-            let entry = EntryName::new(solvable.name(), solvable.version()).map_err(|error| {
-                Error::InvalidEntryName {
-                    name: solvable.name().to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
-            entries.push(entry);
+            entries.push(solvable.entry().clone());
         }
         Ok(Self::removal(entries, no_save))
     }
@@ -202,15 +195,6 @@ impl TransactionPlan {
     #[must_use]
     pub fn steps(&self) -> &[Step] {
         &self.steps
-    }
-
-    /// Where each incoming repository package is downloaded from, keyed by cache file name.
-    ///
-    /// [`TransactionPlan::source`] downloads from these. A named file has no entry: nothing
-    /// downloads it.
-    #[must_use]
-    pub const fn download_targets(&self) -> &HashMap<String, DownloadTarget> {
-        &self.downloads
     }
 
     /// The package source this plan's transaction reads from.
@@ -301,8 +285,12 @@ fn install_steps(
                     no_save: false,
                 });
             }
-            SolveStep::Install { candidate, .. } => {
-                let reason = reason_for(*candidate, targets, reasons, None);
+            SolveStep::Install { candidate, reason } => {
+                let reason = match reasons {
+                    ReasonPolicy::AllDeps => PackageInstallReason::Depend,
+                    ReasonPolicy::AllExplicit => PackageInstallReason::Explicit,
+                    ReasonPolicy::AsResolved => *reason,
+                };
                 steps.push(Step::Install { package: file_name_of(universe, *candidate)?, reason });
             }
             SolveStep::Change { from, to, .. } => {
@@ -330,20 +318,19 @@ fn install_steps(
 fn expectations(universe: &Universe<'_>, built: &Plan) -> Result<HashMap<String, Expected>> {
     let mut expectations = HashMap::new();
     for step in built.steps() {
-        let candidate = match step {
-            SolveStep::Remove { .. } => continue,
-            SolveStep::Install { candidate, .. } => *candidate,
-            SolveStep::Change { to, .. } => *to,
-        };
+        let Some(candidate) = step.incoming() else { continue };
         let file_name = file_name_of(universe, candidate)?;
         let Some(solvable) = universe.get(candidate) else {
             return Err(Error::PlanInconsistent { id: candidate });
         };
-        let expected =
+        let mut expected =
             Expected::of(&solvable).map_err(|source| Error::RepositoryPackageUnreadable {
                 name: solvable.name().to_string(),
                 source: std::sync::Arc::new(source),
             })?;
+        if let SolveStep::Change { from, .. } = step {
+            expected = expected.replacing(entry_name_of(universe, *from)?);
+        }
         expectations.insert(file_name.to_string(), expected);
     }
     Ok(expectations)
@@ -364,11 +351,7 @@ fn expectations(universe: &Universe<'_>, built: &Plan) -> Result<HashMap<String,
 fn published(universe: &Universe<'_>, built: &Plan) -> Result<HashMap<String, Published>> {
     let mut published = HashMap::new();
     for step in built.steps() {
-        let candidate = match step {
-            SolveStep::Remove { .. } => continue,
-            SolveStep::Install { candidate, .. } => *candidate,
-            SolveStep::Change { to, .. } => *to,
-        };
+        let Some(candidate) = step.incoming() else { continue };
         let Some(solvable) = universe.get(candidate) else {
             return Err(Error::PlanInconsistent { id: candidate });
         };
@@ -382,15 +365,13 @@ fn published(universe: &Universe<'_>, built: &Plan) -> Result<HashMap<String, Pu
     Ok(published)
 }
 
-/// The reason recorded for one incoming package.
+/// The reason recorded for an upgrade of an installed package.
 ///
-/// [`ReasonPolicy::AsResolved`] records `Explicit` for a package named on the command line.
-/// That is `_alpm_sync_prepare`'s rule (`sync.c`), the same one
-/// `piko_db::solve::Plan::assemble` applies for a fresh install. The plan itself does not
-/// rename an upgrade of an already-installed package, because `solve::Step::Change` carries
-/// no reason of its own. So it keeps whatever reason it already had, rather than falling to
-/// `Depend`. Only a package with no previous install (a fresh dependency) defaults to
-/// `Depend`.
+/// A fresh install takes the reason its `solve::Step::Install` carries, which
+/// `piko_db::solve::Plan::assemble` decides, `%REPLACES%` included. `solve::Step::Change`
+/// carries no reason of its own. So under [`ReasonPolicy::AsResolved`] an upgrade is
+/// `Explicit` when the command line named it, as `_alpm_sync_prepare` rules (`sync.c`), and
+/// otherwise keeps whatever reason it already had, rather than falling to `Depend`.
 ///
 /// Either override replaces that answer outright. It reaches every incoming package, and it
 /// outranks the reason an upgraded package carried.
@@ -427,11 +408,7 @@ fn reason_for(
 pub fn check_compression(universe: &Universe<'_>, built: &Plan) -> Result<()> {
     let mut refused = Vec::new();
     for step in built.steps() {
-        let id = match step {
-            SolveStep::Install { candidate, .. } => *candidate,
-            SolveStep::Change { to, .. } => *to,
-            SolveStep::Remove { .. } => continue,
-        };
+        let Some(id) = step.incoming() else { continue };
         if universe.get(id).is_some_and(|candidate| candidate.as_file().is_some()) {
             continue;
         }
@@ -477,10 +454,7 @@ fn entry_name_of(universe: &Universe<'_>, id: SolvableId) -> Result<EntryName> {
     let Some(candidate) = universe.get(id) else {
         return Err(Error::PlanInconsistent { id });
     };
-    EntryName::new(candidate.name(), candidate.version()).map_err(|error| Error::InvalidEntryName {
-        name: candidate.name().to_string(),
-        reason: error.to_string(),
-    })
+    Ok(candidate.entry().clone())
 }
 
 /// Where each incoming package is downloaded from, and which signature policy it is held to,
@@ -508,18 +482,17 @@ fn entry_name_of(universe: &Universe<'_>, id: SolvableId) -> Result<EntryName> {
 /// [`Error::UnconfiguredSource`], [`Error::PlanInconsistent`], or
 /// [`Error::RepositoryPackageUnreadable`].
 fn sources(universe: &Universe<'_>, built: &Plan, origins: PackageOrigins<'_>) -> Result<Sources> {
-    let by_name: HashMap<&RepoName, &RepositoryConfig> =
-        origins.repos.iter().map(|repo| (&repo.name, repo)).collect();
+    // The first section of a name wins, as `alpm_register_syncdb` registers only the first.
+    let mut by_name: HashMap<&RepoName, &RepositoryConfig> = HashMap::new();
+    for repo in origins.repos {
+        by_name.entry(&repo.name).or_insert(repo);
+    }
 
     let mut downloads = HashMap::new();
     let mut policies = HashMap::new();
     let mut named = HashMap::new();
     for step in built.steps() {
-        let candidate = match step {
-            SolveStep::Install { candidate, .. } => *candidate,
-            SolveStep::Change { to, .. } => *to,
-            SolveStep::Remove { .. } => continue,
-        };
+        let Some(candidate) = step.incoming() else { continue };
         let Some(solvable) = universe.get(candidate) else {
             return Err(Error::PlanInconsistent { id: candidate });
         };
@@ -557,13 +530,14 @@ fn sources(universe: &Universe<'_>, built: &Plan, origins: PackageOrigins<'_>) -
 
         let file_name = desc.file_name().to_string();
         let policy = Policy::for_package(config.effective_sig_level(origins.sig_level));
-        let servers =
-            if config.cache_servers.is_empty() { &config.servers } else { &config.cache_servers };
+        // Every `CacheServer`, then every `Server`: `payload_next_server` (`dload.c:224`) falls
+        // through to the mirrors once each cache server has failed.
+        let servers = config.cache_servers.iter().chain(&config.servers).cloned().collect();
         downloads.insert(
             file_name.clone(),
             DownloadTarget {
                 repo_name: repo_name.to_string(),
-                servers: servers.clone(),
+                servers,
                 policy,
                 size: repo_package.compressed_size(),
             },
@@ -769,6 +743,64 @@ mod tests {
         TransactionPlan::new(&universe, &built, &[app], ReasonPolicy::AsResolved, origins)
     }
 
+    /// A package is tried on every `CacheServer`, then on every `Server`, as libalpm's
+    /// `payload_next_server` tries them.
+    #[test]
+    fn a_package_falls_back_from_the_cache_servers_to_the_servers() {
+        let mut core = core_config(piko_db::config::SigLevel::default());
+        core.cache_servers = vec!["https://cache.example.invalid/core".to_owned()];
+        let plan = app_plan(&[core], &no_keyring()).unwrap();
+
+        let target = plan.downloads.get("lib-1.0.0-1-x86_64.pkg.tar.zst").unwrap();
+        assert_eq!(
+            target.servers,
+            ["https://cache.example.invalid/core", "https://example.invalid/core"]
+        );
+    }
+
+    /// A `%REPLACES%` replacement records the reason of what it replaces, as
+    /// `check_replacers` copies it. Nothing named it, so no rule about named targets reaches it.
+    #[test]
+    fn a_replacement_records_the_reason_of_what_it_replaces() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("old", "1.0.0-1"))
+            .repo("core", [PackageSpec::new("new", "1.0.0-1").replaces(["old"])])
+            .build();
+        let universe = Universe::build(
+            scenario.local(),
+            scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
+            UniverseOptions::new(),
+        )
+        .unwrap();
+        let request = piko_db::solve::Request::new().with_sysupgrade(&universe, false);
+        let limits = piko_db::Limits::default();
+        let Ok(Ok(planned)) = piko_db::solve::solve_with_removals(&universe, &request, &limits)
+        else {
+            panic!("expected a solution");
+        };
+        let built = Plan::assemble(&universe, &planned, &[], &limits, &piko_db::solve::NoCache);
+        let repos = [core_config(piko_db::config::SigLevel::default())];
+        let origins = PackageOrigins {
+            repos: &repos,
+            sig_level: piko_db::config::SigLevel::default(),
+            files: &[],
+            gpg_dir: &no_keyring(),
+        };
+
+        let plan = TransactionPlan::new(&universe, &built, &[], ReasonPolicy::AsResolved, origins)
+            .unwrap();
+
+        let reasons: Vec<PackageInstallReason> = plan
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Install { reason, .. } => Some(*reason),
+                Step::Remove { .. } => None,
+            })
+            .collect();
+        assert_eq!(reasons, [PackageInstallReason::Explicit]);
+    }
+
     /// A dependency published as `.pkg.tar.xz` refuses the plan before anything is
     /// downloaded, and the error names the file and the format.
     #[test]
@@ -935,7 +967,7 @@ mod tests {
 
         let (plan, file_name, _dir) = named_file_plan(required, true).unwrap();
         assert_eq!(plan.policies.get(&file_name), Some(&required));
-        assert!(plan.download_targets().is_empty(), "a named file is not downloaded");
+        assert!(plan.downloads.is_empty(), "a named file is not downloaded");
     }
 
     /// The source of a plan with signature checking left to nothing: `cache` searched, no

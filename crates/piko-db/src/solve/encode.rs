@@ -121,12 +121,6 @@ impl Request {
         self
     }
 
-    /// Whether `-s` was requested.
-    #[must_use]
-    pub const fn is_recursive(&self) -> bool {
-        self.recursive
-    }
-
     /// `--needed`: skip a target whose installed copy is already at the same version.
     #[must_use]
     pub const fn needed(mut self, needed: bool) -> Self {
@@ -145,14 +139,18 @@ impl Request {
     ///
     /// Every package [`sysupgrade`] selects becomes a target. Every `%REPLACES%` pair becomes
     /// a target plus the removal it displaces. This mirrors `alpm_sync_sysupgrade`'s own
-    /// effect on a transaction.
+    /// effect on a transaction. An installed package the request already targets or removes
+    /// by name is left to the request: pacman adds the named targets before it calls
+    /// `alpm_sync_sysupgrade`, which skips them. So call this after every
+    /// [`Self::target`] and [`Self::remove`].
     ///
     /// `piko plan -u` and `piko update` both need exactly this. The second only commits what
     /// the first prints. The logic lives here once. A hand-written loop at each call site
     /// could drift apart from the other.
     #[must_use]
     pub fn with_sysupgrade(mut self, universe: &Universe<'_>, downgrade: bool) -> Self {
-        let upgrade = sysupgrade(universe, downgrade);
+        let settled: Vec<SolvableId> = self.targets.iter().chain(&self.removals).copied().collect();
+        let upgrade = sysupgrade(universe, downgrade, &settled);
         for id in &upgrade.upgrades {
             self = self.target(*id);
         }
@@ -1425,7 +1423,8 @@ fn relaxed_cause(
 ///
 /// # Errors
 ///
-/// As [`encode`], plus [`crate::Error::SolveBudgetExhausted`] from the solver.
+/// As [`encode`], plus [`crate::Error::SolveBudgetExhausted`] and
+/// [`crate::Error::SolveInconsistent`] from the solver.
 pub fn solve_with_removals(
     universe: &Universe<'_>,
     request: &Request,
@@ -1713,12 +1712,33 @@ pub struct IgnoredUpgrade {
 ///
 /// What was passed over is returned in [`Sysupgrade::ignored`]. This one walk decides it. A
 /// second pass would have to reproduce the same priority rules.
+///
+/// # A name the transaction already holds is skipped
+///
+/// `settled` names the candidates the request already targets or removes. An installed package
+/// carrying one of their names is skipped, as `alpm_sync_sysupgrade` skips a package already
+/// in `trans->add` or `trans->remove` (`sync.c:211-219`). A replacement this walk adds counts
+/// too, because libalpm appends it to `trans->add` before it reaches the next installed
+/// package. Without the skip, `piko update 'foo<3'` targets both the named `foo` and the
+/// upgrade's `foo`, and the request is unsatisfiable.
 #[must_use]
-pub fn sysupgrade(universe: &Universe<'_>, enable_downgrade: bool) -> Sysupgrade {
+pub fn sysupgrade(
+    universe: &Universe<'_>,
+    enable_downgrade: bool,
+    settled: &[SolvableId],
+) -> Sysupgrade {
     let mut result = Sysupgrade::default();
+    let mut held: HashSet<String> = settled
+        .iter()
+        .filter_map(|id| universe.get(*id))
+        .map(|candidate| candidate.name().to_string())
+        .collect();
 
     for installed in universe.iter().filter(Solvable::is_installed) {
         let name = installed.name().as_ref();
+        if held.contains(name) {
+            continue;
+        }
         // The `lpkg` half of the test, which no filter upstream of here can apply.
         let local = universe.ignores().reason(name, installed.groups());
 
@@ -1763,7 +1783,12 @@ pub fn sysupgrade(universe: &Universe<'_>, enable_downgrade: bool) -> Sysupgrade
                         reason: reason.clone(),
                         kind: IgnoredChange::Replacement,
                     }),
-                    _ => result.replacements.push((replacer, installed.id())),
+                    (_, candidate) => {
+                        if let Some(candidate) = candidate {
+                            held.insert(candidate.name().to_string());
+                        }
+                        result.replacements.push((replacer, installed.id()));
+                    }
                 }
                 break;
             }
@@ -1928,7 +1953,7 @@ mod tests {
             .build();
         let universe = universe_of(&scenario, DbUsage::ALL);
 
-        let result = sysupgrade(&universe, false);
+        let result = sysupgrade(&universe, false, &[]);
         assert_eq!(named(&universe, &result.upgrades), ["app"]);
     }
 
@@ -1940,7 +1965,7 @@ mod tests {
             .build();
         let universe = universe_of(&scenario, DbUsage::ALL);
 
-        assert!(sysupgrade(&universe, false).upgrades.is_empty());
+        assert!(sysupgrade(&universe, false, &[]).upgrades.is_empty());
     }
 
     /// libalpm warns "local (%s) is newer than %s (%s)" and leaves it alone unless
@@ -1954,8 +1979,8 @@ mod tests {
             .build();
         let universe = universe_of(&scenario, DbUsage::ALL);
 
-        assert!(sysupgrade(&universe, false).upgrades.is_empty());
-        assert_eq!(named(&universe, &sysupgrade(&universe, true).upgrades), ["app"]);
+        assert!(sysupgrade(&universe, false, &[]).upgrades.is_empty());
+        assert_eq!(named(&universe, &sysupgrade(&universe, true, &[]).upgrades), ["app"]);
     }
 
     /// `-Su` gates on `Upgrade` alone (`sync.c:229`), a narrower mask than the
@@ -1969,7 +1994,7 @@ mod tests {
         let universe = universe_of(&scenario, DbUsage::INSTALL);
 
         assert!(
-            sysupgrade(&universe, false).upgrades.is_empty(),
+            sysupgrade(&universe, false, &[]).upgrades.is_empty(),
             "Usage = Install may satisfy a dependency but must not offer upgrades"
         );
     }
@@ -1982,7 +2007,7 @@ mod tests {
             .build();
         let universe = universe_of(&scenario, DbUsage::ALL);
 
-        let result = sysupgrade(&universe, false);
+        let result = sysupgrade(&universe, false, &[]);
         assert_eq!(result.replacements.len(), 1);
         let (replacement, replaced) = result.replacements[0];
         assert_eq!(universe.get(replacement).unwrap().name().as_ref(), "new-name");
@@ -2000,7 +2025,7 @@ mod tests {
         let universe = universe_of(&scenario, DbUsage::ALL);
 
         assert!(
-            sysupgrade(&universe, false).replacements.is_empty(),
+            sysupgrade(&universe, false, &[]).replacements.is_empty(),
             "installed 3.0.0-1 does not satisfy `old-name<2.0`"
         );
     }
@@ -2021,7 +2046,7 @@ mod tests {
             .build();
         let universe = universe_of(&scenario, DbUsage::ALL);
 
-        let result = sysupgrade(&universe, false);
+        let result = sysupgrade(&universe, false, &[]);
         assert!(result.upgrades.is_empty(), "the replacement settles it");
         assert_eq!(result.replacements.len(), 1);
         assert_eq!(universe.get(result.replacements[0].0).unwrap().name().as_ref(), "app-ng");
@@ -2040,7 +2065,7 @@ mod tests {
         let universe = universe_of(&scenario, DbUsage::ALL);
 
         assert!(
-            sysupgrade(&universe, false).upgrades.is_empty(),
+            sysupgrade(&universe, false, &[]).upgrades.is_empty(),
             "core carries app at the installed version, so extra is never consulted"
         );
     }
@@ -2069,7 +2094,7 @@ mod tests {
         let ignored = vec!["gedit".to_owned()];
         let universe = ignoring(&scenario, &ignored, &[]);
 
-        let result = sysupgrade(&universe, false);
+        let result = sysupgrade(&universe, false, &[]);
         assert!(result.upgrades.is_empty());
         assert_eq!(result.ignored.len(), 1);
         assert_eq!(result.ignored[0].kind, IgnoredChange::Upgrade);
@@ -2086,7 +2111,7 @@ mod tests {
             .build();
         let ignored = vec!["gedit".to_owned()];
 
-        assert!(sysupgrade(&ignoring(&scenario, &ignored, &[]), false).ignored.is_empty());
+        assert!(sysupgrade(&ignoring(&scenario, &ignored, &[]), false, &[]).ignored.is_empty());
     }
 
     /// Without `-Suu` an older repository version was never going to be taken, so nothing was
@@ -2100,8 +2125,8 @@ mod tests {
         let ignored = vec!["gedit".to_owned()];
         let universe = ignoring(&scenario, &ignored, &[]);
 
-        assert!(sysupgrade(&universe, false).ignored.is_empty());
-        let downgraded = sysupgrade(&universe, true);
+        assert!(sysupgrade(&universe, false, &[]).ignored.is_empty());
+        let downgraded = sysupgrade(&universe, true, &[]);
         assert_eq!(downgraded.ignored.len(), 1);
         assert_eq!(downgraded.ignored[0].kind, IgnoredChange::Downgrade);
     }
@@ -2116,7 +2141,7 @@ mod tests {
         let ignored = vec!["new".to_owned()];
         let universe = ignoring(&scenario, &ignored, &[]);
 
-        let result = sysupgrade(&universe, false);
+        let result = sysupgrade(&universe, false, &[]);
         assert!(result.replacements.is_empty());
         assert_eq!(result.ignored.len(), 1);
         assert_eq!(result.ignored[0].kind, IgnoredChange::Replacement);
@@ -2135,7 +2160,7 @@ mod tests {
         let groups = vec!["held".to_owned()];
         let universe = ignoring(&scenario, &[], &groups);
 
-        let result = sysupgrade(&universe, false);
+        let result = sysupgrade(&universe, false, &[]);
         assert!(
             result.upgrades.is_empty(),
             "the installed side of the test must hold the upgrade back, as `lpkg` does"
@@ -2160,7 +2185,7 @@ mod tests {
         let groups = vec!["held".to_owned()];
         let universe = ignoring(&scenario, &[], &groups);
 
-        let result = sysupgrade(&universe, false);
+        let result = sysupgrade(&universe, false, &[]);
         assert!(
             result.upgrades.is_empty(),
             "core carries the name, ignored or not, so extra is never consulted"
@@ -2869,5 +2894,48 @@ mod tests {
             [BrokenDependency { dependent: installed_broken, dependency: 0 }],
             "the encoding must name what it left out"
         );
+    }
+
+    /// An installed package the request already targets or removes by name is skipped, and
+    /// so is one named like a replacement this walk added before it. The walk runs in name
+    /// order, so `aold` adds `znew` before the installed `znew` is reached.
+    #[test]
+    fn a_name_the_request_or_a_replacement_holds_is_skipped() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("held", "1.0.0-1"))
+            .installed(PackageSpec::new("znew", "1.0.0-1"))
+            .installed(PackageSpec::new("aold", "1.0.0-1"))
+            .installed(PackageSpec::new("free", "1.0.0-1"))
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("held", "2.0.0-1"),
+                    PackageSpec::new("free", "2.0.0-1"),
+                    PackageSpec::new("znew", "2.0.0-1").replaces(["aold"]),
+                ],
+            )
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let installed_held = universe
+            .candidates_named("held")
+            .iter()
+            .copied()
+            .find(|id| universe.get(*id).unwrap().is_installed())
+            .unwrap();
+
+        let result = sysupgrade(&universe, false, &[installed_held]);
+
+        assert_eq!(named(&universe, &result.upgrades), ["free"]);
+        let replacements: Vec<(String, String)> = result
+            .replacements
+            .iter()
+            .map(|(by, of)| {
+                (
+                    universe.get(*by).unwrap().name().to_string(),
+                    universe.get(*of).unwrap().name().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(replacements, [("znew".to_owned(), "aold".to_owned())]);
     }
 }

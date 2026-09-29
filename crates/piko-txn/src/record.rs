@@ -57,48 +57,28 @@ pub fn desc(info: &PackageInfo, raw: &str, facts: &InstallFacts) -> Result<Recor
     let mut record = Record::new(RecordKind::Desc);
     let mut one = |key: &str, value: String| record.set(key, vec![value]);
 
-    match info {
-        PackageInfo::V1(v1) => {
-            one("NAME", v1.pkgname.to_string())?;
-            one("VERSION", v1.pkgver.to_string())?;
-            one("BASE", v1.pkgbase.to_string())?;
-            one("DESC", v1.pkgdesc.to_string())?;
-            one("URL", raw_field(raw, "url").unwrap_or_else(|| v1.url.to_string()))?;
-            one("ARCH", v1.arch.to_string())?;
-            one("BUILDDATE", v1.builddate.to_string())?;
-            one("PACKAGER", raw_field(raw, "packager").unwrap_or_else(|| v1.packager.to_string()))?;
-            if v1.size.to_string() != "0" {
-                one("SIZE", v1.size.to_string())?;
-            }
-            record.set("GROUPS", strings(&v1.group))?;
-            record.set("LICENSE", strings(&v1.license))?;
-            record.set("REPLACES", strings(&v1.replaces))?;
-            record.set("DEPENDS", strings(&v1.depend))?;
-            record.set("OPTDEPENDS", strings(&v1.optdepend))?;
-            record.set("CONFLICTS", strings(&v1.conflict))?;
-            record.set("PROVIDES", strings(&v1.provides))?;
+    crate::pkginfo::either_version!(info, |v| {
+        one("NAME", v.pkgname.to_string())?;
+        one("VERSION", v.pkgver.to_string())?;
+        one("BASE", v.pkgbase.to_string())?;
+        one("DESC", v.pkgdesc.to_string())?;
+        one("URL", raw_field(raw, "url").unwrap_or_else(|| v.url.to_string()))?;
+        one("ARCH", v.arch.to_string())?;
+        one("BUILDDATE", v.builddate.to_string())?;
+        one("PACKAGER", raw_field(raw, "packager").unwrap_or_else(|| v.packager.to_string()))?;
+        if v.size.to_string() != "0" {
+            one("SIZE", v.size.to_string())?;
         }
-        PackageInfo::V2(v2) => {
-            one("NAME", v2.pkgname.to_string())?;
-            one("VERSION", v2.pkgver.to_string())?;
-            one("BASE", v2.pkgbase.to_string())?;
-            one("DESC", v2.pkgdesc.to_string())?;
-            one("URL", raw_field(raw, "url").unwrap_or_else(|| v2.url.to_string()))?;
-            one("ARCH", v2.arch.to_string())?;
-            one("BUILDDATE", v2.builddate.to_string())?;
-            one("PACKAGER", raw_field(raw, "packager").unwrap_or_else(|| v2.packager.to_string()))?;
-            if v2.size.to_string() != "0" {
-                one("SIZE", v2.size.to_string())?;
-            }
-            record.set("GROUPS", strings(&v2.group))?;
-            record.set("LICENSE", strings(&v2.license))?;
-            record.set("REPLACES", strings(&v2.replaces))?;
-            record.set("DEPENDS", strings(&v2.depend))?;
-            record.set("OPTDEPENDS", strings(&v2.optdepend))?;
-            record.set("CONFLICTS", strings(&v2.conflict))?;
-            record.set("PROVIDES", strings(&v2.provides))?;
-            record.set("XDATA", v2.xdata.clone().into_iter().map(|e| e.to_string()).collect())?;
-        }
+        record.set("GROUPS", strings(&v.group))?;
+        record.set("LICENSE", strings(&v.license))?;
+        record.set("REPLACES", strings(&v.replaces))?;
+        record.set("DEPENDS", strings(&v.depend))?;
+        record.set("OPTDEPENDS", strings(&v.optdepend))?;
+        record.set("CONFLICTS", strings(&v.conflict))?;
+        record.set("PROVIDES", strings(&v.provides))?;
+    });
+    if let PackageInfo::V2(v2) = info {
+        record.set("XDATA", v2.xdata.clone().into_iter().map(|e| e.to_string()).collect())?;
     }
 
     record.set("INSTALLDATE", vec![facts.install_date.to_string()])?;

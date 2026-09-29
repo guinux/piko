@@ -4,70 +4,19 @@
 //! implementation this mirrors.
 
 use super::package::RepoPackage;
-use crate::search::{MatchKind, Searchable, Term, best_match, every_term_is_the_name, prepare};
+use crate::search::{MatchKind, Searchable, rank};
 
 /// One package that matched a search query, together with why it matched.
 ///
 /// See [`super::RepoDatabase::search`].
 pub type SearchHit<'a> = (&'a RepoPackage, MatchKind);
 
-/// Scores every package in `packages` against `terms`, returning only those that matched
-/// **every** term.
-///
-/// Comparisons are case-insensitive. Blank (or all-whitespace) terms are dropped. If nothing
-/// is left after that, nothing matches. That covers an empty `terms` and every term blank
-/// alike. "No term" is never treated as an automatic pass.
-///
-/// A term carrying `*`, `?` or `[` is a glob pattern. It is matched against the whole name,
-/// `%PROVIDES%` name or `%GROUPS%` entry. See [`MatchKind::Glob`]. Each package appears at most
-/// once, scored by the single highest [`MatchKind`] any one of its (all-matching) terms
-/// achieved. The AND requirement above already guarantees every term matched *something*, so
-/// this score is purely a ranking signal. A package that matches one term exactly stays ranked
-/// at [`MatchKind::ExactName`], even if a second term only matched its description. Results are
-/// sorted most-relevant-first, then by name to break ties deterministically.
+/// Ranks `packages` against `terms`, as [`crate::search::rank`] documents.
 pub(crate) fn search<'a, 'q>(
     packages: &'a [RepoPackage],
     terms: impl IntoIterator<Item = &'q str>,
 ) -> Vec<SearchHit<'a>> {
-    let terms = prepare(terms);
-    if terms.is_empty() {
-        return Vec::new();
-    }
-
-    let mut hits: Vec<SearchHit<'a>> = packages
-        .iter()
-        .filter_map(|package| combined_match(package, &terms).map(|kind| (package, kind)))
-        .collect();
-
-    hits.sort_by(|(left, left_kind), (right, right_kind)| {
-        right_kind.cmp(left_kind).then_with(|| left.name().cmp(right.name()))
-    });
-    hits
-}
-
-/// The best [`MatchKind`] achieved across `terms`, if `package` matches every one of them.
-///
-/// `terms` must be non-empty. Returns `None` as soon as any term fails to match at all, which
-/// is the AND requirement, without evaluating the remaining terms.
-///
-/// The package's own lowercased text is built **here**, once, rather than inside
-/// [`best_match`] per term. Matching is case-insensitive. The lowercasing covers the name,
-/// every `%PROVIDES%` entry, the description and every group. Doing it once per (package, term)
-/// pair would allocate `terms.len()` times more than the search needs. On the real `extra`
-/// repository (about 15 000 packages), a three-term search allocates a third as much this way.
-fn combined_match(package: &RepoPackage, terms: &[Term]) -> Option<MatchKind> {
-    let name = package.name().as_ref().to_lowercase();
-
-    // An exact name match outranks everything and needs nothing from `desc`. A search whose
-    // every term hits the name never builds a `Searchable`.
-    let searchable = (!every_term_is_the_name(terms, &name)).then(|| searchable_from(package));
-
-    let mut best: Option<MatchKind> = None;
-    for term in terms {
-        let kind = best_match(&name, searchable.as_ref(), term)?;
-        best = Some(best.map_or(kind, |current| current.max(kind)));
-    }
-    best
+    rank(packages, terms, RepoPackage::name, |package| Some(searchable_from(package)))
 }
 
 /// A package's searchable `desc` text, lowercased once.
@@ -103,7 +52,12 @@ mod tests {
         super::{eager, package::FilesSource, repo_name::RepoName},
         *,
     };
-    use crate::{eager::RelationBudget, entry_name::EntryName, limits::Limits};
+    use crate::{
+        eager::RelationBudget,
+        entry_name::EntryName,
+        limits::Limits,
+        search::{best_match, prepare},
+    };
 
     /// Builds a package the way [`super::super::database`] does: eager fields parsed now, and
     /// the text retained for the deferred parse. Going through the real path keeps these tests

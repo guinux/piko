@@ -161,7 +161,8 @@ impl<'p> Solver<'p> {
     /// # Errors
     ///
     /// [`Error::SolveBudgetExhausted`] if the search exceeds
-    /// [`crate::Limits::solve_max_conflicts`].
+    /// [`crate::Limits::solve_max_conflicts`]. [`Error::SolveInconsistent`] if the selection
+    /// breaks a clause, which is a defect in the solver.
     pub fn solve(mut self) -> Result<Outcome> {
         if let Some(core) = self.attach_all() {
             return Ok(Outcome::Unsatisfiable(Unsatisfiable { core: vec![core] }));
@@ -363,7 +364,9 @@ impl<'p> Solver<'p> {
             .iter()
             .enumerate()
             .find(|(position, literal)| {
-                *position != first && *position != second && self.value_of(**literal) != Value::False
+                *position != first
+                    && *position != second
+                    && self.value_of(**literal) != Value::False
             })
             .map(|(position, literal)| (position, *literal));
         if let Some((position, literal)) = replacement {
@@ -968,7 +971,8 @@ mod tests {
             }
 
             let exists = (0..1_u32 << solvables).any(|mask| {
-                let chosen: Vec<u32> = (0..solvables).filter(|bit| mask & (1 << bit) != 0).collect();
+                let chosen: Vec<u32> =
+                    (0..solvables).filter(|bit| mask & (1 << bit) != 0).collect();
                 problem.iter().all(|(_, clause)| {
                     clause.literals().iter().any(|literal| {
                         chosen.contains(&literal.solvable().get()) == literal.expects()

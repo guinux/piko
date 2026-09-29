@@ -26,6 +26,21 @@ pub fn printable_lines(text: &str) -> String {
     escape(text, true)
 }
 
+/// The first 32 characters of `text`, with `…` after them if `text` is longer.
+///
+/// For content a file chose, quoted in an error: a hostile file cannot flood the message.
+#[must_use]
+pub fn excerpt(text: &str) -> String {
+    const MAX: usize = 32;
+    match text.char_indices().nth(MAX) {
+        Some((index, _)) => {
+            let head = text.get(..index).unwrap_or_default();
+            format!("{head}…")
+        }
+        None => text.to_owned(),
+    }
+}
+
 /// Escapes every control character and every bidirectional formatting character in `text`,
 /// except a line feed when `keep_line_feed` is set.
 fn escape(text: &str, keep_line_feed: bool) -> String {

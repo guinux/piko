@@ -262,10 +262,47 @@ impl DescUrl {
 }
 
 /// Extracts `KEYWORD` from a `%KEYWORD%` header line, if the line is one.
-fn section_keyword(line: &str) -> Option<&str> {
+///
+/// A header is `%`, then a non-empty keyword holding no further `%`, then `%`. This is the one
+/// header grammar: the text filters here, `eager::scan` and `piko-db-write`'s record check read
+/// a line the same way, so a line never reads as a header in one and a value in another.
+#[must_use]
+pub fn section_keyword(line: &str) -> Option<&str> {
     let inner = line.strip_prefix('%')?.strip_suffix('%')?;
     (!inner.is_empty() && !inner.contains('%')).then_some(inner)
 }
+
+/// Generates accessors on a `desc` view that read the same field from either schema version of
+/// `$file`, the enum the view wraps as `self.inner`.
+///
+/// A field is returned by reference, or by value after `, copy`, for one cheap to copy.
+macro_rules! schema_fields {
+    ($file:ident; $( $(#[$meta:meta])* $method:ident: $field:ident -> $ty:ty ),* $(,)?) => {
+        $(
+            $(#[$meta])*
+            #[must_use]
+            pub fn $method(&self) -> $ty {
+                match self.inner {
+                    $file::V1(desc) => &desc.$field,
+                    $file::V2(desc) => &desc.$field,
+                }
+            }
+        )*
+    };
+    ($file:ident, copy; $( $(#[$meta:meta])* $method:ident: $field:ident -> $ty:ty ),* $(,)?) => {
+        $(
+            $(#[$meta])*
+            #[must_use]
+            pub fn $method(&self) -> $ty {
+                match self.inner {
+                    $file::V1(desc) => desc.$field,
+                    $file::V2(desc) => desc.$field,
+                }
+            }
+        )*
+    };
+}
+pub(crate) use schema_fields;
 
 #[cfg(test)]
 #[allow(

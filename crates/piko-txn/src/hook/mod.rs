@@ -92,7 +92,8 @@ fn max_hook_bytes() -> u64 {
     piko_db::Limits::default().get(piko_db::Limit::Hook)
 }
 
-/// Something that stopped one hook file being used.
+/// Something wrong with one hook file. Every variant but [`Problem::Warning`] stopped it being
+/// used.
 ///
 /// Returned, not logged, like every other diagnostic in the workspace. libalpm makes a parse
 /// failure fatal for `PreTransaction` and merely noisy for `PostTransaction` (`hook.c:625`).
@@ -137,6 +138,15 @@ pub enum Problem {
     /// A `.hook` file did not parse.
     #[error("{0}")]
     Invalid(#[from] ParseError),
+    /// A `.hook` file parsed, and is used, but holds something libalpm warns about. See
+    /// [`Hook::warnings`].
+    #[error("hook {}: {reason}", path.display())]
+    Warning {
+        /// The file.
+        path: PathBuf,
+        /// What libalpm warns about.
+        reason: String,
+    },
 }
 
 /// Every hook found, in the order they will run.
@@ -177,7 +187,13 @@ impl Hooks {
                 }
                 let path = directory.join(&name);
                 match read_hook(&path, &name) {
-                    Ok(Some(hook)) => hooks.push(hook),
+                    Ok(Some(hook)) => {
+                        problems.extend(hook.warnings.iter().map(|reason| Problem::Warning {
+                            path: path.clone(),
+                            reason: reason.clone(),
+                        }));
+                        hooks.push(hook);
+                    }
                     // A directory named `something.hook`. libalpm skips it silently.
                     Ok(None) => {}
                     Err(problem) => problems.push(problem),
@@ -620,6 +636,19 @@ Exec = /bin/true
         assert_eq!(hooks.all().len(), 1);
         assert_eq!(problems.len(), 1);
         assert!(problems.first().unwrap().to_string().contains("bad.hook"), "{problems:?}");
+    }
+
+    /// A hook libalpm warns about still loads, and the warning reaches the caller.
+    #[test]
+    fn a_hook_warning_is_reported_and_the_hook_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "twice.hook", &format!("{BODY}Exec = /bin/false\n"));
+
+        let (hooks, problems) = Hooks::collect(&[dir.path().to_path_buf()]);
+        assert_eq!(hooks.all().len(), 1);
+        assert!(matches!(problems.as_slice(), [Problem::Warning { .. }]), "{problems:?}");
+        let text = problems.first().unwrap().to_string();
+        assert!(text.contains("twice.hook") && text.contains("Exec"), "{text}");
     }
 
     #[test]

@@ -68,7 +68,7 @@ pub mod decision;
 pub mod filelist;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
 };
 
@@ -234,7 +234,7 @@ impl Overwrite {
 
     /// Releases the paths `patterns` match, as pacman's `--overwrite` does.
     ///
-    /// Matched with [`piko_db::resolve::matches_any`], libalpm's `_alpm_fnmatch_patterns`: a
+    /// Matched as a [`piko_db::resolve::PatternList`], libalpm's `_alpm_fnmatch_patterns`: a
     /// backward scan where the last matching pattern wins, and a leading `!` inverts it. pacman
     /// uses the same function for this flag, for `NoExtract` and for `NoUpgrade`, which
     /// [`crate::Patterns`] applies. So the three cannot read one pattern two ways. No pattern
@@ -244,7 +244,8 @@ impl Overwrite {
         if patterns.is_empty() {
             return Self::default();
         }
-        Self::new(move |path| piko_db::resolve::matches_any(&patterns, &path.to_string_lossy()))
+        let patterns = piko_db::resolve::PatternList::new(patterns);
+        Self::new(move |path| patterns.matches(&path.to_string_lossy()))
     }
 
     /// Whether `path` is released.
@@ -273,11 +274,9 @@ impl std::fmt::Debug for Overwrite {
 /// vacated stop being a conflict. `overwrite` answers the `--overwrite` patterns. It is a
 /// predicate rather than a pattern list for the same reason [`crate::Filters`] is.
 ///
-/// # Errors
-///
-/// [`crate::Error`] only for a path that cannot be resolved inside the root. A path that
-/// simply does not exist, or a directory that cannot be read, is an answer rather than a
-/// failure.
+/// Nothing here fails. A path that does not exist, a path the root cannot reach, and a
+/// directory that cannot be read are each an answer, not a failure.
+#[must_use]
 pub fn check(
     root: &RootDir,
     local: &LocalDatabase,
@@ -285,17 +284,16 @@ pub fn check(
     removals: &[String],
     overwrite: &Overwrite,
     limits: &WalkLimits,
-) -> Result<Check> {
+) -> Check {
     let mut result = Check::default();
     let mut owners = Owners::new(local);
 
     check_targets(targets, overwrite, &mut result);
-    check_filesystem(root, &mut owners, targets, removals, overwrite, limits, &mut result)?;
-
-    Ok(result)
+    check_filesystem(root, &mut owners, targets, removals, overwrite, limits, &mut result);
+    result
 }
 
-/// One target's entry, keyed by the path [`FileList::intersection`] compares on.
+/// One target's entry, keyed by the path `_alpm_filelist_intersection` compares on.
 ///
 /// Ordered as `(stripped path, target, spelling)`. Sorting on this tuple groups every target
 /// that ships one path together. It orders the group by target and then by spelling, which is
@@ -307,7 +305,7 @@ type Shipped<'a> = (&'a str, usize, &'a str);
 /// # Not a loop over pairs
 ///
 /// `conflict.c:432` is a double loop calling `_alpm_filelist_intersection` on each pair. That is
-/// quadratic in the number of targets *and* linear in the file lists. [`FileList::intersection`]
+/// quadratic in the number of targets *and* linear in the file lists. `FileList::intersection`
 /// builds a map of the whole right-hand list every time it is called. A 500-package transaction
 /// would take ~125 000 intersections, each rebuilding a map of a list it had already seen
 /// hundreds of times.
@@ -485,7 +483,7 @@ fn check_filesystem(
     overwrite: &Overwrite,
     limits: &WalkLimits,
     into: &mut Check,
-) -> Result<()> {
+) {
     // This is built once for the whole check, not consulted per target per path. See
     // `handovers`.
     let handovers = self::handovers(owners, targets);
@@ -529,7 +527,7 @@ fn check_filesystem(
                 removals,
                 overwrite,
                 limits,
-            )?;
+            );
 
             if verdict.changes_owner_from().is_some() {
                 into.skip_remove.insert(PathBuf::from(strip_dir(spelled)));
@@ -554,7 +552,6 @@ fn check_filesystem(
             }
         }
     }
-    Ok(())
 }
 
 /// Answers every question [`decide`] asks about one path.
@@ -575,7 +572,7 @@ fn examine(
     removals: &[String],
     overwrite: &Overwrite,
     limits: &WalkLimits,
-) -> Result<Verdict> {
+) -> Verdict {
     let packaged_directory = is_directory(spelled);
     // Every lookup below uses the path without its trailing slash, matching libalpm. libalpm
     // truncates it in place before the first of them (`conflict.c:530`).
@@ -583,7 +580,7 @@ fn examine(
     let as_path = Path::new(stripped);
 
     if existing == Existing::Absent {
-        return Ok(Verdict::Resolved(Resolution::NotPresent));
+        return Verdict::Resolved(Resolution::NotPresent);
     }
 
     let mut context = FilesystemContext {
@@ -630,7 +627,7 @@ fn examine(
         context.owned_by_anyone = owners.anyone_owns(stripped);
     }
 
-    Ok(decide(&context))
+    decide(&context)
 }
 
 /// What [`locate`] found.
@@ -833,9 +830,8 @@ pub struct LoadedPackage {
     /// What each payload member will occupy, for the disk-space estimate.
     ///
     /// Not on [`Target`], although it comes from the same walk. A size is not a
-    /// conflict-detection concern. And [`target_from_installed`] builds a `Target` out of an
-    /// installed package's `%FILES%`, which records no sizes at all. This is the type that
-    /// already means "the archive, read once".
+    /// conflict-detection concern, and an installed package's `%FILES%` records no sizes at
+    /// all. This is the type that already means "the archive, read once".
     pub footprint: Vec<crate::space::MemberFootprint>,
 }
 
@@ -864,11 +860,16 @@ pub fn load_package(
             if member.path == Path::new(".PKGINFO") {
                 // A `.PKGINFO` that is not valid UTF-8 leaves nothing to parse. It is reported
                 // below as the absence it amounts to.
-                pkginfo = read_whole(contents, package, ".PKGINFO size", MAX_PKGINFO_BYTES)?
-                    .and_then(|bytes| String::from_utf8(bytes).ok());
+                pkginfo = String::from_utf8(read_whole(
+                    contents,
+                    package,
+                    ".PKGINFO size",
+                    MAX_PKGINFO_BYTES,
+                )?)
+                .ok();
             } else if member.path == Path::new(".INSTALL") {
                 install_script =
-                    read_whole(contents, package, "scriptlet size", MAX_SCRIPTLET_BYTES)?;
+                    Some(read_whole(contents, package, "scriptlet size", MAX_SCRIPTLET_BYTES)?);
             }
             return Ok(());
         }
@@ -906,10 +907,8 @@ pub fn load_package(
         reason: format!("its .PKGINFO is unreadable: {error}"),
     })?;
 
-    let (name, version) = match &info {
-        alpm_pkginfo::PackageInfo::V1(v1) => (v1.pkgname.to_string(), v1.pkgver.to_string()),
-        alpm_pkginfo::PackageInfo::V2(v2) => (v2.pkgname.to_string(), v2.pkgver.to_string()),
-    };
+    let (name, version) = crate::pkginfo::name_and_version(&info);
+    let (name, version) = (name.to_string(), version.to_string());
     // `%BACKUP%` paths are taken from the text rather than from the parsed `Backup` values.
     // They are compared against the paths the *archive* spells. A round trip through a typed
     // path that normalises anything could make that comparison miss. `record::desc` avoids the
@@ -959,8 +958,9 @@ pub fn load_pkginfo(
         }
         // A `.PKGINFO` that is not valid UTF-8 leaves nothing to parse. It is reported below
         // as the absence it amounts to.
-        pkginfo = read_whole(contents, package, ".PKGINFO size", MAX_PKGINFO_BYTES)?
-            .and_then(|bytes| String::from_utf8(bytes).ok());
+        pkginfo =
+            String::from_utf8(read_whole(contents, package, ".PKGINFO size", MAX_PKGINFO_BYTES)?)
+                .ok();
         Ok(crate::extract::archive::Flow::Stop)
     })?;
 
@@ -987,52 +987,28 @@ const MAX_PKGINFO_BYTES: u64 = 4 * 1024 * 1024;
 /// `rm -rf /usr` at the wrong byte. One byte past the bound is what tells a member at the
 /// limit from one over it.
 ///
-/// `Ok(None)` when the member cannot be read at all. The caller reports that as the absence
-/// it amounts to.
+/// A member that cannot be read refuses the package. Reported as absent, a `.INSTALL` that
+/// could not be read would install the package without its scriptlet.
 ///
 /// # Errors
 ///
-/// [`crate::Error::PackageLimitExceeded`] naming `limit` if the member is larger than `max`.
+/// - [`crate::Error::PackageLimitExceeded`] naming `limit` if the member is larger than `max`.
+/// - [`crate::Error::Io`] if the member cannot be read. The walk reports a bound of its own
+///   that tripped during the read as that bound instead.
 fn read_whole(
     contents: &mut dyn std::io::Read,
     package: &Path,
     limit: &'static str,
     max: u64,
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut limited = std::io::Read::take(contents, max.saturating_add(1));
-    if std::io::Read::read_to_end(&mut limited, &mut bytes).is_err() {
-        return Ok(None);
-    }
+    std::io::Read::read_to_end(&mut limited, &mut bytes)
+        .map_err(|source| crate::Error::io(package, crate::error::IoAction::Read, source))?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max {
         return Err(crate::Error::PackageLimitExceeded { path: package.to_path_buf(), limit, max });
     }
-    Ok(Some(bytes))
-}
-
-/// Builds the [`Target`] view of an already-installed package, for a removal step.
-///
-/// [`Target::version`] is left empty. Conflict detection never reads it. The only caller that
-/// does is the scriptlet sequence. It takes the version from the database entry it is removing,
-/// rather than from here.
-#[must_use]
-pub fn target_from_installed(name: &str, files: &[PathBuf]) -> Target {
-    Target {
-        name: name.to_owned(),
-        version: String::new(),
-        files: FileList::new(files.iter().map(|path| path.to_string_lossy().into_owned())),
-        backups: BTreeSet::new(),
-        // The removal side reads its scriptlet from the database entry, not from an archive.
-        install_script: None,
-    }
-}
-
-/// The installed packages' file lists, keyed by name — exposed for tests and for callers that
-/// want to report ownership themselves.
-#[must_use]
-pub fn installed_file_lists(local: &LocalDatabase) -> BTreeMap<String, FileList> {
-    let mut owners = Owners::new(local);
-    owners.all().iter().cloned().collect()
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -1103,7 +1079,6 @@ mod tests {
         removals: &[String],
     ) -> Check {
         check(root, local, targets, removals, &Overwrite::default(), &WalkLimits::default())
-            .unwrap()
     }
 
     /// Nothing installed, nothing on disk: the ordinary install.
@@ -1530,8 +1505,7 @@ mod tests {
             &[],
             &everything,
             &WalkLimits::default(),
-        )
-        .unwrap();
+        );
         assert!(
             matches!(
                 result.conflicts.as_slice(),
@@ -1615,8 +1589,7 @@ mod tests {
             &[],
             &all,
             &WalkLimits::default(),
-        )
-        .unwrap();
+        );
         assert!(result.is_clear(), "{:?}", result.conflicts);
     }
 
@@ -1634,8 +1607,7 @@ mod tests {
             &[],
             &all,
             &WalkLimits::default(),
-        )
-        .unwrap();
+        );
         assert!(result.is_clear(), "{:?}", result.conflicts);
     }
 
@@ -1658,8 +1630,7 @@ mod tests {
             &[],
             &all,
             &WalkLimits::default(),
-        )
-        .unwrap();
+        );
         assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
     }
 
@@ -1721,8 +1692,7 @@ mod tests {
             &["old".to_owned()],
             &Overwrite::default(),
             &WalkLimits { max_depth: 64, max_entries: 0 },
-        )
-        .unwrap();
+        );
         assert_eq!(result.conflicts.len(), 1, "{:?}", result.conflicts);
     }
 
@@ -1778,6 +1748,41 @@ backup = etc/foo.conf
         let (_keep, path) = package_with_scriptlet(limit);
         let loaded = load_package(&path, &crate::extract::PackageLimits::default()).unwrap();
         assert_eq!(loaded.target.install_script.map(|script| script.len()), Some(limit));
+    }
+
+    /// A member that cannot be read is an error, never an absent member. Taken as absent, a
+    /// `.INSTALL` that failed to read would install its package without the scriptlet.
+    #[test]
+    fn a_member_that_cannot_be_read_is_an_error_not_an_absence() {
+        struct Failing;
+        impl std::io::Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("the stream broke"))
+            }
+        }
+
+        let package = Path::new("foo-1.0.0-1-x86_64.pkg.tar");
+        let error =
+            read_whole(&mut Failing, package, "scriptlet size", MAX_SCRIPTLET_BYTES).unwrap_err();
+        assert!(
+            matches!(&error, crate::Error::Io { path, .. } if path == package),
+            "got {error:?}"
+        );
+    }
+
+    /// A read of a metadata member goes through the walk's bounded reader. When that reader
+    /// refuses, the error names its bound, not a read failure.
+    #[test]
+    fn a_bound_tripped_while_reading_a_scriptlet_is_reported_as_that_bound() {
+        let (_keep, path) = package_with_scriptlet(64 * 1024);
+        let limits =
+            crate::extract::PackageLimits { inflated_bytes: 16 * 1024, ..Default::default() };
+
+        let error = load_package(&path, &limits).unwrap_err();
+        assert!(
+            matches!(error, crate::Error::PackageLimitExceeded { limit: "inflated size", .. }),
+            "got {error:?}"
+        );
     }
 
     /// A package's own file list is read from the archive. The package is not installed yet,

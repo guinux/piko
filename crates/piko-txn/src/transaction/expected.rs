@@ -3,6 +3,7 @@
 use std::fmt::Display;
 
 use alpm_pkginfo::PackageInfo;
+use piko_db::EntryName;
 use piko_db::solve::Solvable;
 
 /// The fields of a planned package that its archive's `.PKGINFO` must repeat.
@@ -25,6 +26,9 @@ pub struct Expected {
     replaces: Vec<String>,
     provides: Vec<String>,
     groups: Vec<String>,
+    /// The entry the plan expects to find installed under the same name, which the install
+    /// replaces, or `None` for a fresh install. Not part of the archive comparison.
+    replaced: Option<EntryName>,
 }
 
 impl Expected {
@@ -43,7 +47,22 @@ impl Expected {
             replaces: rendered(candidate.replaces()),
             provides: rendered(candidate.provides()),
             groups: rendered(candidate.groups()),
+            replaced: None,
         })
+    }
+
+    /// This expectation, for an install that replaces the installed entry `replaced`.
+    #[must_use]
+    pub fn replacing(mut self, replaced: EntryName) -> Self {
+        self.replaced = Some(replaced);
+        self
+    }
+
+    /// The installed entry the plan expects this install to replace, or `None` when the plan
+    /// expects the name not to be installed.
+    #[must_use]
+    pub const fn replaced(&self) -> Option<&EntryName> {
+        self.replaced.as_ref()
     }
 
     /// The installed size, `%ISIZE%` or the `.PKGINFO`'s `size`.
@@ -55,24 +74,15 @@ impl Expected {
     /// What an archive's `.PKGINFO` says.
     #[must_use]
     pub fn of_archive(info: &PackageInfo) -> Self {
-        match info {
-            PackageInfo::V1(v1) => Self {
-                installed_size: v1.size,
-                depends: rendered(&v1.depend),
-                conflicts: rendered(&v1.conflict),
-                replaces: rendered(&v1.replaces),
-                provides: rendered(&v1.provides),
-                groups: rendered(&v1.group),
-            },
-            PackageInfo::V2(v2) => Self {
-                installed_size: v2.size,
-                depends: rendered(&v2.depend),
-                conflicts: rendered(&v2.conflict),
-                replaces: rendered(&v2.replaces),
-                provides: rendered(&v2.provides),
-                groups: rendered(&v2.group),
-            },
-        }
+        crate::pkginfo::either_version!(info, |v| Self {
+            installed_size: v.size,
+            depends: rendered(&v.depend),
+            conflicts: rendered(&v.conflict),
+            replaces: rendered(&v.replaces),
+            provides: rendered(&v.provides),
+            groups: rendered(&v.group),
+            replaced: None,
+        })
     }
 
     /// The fields where `found` differs from this expectation, named as `.PKGINFO` names them.
@@ -117,6 +127,7 @@ mod tests {
             replaces: Vec::new(),
             provides: rendered(["libfoo.so=1-64"]),
             groups: rendered(["base"]),
+            replaced: None,
         }
     }
 

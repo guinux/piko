@@ -71,6 +71,12 @@ impl SigLevel {
         self.0 &= !flag.0;
     }
 
+    /// The database flag that matches this package flag: `ALPM_SIG_DATABASE*` is
+    /// `ALPM_SIG_PACKAGE*` four bits up.
+    const fn database_half(self) -> Self {
+        Self(self.0.wrapping_shl(4))
+    }
+
     /// Merges an override on top of a base value. Bits present in `mask` come from `over`;
     /// every other bit comes from `base`. Translates `merge_siglevel` in `conf.c`.
     #[must_use]
@@ -108,72 +114,17 @@ pub(crate) fn apply_values(
             (original, true, true)
         };
 
-        match value {
-            "Never" => {
-                if package {
-                    new_level.unset(SigLevel::PACKAGE);
-                    new_mask.set(SigLevel::PACKAGE);
-                }
-                if database {
-                    new_level.unset(SigLevel::DATABASE);
-                    new_mask.set(SigLevel::DATABASE);
-                }
-            }
-            "Optional" => {
-                if package {
-                    new_level.set(SigLevel::PACKAGE);
-                    new_mask.set(SigLevel::PACKAGE);
-                    new_level.set(SigLevel::PACKAGE_OPTIONAL);
-                    new_mask.set(SigLevel::PACKAGE_OPTIONAL);
-                }
-                if database {
-                    new_level.set(SigLevel::DATABASE);
-                    new_mask.set(SigLevel::DATABASE);
-                    new_level.set(SigLevel::DATABASE_OPTIONAL);
-                    new_mask.set(SigLevel::DATABASE_OPTIONAL);
-                }
-            }
-            "Required" => {
-                if package {
-                    new_level.set(SigLevel::PACKAGE);
-                    new_mask.set(SigLevel::PACKAGE);
-                    new_level.unset(SigLevel::PACKAGE_OPTIONAL);
-                    new_mask.set(SigLevel::PACKAGE_OPTIONAL);
-                }
-                if database {
-                    new_level.set(SigLevel::DATABASE);
-                    new_mask.set(SigLevel::DATABASE);
-                    new_level.unset(SigLevel::DATABASE_OPTIONAL);
-                    new_mask.set(SigLevel::DATABASE_OPTIONAL);
-                }
-            }
+        // What the keyword does to the package half: each flag it touches, and whether it sets
+        // or clears it. The database half is the same change, four bits up.
+        let changes: &[(SigLevel, bool)] = match value {
+            "Never" => &[(SigLevel::PACKAGE, false)],
+            "Optional" => &[(SigLevel::PACKAGE, true), (SigLevel::PACKAGE_OPTIONAL, true)],
+            "Required" => &[(SigLevel::PACKAGE, true), (SigLevel::PACKAGE_OPTIONAL, false)],
             "TrustedOnly" => {
-                if package {
-                    new_level.unset(SigLevel::PACKAGE_MARGINAL_OK);
-                    new_mask.set(SigLevel::PACKAGE_MARGINAL_OK);
-                    new_level.unset(SigLevel::PACKAGE_UNKNOWN_OK);
-                    new_mask.set(SigLevel::PACKAGE_UNKNOWN_OK);
-                }
-                if database {
-                    new_level.unset(SigLevel::DATABASE_MARGINAL_OK);
-                    new_mask.set(SigLevel::DATABASE_MARGINAL_OK);
-                    new_level.unset(SigLevel::DATABASE_UNKNOWN_OK);
-                    new_mask.set(SigLevel::DATABASE_UNKNOWN_OK);
-                }
+                &[(SigLevel::PACKAGE_MARGINAL_OK, false), (SigLevel::PACKAGE_UNKNOWN_OK, false)]
             }
             "TrustAll" => {
-                if package {
-                    new_level.set(SigLevel::PACKAGE_MARGINAL_OK);
-                    new_mask.set(SigLevel::PACKAGE_MARGINAL_OK);
-                    new_level.set(SigLevel::PACKAGE_UNKNOWN_OK);
-                    new_mask.set(SigLevel::PACKAGE_UNKNOWN_OK);
-                }
-                if database {
-                    new_level.set(SigLevel::DATABASE_MARGINAL_OK);
-                    new_mask.set(SigLevel::DATABASE_MARGINAL_OK);
-                    new_level.set(SigLevel::DATABASE_UNKNOWN_OK);
-                    new_mask.set(SigLevel::DATABASE_UNKNOWN_OK);
-                }
+                &[(SigLevel::PACKAGE_MARGINAL_OK, true), (SigLevel::PACKAGE_UNKNOWN_OK, true)]
             }
             _ => {
                 return Err(Error::ConfigInvalidDirective {
@@ -185,6 +136,17 @@ pub(crate) fn apply_values(
                              optionally Package- or Database-prefixed"
                         .to_owned(),
                 });
+            }
+        };
+        for &(flag, enabled) in changes {
+            let halves = [package.then_some(flag), database.then_some(flag.database_half())];
+            for flag in halves.into_iter().flatten() {
+                if enabled {
+                    new_level.set(flag);
+                } else {
+                    new_level.unset(flag);
+                }
+                new_mask.set(flag);
             }
         }
         new_level.unset(SigLevel::USE_DEFAULT);

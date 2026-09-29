@@ -239,7 +239,12 @@ impl LocalDatabase {
                 .then_with(|| left.entry().as_str().cmp(right.entry().as_str()))
         });
 
-        Self::drop_duplicates(&mut packages, &mut diagnostics);
+        crate::diagnostics::drop_duplicates(
+            &mut packages,
+            LocalPackage::entry,
+            &mut diagnostics,
+            |name, kept, ignored| Diagnostic::DuplicateEntry { name, kept, ignored },
+        );
 
         let (diagnostics, diagnostics_dropped) = diagnostics.finish();
 
@@ -308,28 +313,6 @@ impl LocalDatabase {
         }
 
         Ok(packages)
-    }
-
-    /// Removes entries whose package name repeats, keeping the first of each run.
-    ///
-    /// `packages` must already be sorted by name.
-    fn drop_duplicates(packages: &mut Vec<LocalPackage>, diagnostics: &mut Sink<Diagnostic>) {
-        let mut kept: Option<(Name, String)> = None;
-
-        packages.retain(|package| match &kept {
-            Some((name, kept_entry)) if name == package.name() => {
-                diagnostics.push(|| Diagnostic::DuplicateEntry {
-                    name: name.clone(),
-                    kept: kept_entry.clone(),
-                    ignored: package.entry().as_str().to_owned(),
-                });
-                false
-            }
-            _ => {
-                kept = Some((package.name().clone(), package.entry().as_str().to_owned()));
-                true
-            }
-        });
     }
 
     /// The database directory.
@@ -429,7 +412,8 @@ impl LocalDatabase {
     /// available — mirrors `pacman -Qu`.
     ///
     /// See `updates::check_updates` for the exact rules. Repository priority is `repos`' own
-    /// order, since piko does not parse `pacman.conf`. A package absent from every repository
+    /// order, which a caller takes from `pacman.conf`'s section order. A package absent from
+    /// every repository
     /// is skipped. Version comparison reuses [`alpm_types::FullVersion`]'s `Ord`, the same
     /// algorithm as libalpm's `alpm_pkg_vercmp` (`version.c`).
     #[must_use]
@@ -441,13 +425,18 @@ impl LocalDatabase {
     }
 
     /// [`LocalDatabase::check_updates`], with each update `ignores` covers set apart. See
-    /// [`crate::updates::Updates`].
-    #[must_use]
+    /// [`crate::updates::Updates`]. An update is held back when `ignores` covers the repository
+    /// package or the installed one, as `piko update` holds it back.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::UpdateLocalDescUnreadable`] if `IgnoreGroup` is set and an installed
+    /// `desc` the group test needs cannot be read.
     pub fn check_updates_ignoring<'a>(
         &'a self,
         repos: impl IntoIterator<Item = &'a crate::repo::RepoDatabase>,
         ignores: crate::resolve::IgnoreList<'_>,
-    ) -> crate::updates::Updates<'a> {
+    ) -> crate::Result<crate::updates::Updates<'a>> {
         crate::updates::check_updates_ignoring(self, repos, ignores)
     }
 

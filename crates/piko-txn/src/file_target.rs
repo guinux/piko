@@ -128,25 +128,17 @@ impl<'a> Fields<'a> {
     /// Both `.PKGINFO` schema versions carry every field read here. V2 adds `xdata`, which
     /// nothing in a plan needs.
     fn of(info: &'a alpm_pkginfo::PackageInfo) -> Self {
-        macro_rules! fields {
-            ($v:expr) => {
-                Self {
-                    name: &$v.pkgname,
-                    version: &$v.pkgver,
-                    architecture: &$v.arch,
-                    installed_size: u64::from($v.size),
-                    depends: &$v.depend,
-                    provides: &$v.provides,
-                    conflicts: &$v.conflict,
-                    replaces: &$v.replaces,
-                    groups: &$v.group,
-                }
-            };
-        }
-        match info {
-            alpm_pkginfo::PackageInfo::V1(v1) => fields!(v1),
-            alpm_pkginfo::PackageInfo::V2(v2) => fields!(v2),
-        }
+        crate::pkginfo::either_version!(info, |v| Self {
+            name: &v.pkgname,
+            version: &v.pkgver,
+            architecture: &v.arch,
+            installed_size: v.size,
+            depends: &v.depend,
+            provides: &v.provides,
+            conflicts: &v.conflict,
+            replaces: &v.replaces,
+            groups: &v.group,
+        })
     }
 }
 

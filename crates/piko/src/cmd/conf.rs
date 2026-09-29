@@ -246,12 +246,12 @@ mod tests {
     #[test]
     fn a_directive_prints_its_value_without_its_name() {
         let dir = tempfile::tempdir().unwrap();
-        let config = parse(dir.path(), "[options]\nDBPath = /custom/db/\n");
+        let config = parse(dir.path(), "[options]\nCacheDir = /custom/cache/\n");
 
-        let (code, out) = run(&config, Some("DBPath"));
+        let (code, out) = run(&config, Some("CacheDir"));
 
         assert_eq!(code, ExitCode::SUCCESS);
-        assert_eq!(out, "/custom/db/\n");
+        assert_eq!(out, "/custom/cache/\n");
     }
 
     #[test]
@@ -355,10 +355,10 @@ mod tests {
     #[test]
     fn a_directive_name_is_matched_without_regard_to_case() {
         let dir = tempfile::tempdir().unwrap();
-        let config = parse(dir.path(), "[options]\nDBPath = /custom/db/\n");
+        let config = parse(dir.path(), "[options]\nCacheDir = /custom/cache/\n");
 
-        assert_eq!(run(&config, Some("dbpath")).1, "/custom/db/\n");
-        assert_eq!(run(&config, Some("DBPATH")).1, "/custom/db/\n");
+        assert_eq!(run(&config, Some("cachedir")).1, "/custom/cache/\n");
+        assert_eq!(run(&config, Some("CACHEDIR")).1, "/custom/cache/\n");
     }
 
     #[test]

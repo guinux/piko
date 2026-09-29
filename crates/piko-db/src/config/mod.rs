@@ -178,6 +178,24 @@ pub struct Options {
     pub remote_file_sig_level: SigLevel,
 }
 
+/// Why pacman does not register a repository section (`alpm_register_syncdb`, `db.c:47`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Unregistered {
+    /// The section is named `local`, the name of the installed-package database.
+    Reserved,
+    /// An earlier section has the same name. That one is registered instead.
+    Duplicate,
+}
+
+impl fmt::Display for Unregistered {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Reserved => "the name is reserved for the local database",
+            Self::Duplicate => "an earlier section has the same name",
+        })
+    }
+}
+
 /// A `[reponame]` section of a parsed `pacman.conf`, after defaults are applied.
 #[derive(Clone, Debug)]
 pub struct RepositoryConfig {
@@ -220,9 +238,11 @@ impl RepositoryConfig {
 pub struct PacmanConfig {
     /// The `[options]` section.
     pub options: Options,
-    /// Every `[reponame]` section, in file order. File order **is** repository priority
-    /// order — the same convention [`crate::LocalDatabase::check_updates`] uses for its
-    /// caller-supplied repository list.
+    /// Every `[reponame]` section, in file order, as written. File order **is** repository
+    /// priority order — the same convention [`crate::LocalDatabase::check_updates`] uses for
+    /// its caller-supplied repository list. A duplicate section and one named `local` are kept
+    /// here, as `pacman-conf` prints them. A consumer that uses the repositories reads
+    /// [`Self::registered_repositories`] instead.
     pub repositories: Vec<RepositoryConfig>,
     diagnostics: Vec<ConfigDiagnostic>,
 }
@@ -262,10 +282,50 @@ impl PacmanConfig {
         &self.diagnostics
     }
 
-    /// The section that configures `repo`, if any.
+    /// The section that configures `repo`, if any: the one [`Self::registered_repositories`]
+    /// keeps.
     #[must_use]
     pub fn repository(&self, repo: &RepoName) -> Option<&RepositoryConfig> {
-        self.repositories.iter().find(|configured| configured.name == *repo)
+        self.registered_repositories().find(|configured| configured.name == *repo)
+    }
+
+    /// The repositories libalpm registers, in file (priority) order.
+    ///
+    /// [`Self::repositories`] holds every section as written, which is what `pacman-conf`
+    /// prints. pacman then registers each one through `alpm_register_syncdb` (`db.c:47`), which
+    /// refuses a section named `local` and a name already registered, and pacman continues
+    /// without it. So the first section of a name is the one that counts, and a later one
+    /// changes nothing. Every consumer that opens, refreshes or downloads from a repository
+    /// reads this list. [`Self::unregistered_repositories`] names what it leaves out.
+    pub fn registered_repositories(&self) -> impl Iterator<Item = &RepositoryConfig> {
+        self.repositories
+            .iter()
+            .enumerate()
+            .filter(|(index, repo)| self.refusal(*index, repo).is_none())
+            .map(|(_, repo)| repo)
+    }
+
+    /// The sections [`Self::registered_repositories`] leaves out, with the reason, in file
+    /// order.
+    pub fn unregistered_repositories(
+        &self,
+    ) -> impl Iterator<Item = (&RepositoryConfig, Unregistered)> {
+        self.repositories
+            .iter()
+            .enumerate()
+            .filter_map(|(index, repo)| self.refusal(index, repo).map(|refusal| (repo, refusal)))
+    }
+
+    /// Why `alpm_register_syncdb` refuses the section at `index`, if it does.
+    fn refusal(&self, index: usize, repo: &RepositoryConfig) -> Option<Unregistered> {
+        if repo.name.as_str() == "local" {
+            return Some(Unregistered::Reserved);
+        }
+        self.repositories
+            .iter()
+            .take(index)
+            .any(|earlier| earlier.name == repo.name)
+            .then_some(Unregistered::Duplicate)
     }
 
     /// The `SigLevel` `repo`'s database is held to when it is opened or downloaded.
@@ -510,14 +570,13 @@ impl<'a> Parser<'a> {
         let root_dir = self.options.root_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT_DIR));
 
         let (db_path, log_file) = if root_was_set {
-            let trimmed = trim_trailing_slash(&root_dir);
             (
                 self.options
                     .db_path
-                    .unwrap_or_else(|| trimmed.join(DEFAULT_DB_PATH.trim_start_matches('/'))),
+                    .unwrap_or_else(|| root_dir.join(DEFAULT_DB_PATH.trim_start_matches('/'))),
                 self.options
                     .log_file
-                    .unwrap_or_else(|| trimmed.join(DEFAULT_LOG_FILE.trim_start_matches('/'))),
+                    .unwrap_or_else(|| root_dir.join(DEFAULT_LOG_FILE.trim_start_matches('/'))),
             )
         } else {
             (
@@ -596,6 +655,7 @@ impl<'a> Parser<'a> {
             let mut servers = Vec::with_capacity(repo.servers.len());
             for server in &repo.servers {
                 servers.push(substitute_repo_vars(
+                    "Server",
                     server,
                     &repo.name,
                     &options.architecture,
@@ -606,6 +666,7 @@ impl<'a> Parser<'a> {
             let mut cache_servers = Vec::with_capacity(repo.cache_servers.len());
             for server in &repo.cache_servers {
                 cache_servers.push(substitute_repo_vars(
+                    "CacheServer",
                     server,
                     &repo.name,
                     &options.architecture,
@@ -654,6 +715,31 @@ fn set_first_path(field: &mut Option<PathBuf>, value: &str) {
     if field.is_none() {
         *field = Some(PathBuf::from(value));
     }
+}
+
+/// As `set_first_path`, through `realpath`, the way `conf.c` takes `RootDir`, `DBPath` and
+/// `GPGDir`. The result is absolute, with no link, no `.` or `..`, no repeated slash and no
+/// trailing slash. A path that does not exist refuses the file. A later occurrence is ignored
+/// without being resolved, as pacman ignores it.
+fn set_first_resolved_path(
+    field: &mut Option<PathBuf>,
+    directive: &str,
+    value: &str,
+    path: &Path,
+    line: usize,
+) -> Result<()> {
+    if field.is_none() {
+        let resolved =
+            std::fs::canonicalize(value).map_err(|source| Error::ConfigPathUnresolved {
+                path: path.to_path_buf(),
+                line,
+                directive: directive.to_owned(),
+                value: value.to_owned(),
+                source,
+            })?;
+        *field = Some(resolved);
+    }
+    Ok(())
 }
 
 fn apply_option_directive(
@@ -723,9 +809,9 @@ fn apply_valued_option(
                 options.architecture.push(parse_architecture(word, path, line)?);
             }
         }
-        "DBPath" => set_first_path(&mut options.db_path, value),
-        "RootDir" => set_first_path(&mut options.root_dir, value),
-        "GPGDir" => set_first_path(&mut options.gpg_dir, value),
+        "DBPath" => set_first_resolved_path(&mut options.db_path, key, value, path, line)?,
+        "RootDir" => set_first_resolved_path(&mut options.root_dir, key, value, path, line)?,
+        "GPGDir" => set_first_resolved_path(&mut options.gpg_dir, key, value, path, line)?,
         "LogFile" => set_first_path(&mut options.log_file, value),
         "CleanMethod" => {
             for word in value.split_whitespace() {
@@ -875,8 +961,9 @@ fn parse_parallel_downloads(value: &str, path: &Path, line: usize) -> Result<u32
 
 /// `replace_server_vars`. Substitutes `$arch` (using the first configured architecture) and
 /// `$repo` into a `Server`/`CacheServer` URL. A `$arch` with no `Architecture` configured is
-/// a fatal error, matching `conf.c` exactly.
+/// a fatal error, matching `conf.c` exactly. `directive` names the line in that error.
 fn substitute_repo_vars(
+    directive: &str,
     value: &str,
     repo_name: &str,
     architecture: &[Architecture],
@@ -893,7 +980,7 @@ fn substitute_repo_vars(
                 return Err(Error::ConfigInvalidDirective {
                     path: path.to_path_buf(),
                     line,
-                    directive: "Server".to_owned(),
+                    directive: directive.to_owned(),
                     value: value.to_owned(),
                     reason: "contains $arch but no Architecture is configured".to_owned(),
                 });
@@ -901,12 +988,6 @@ fn substitute_repo_vars(
             Ok(value.replace("$repo", repo_name))
         }
     }
-}
-
-/// `RootDir`'s trailing-slash trim in `setdefaults`.
-fn trim_trailing_slash(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
-    PathBuf::from(text.strip_suffix('/').unwrap_or(&text))
 }
 
 #[cfg(test)]
@@ -952,14 +1033,148 @@ mod tests {
     #[test]
     fn root_dir_changes_the_default_db_path_and_log_file() {
         let dir = TempDir::new().unwrap();
-        let path = write_conf(&dir, "pacman.conf", "[options]\nRootDir = /mnt/target/\n");
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let text = format!("[options]\nRootDir = {}/\n", target.display());
+        let path = write_conf(&dir, "pacman.conf", &text);
 
         let config = PacmanConfig::open(&path).unwrap();
 
-        assert_eq!(config.options.db_path, Path::new("/mnt/target/var/lib/pacman/"));
-        assert_eq!(config.options.log_file, Path::new("/mnt/target/var/log/pacman.log"));
+        let root = std::fs::canonicalize(&target).unwrap();
+        let root = root.to_str().unwrap();
+        assert_eq!(config.options.root_dir.as_os_str(), root);
+        assert_eq!(config.options.db_path.as_os_str(), &*format!("{root}/var/lib/pacman/"));
+        assert_eq!(config.options.log_file.as_os_str(), &*format!("{root}/var/log/pacman.log"));
         // GPGDir is never rootdir-prefixed.
         assert_eq!(config.options.gpg_dir, Path::new("/etc/pacman.d/gnupg/"));
+    }
+
+    /// `RootDir` goes through `realpath`, and the defaults are joined onto the result. A root
+    /// of `/` keeps them absolute. The expected values are what `pacman-conf` prints, measured
+    /// on pacman 7.1.0.
+    #[test]
+    fn a_root_is_resolved_before_the_defaults_are_joined_onto_it() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(target.join("sub")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("link")).unwrap();
+        let canonical = std::fs::canonicalize(&target).unwrap();
+        let canonical = canonical.to_str().unwrap();
+        let base = dir.path().display();
+
+        for (root, expected) in [
+            ("/".to_owned(), "/"),
+            ("//".to_owned(), "/"),
+            (format!("{base}/target//"), canonical),
+            (format!("{base}/link/./sub/../"), canonical),
+        ] {
+            let path = write_conf(&dir, "pacman.conf", &format!("[options]\nRootDir = {root}\n"));
+
+            let config = PacmanConfig::open(&path).unwrap();
+
+            let db_path = format!("{}/var/lib/pacman/", expected.trim_end_matches('/'));
+            let log_file = format!("{}/var/log/pacman.log", expected.trim_end_matches('/'));
+            // `Path` equality ignores repeated and trailing slashes. The printed text does not.
+            assert_eq!(config.options.root_dir.as_os_str(), expected, "RootDir = {root}");
+            assert_eq!(config.options.db_path.as_os_str(), &*db_path, "RootDir = {root}");
+            assert_eq!(config.options.log_file.as_os_str(), &*log_file, "RootDir = {root}");
+        }
+    }
+
+    /// `DBPath` and `GPGDir` go through `realpath` too, and lose their trailing slash.
+    #[test]
+    fn db_path_and_gpg_dir_are_resolved() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("db")).unwrap();
+        std::fs::create_dir(dir.path().join("gnupg")).unwrap();
+        let base = dir.path().display();
+        let text = format!("[options]\nDBPath = {base}/./db/\nGPGDir = {base}//gnupg/\n");
+        let path = write_conf(&dir, "pacman.conf", &text);
+
+        let config = PacmanConfig::open(&path).unwrap();
+
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let canonical = canonical.to_str().unwrap();
+        assert_eq!(config.options.db_path.as_os_str(), &*format!("{canonical}/db"));
+        assert_eq!(config.options.gpg_dir.as_os_str(), &*format!("{canonical}/gnupg"));
+    }
+
+    /// A path `realpath` cannot resolve refuses the file, as `pacman-conf` refuses it. A later
+    /// occurrence of the directive is ignored, and never resolved.
+    #[test]
+    fn a_path_that_does_not_exist_refuses_the_file() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing");
+
+        for directive in ["RootDir", "DBPath", "GPGDir"] {
+            let text = format!("[options]\n{directive} = {}\n", missing.display());
+            let path = write_conf(&dir, "pacman.conf", &text);
+
+            let error = PacmanConfig::open(&path).unwrap_err();
+
+            assert!(
+                matches!(
+                    &error,
+                    Error::ConfigPathUnresolved { directive: named, line: 2, .. }
+                        if named == directive
+                ),
+                "got {error:?}"
+            );
+        }
+
+        let text = format!("[options]\nRootDir = /\nRootDir = {}\n", missing.display());
+        let path = write_conf(&dir, "pacman.conf", &text);
+        assert_eq!(PacmanConfig::open(&path).unwrap().options.root_dir.as_os_str(), "/");
+    }
+
+    /// A second section of a name and a section named `local` stay in the dump, as
+    /// `pacman-conf` prints them, and are never used, as `alpm_register_syncdb` refuses them.
+    #[test]
+    fn a_duplicate_section_and_local_are_kept_but_not_registered() {
+        let dir = TempDir::new().unwrap();
+        let path = write_conf(
+            &dir,
+            "pacman.conf",
+            "[options]\n[core]\nServer = https://a.invalid/$repo\n\
+             [core]\nServer = https://b.invalid/$repo\n[local]\nServer = https://c.invalid/\n\
+             [extra]\nServer = https://a.invalid/$repo\n",
+        );
+
+        let config = PacmanConfig::open(&path).unwrap();
+
+        assert_eq!(config.repositories.len(), 4);
+        let registered: Vec<(&str, &str)> = config
+            .registered_repositories()
+            .map(|repo| (repo.name.as_str(), repo.servers.first().unwrap().as_str()))
+            .collect();
+        assert_eq!(
+            registered,
+            [("core", "https://a.invalid/core"), ("extra", "https://a.invalid/extra")]
+        );
+        let refused: Vec<(&str, Unregistered)> = config
+            .unregistered_repositories()
+            .map(|(repo, refusal)| (repo.name.as_str(), refusal))
+            .collect();
+        assert_eq!(refused, [("core", Unregistered::Duplicate), ("local", Unregistered::Reserved)]);
+        let core = RepoName::parse("core").unwrap();
+        assert_eq!(config.repository(&core).unwrap().servers, ["https://a.invalid/core"]);
+    }
+
+    /// The error for a `$arch` with no `Architecture` names the directive the line holds.
+    #[test]
+    fn an_arch_variable_without_an_architecture_names_its_directive() {
+        let dir = TempDir::new().unwrap();
+        for directive in ["Server", "CacheServer"] {
+            let text = format!("[options]\n[core]\n{directive} = https://a.invalid/$arch\n");
+            let path = write_conf(&dir, "pacman.conf", &text);
+
+            let error = PacmanConfig::open(&path).unwrap_err();
+
+            assert!(
+                matches!(&error, Error::ConfigInvalidDirective { directive: named, .. } if named == directive),
+                "got {error:?}"
+            );
+        }
     }
 
     #[test]

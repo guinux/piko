@@ -216,12 +216,13 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
         },
         Command::Check { packages } => {
             let root = resolve_root_dir(cli, &config);
-            let no_extract = path_patterns(cli, &config).no_extract;
+            let patterns = path_patterns(cli, &config);
+            let no_extract = patterns.no_extract.as_slice();
             let db = open_local_db(cli, &config)?;
             if packages.is_empty() {
-                cmd::check::check_all(&db, &root, &no_extract, &mut out)
+                cmd::check::check_all(&db, &root, no_extract, &mut out)
             } else {
-                cmd::check::check_selected(&db, packages, &root, &no_extract, &mut out)
+                cmd::check::check_selected(&db, packages, &root, no_extract, &mut out)
             }
         }
         Command::Search { terms, installed, repos, repo, quiet } => {
@@ -234,7 +235,14 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                         let dbpath = resolve_dbpath(cli, &config);
                         vec![open_repo_by_name(&dbpath, &repo, cli, &config)?]
                     }
-                    None => open_all_repos(cli, &config)?.into_iter().map(|(_, db)| db).collect(),
+                    // `alpm_db_search` finds nothing in a repository whose `Usage` does not
+                    // include `Search` (`db.c:447`). `--repo` names its repository on purpose,
+                    // as `pacman -Sl <repo>` does, so it is not filtered.
+                    None => open_all_repos(cli, &config)?
+                        .into_iter()
+                        .filter(|(usage, _)| usage.contains(piko_db::config::DbUsage::SEARCH))
+                        .map(|(_, db)| db)
+                        .collect(),
                 };
                 // `--repo` names one specific repository to search. That alone makes the
                 // search repos-only, even without `--repos`. Being installed has nothing to
@@ -266,7 +274,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             };
             // A frozen database makes this command answer "no updates" and nothing else. That
             // is exactly the harm an old database does, so it is said on stderr.
-            report_stale_repos(cli, &config, repos.iter(), *max_age, offset);
+            report_stale_repos(repos.iter(), *max_age, offset);
             let (ignore_pkg, ignore_group) = ignore_lists(cli, &config);
             let ignores = IgnoreList::new(&ignore_pkg, &ignore_group);
             cmd::sync::check_updates(&local, &repos, ignores, *quiet, &mut out)
@@ -293,7 +301,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             let local = open_local_db(cli, &config)?;
             let opened = open_all_repos(cli, &config)?;
             if *sysupgrade {
-                report_stale_repos(cli, &config, opened.iter().map(|(_, db)| db), *max_age, offset);
+                report_stale_repos(opened.iter().map(|(_, db)| db), *max_age, offset);
             }
             let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
             let format = if *names { cmd::plan::Format::Names } else { cmd::plan::Format::Full };
@@ -454,7 +462,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 cmd::txn::SideEffects {
                     scriptlets: !*noscriptlet,
                     hook_dirs: hook_dirs(cli, &config, hookdir, &root),
-                    recording: record.clone(),
+                    recording: record,
                 },
                 &mut out,
             )
@@ -641,16 +649,11 @@ fn freshness_policy(accept_older: bool, max_age_days: u64) -> piko_net::Freshnes
 
 /// Warns about each database in `repos` that is older than `--max-age`, or dated in the future.
 fn report_stale_repos<'a>(
-    cli: &Cli,
-    config: &ConfigCache,
     repos: impl IntoIterator<Item = &'a piko_db::repo::RepoDatabase>,
     max_age_days: u64,
     offset: piko_txn::LocalOffset,
 ) {
-    let dated: Vec<_> = repos
-        .into_iter()
-        .map(|db| (db.name(), context::repo_publication(db, cli, config)))
-        .collect();
+    let dated: Vec<_> = repos.into_iter().map(|db| (db.name(), db.publication())).collect();
     cmd::freshness::report_stale(
         dated,
         std::time::SystemTime::now(),
@@ -716,15 +719,16 @@ fn sync(
     // The refresh above already reported each database's age, after asking other mirrors. With
     // `--norefresh`, the plan rests on whatever is on disk, and only an age can be reported.
     if !args.refresh && args.sysupgrade.is_some() {
-        report_stale_repos(cli, config, opened.iter().map(|(_, db)| db), args.max_age, args.offset);
+        report_stale_repos(opened.iter().map(|(_, db)| db), args.max_age, args.offset);
     }
     let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
     let signing = signing_policy(parsed);
+    let registered: Vec<_> = parsed.registered_repositories().cloned().collect();
     Ok(cmd::txn::install(
         args.root,
         &dbpath,
         cache_dirs(config, cli),
-        cmd::txn::Catalog { local: &local, repos: &opened, ignores, configs: &parsed.repositories },
+        cmd::txn::Catalog { local: &local, repos: &opened, ignores, configs: &registered },
         args.targets,
         cmd::txn::InstallOptions {
             reasons: args.reasons,
@@ -738,7 +742,7 @@ fn sync(
             side_effects: cmd::txn::SideEffects {
                 scriptlets: !args.noscriptlet,
                 hook_dirs: hook_dirs(cli, config, args.hookdir, args.root),
-                recording: record.clone(),
+                recording: record,
             },
             patterns: path_patterns(cli, config),
             noconfirm: args.noconfirm,

@@ -17,7 +17,7 @@ use alpm_types::{
     PackageDescription, PackageFileName, PackageRelation, Packager, RelationOrSoname, Url,
 };
 
-use crate::desc_compat::TakenFields;
+use crate::desc_compat::{TakenFields, schema_fields};
 
 /// Whether `keyword` is a section this build recognises in a repository `desc`.
 pub(crate) fn is_known_section(keyword: &str) -> bool {
@@ -34,53 +34,10 @@ pub struct RepoDescView<'a> {
     taken: &'a TakenFields,
 }
 
-/// Generates accessors that read the same field from either schema version.
-macro_rules! shared_field {
-    ($( $(#[$meta:meta])* $method:ident: $field:ident -> $ty:ty ),* $(,)?) => {
-        $(
-            $(#[$meta])*
-            #[must_use]
-            pub fn $method(&self) -> $ty {
-                match self.inner {
-                    RepoDescFile::V1(desc) => &desc.$field,
-                    RepoDescFile::V2(desc) => &desc.$field,
-                }
-            }
-        )*
-    };
-}
-
-/// Generates accessors for fields that are cheap to copy.
-macro_rules! shared_copy_field {
-    ($( $(#[$meta:meta])* $method:ident: $field:ident -> $ty:ty ),* $(,)?) => {
-        $(
-            $(#[$meta])*
-            #[must_use]
-            pub fn $method(&self) -> $ty {
-                match self.inner {
-                    RepoDescFile::V1(desc) => desc.$field,
-                    RepoDescFile::V2(desc) => desc.$field,
-                }
-            }
-        )*
-    };
-}
-
 impl<'a> RepoDescView<'a> {
     /// Wraps a parsed repository `desc` and the fields taken out of it before parsing.
     pub(crate) const fn new(inner: &'a RepoDescFile, taken: &'a TakenFields) -> Self {
         Self { inner, taken }
-    }
-
-    /// The underlying schema-tagged value, for callers that need the distinction.
-    ///
-    /// Its `url` field is always `None`. `%URL%` is blanked before the upstream parser sees
-    /// the text, so [`RepoDescView::url`] and [`RepoDescView::url_raw`] are the only sources
-    /// for it. Its `packager` field can likewise hold a substitute. Read
-    /// [`RepoDescView::packager`] and [`RepoDescView::packager_raw`] rather than it.
-    #[must_use]
-    pub const fn as_inner(&self) -> &'a RepoDescFile {
-        self.inner
     }
 
     /// Whether this `desc` uses the v2 schema.
@@ -89,7 +46,8 @@ impl<'a> RepoDescView<'a> {
         matches!(self.inner, RepoDescFile::V2(_))
     }
 
-    shared_field! {
+    schema_fields! {
+        RepoDescFile;
         /// `%FILENAME%`, the package file's name on the repository server.
         file_name: file_name -> &'a PackageFileName,
         /// `%NAME%`.
@@ -122,7 +80,8 @@ impl<'a> RepoDescView<'a> {
         check_depends: check_dependencies -> &'a [PackageRelation],
     }
 
-    shared_copy_field! {
+    schema_fields! {
+        RepoDescFile, copy;
         /// `%CSIZE%`, the compressed package file's size in bytes.
         compressed_size: compressed_size -> CompressedSize,
         /// `%ISIZE%`, the installed size in bytes.

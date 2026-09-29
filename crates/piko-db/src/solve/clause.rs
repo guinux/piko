@@ -222,17 +222,14 @@ impl Problem {
     }
 
     /// The number of clauses.
-    //
-    // Not `const`: `Vec::len` is only usable in a `const fn` from Rust 1.87. This workspace
-    // declares an MSRV of 1.85 (the `alpm-*` crates').
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.kinds.len()
     }
 
     /// Whether there are no clauses.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.kinds.is_empty()
     }
 

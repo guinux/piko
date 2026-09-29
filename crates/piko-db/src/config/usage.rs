@@ -34,6 +34,24 @@ impl DbUsage {
     pub fn contains(self, flag: Self) -> bool {
         self.0 & flag.0 == flag.0
     }
+
+    /// Returns `true` if any bit in `other` is set: libalpm's `db->usage & mask` test.
+    #[must_use]
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// Every bit set in `self` or in `other`.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Returns `true` if no bit is set.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
 }
 
 /// Applies a space-separated list of `Usage` keywords (`Sync`, `Search`, `Install`,

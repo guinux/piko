@@ -20,8 +20,8 @@ pub const DEFAULT_KEYRINGS_DIR: &str = "/usr/share/pacman/keyrings/";
 pub struct Cli {
     /// Path to the ALPM database directory. Defaults to `DBPath` from the parsed
     /// pacman.conf (see `--config`); falls back to `/var/lib/pacman` with a warning if that
-    /// cannot be read.
-    #[arg(long, global = true, value_name = "PATH")]
+    /// cannot be read. Resolved through `realpath`, as pacman resolves it, so it must exist.
+    #[arg(long, global = true, value_name = "PATH", value_parser = resolved_path)]
     pub dbpath: Option<PathBuf>,
 
     /// Path to the pacman.conf-style configuration file, used by the `conf` subcommand.
@@ -35,8 +35,9 @@ pub struct Cli {
     /// rather than replacing it. pacman's flag of the same name behaves the same way. A package
     /// downloads into the first directory, and every directory is searched
     /// for a package already there. With no `--cachedir` and no readable config, this is
-    /// `/var/cache/pacman/pkg`.
-    #[arg(long = "cachedir", global = true, value_name = "PATH")]
+    /// `/var/cache/pacman/pkg`. Resolved through `realpath`, as pacman resolves it, so it must
+    /// exist.
+    #[arg(long = "cachedir", global = true, value_name = "PATH", value_parser = resolved_path)]
     pub cache_dir: Vec<PathBuf>,
 
     /// Path to the transaction log. Defaults to `LogFile` from the parsed pacman.conf (see
@@ -261,9 +262,9 @@ pub enum Command {
     /// `--repo` restricts the search to a single named repository, e.g. `core`, and implies
     /// `--repos`. A specific repository is itself a repos-only request. Otherwise a package's
     /// `[Installed]` line would show up identically whichever repository was named. Being
-    /// installed has nothing to do with any one repository. Every configured repository is
-    /// searched, in file (priority) order, when `--repo` is omitted. It conflicts with
-    /// `--installed`.
+    /// installed has nothing to do with any one repository. Every configured repository whose
+    /// `Usage` includes `Search` is searched, in file (priority) order, when `--repo` is
+    /// omitted. It conflicts with `--installed`.
     #[command(visible_alias = "se")]
     Search {
         /// The search term(s); a package must match all of them.
@@ -473,7 +474,7 @@ pub enum Command {
     #[command(visible_alias = "in")]
     Install {
         /// Where to install. Use `/` for the running system.
-        #[arg(long)]
+        #[arg(long, value_parser = resolved_path)]
         root: Option<PathBuf>,
         /// The package(s) to install: a dependency string (`foo`, `foo>=1.0`), a group name,
         /// a path to a package file, or its URL.
@@ -568,7 +569,7 @@ pub enum Command {
     #[command(visible_alias = "up")]
     Update {
         /// Where to upgrade. Use `/` for the running system.
-        #[arg(long)]
+        #[arg(long, value_parser = resolved_path)]
         root: Option<PathBuf>,
         /// Extra targets to install alongside the upgrade, as `pacman -Su foo` allows. With
         /// none, every installed package is checked. A target carrying `*`, `?` or `[` is a
@@ -643,7 +644,7 @@ pub enum Command {
     #[command(visible_alias = "rm")]
     Remove {
         /// Where to remove from. Use `/` for the running system.
-        #[arg(long)]
+        #[arg(long, value_parser = resolved_path)]
         root: Option<PathBuf>,
         /// Installed package names, or a group name to remove every installed
         /// member of.
@@ -811,7 +812,7 @@ pub enum Command {
     #[command(visible_alias = "mg")]
     Merge {
         /// Where to look. Defaults to RootDir from pacman.conf, or `/`.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_parser = resolved_path)]
         root: Option<PathBuf>,
 
         /// Print the pending files, one absolute path per line, and change nothing.
@@ -950,4 +951,13 @@ pub enum KeyCommand {
 
     /// Force GnuPG to recompute key validity from the current trust database.
     Updatedb,
+}
+
+/// Resolves a `--root`, `--dbpath` or `--cachedir` value through `realpath`, as pacman's
+/// `parseargs` does.
+/// The result is absolute, with no link, no `.` or `..` and no trailing slash. A path that
+/// does not exist is refused before any command runs.
+fn resolved_path(value: &str) -> Result<PathBuf, String> {
+    std::fs::canonicalize(value)
+        .map_err(|error| format!("failed to resolve path '{value}': {error}"))
 }

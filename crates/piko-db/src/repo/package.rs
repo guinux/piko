@@ -15,6 +15,7 @@ use alpm_types::{
 
 use super::{
     archive::{self, ArchiveItem},
+    database::{ArchiveCheck, run_check},
     desc_compat::RepoDescView,
     eager::EagerFields,
     files_arena::{FilesArena, PathIter},
@@ -46,32 +47,50 @@ pub(crate) struct LoadedDesc {
 /// *whole* `.files` archive, because there is no random access into a gzip-over-tar stream. It is
 /// built once, on first use, and the result is shared. That is what makes opening `<repo>.db` and
 /// never calling [`RepoPackage::file_list`] cost nothing beyond the `desc` pass.
-#[derive(Debug)]
 pub(crate) struct FilesSource {
     lazy: Lazy<FilesArena>,
     /// The `.files` archive to load from. `None` means `<repo>.db` was opened with no sibling
     /// `<repo>.files` at all. Every [`RepoPackage::file_list`] call then fails with
     /// [`Error::FilesUnavailable`], cached the same way any other failure is.
     archive_path: Option<PathBuf>,
+    /// Run on `archive_path` before each walk of it.
+    check: Option<ArchiveCheck>,
     limits: Limits,
     repo: RepoName,
+}
+
+impl std::fmt::Debug for FilesSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilesSource")
+            .field("lazy", &self.lazy)
+            .field("archive_path", &self.archive_path)
+            .field("check", &self.check.as_ref().map(|_| "<fn>"))
+            .field("limits", &self.limits)
+            .field("repo", &self.repo)
+            .finish()
+    }
 }
 
 impl FilesSource {
     /// A source with no `.files` archive at all.
     pub(crate) fn unavailable(repo: RepoName, limits: Limits) -> Self {
-        Self { lazy: Lazy::new(), archive_path: None, limits, repo }
+        Self { lazy: Lazy::new(), archive_path: None, check: None, limits, repo }
     }
 
-    /// A source backed by `archive_path`, not yet loaded.
-    pub(crate) fn deferred(repo: RepoName, archive_path: PathBuf, limits: Limits) -> Self {
-        Self { lazy: Lazy::new(), archive_path: Some(archive_path), limits, repo }
+    /// A source backed by `archive_path`, not yet loaded. `check` runs on it before each walk.
+    pub(crate) fn deferred(
+        repo: RepoName,
+        archive_path: PathBuf,
+        limits: Limits,
+        check: Option<ArchiveCheck>,
+    ) -> Self {
+        Self { lazy: Lazy::new(), archive_path: Some(archive_path), check, limits, repo }
     }
 
     /// A source whose arena has already been built. That is the `.files`-only variant, where
     /// everything must be populated in the same pass as `desc`, not deferred.
     pub(crate) fn preloaded(repo: RepoName, limits: Limits, arena: FilesArena) -> Self {
-        let source = Self { lazy: Lazy::new(), archive_path: None, limits, repo };
+        let source = Self { lazy: Lazy::new(), archive_path: None, check: None, limits, repo };
         // Seeding the slot here, instead of special-casing an already-built arena
         // everywhere else, keeps `file_list` a single code path regardless of variant.
         let _ = source.lazy.get_or_load(|| Ok(arena));
@@ -86,6 +105,7 @@ impl FilesSource {
         let Some(archive_path) = &self.archive_path else {
             return Err(Error::FilesUnavailable { repo: self.repo.clone() });
         };
+        run_check(self.check.as_ref(), archive_path)?;
 
         let mut arena = FilesArena::new();
         archive::walk(
@@ -101,7 +121,7 @@ impl FilesSource {
                     // A same-archive duplicate keeps the first entry. There is nowhere to
                     // report it from here, for the same reason `on_skip` below discards its
                     // diagnostics. `RepoDatabase::diagnostics()` was finalised at open time.
-                    let _ = arena.insert(
+                    arena.insert(
                         archive_path,
                         entry.name().clone(),
                         entry.version().clone(),
@@ -169,12 +189,12 @@ impl FilesSource {
 
         let wanted: HashSet<&Name> = packages.iter().map(|package| package.name()).collect();
         let mut arena = FilesArena::new();
-        let walk_result =
+        let walk_result = run_check(self.check.as_ref(), archive_path).and_then(|_| {
             archive::walk_matching(archive_path, &self.limits, &wanted, |entry, text| {
                 // As in `load`, a member that fails to parse here is dropped, not fatal. It
                 // surfaces as `Error::FilesMissingForPackage` for that one package.
                 if let Ok(parsed) = RepoFilesV1::from_str(&text) {
-                    let _ = arena.insert(
+                    arena.insert(
                         archive_path,
                         entry.name().clone(),
                         entry.version().clone(),
@@ -184,7 +204,8 @@ impl FilesSource {
                     )?;
                 }
                 Ok(())
-            });
+            })
+        });
 
         if let Err(error) = walk_result {
             let shared = SharedError::new(error);
@@ -550,7 +571,8 @@ mod tests {
             ],
         );
 
-        let files = Arc::new(FilesSource::deferred(a_repo_name(), archive_path, Limits::default()));
+        let files =
+            Arc::new(FilesSource::deferred(a_repo_name(), archive_path, Limits::default(), None));
         let foo = package_at("foo", "1.0.0-1", Arc::clone(&files));
 
         let mut results = files.file_lists_for(&[&foo]);
@@ -576,8 +598,12 @@ mod tests {
             &[("foo-1.0.0-1/files", b"%FILES%\nusr/\nusr/bin/\nusr/bin/foo\n\n")],
         );
 
-        let files =
-            Arc::new(FilesSource::deferred(a_repo_name(), archive_path.clone(), Limits::default()));
+        let files = Arc::new(FilesSource::deferred(
+            a_repo_name(),
+            archive_path.clone(),
+            Limits::default(),
+            None,
+        ));
         let foo = package_at("foo", "1.0.0-1", Arc::clone(&files));
 
         // Force the full, shared load once, the ordinary way.
@@ -604,6 +630,7 @@ mod tests {
             a_repo_name(),
             PathBuf::from("/nonexistent/core.files"),
             Limits::default(),
+            None,
         ));
         let foo = package_at("foo", "1.0.0-1", Arc::clone(&files));
 
@@ -626,7 +653,8 @@ mod tests {
             &[("foo-2.0.0-1/files", b"%FILES%\nusr/\nusr/bin/\nusr/bin/foo\n\n")],
         );
 
-        let files = Arc::new(FilesSource::deferred(a_repo_name(), archive_path, Limits::default()));
+        let files =
+            Arc::new(FilesSource::deferred(a_repo_name(), archive_path, Limits::default(), None));
         // The database itself says `foo` is at 1.0.0-1, but the archive holds 2.0.0-1.
         let foo = package_at("foo", "1.0.0-1", Arc::clone(&files));
 

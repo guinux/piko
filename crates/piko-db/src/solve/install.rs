@@ -276,7 +276,7 @@ pub fn plan_install(
 
     let explanation =
         options.explain.then(|| explain_plan(universe, &planned, &request, &defaulted));
-    let plan = Plan::assemble(universe, &planned, request.targets(), limits, cache);
+    let plan = Plan::assemble(universe, &planned, &explicit, limits, cache);
     Ok(InstallPlan { plan, explicit, defaulted, explanation })
 }
 
@@ -307,11 +307,7 @@ mod tests {
         let mut names: Vec<String> = plan
             .steps()
             .iter()
-            .filter_map(|step| match step {
-                Step::Install { candidate, .. } => Some(*candidate),
-                Step::Change { to, .. } => Some(*to),
-                Step::Remove { .. } => None,
-            })
+            .filter_map(Step::incoming)
             .map(|id| universe.get(id).unwrap().name().to_string())
             .collect();
         names.sort();
@@ -557,5 +553,93 @@ mod tests {
         let failure =
             plan(&universe, &["app"], InstallOptions::default(), &mut Defaults).unwrap_err();
         assert!(matches!(failure, InstallFailure::Unsatisfiable(_)), "got {failure:?}");
+    }
+
+    /// `lib>=2` has three providers, and each one is ruled out only after a decision: `lib`
+    /// by the installed `a`, `p2` and `p3` by the installed `b`. The plan must still give
+    /// `app` a provider, with the installed package that conflicts with it upgraded.
+    #[test]
+    fn a_requirement_with_three_providers_is_met_once_the_first_two_fall() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("a", "1.0.0-1").conflicts(["marker"]))
+            .installed(PackageSpec::new("b", "1.0.0-1").conflicts(["p2", "p3"]))
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("a", "2.0.0-1"),
+                    PackageSpec::new("b", "2.0.0-1"),
+                    PackageSpec::new("lib", "2.0.0-1").provides(["marker"]),
+                    PackageSpec::new("p2", "1.0.0-1").provides(["lib=2.0.0-1"]),
+                    PackageSpec::new("p3", "1.0.0-1").provides(["lib=2.0.0-1"]),
+                    PackageSpec::new("app", "1.0.0-1").depends(["lib>=2"]),
+                ],
+            )
+            .build();
+        let universe = universe(&scenario);
+
+        let planned = plan(&universe, &["app"], InstallOptions::default(), &mut Defaults).unwrap();
+
+        let chosen = installed(&universe, &planned.plan);
+        let valid = [["a", "app", "lib"], ["app", "b", "p2"], ["app", "b", "p3"]];
+        assert!(
+            valid.iter().any(|plan| chosen == plan),
+            "`app` needs a provider it does not conflict with: {chosen:?}"
+        );
+    }
+
+    /// A named target settles its own name, and the system upgrade leaves it alone. `core`'s
+    /// `foo` would be the upgrade, but the target asks for an older one from `extra`.
+    #[test]
+    fn a_sysupgrade_leaves_a_named_target_to_its_name() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("foo", "1.0.0-1"))
+            .repo("core", [PackageSpec::new("foo", "3.0.0-1")])
+            .repo("extra", [PackageSpec::new("foo", "2.0.0-1")])
+            .build();
+        let universe = universe(&scenario);
+        let options = InstallOptions { sysupgrade: Some(false), ..InstallOptions::default() };
+
+        let planned = plan(&universe, &["foo<3"], options, &mut Defaults).unwrap();
+
+        let versions: Vec<String> = planned
+            .plan
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Change { to, .. } => Some(universe.get(*to).unwrap().version().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(versions, ["2.0.0-1"]);
+    }
+
+    /// A `%REPLACES%` replacement nobody named takes the reason of what it replaces, as
+    /// `check_replacers` copies it: an explicit package stays explicit under its new name, and
+    /// a dependency stays a dependency.
+    #[test]
+    fn a_replacement_takes_the_reason_of_what_it_replaces() {
+        use alpm_types::PackageInstallReason::{Depend, Explicit};
+
+        for (replaced, expected) in [(Explicit, Explicit), (Depend, Depend)] {
+            let scenario = Scenario::new()
+                .installed(PackageSpec::new("old", "1.0.0-1").reason(replaced))
+                .repo("core", [PackageSpec::new("new", "1.0.0-1").replaces(["old"])])
+                .build();
+            let universe = universe(&scenario);
+            let options = InstallOptions { sysupgrade: Some(false), ..InstallOptions::default() };
+
+            let planned = plan(&universe, &[], options, &mut Defaults).unwrap();
+
+            let reasons: Vec<_> = planned
+                .plan
+                .steps()
+                .iter()
+                .filter_map(|step| match step {
+                    Step::Install { reason, .. } => Some(*reason),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reasons, [expected], "replacing a package installed as {replaced:?}");
+        }
     }
 }

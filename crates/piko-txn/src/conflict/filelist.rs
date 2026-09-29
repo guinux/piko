@@ -1,7 +1,9 @@
-//! A package's file list, and the three set operations conflict detection is built from.
+//! A package's file list, and the set operations conflict detection is built from.
 //!
 //! This module is transcribed from `filelist.c`, with one deliberate difference in
-//! [`FileList::intersection`].
+//! `FileList::intersection`. The target check in `conflict` does not call it: it indexes every
+//! target's paths once instead. The method stays, in tests only, as the pairwise reference that
+//! check is tested against.
 //!
 //! # Two comparisons, not one
 //!
@@ -20,8 +22,6 @@
 //!
 //! This module keeps both comparisons, under names that say which is which.
 
-use std::collections::HashMap;
-
 /// A package's file list, sorted, as `%FILES%` and a package archive both spell it.
 ///
 /// Directories carry a trailing `/`, and files do not. That convention comes from the archive.
@@ -32,7 +32,7 @@ pub struct FileList {
     entries: Box<[Box<str>]>,
 }
 
-/// A path with one trailing `/` removed, which is how [`pathcmp`] compares.
+/// A path with one trailing `/` removed, which is how `_alpm_filelist_pathcmp` compares.
 ///
 /// Exactly one slash, not all of them. `_alpm_filelist_pathcmp` advances a single character
 /// past the end of the shorter string, so `a` equals `a/` but not `a//`. Real archives never
@@ -50,8 +50,8 @@ pub fn is_directory(path: &str) -> bool {
 }
 
 /// Compares two paths ignoring a trailing slash, as `_alpm_filelist_pathcmp` does.
-#[must_use]
-pub fn pathcmp(left: &str, right: &str) -> std::cmp::Ordering {
+#[cfg(test)]
+fn pathcmp(left: &str, right: &str) -> std::cmp::Ordering {
     strip_dir(left).cmp(strip_dir(right))
 }
 
@@ -120,12 +120,13 @@ impl FileList {
     /// `the_libalpm_merge_can_step_past_a_conflict` in this module demonstrates a concrete
     /// case. piko matches on the stripped path instead, so the order entries arrive in cannot
     /// hide a pair.
-    #[must_use]
-    pub fn intersection<'a>(&'a self, other: &Self) -> Vec<&'a str> {
+    #[cfg(test)]
+    pub(crate) fn intersection<'a>(&'a self, other: &Self) -> Vec<&'a str> {
         // Whether `other` holds a non-directory under this stripped path. A pair is skipped
         // only when both sides are directories, so one non-directory on the other side makes
         // every match a conflict.
-        let mut other_has_file: HashMap<&str, bool> = HashMap::new();
+        let mut other_has_file: std::collections::HashMap<&str, bool> =
+            std::collections::HashMap::new();
         for entry in other.iter() {
             let slot = other_has_file.entry(strip_dir(entry)).or_insert(false);
             *slot = *slot || !is_directory(entry);

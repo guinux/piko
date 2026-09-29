@@ -28,13 +28,10 @@ use std::{
     ffi::OsString,
     io::Read,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU8, AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 
-use piko_db::compression::{self, Decoder};
+use piko_db::compression::{self, BoundedReader, Bounds, Decoder, Overrun};
 
 use crate::{
     error::{Error, IoAction, Result},
@@ -294,16 +291,8 @@ pub fn walk_until(
     let decoder = Decoder::new(file, format)
         .map_err(|source| Error::io(path, IoAction::Decompress, source))?;
 
-    let budget = Arc::new(Budget {
-        declared: AtomicU64::new(limits.declared_bound(0)),
-        tripped: AtomicU8::new(Budget::CLEAR),
-    });
-    let bounded = BoundedReader {
-        inner: decoder,
-        limit: limits.inflated_bytes,
-        read_so_far: 0,
-        budget: Arc::clone(&budget),
-    };
+    let budget = Bounds::new(limits.declared_bound(0));
+    let bounded = BoundedReader::new(decoder, limits.inflated_bytes, Arc::clone(&budget));
     let mut archive = tar::Archive::new(bounded);
 
     let classify = |source: std::io::Error| classify_io_error(path, source, &budget, limits);
@@ -314,7 +303,7 @@ pub fn walk_until(
         let mut entry = entry.map_err(classify)?;
 
         seen = seen.saturating_add(1);
-        budget.declared.store(limits.declared_bound(seen), Ordering::Relaxed);
+        budget.set_declared(limits.declared_bound(seen));
         if seen > limits.max_members {
             return Err(Error::PackageLimitExceeded {
                 path: path.to_path_buf(),
@@ -348,8 +337,12 @@ pub fn walk_until(
                 return Err(Error::PackageLimitExceeded { path: path.to_path_buf(), limit, max });
             }
         };
-        if on_member(&member, &mut entry)? == Flow::Stop {
-            break;
+        // A callback reads the member through the bounded reader, so its error can be a bound
+        // that tripped. The budget says which, as it does for the walk's own reads.
+        match on_member(&member, &mut entry) {
+            Ok(Flow::Continue) => {}
+            Ok(Flow::Stop) => break,
+            Err(error) => return Err(tripped_limit(path, &budget, limits).unwrap_or(error)),
         }
     }
 
@@ -545,67 +538,24 @@ fn sniff_file(file: &mut std::fs::File, path: &Path) -> Result<compression::Form
 /// Tells a genuine bound violation apart from an unrelated I/O or tar-format failure.
 ///
 /// `tar` surfaces [`BoundedReader`]'s error as an opaque [`std::io::Error`]. The shared
-/// [`Budget`] is what distinguishes the two. Its flag is set only when a bound was actually
-/// exceeded, and says which one.
+/// [`Bounds`] is what distinguishes the two: it records a bound only when one was actually
+/// exceeded, and which one.
 fn classify_io_error(
     path: &Path,
     source: std::io::Error,
-    budget: &Budget,
+    budget: &Bounds,
     limits: &PackageLimits,
 ) -> Error {
-    let (limit, max) = match budget.tripped.load(Ordering::Relaxed) {
-        Budget::INFLATED => ("inflated size", limits.inflated_bytes),
-        Budget::DECLARED => {
-            ("installed size the plan declares", budget.declared.load(Ordering::Relaxed))
-        }
-        _ => return Error::io(path, IoAction::Read, source),
+    tripped_limit(path, budget, limits).unwrap_or_else(|| Error::io(path, IoAction::Read, source))
+}
+
+/// The bound the walk's reader refused a read on, if one tripped.
+fn tripped_limit(path: &Path, budget: &Bounds, limits: &PackageLimits) -> Option<Error> {
+    let (limit, max) = match budget.tripped()? {
+        Overrun::Limit => ("inflated size", limits.inflated_bytes),
+        Overrun::Declared => ("installed size the plan declares", budget.declared()),
     };
-    Error::PackageLimitExceeded { path: path.to_path_buf(), limit, max }
-}
-
-/// The bounds [`BoundedReader`] shares with the walk that drives it.
-#[derive(Debug)]
-struct Budget {
-    /// The declared bound in force. The walk raises it as each member is read.
-    declared: AtomicU64,
-    /// Which bound was exceeded: [`Budget::CLEAR`], [`Budget::INFLATED`] or
-    /// [`Budget::DECLARED`].
-    tripped: AtomicU8,
-}
-
-impl Budget {
-    const CLEAR: u8 = 0;
-    const INFLATED: u8 = 1;
-    const DECLARED: u8 = 2;
-}
-
-/// A reader that refuses to yield more than `limit` bytes in total, or more than the
-/// declared bound in `budget`.
-///
-/// A compressed archive can inflate to arbitrarily more than its own size. Without this, a
-/// few kilobytes on disk can exhaust memory or fill a filesystem.
-#[derive(Debug)]
-struct BoundedReader<R> {
-    inner: R,
-    limit: u64,
-    read_so_far: u64,
-    budget: Arc<Budget>,
-}
-
-impl<R: Read> Read for BoundedReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let read = self.inner.read(buf)?;
-        self.read_so_far = self.read_so_far.saturating_add(read as u64);
-        let tripped = if self.read_so_far > self.limit {
-            Budget::INFLATED
-        } else if self.read_so_far > self.budget.declared.load(Ordering::Relaxed) {
-            Budget::DECLARED
-        } else {
-            return Ok(read);
-        };
-        self.budget.tripped.store(tripped, Ordering::Relaxed);
-        Err(std::io::Error::other("decompressed size limit exceeded"))
-    }
+    Some(Error::PackageLimitExceeded { path: path.to_path_buf(), limit, max })
 }
 
 /// Builds package archives for tests.
@@ -981,6 +931,29 @@ mod tests {
         let err = walk(&path, &limits, |_, reader| {
             let mut sink = Vec::new();
             let _ = reader.read_to_end(&mut sink);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::PackageLimitExceeded { limit: "inflated size", .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// A callback that returns the bounded reader's refusal as a read error still reports the
+    /// bound. Extraction and the metadata reads both return it that way.
+    #[test]
+    fn a_bound_tripped_inside_a_callback_is_reported_as_that_bound() {
+        let path = tarball(|builder| {
+            file_entry(builder, "usr/share/big", &vec![b'x'; 64 * 1024], 0o644);
+        });
+        let limits = PackageLimits { inflated_bytes: 1024, ..PackageLimits::default() };
+
+        let err = walk(&path, &limits, |_, reader| {
+            let mut sink = Vec::new();
+            reader
+                .read_to_end(&mut sink)
+                .map_err(|source| Error::io("big", IoAction::Read, source))?;
             Ok(())
         })
         .unwrap_err();

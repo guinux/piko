@@ -228,11 +228,7 @@ fn a_real_plan_orders_every_dependency_before_its_dependent() {
     // Position of each incoming package in execution order.
     let mut position = std::collections::HashMap::new();
     for (index, step) in plan.steps().iter().enumerate() {
-        let id = match step {
-            piko_db::solve::Step::Install { candidate, .. } => *candidate,
-            piko_db::solve::Step::Change { to, .. } => *to,
-            piko_db::solve::Step::Remove { .. } => continue,
-        };
+        let Some(id) = step.incoming() else { continue };
         position.insert(id, index);
     }
     assert!(position.len() > 100, "expected a deep plan, got {}", position.len());
@@ -430,11 +426,7 @@ fn a_removal_plan_is_the_same_with_and_without_repositories() {
             .steps()
             .iter()
             .map(|step| {
-                let id = match step {
-                    piko_db::solve::Step::Remove { package } => *package,
-                    piko_db::solve::Step::Install { candidate, .. } => *candidate,
-                    piko_db::solve::Step::Change { to, .. } => *to,
-                };
+                let id = step.subject();
                 universe.get(id).map_or_else(|| "<unknown>".to_owned(), |s| s.name().to_string())
             })
             .collect();
@@ -852,11 +844,7 @@ fn every_step_of_a_real_plan_has_a_cause_that_holds() {
 
     let mut checked = 0_usize;
     for step in plan.steps() {
-        let id = match step {
-            piko_db::solve::Step::Install { candidate, .. } => *candidate,
-            piko_db::solve::Step::Change { to, .. } => *to,
-            piko_db::solve::Step::Remove { package } => *package,
-        };
+        let id = step.subject();
         let name = universe.get(id).unwrap().name().to_string();
         let cause = explanation.cause(id).unwrap_or_else(|| panic!("{name} has no cause"));
 

@@ -24,8 +24,8 @@ pub(crate) struct EagerFields {
 
 impl EagerFields {
     /// Where `%DEPENDS%` sits in the entry's text, for the deferred conversion.
-    pub(crate) const fn depends_text(&self) -> Option<(usize, usize)> {
-        self.relations.depends_text
+    pub(crate) fn depends_text(&self) -> &[(usize, usize)] {
+        &self.relations.depends_text
     }
 
     /// `%PROVIDES%`.
@@ -165,7 +165,7 @@ ancientfoo
     fn an_absent_depends_section_defers_to_nothing() {
         let text = DESC.replace("%DEPENDS%\nglibc\nbash>=5.0\nlibexample.so=1-64\n", "");
         let fields = parse(&text).unwrap();
-        assert_eq!(fields.depends_text(), None);
+        assert!(fields.depends_text().is_empty());
         assert!(crate::eager::parse_depends(&text, fields.depends_text()).unwrap().is_empty());
     }
 

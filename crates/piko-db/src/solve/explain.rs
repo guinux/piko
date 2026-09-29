@@ -28,6 +28,7 @@ use alpm_types::RelationOrSoname;
 
 use crate::Limits;
 use crate::solve::clause::{ClauseKind, Lit};
+use crate::solve::justify::relation_text;
 use crate::solve::{Outcome, Problem, SolvableId, Solver, Universe, Unsatisfiable};
 
 /// One clause from the core, in terms of packages rather than candidate ids.
@@ -798,15 +799,6 @@ fn fact(universe: &Universe<'_>, kind: ClauseKind) -> Option<Fact> {
         // already replaces each one with the problem clauses that produced it.
         ClauseKind::Learned => None,
     }
-}
-
-/// One of `dependent`'s `%DEPENDS%` entries, verbatim, or `?` if it cannot be read.
-fn relation_text(universe: &Universe<'_>, dependent: SolvableId, dependency: usize) -> String {
-    universe
-        .get(dependent)
-        .and_then(|solvable| solvable.depends().ok())
-        .and_then(|depends| depends.get(dependency).map(ToString::to_string))
-        .unwrap_or_else(|| "?".to_owned())
 }
 
 /// `name version (origin)`, the form every fact refers to a package by.

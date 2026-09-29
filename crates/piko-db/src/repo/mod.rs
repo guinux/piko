@@ -28,7 +28,9 @@ pub mod database;
 
 pub use crate::eager::DescFieldError;
 pub use crate::search::MatchKind;
-pub use database::{FileListEntry, RepoDatabase, RepoDiagnostic, RepoOpenOptions, Variant};
+pub use database::{
+    ArchiveCheck, FileListEntry, RepoDatabase, RepoDiagnostic, RepoOpenOptions, Variant,
+};
 pub use desc_compat::RepoDescView;
 pub use package::RepoPackage;
 pub use repo_name::{RepoName, RepoNameError};

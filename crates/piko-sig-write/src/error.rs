@@ -90,12 +90,19 @@ impl From<piko_sig::Error> for Error {
             piko_sig::Error::KeyringUnusable { home, reason } => {
                 Error::KeyringUnusable { home, reason }
             }
-            other => Error::Gpgme {
-                path: PathBuf::new(),
-                action: "open the keyring",
-                message: other.to_string(),
-            },
+            other => Error::gpgme(PathBuf::new(), "open the keyring", other),
         }
+    }
+}
+
+impl Error {
+    /// An [`Error::Gpgme`] that carries `source`'s message.
+    pub(crate) fn gpgme(
+        path: impl Into<PathBuf>,
+        action: &'static str,
+        source: impl std::fmt::Display,
+    ) -> Self {
+        Self::Gpgme { path: path.into(), action, message: source.to_string() }
     }
 }
 

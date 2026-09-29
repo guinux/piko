@@ -384,8 +384,7 @@ pub enum Error {
     ///
     /// This is boxed, and that is not incidental. `piko_db::Error` is 104 bytes against this
     /// enum's 112, both measured. Nesting it inline would make every other variant pay for
-    /// this one. That is the trade [`Error::InvalidEntryName`] documents avoiding by
-    /// stringifying. A box costs one pointer and keeps the error whole and typed.
+    /// this one. A box costs one pointer and keeps the error whole and typed.
     /// Stringifying with `to_string()` would flatten it into an `Error::Io` carrying an
     /// opaque string. A caller wanting to know *which* `piko_db` failure it was could not
     /// recover that at any depth.
@@ -456,6 +455,26 @@ pub enum Error {
         rejected: Vec<crate::source::RejectedCacheDir>,
     },
 
+    /// The installed packages changed between the plan and `verify`, which holds `db.lck`.
+    ///
+    /// The plan is computed and confirmed before the lock is taken, so another package manager
+    /// can change the database in between. A step that removes or upgrades the wrong version
+    /// would delete files the database no longer lists, so the transaction stops and asks for a
+    /// new plan.
+    #[error(
+        "{name} changed since the plan: the plan expects {}, and {} is installed; plan again",
+        planned.as_deref().unwrap_or("it not to be installed"),
+        installed.as_deref().unwrap_or("nothing")
+    )]
+    PlanStale {
+        /// The package name.
+        name: String,
+        /// The entry the plan expected to find installed, or `None` for a fresh install.
+        planned: Option<String>,
+        /// The entry installed now, or `None` when the name is not installed.
+        installed: Option<String>,
+    },
+
     /// A source was configured with a path that cannot be used.
     #[error("{} is not a usable package source: {}", shown(path), said(reason))]
     UnusableSource {
@@ -509,19 +528,6 @@ pub enum Error {
         /// loaders cache a failure behind one rather than re-reading on every access.
         #[source]
         source: std::sync::Arc<piko_db::Error>,
-    },
-
-    /// A plan named a package whose name and version cannot form a valid entry name.
-    ///
-    /// The reason is stringified rather than carrying [`piko_db::EntryNameError`] itself. This
-    /// is the same trade [`Error::SignatureRejected`] makes, and for the same reason.
-    /// Nesting it would make every variant of this enum pay for that one's size.
-    #[error("{name} has no usable entry name: {}", said(reason))]
-    InvalidEntryName {
-        /// The package name.
-        name: String,
-        /// Why the name and version could not form one.
-        reason: String,
     },
 
     /// A package file was built for an architecture this machine is not configured to run.

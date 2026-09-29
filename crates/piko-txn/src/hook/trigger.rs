@@ -19,7 +19,7 @@
 
 use std::collections::BTreeSet;
 
-use piko_db::resolve::matches_any;
+use piko_db::resolve::PatternList;
 
 use super::parse::{Hook, Operations, Trigger, TriggerKind};
 
@@ -56,7 +56,7 @@ pub struct Summary {
     /// Packages being removed — libalpm's `trans->remove`.
     pub removed: Vec<Removed>,
     /// `NoExtract` patterns: a path matching them is never written, so it triggers nothing.
-    pub no_extract: Vec<String>,
+    pub no_extract: PatternList,
 }
 
 /// What a trigger matched, if anything.
@@ -117,19 +117,23 @@ pub fn triggered(hook: &Hook, summary: &Summary) -> Option<Vec<String>> {
 }
 
 /// One trigger against the transaction.
+///
+/// The `Target` list is compiled here, once per trigger, rather than once per name or path it
+/// is tested against.
 fn match_trigger(trigger: &Trigger, summary: &Summary) -> Matches {
+    let targets = PatternList::new(trigger.targets.clone());
     match trigger.kind {
-        Some(TriggerKind::Package) | None => match_packages(trigger, summary),
-        Some(TriggerKind::Path) => match_paths(trigger, summary),
+        Some(TriggerKind::Package) | None => match_packages(&targets, summary),
+        Some(TriggerKind::Path) => match_paths(&targets, summary),
     }
 }
 
 /// `_alpm_hook_trigger_match_pkg` (`hook.c:359`).
-fn match_packages(trigger: &Trigger, summary: &Summary) -> Matches {
+fn match_packages(targets: &PatternList, summary: &Summary) -> Matches {
     let mut matches = Matches::default();
 
     for added in &summary.added {
-        if !matches_any(&trigger.targets, &added.name) {
+        if !targets.matches(&added.name) {
             continue;
         }
         if added.replaces_installed {
@@ -140,7 +144,7 @@ fn match_packages(trigger: &Trigger, summary: &Summary) -> Matches {
     }
 
     for removed in &summary.removed {
-        if !matches_any(&trigger.targets, &removed.name) {
+        if !targets.matches(&removed.name) {
             continue;
         }
         // A package that is also being added is not "removed". It is the old half of an
@@ -161,24 +165,24 @@ fn match_packages(trigger: &Trigger, summary: &Summary) -> Matches {
 /// halves come from different packages often enough that a file-by-file shortcut would be
 /// wrong. `alpm-hooks(5)` says so: "even if the file changes ownership from one package to
 /// another".
-fn match_paths(trigger: &Trigger, summary: &Summary) -> Matches {
+fn match_paths(targets: &PatternList, summary: &Summary) -> Matches {
     let mut install: BTreeSet<String> = BTreeSet::new();
     let mut remove: BTreeSet<String> = BTreeSet::new();
 
     for added in &summary.added {
         for path in &added.files {
             // A `NoExtract` path is never written, so nothing about it changes.
-            if matches_any(&summary.no_extract, path) {
+            if summary.no_extract.matches(path) {
                 continue;
             }
-            if matches_any(&trigger.targets, path) {
+            if targets.matches(path) {
                 install.insert(path.clone());
             }
         }
         // The version being replaced loses its files, `NoExtract` or not. They are deleted
         // rather than written, so the filter does not apply. libalpm omits it here too.
         for path in &added.old_files {
-            if matches_any(&trigger.targets, path) {
+            if targets.matches(path) {
                 remove.insert(path.clone());
             }
         }
@@ -186,7 +190,7 @@ fn match_paths(trigger: &Trigger, summary: &Summary) -> Matches {
 
     for removed in &summary.removed {
         for path in &removed.files {
-            if matches_any(&trigger.targets, path) {
+            if targets.matches(path) {
                 remove.insert(path.clone());
             }
         }
@@ -374,7 +378,7 @@ Exec = /bin/true
     fn a_no_extract_path_does_not_trigger() {
         let summary = Summary {
             added: vec![added("linux", &["usr/lib/modules/6.1/x.ko"])],
-            no_extract: vec!["usr/lib/modules/*".to_owned()],
+            no_extract: PatternList::new(vec!["usr/lib/modules/*".to_owned()]),
             ..Summary::default()
         };
         assert_eq!(triggered(&hook(PATH_HOOK), &summary), None);

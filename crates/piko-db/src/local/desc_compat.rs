@@ -15,7 +15,7 @@ use alpm_types::{
     PackageValidation, Packager, RelationOrSoname, Url,
 };
 
-use crate::desc_compat::TakenFields;
+use crate::desc_compat::{TakenFields, schema_fields};
 
 /// Read-only access to a `desc` file, independent of its schema version.
 ///
@@ -26,53 +26,10 @@ pub struct DescView<'a> {
     taken: &'a TakenFields,
 }
 
-/// Generates accessors that read the same field from either schema version.
-macro_rules! shared_field {
-    ($( $(#[$meta:meta])* $method:ident: $field:ident -> $ty:ty ),* $(,)?) => {
-        $(
-            $(#[$meta])*
-            #[must_use]
-            pub fn $method(&self) -> $ty {
-                match self.inner {
-                    DbDescFile::V1(desc) => &desc.$field,
-                    DbDescFile::V2(desc) => &desc.$field,
-                }
-            }
-        )*
-    };
-}
-
-/// Generates accessors for fields that are cheap to copy.
-macro_rules! shared_copy_field {
-    ($( $(#[$meta:meta])* $method:ident: $field:ident -> $ty:ty ),* $(,)?) => {
-        $(
-            $(#[$meta])*
-            #[must_use]
-            pub fn $method(&self) -> $ty {
-                match self.inner {
-                    DbDescFile::V1(desc) => desc.$field,
-                    DbDescFile::V2(desc) => desc.$field,
-                }
-            }
-        )*
-    };
-}
-
 impl<'a> DescView<'a> {
     /// Wraps a parsed `desc` and the fields taken out of it before parsing.
     pub(crate) const fn new(inner: &'a DbDescFile, taken: &'a TakenFields) -> Self {
         Self { inner, taken }
-    }
-
-    /// The underlying schema-tagged value, for callers that need the distinction.
-    ///
-    /// Its `url` field is always `None`. `%URL%` is blanked before the upstream parser sees
-    /// the text, so [`DescView::url`] and [`DescView::url_raw`] are the only sources for it.
-    /// Its `packager` field can likewise hold a substitute. Read [`DescView::packager`] and
-    /// [`DescView::packager_raw`] rather than it.
-    #[must_use]
-    pub const fn as_inner(&self) -> &'a DbDescFile {
-        self.inner
     }
 
     /// Whether this `desc` uses the v2 schema, which carries `%XDATA%`.
@@ -81,7 +38,8 @@ impl<'a> DescView<'a> {
         matches!(self.inner, DbDescFile::V2(_))
     }
 
-    shared_field! {
+    schema_fields! {
+        DbDescFile;
         /// `%NAME%`.
         ///
         /// Advisory only. The authoritative package name comes from the entry directory
@@ -115,7 +73,8 @@ impl<'a> DescView<'a> {
         provides: provides -> &'a [RelationOrSoname],
     }
 
-    shared_copy_field! {
+    schema_fields! {
+        DbDescFile, copy;
         /// `%BUILDDATE%`, as a Unix timestamp.
         build_date: builddate -> BuildDate,
         /// `%INSTALLDATE%`, as a Unix timestamp.

@@ -67,6 +67,26 @@ fn substitute_unknown_packager(raw: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Evaluates `$body` with `$v` bound to a `.PKGINFO`, whichever schema version it is.
+///
+/// Both versions carry every field but `xdata`, which only v2 has, so an expression over the
+/// shared fields is written once.
+macro_rules! either_version {
+    ($info:expr, |$v:ident| $body:expr) => {
+        match $info {
+            alpm_pkginfo::PackageInfo::V1($v) => $body,
+            alpm_pkginfo::PackageInfo::V2($v) => $body,
+        }
+    };
+}
+pub(crate) use either_version;
+
+/// The `pkgname` and `pkgver` of a `.PKGINFO`.
+#[must_use]
+pub fn name_and_version(info: &PackageInfo) -> (&alpm_types::Name, &alpm_types::FullVersion) {
+    either_version!(info, |v| (&v.pkgname, &v.pkgver))
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

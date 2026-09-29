@@ -368,15 +368,7 @@ impl<'lock> LocalDbWriter<'lock> {
 pub struct EntryWrite {
     /// The entry directory every staged file lands in.
     dir: PathBuf,
-    staged: Vec<Staged>,
-}
-
-/// One file written to its temporary, not yet synced or renamed.
-#[derive(Debug)]
-struct Staged {
-    file: File,
-    temp: PathBuf,
-    destination: PathBuf,
+    staged: Vec<Temporary>,
 }
 
 impl EntryWrite {
@@ -407,36 +399,15 @@ impl EntryWrite {
     ///
     /// [`Error::Io`] if the temporary cannot be created or written.
     pub fn raw(&mut self, name: &str, contents: &[u8], modified: Option<SystemTime>) -> Result<()> {
-        let destination = self.dir.join(name);
-        let temp = temp_path(&destination);
-        let mut file = create_temp(&temp)?;
-
-        if let Err(error) =
-            file.write_all(contents).map_err(|source| Error::io(&temp, IoAction::Write, source))
-        {
-            drop(file);
-            let _ = std::fs::remove_file(&temp);
-            return Err(error);
-        }
-
+        let mut temporary = Temporary::create(&self.dir.join(name))?;
+        temporary.write_all(contents)?;
         // After the write, which would otherwise move the time forward again. Before
-        // `commit`'s `sync_all`, which is what makes it durable. The rename does not touch
-        // the time: it travels with the inode.
-        if let Some(source) = modified.and_then(|time| file.set_modified(time).err()) {
-            drop(file);
-            let _ = std::fs::remove_file(&temp);
-            return Err(Error::io(&temp, IoAction::Metadata, source));
+        // `commit`'s sync, which is what makes it durable. The rename does not touch the time:
+        // it travels with the inode.
+        if let Some(time) = modified {
+            temporary.set_modified(time)?;
         }
-
-        // `mode` on the open above is masked by the caller's umask. So it is set explicitly
-        // too, for the same reason `atomic_write` does it.
-        if let Err(error) = set_file_mode(&file, &temp) {
-            drop(file);
-            let _ = std::fs::remove_file(&temp);
-            return Err(error);
-        }
-
-        self.staged.push(Staged { file, temp, destination });
+        self.staged.push(temporary);
         Ok(())
     }
 
@@ -452,32 +423,15 @@ impl EntryWrite {
     /// [`Error::Io`] if any `fsync` or `rename` fails. Whatever has not been renamed yet is
     /// removed, so a partial failure does not leave temporaries behind.
     pub fn commit(mut self) -> Result<()> {
-        if let Err(error) = self.sync_all_staged() {
-            self.discard();
-            return Err(error);
-        }
-
-        for index in 0..self.staged.len() {
-            // Indexing through the length keeps `self` borrowed mutably for `discard` on the
-            // error path. This uses `get` rather than `[]` because the lint wall forbids
-            // indexing.
-            let Some(entry) = self.staged.get(index) else { continue };
-            if let Err(error) = ensure_unreplaced(&entry.file, &entry.temp) {
-                self.discard();
-                return Err(error);
-            }
-            if let Err(source) = std::fs::rename(&entry.temp, &entry.destination) {
-                let error = Error::io(&entry.destination, IoAction::Rename, source);
-                self.discard();
-                return Err(error);
-            }
+        // On an error, every temporary not yet renamed is dropped, which removes it.
+        self.sync_all_staged()?;
+        for temporary in std::mem::take(&mut self.staged) {
+            temporary.publish()?;
         }
 
         // Every rename above becomes durable with this one directory sync. The directory's
         // metadata covers all of them, so syncing per rename would buy nothing.
-        let result = sync_directory(&self.dir);
-        self.staged.clear();
-        result
+        sync_directory(&self.dir)
     }
 
     /// `fsync`s every staged temporary, one scoped thread each.
@@ -488,21 +442,11 @@ impl EntryWrite {
     /// parallelism.
     fn sync_all_staged(&self) -> Result<()> {
         std::thread::scope(|scope| {
-            let handles: Vec<_> = self
-                .staged
-                .iter()
-                .map(|entry| {
-                    scope.spawn(move || {
-                        entry
-                            .file
-                            .sync_all()
-                            .map_err(|source| Error::io(&entry.temp, IoAction::Sync, source))
-                    })
-                })
-                .collect();
+            let handles: Vec<_> =
+                self.staged.iter().map(|entry| scope.spawn(move || entry.sync())).collect();
 
             // Every handle is joined before the first failure is returned. So no thread is
-            // left running against a `Staged` this function is about to hand back.
+            // left running against a `Temporary` this function is about to hand back.
             let mut first_error = None;
             for handle in handles {
                 match handle.join() {
@@ -523,20 +467,6 @@ impl EntryWrite {
             }
             first_error.map_or(Ok(()), Err)
         })
-    }
-
-    /// Removes every temporary that has not been renamed yet.
-    fn discard(&mut self) {
-        for entry in self.staged.drain(..) {
-            drop(entry.file);
-            let _ = std::fs::remove_file(&entry.temp);
-        }
-    }
-}
-
-impl Drop for EntryWrite {
-    fn drop(&mut self) {
-        self.discard();
     }
 }
 
@@ -657,39 +587,97 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
 /// the `fsync`, which makes it durable. See [`EntryWrite::raw`] for why a member copied out of an
 /// archive needs one.
 fn atomic_write_at(path: &Path, contents: &[u8], modified: Option<SystemTime>) -> Result<()> {
-    let directory = path.parent().unwrap_or(Path::new("."));
-    let temp = temp_path(path);
+    let mut temporary = Temporary::create(path)?;
+    temporary.write_all(contents)?;
+    if let Some(time) = modified {
+        temporary.set_modified(time)?;
+    }
+    temporary.sync()?;
+    temporary.publish()?;
+    sync_directory(path.parent().unwrap_or(Path::new(".")))
+}
 
-    let mut file = create_temp(&temp)?;
+/// A file written beside its destination, which a rename publishes.
+///
+/// It is created `O_EXCL` (see [`create_temp`]) and set to [`FILE_MODE`] through its descriptor,
+/// whatever the umask. Until [`Self::publish`], dropping it removes the temporary, so a failed
+/// write never leaves one behind for some other code path to rename later.
+#[derive(Debug)]
+pub(crate) struct Temporary {
+    file: File,
+    temp: PathBuf,
+    destination: PathBuf,
+    /// Set once the rename is done, so `Drop` leaves the name alone.
+    published: bool,
+}
 
-    // A failed write must not leave the temporary file behind for some other code path to
-    // rename later. So each failure cleans up before returning.
-    if let Err(error) = file
-        .write_all(contents)
-        .and_then(|()| modified.map_or(Ok(()), |time| file.set_modified(time)))
-        .and_then(|()| file.sync_all())
-        .map_err(|source| Error::io(&temp, IoAction::Write, source))
-    {
-        drop(file);
-        let _ = std::fs::remove_file(&temp);
-        return Err(error);
+impl Temporary {
+    /// Creates the temporary beside `destination`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the temporary cannot be created or its mode cannot be set.
+    pub(crate) fn create(destination: &Path) -> Result<Self> {
+        let temp = temp_path(destination);
+        let file = create_temp(&temp)?;
+        let temporary =
+            Self { file, temp, destination: destination.to_path_buf(), published: false };
+        // The mode on the open is masked by the caller's umask, so it is set explicitly. Set
+        // before the data is synced, so the sync makes it durable too.
+        set_file_mode(&temporary.file, &temporary.temp)?;
+        Ok(temporary)
     }
 
-    // `mode` on the open above is masked by the caller's umask, so it is also set explicitly.
-    // The descriptor stays open through the identity check, which needs it.
-    if let Err(error) = set_file_mode(&file, &temp).and_then(|()| ensure_unreplaced(&file, &temp)) {
-        drop(file);
-        let _ = std::fs::remove_file(&temp);
-        return Err(error);
-    }
-    drop(file);
-
-    if let Err(source) = std::fs::rename(&temp, path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(Error::io(path, IoAction::Rename, source));
+    /// The temporary's path.
+    pub(crate) fn path(&self) -> &Path {
+        &self.temp
     }
 
-    sync_directory(directory)
+    /// The path the temporary is published at.
+    pub(crate) fn destination(&self) -> &Path {
+        &self.destination
+    }
+
+    /// The open temporary, to write into.
+    pub(crate) const fn file_mut(&mut self) -> &mut File {
+        &mut self.file
+    }
+
+    /// Writes all of `bytes`.
+    pub(crate) fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
+        self.file.write_all(bytes).map_err(|source| Error::io(&self.temp, IoAction::Write, source))
+    }
+
+    /// Sets the modification time the published file carries. Call it after the last write.
+    pub(crate) fn set_modified(&self, time: SystemTime) -> Result<()> {
+        self.file
+            .set_modified(time)
+            .map_err(|source| Error::io(&self.temp, IoAction::Metadata, source))
+    }
+
+    /// Makes the contents, the mode and the time durable.
+    pub(crate) fn sync(&self) -> Result<()> {
+        self.file.sync_all().map_err(|source| Error::io(&self.temp, IoAction::Sync, source))
+    }
+
+    /// Renames the temporary over its destination, if it still names the file written.
+    ///
+    /// This does not sync the directory. The caller does, once, after its last rename.
+    pub(crate) fn publish(mut self) -> Result<()> {
+        ensure_unreplaced(&self.file, &self.temp)?;
+        std::fs::rename(&self.temp, &self.destination)
+            .map_err(|source| Error::io(&self.destination, IoAction::Rename, source))?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+impl Drop for Temporary {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = std::fs::remove_file(&self.temp);
+        }
+    }
 }
 
 /// Creates the temporary file, refusing to write through anything that is already there.
