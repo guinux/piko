@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+use rustix::fs::OFlags;
+
 use crate::{
     edit::ScriptedInteractor,
     error::{Error, Result},
@@ -800,7 +802,7 @@ fn carries_option(line: &str, option: &str) -> bool {
 /// Adds `O_NOFOLLOW | O_NONBLOCK` to `options`: a final symlink is refused, and a FIFO does not
 /// block the open.
 fn no_follow(options: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+    options.custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits().cast_signed())
 }
 
 /// Fails unless `file`, opened from `path`, is a regular file.
@@ -867,11 +869,7 @@ fn create_keyring_dir(home: &Path) -> Result<bool> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
 

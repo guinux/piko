@@ -115,9 +115,8 @@ pub fn report_defaults(universe: &Universe<'_>, groups: &[GroupTarget]) {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::indexing_slicing,
     reason = "a failing assertion in a test should abort it loudly"
 )]

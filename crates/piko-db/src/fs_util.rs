@@ -44,8 +44,9 @@ fn open_no_follow(path: &Path) -> Result<File> {
 
     #[cfg(unix)]
     {
+        use rustix::fs::OFlags;
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options.custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits().cast_signed());
     }
 
     options.open(path).map_err(|source| Error::io(path, IoAction::Open, source))
@@ -89,8 +90,9 @@ pub fn open_following_symlinks(path: &Path) -> Result<File> {
 
     #[cfg(unix)]
     {
+        use rustix::fs::OFlags;
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NONBLOCK);
+        options.custom_flags(OFlags::NONBLOCK.bits().cast_signed());
     }
 
     let file = options.open(path).map_err(|source| Error::io(path, IoAction::Open, source))?;
@@ -558,11 +560,7 @@ pub(crate) fn join(directory: &Path, component: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use std::io::Write as _;
 

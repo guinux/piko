@@ -20,12 +20,7 @@
 //! differently — that is the entire point of recording it. So this test reports the split and
 //! asserts on the matching majority, not on perfection.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::arithmetic_side_effects,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::path::Path;
 

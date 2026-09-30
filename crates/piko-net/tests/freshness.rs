@@ -18,9 +18,8 @@
 //! then goes further: it tries the next mirror instead of stopping, it checks the archive's own
 //! date as well as the header, and `force` does not turn any of it off.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::panic,
     clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"

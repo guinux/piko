@@ -16,8 +16,6 @@ alpm-pkginfo.workspace = true
 alpm-types.workspace = true
 # `%PGPSIG%`, which a repository database spells in base64.
 base64.workspace = true
-# `O_NOFOLLOW` on the journal's temporary file; see `journal::atomic_write`.
-libc.workspace = true
 piko-db.workspace = true
 piko-db-write.workspace = true
 piko-net.workspace = true

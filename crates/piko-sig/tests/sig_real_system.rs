@@ -19,11 +19,10 @@
 //! mistake in how piko *interprets* GPGME cannot pass by agreeing with a mistake in how it
 //! *calls* GPGME.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 

@@ -108,6 +108,7 @@ pub mod install;
 pub mod journal;
 pub mod merge;
 pub mod owner;
+mod parallel;
 pub mod pkginfo;
 pub mod plan;
 pub mod progress;

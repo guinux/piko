@@ -378,7 +378,8 @@ fn stream(path: &Path, action: &'static str) -> Result<gpgme::Data<'static>> {
 /// # Errors
 ///
 /// [`Error::Gpgme`] if the signing key is in the keyring but GnuPG cannot list it. The
-/// disabled flag lives on that listing, so a key that cannot be listed cannot be accepted.
+/// disabled flag and the key's length live on that listing, so a key that cannot be listed
+/// cannot be accepted.
 fn describe(
     context: &mut gpgme::Context,
     path: &Path,
@@ -415,27 +416,33 @@ fn describe(
         }
     };
 
-    let status =
-        if status == Status::KeyUnknown || summary.contains(gpgme::SignatureSummary::KEY_MISSING) {
-            Status::KeyUnknown
-        } else if is_disabled(context, path, fingerprint.as_deref())? {
-            // GnuPG reports a signature from a disabled key as good, with the key's usual
-            // validity: a disabled key is only noted, never refused, by `gpg --verify`. So the
-            // flag is read off the key itself, as `signing.c:695` does. This is what gives
-            // `piko key populate`'s `-revoked` list, and any manual `disable`, an effect.
-            Status::KeyDisabled
-        } else if summary.contains(gpgme::SignatureSummary::KEY_REVOKED) {
-            // GnuPG can report a revocation through the validity reason alone, with a status of
-            // `NO_ERROR`. The summary bit covers both routes.
-            Status::KeyRevoked
-        } else {
-            status
-        };
+    let unknown =
+        status == Status::KeyUnknown || summary.contains(gpgme::SignatureSummary::KEY_MISSING);
+    let key = if unknown { None } else { signing_key(context, path, fingerprint.as_deref())? };
 
-    // Last, and only over a signature that verified: a bad one stays bad, whatever it hashed.
+    let status = if unknown {
+        Status::KeyUnknown
+    } else if key.as_ref().is_some_and(gpgme::Key::is_disabled) {
+        // GnuPG reports a signature from a disabled key as good, with the key's usual
+        // validity: a disabled key is only noted, never refused, by `gpg --verify`. So the
+        // flag is read off the key itself, as `signing.c:695` does. This is what gives
+        // `piko key populate`'s `-revoked` list, and any manual `disable`, an effect.
+        Status::KeyDisabled
+    } else if summary.contains(gpgme::SignatureSummary::KEY_REVOKED) {
+        // GnuPG can report a revocation through the validity reason alone, with a status of
+        // `NO_ERROR`. The summary bit covers both routes.
+        Status::KeyRevoked
+    } else {
+        status
+    };
+
+    // Last, and only over a signature that verified: a bad one stays bad, whatever it hashed
+    // and whatever key made it.
     let status = match status {
         Status::Valid | Status::KeyExpired => weak_digest(signature.hash_algorithm())
-            .map_or(status, |algorithm| Status::WeakDigest { algorithm }),
+            .map(|algorithm| Status::WeakDigest { algorithm })
+            .or_else(|| key.as_ref().and_then(|key| weak_key(key, fingerprint.as_deref())))
+            .unwrap_or(status),
         other => other,
     };
 
@@ -470,20 +477,56 @@ fn weak_digest(algorithm: gpgme::HashAlgorithm) -> Option<&'static str> {
     weak.contains(&algorithm).then(|| algorithm.name().unwrap_or("an unnamed digest"))
 }
 
-/// Whether the key that made a signature is disabled in the keyring.
+/// The shortest RSA key a signature is accepted from.
 ///
-/// `gpgme_get_key` resolves a subkey's fingerprint to the key holding it, and the disabled
-/// flag belongs to that whole key. `EOF` means no key holds it, which the signature's own
-/// status already reports.
-fn is_disabled(
+/// NIST SP 800-57 rates 2048 bits at 112-bit security, the floor it accepts until 2030.
+const MIN_RSA_BITS: usize = 2048;
+
+/// A [`Status::WeakKey`] when the subkey that made a signature is too weak to sign with, or
+/// `None` when it is strong enough.
+///
+/// The subkey is read from the keyring, not from the signature: only the key records its
+/// length. It is found by fingerprint, or by key ID when GnuPG reported only that.
+///
+/// A denylist, as for digests, so an algorithm newer than GPGME's list does not read as weak.
+/// DSA is refused at every size: FIPS 186-5 withdrew it for new signatures, and a signature
+/// made with a predictable nonce gives away the key. ElGamal signing is broken. RSA is refused
+/// below [`MIN_RSA_BITS`]. Elliptic-curve keys pass, because GnuPG offers no curve below
+/// 255 bits.
+fn weak_key(key: &gpgme::Key, fingerprint: Option<&str>) -> Option<Status> {
+    use gpgme::KeyAlgorithm as Algorithm;
+    let fingerprint = fingerprint?;
+    let names = |candidate: Result<&str, _>| {
+        candidate.is_ok_and(|candidate: &str| candidate.eq_ignore_ascii_case(fingerprint))
+    };
+    let subkey = key.subkeys().find(|subkey| names(subkey.fingerprint()) || names(subkey.id()))?;
+    let algorithm = subkey.algorithm();
+    let bits = subkey.length();
+    let weak = match algorithm {
+        Algorithm::Dsa | Algorithm::Elgamal | Algorithm::ElgamalEncrypt => true,
+        Algorithm::Rsa | Algorithm::RsaSign | Algorithm::RsaEncrypt => bits < MIN_RSA_BITS,
+        _ => false,
+    };
+    weak.then(|| Status::WeakKey {
+        algorithm: algorithm.name().unwrap_or("an unnamed algorithm"),
+        bits,
+    })
+}
+
+/// The key that made a signature, as the keyring holds it.
+///
+/// `gpgme_get_key` resolves a subkey's fingerprint to the key holding it. The disabled flag
+/// belongs to that whole key, and the length to the subkey inside it. `EOF` means no key holds
+/// it, which the signature's own status already reports.
+fn signing_key(
     context: &mut gpgme::Context,
     path: &Path,
     fingerprint: Option<&str>,
-) -> Result<bool> {
-    let Some(fingerprint) = fingerprint else { return Ok(false) };
+) -> Result<Option<gpgme::Key>> {
+    let Some(fingerprint) = fingerprint else { return Ok(None) };
     match context.get_key(fingerprint) {
-        Ok(key) => Ok(key.is_disabled()),
-        Err(error) if error.code() == gpgme::Error::EOF.code() => Ok(false),
+        Ok(key) => Ok(Some(key)),
+        Err(error) if error.code() == gpgme::Error::EOF.code() => Ok(None),
         Err(error) => Err(Error::Gpgme {
             path: path.to_path_buf(),
             action: "look up the signing key of",
@@ -504,11 +547,7 @@ pub fn signature_path(file: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
 

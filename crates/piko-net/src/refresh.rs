@@ -16,6 +16,7 @@ use crate::{
     concurrency::Concurrency,
     error::{Error, Result, attempt_reason, with_causes},
     freshness::{Baseline, FreshnessNote, FreshnessPolicy, Refreshed},
+    health::{self, Health},
     pool,
     progress::{Event, Kind},
     sandbox::{Failure, Sandbox, Timeouts},
@@ -313,6 +314,11 @@ pub struct PackageFetch<'a> {
     pub repo_name: &'a str,
     /// `Server`/`CacheServer`, tried in order from wherever this transfer's worker starts.
     pub servers: &'a [String],
+    /// How many entries at the front of [`Self::servers`] are `CacheServer`s.
+    ///
+    /// A cache server's errors are not counted against its host, so it is never skipped. A
+    /// cache that does not hold one file answers 404, and still holds the next one.
+    pub cache_servers: usize,
     /// Whether a detached `.sig` is worth fetching alongside it.
     pub policy: Policy,
     /// `%CSIZE%`, the size the repository database declares for the file.
@@ -345,6 +351,8 @@ fn first_duplicate(names: impl Iterator<Item = String>) -> Option<String> {
 pub struct Refresher {
     transport: Transport,
     limits: Limits,
+    /// The hosts this refresher stops asking. See [`crate::health`].
+    health: Health,
 }
 
 impl Default for Refresher {
@@ -357,7 +365,11 @@ impl Refresher {
     /// Builds a refresher with the given bounds, which reaches servers from this process.
     #[must_use]
     pub fn new(limits: Limits) -> Self {
-        Self { transport: Transport::direct(Self::timeouts(&limits)), limits }
+        Self {
+            transport: Transport::direct(Self::timeouts(&limits)),
+            limits,
+            health: Health::default(),
+        }
     }
 
     /// Runs every request in a helper process confined by `sandbox`.
@@ -370,6 +382,13 @@ impl Refresher {
                 Transport::Sandboxed { sandbox, timeouts: Self::timeouts(&self.limits) };
         }
         self
+    }
+
+    /// Records a failed request to `server`, and reports its host once it is skipped.
+    fn report_failure(&self, server: &str, progress: &(dyn Fn(Event) + Sync)) {
+        if let Some(host) = self.health.failed(server) {
+            progress(Event::HostSkipped { host });
+        }
     }
 
     const fn timeouts(limits: &Limits) -> Timeouts {
@@ -399,7 +418,7 @@ impl Refresher {
     /// Returns [`Error`] if no server could supply the database, if it exceeded
     /// [`Limits::max_bytes`], or if it failed verification. In every case the existing
     /// database is left in place.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "each parameter names one concern a caller must decide, as \
                   `refresh_with_progress` documents — this is that signature with the \
@@ -439,7 +458,7 @@ impl Refresher {
     /// # Errors
     ///
     /// As [`Refresher::refresh`].
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "each parameter names one concern a caller must decide (where, which \
                   repository, which servers, how to authenticate, under what policy, whether \
@@ -488,7 +507,7 @@ impl Refresher {
     /// server does that, the installed database is kept. Then, for a `.db` archive, the age
     /// check runs. A database older than the age limit sends the refresh to the servers not yet
     /// tried, a few at most, for a newer one.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "the public `refresh_with_progress` this backs already documents why each \
                   concern is named separately; this adds the two the batch decides"
@@ -542,6 +561,10 @@ impl Refresher {
         for server in &order {
             tried = tried.saturating_add(1);
             let url = format!("{}/{name}", server.trim_end_matches('/'));
+            if self.health.skips(server) {
+                attempts.push((url, health::skipped_reason(server)));
+                continue;
+            }
             match self.attempt(&url, &attempt, force, &mut baseline)? {
                 Step::Installed(note) => {
                     notes.extend(note);
@@ -553,7 +576,10 @@ impl Refresher {
                     break;
                 }
                 Step::PassedOver(note) => notes.push(note),
-                Step::Failed(reason) => attempts.push((url, reason)),
+                Step::Failed(reason) => {
+                    self.report_failure(server, progress);
+                    attempts.push((url, reason));
+                }
             }
         }
         let mut outcome = match settled {
@@ -593,6 +619,10 @@ impl Refresher {
                             break;
                         };
                         tried = tried.saturating_add(1);
+                        // A skipped host is not asked, and does not count as a probe.
+                        if self.health.skips(server) {
+                            continue;
+                        }
                         probed = probed.saturating_add(1);
                         let url = format!("{}/{name}", server.trim_end_matches('/'));
                         match self.attempt(&url, &attempt, false, &mut baseline)? {
@@ -601,7 +631,8 @@ impl Refresher {
                                 outcome = Outcome::Updated;
                             }
                             Step::PassedOver(note) => notes.push(note),
-                            Step::Current | Step::Failed(_) => {}
+                            Step::Failed(_) => self.report_failure(server, progress),
+                            Step::Current => {}
                         }
                         notes.extend(baseline.take_note());
                     }
@@ -1071,7 +1102,14 @@ impl Refresher {
         cancel: &Cancel,
         progress: &(dyn Fn(Event) + Sync),
     ) -> Result<PathBuf> {
-        let PackageFetch { file_name, repo_name, servers, policy, size } = wanted;
+        let PackageFetch { file_name, repo_name, servers, cache_servers, policy, size } = wanted;
+        let caches = servers.get(..cache_servers).unwrap_or(servers);
+        // The failure of a request to `server`, recorded unless `server` is a cache.
+        let failed = |server: &str| {
+            if !caches.iter().any(|cache| cache == server) {
+                self.report_failure(server, progress);
+            }
+        };
         if servers.is_empty() {
             return Err(Error::NoServers { repo: repo_name.to_owned() });
         }
@@ -1088,6 +1126,10 @@ impl Refresher {
         let mut attempts = Vec::new();
         for server in concurrency.servers_for(servers, worker) {
             let url = format!("{}/{name}", server.trim_end_matches('/'));
+            if self.health.skips(server) {
+                attempts.push((url, health::skipped_reason(server)));
+                continue;
+            }
             match self.fetch(
                 &url,
                 &destination,
@@ -1105,6 +1147,7 @@ impl Refresher {
                 // downloaded. `LocalCopy::NONE` has no time to be behind, so `Behind` cannot
                 // arise here, and is treated the same way.
                 Ok(Fetched::NotModified | Fetched::Behind { .. }) => {
+                    failed(server);
                     attempts.push((
                         url,
                         "the server answered \"not modified\" to an unconditional request"
@@ -1128,6 +1171,7 @@ impl Refresher {
                         // signature loses both halves to the next server. `file` is dropped
                         // uncommitted, so nothing reaches the cache.
                         Err(error) => {
+                            failed(server);
                             let reason = attempt_reason(&url, &error);
                             attempts.push((url, reason));
                             continue;
@@ -1147,6 +1191,7 @@ impl Refresher {
                 }
                 Err(error) if error.stops_every_server() => return Err(error),
                 Err(error) => {
+                    failed(server);
                     let reason = attempt_reason(&url, &error);
                     attempts.push((url, reason));
                 }
@@ -1177,7 +1222,7 @@ impl Refresher {
     /// fails every entry with [`Error::DuplicateTarget`] before any I/O. Two workers would otherwise
     /// race for one atomic-write temporary. One repository named twice is not a duplicate:
     /// its `.db` and its `.files` are two destinations.
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "the same concerns `refresh_with_progress` names, minus the repository (now a \
                   list) and plus how many at a time"
@@ -1412,7 +1457,7 @@ fn parse_http_date(value: &str) -> Option<u64> {
 /// # Errors
 ///
 /// As [`Refresher::refresh`].
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "the same concerns `Refresher::refresh` names, with the bounds defaulted away"
 )]
@@ -1441,10 +1486,9 @@ fn check_lock(sync_dir: &Path, lock: &DbLock) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 mod tests {

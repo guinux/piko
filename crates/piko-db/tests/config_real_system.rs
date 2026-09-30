@@ -11,7 +11,7 @@
 //! intends. This proves those intentions match a real, unsanitised `pacman.conf` — including
 //! whatever `Include`d mirrorlist it pulls in.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"

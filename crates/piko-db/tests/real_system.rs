@@ -10,12 +10,7 @@
 //! Fixture-based tests prove piko does what piko intends. These prove those intentions match
 //! a real, unsanitised database of over a thousand packages.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::arithmetic_side_effects,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::panic, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::path::Path;
 

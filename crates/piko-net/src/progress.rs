@@ -1,9 +1,10 @@
 //! Progress events for a download, reported through an optional, caller-supplied callback.
 //!
-//! An event duplicates no information the returned `Result<Outcome>` does not already carry.
-//! [`crate::Refresher::refresh`] takes no callback, and produces the same effect without one.
-//! Nothing here may be used to decide anything. See
-//! [`crate::Refresher::refresh_with_progress`].
+//! An event duplicates no information the returned `Result<Outcome>` does not already carry,
+//! with one exception: [`Event::HostSkipped`], a notice for a person, which has no place in a
+//! result that can succeed through another server. [`crate::Refresher::refresh`] takes no
+//! callback, and produces the same effect without one. Nothing here may be used to decide
+//! anything. See [`crate::Refresher::refresh_with_progress`].
 //!
 //! # Events are per-file, and several files can be in flight
 //!
@@ -57,6 +58,14 @@ pub enum Event {
     /// This is the only event that means "done" — the same point
     /// [`crate::refresh::Outcome::Updated`] is returned for.
     Installed,
+    /// A host failed its third request, and this `Refresher` does not ask it again.
+    ///
+    /// Sent once for each host, by the worker whose request reached the limit. libalpm warns at
+    /// the same point. The host is the URL's authority, from the configured server list.
+    HostSkipped {
+        /// The host, with its port when the server names one.
+        host: String,
+    },
 }
 
 /// Which file an [`Event`] refers to.

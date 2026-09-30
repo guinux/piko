@@ -19,12 +19,7 @@
 //! into `usr/`, and a package owning a file under one of those would be un-installable under
 //! these rules. So the claim is measured against every path of every installed package.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::arithmetic_side_effects,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{
     collections::BTreeSet,

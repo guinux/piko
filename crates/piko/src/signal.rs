@@ -88,7 +88,7 @@ pub(crate) fn install_cancel_handler() -> (piko_net::Cancel, PromptMode) {
     let for_handler = cancel.clone();
     let instant_kill = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let for_handler_kill = std::sync::Arc::clone(&instant_kill);
-    #[allow(clippy::expect_used, reason = "the only registration reachable in one process run")]
+    #[expect(clippy::expect_used, reason = "the only registration reachable in one process run")]
     ctrlc::set_handler(move || {
         if for_handler_kill.load(std::sync::atomic::Ordering::SeqCst) {
             // The one message that prints on its own. Instant-kill mode marks a prompt.

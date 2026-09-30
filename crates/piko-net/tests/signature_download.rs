@@ -19,12 +19,7 @@
 //! open. Pacman verifies at open too, and shares `/var/lib/pacman/sync` with piko. A stale file
 //! left there makes the next `pacman -Sy` reject a database piko installed correctly.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{
     io::{BufRead, BufReader, Write},

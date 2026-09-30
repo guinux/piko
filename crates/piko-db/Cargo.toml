@@ -35,9 +35,8 @@ thiserror.workspace = true
 zstd.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-# Only for the `O_NOFOLLOW | O_NONBLOCK` open flags, whose values are platform-specific.
-libc.workspace = true
-# `openat`, so a read inside a database entry follows no symbolic link at any level.
+# `openat`, so a read inside a database entry follows no symbolic link at any level, and the
+# `O_NOFOLLOW | O_NONBLOCK` flags of every other open.
 # `unsafe_code = "forbid"` rules out calling `libc::openat` directly.
 rustix.workspace = true
 

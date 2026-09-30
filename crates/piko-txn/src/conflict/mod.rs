@@ -28,7 +28,8 @@
 //! package's `files` to be read. libalpm has the same data resident for other reasons; piko does
 //! not. [`crate::owner::Owners`] defers the load to the first query that actually needs one, and
 //! shares it afterwards. A transaction whose packages ship no backup files and hit no conflicts
-//! never pays it.
+//! never pays it. `files_of`, asked for every target, reads only the package that it names, so it
+//! does not start the load.
 //!
 //! Deferring the load is not the whole cost, and the rest is easy to miss. Most of that type's
 //! accessors ask "who owns this path". That genuinely has to consider every installed package.
@@ -555,7 +556,7 @@ fn check_filesystem(
 }
 
 /// Answers every question [`decide`] asks about one path.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "each argument answers one of the rules' inputs; bundling them into a struct \
               would only move the same list one line up"
@@ -1012,9 +1013,8 @@ fn read_whole(
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"
 )]

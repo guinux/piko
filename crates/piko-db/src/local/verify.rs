@@ -290,12 +290,7 @@ fn symlink_in_place_of(entry: &v2::Path, on_disk: &Path) -> Option<PathValidatio
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use std::{
         fs::Metadata,

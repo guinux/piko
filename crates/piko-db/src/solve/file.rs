@@ -45,7 +45,7 @@ impl FilePackage {
     /// this candidate has nothing to download for it. See
     /// [`Solvable::download_size`](crate::solve::Solvable::download_size).
     #[must_use]
-    #[allow(
+    #[expect(
         clippy::too_many_arguments,
         reason = "each parameter is one `.PKGINFO` section; grouping them into a struct would \
                   only move the same list one level out"

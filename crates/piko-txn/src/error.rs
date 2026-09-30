@@ -660,11 +660,6 @@ impl Error {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
 mod tests {
     use super::*;
 

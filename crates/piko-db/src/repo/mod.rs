@@ -14,7 +14,6 @@
 //!
 //! [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
 
-#[cfg_attr(test, allow(unreachable_pub))]
 pub(crate) mod archive;
 mod desc_compat;
 mod eager;

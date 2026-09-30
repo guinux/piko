@@ -29,10 +29,9 @@
 //! **empty** `%BACKUP%`. Unit tests do not catch that: the mechanism itself passes them while
 //! no transaction ever reaches it. This test runs the transaction.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 

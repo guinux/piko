@@ -66,6 +66,17 @@ pub enum Status {
         /// The digest's name, as GnuPG spells it.
         algorithm: &'static str,
     },
+    /// The signature verifies, but the key that made it is too weak to trust: DSA of any size,
+    /// ElGamal, or RSA shorter than 2048 bits.
+    ///
+    /// Whoever can factor or solve the key can sign as its owner. GnuPG reports a signature from
+    /// such a key as good, and libalpm reads no key algorithm.
+    WeakKey {
+        /// The key's algorithm, as GnuPG spells it.
+        algorithm: &'static str,
+        /// The key's length in bits.
+        bits: usize,
+    },
     /// The signature does not verify.
     Invalid,
 }
@@ -201,6 +212,15 @@ pub enum Rejection {
         /// The digest's name, as GnuPG spells it.
         algorithm: &'static str,
     },
+    /// The signing key is too weak to trust. See [`Status::WeakKey`].
+    WeakKey {
+        /// The key.
+        fingerprint: Option<String>,
+        /// The key's algorithm, as GnuPG spells it.
+        algorithm: &'static str,
+        /// The key's length in bits.
+        bits: usize,
+    },
     /// The signature does not verify.
     Invalid,
 }
@@ -239,6 +259,11 @@ impl std::fmt::Display for Rejection {
             Self::WeakDigest { fingerprint, algorithm } => write!(
                 f,
                 "the signature from {} uses the weak digest {algorithm}",
+                key(fingerprint.as_ref())
+            ),
+            Self::WeakKey { fingerprint, algorithm, bits } => write!(
+                f,
+                "the signing key {} is a {bits}-bit {algorithm} key, which is too weak",
                 key(fingerprint.as_ref())
             ),
             Self::Invalid => f.write_str("the signature is invalid"),
@@ -311,6 +336,9 @@ pub fn decide(signatures: &[SignatureOutcome], policy: Policy) -> Verdict {
             Status::WeakDigest { algorithm } => {
                 return Verdict::Rejected(Rejection::WeakDigest { fingerprint, algorithm });
             }
+            Status::WeakKey { algorithm, bits } => {
+                return Verdict::Rejected(Rejection::WeakKey { fingerprint, algorithm, bits });
+            }
             Status::Invalid => return Verdict::Rejected(Rejection::Invalid),
         }
     }
@@ -319,11 +347,6 @@ pub fn decide(signatures: &[SignatureOutcome], policy: Policy) -> Verdict {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -374,6 +397,26 @@ mod tests {
             );
         }
         assert_eq!(newest_creation(&[made_at(Status::WeakDigest { algorithm: "MD5" }, 9)]), None);
+    }
+
+    /// A weak key refuses the file whatever the trust and the policy, and names the key.
+    #[test]
+    fn a_weak_key_is_refused_whatever_the_trust() {
+        let weak = Status::WeakKey { algorithm: "DSA", bits: 1024 };
+        let sigs = [signature(weak, Trust::Full)];
+        let trust_all = Policy { marginal_ok: true, unknown_ok: true, ..REQUIRED_TRUSTED };
+        let optional = Policy { optional: true, ..trust_all };
+        for policy in [REQUIRED_TRUSTED, trust_all, optional] {
+            assert_eq!(
+                decide(&sigs, policy),
+                Verdict::Rejected(Rejection::WeakKey {
+                    fingerprint: Some("ABC123".to_owned()),
+                    algorithm: "DSA",
+                    bits: 1024,
+                })
+            );
+        }
+        assert_eq!(newest_creation(&[made_at(weak, 9)]), None);
     }
 
     #[test]

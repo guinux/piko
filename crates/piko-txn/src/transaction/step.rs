@@ -377,7 +377,9 @@ fn remove_files(
         let Ok(resolved) = root.resolve_parent(&trimmed) else { continue };
         let stripped = trimmed.to_string_lossy();
 
-        let existing = crate::install::probe_existing(root, &trimmed);
+        // Asked of the directory the walk above opened, which the unlink below also uses. A
+        // second walk costs as much again, and can reach another directory if the tree changes.
+        let existing = crate::install::existing_in(&resolved);
         let recorded = removal.backups.get(&trimmed).cloned();
         let local_hash = recorded.as_ref().and_then(|_| {
             crate::hash::file_md5_at(resolved.dir(), resolved.name(), MAX_BACKUP_BYTES)
@@ -533,11 +535,7 @@ fn trim_trailing_slash(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
 

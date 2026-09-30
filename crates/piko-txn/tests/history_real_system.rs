@@ -19,12 +19,7 @@
 //! silently drops a line, or merges two transactions into one, fails on the count before
 //! anyone has to eyeball the output.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::expect_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::path::Path;
 

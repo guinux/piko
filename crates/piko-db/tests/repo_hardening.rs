@@ -5,7 +5,7 @@
 //! of its own. The other is the `.db`/`.files` version-skew defence documented on
 //! [`piko_db::Error::FilesVersionSkew`].
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"

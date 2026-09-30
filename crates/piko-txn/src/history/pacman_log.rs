@@ -314,9 +314,8 @@ fn hook_name(message: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::expect_used,
     reason = "a failing assertion in a test should abort it loudly"
 )]

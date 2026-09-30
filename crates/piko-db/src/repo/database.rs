@@ -670,7 +670,7 @@ struct StagedDesc {
 
 /// Handles one item from the archive walk: a `desc` is parsed and staged, a `files` member is
 /// inserted into the in-progress arena.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "an internal helper threading the build's local state through one callback; splitting it would need a struct with the same fields"
 )]
@@ -811,7 +811,7 @@ fn translate_skip(skipped: Skipped) -> RepoDiagnostic {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"

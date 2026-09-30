@@ -359,7 +359,7 @@ pub fn expand_installed_names(
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::panic,
     clippy::indexing_slicing,

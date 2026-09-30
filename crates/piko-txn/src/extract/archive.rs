@@ -264,6 +264,42 @@ pub enum Flow {
 pub fn walk_until(
     path: &Path,
     limits: &PackageLimits,
+    on_member: impl FnMut(&Member, &mut dyn Read) -> Result<Flow>,
+) -> Result<()> {
+    walk_members(path, limits, Decoding::Direct, on_member)
+}
+
+/// [`walk`], with the archive decoded on a thread of its own while `on_member` runs.
+///
+/// For extraction, which writes each member while the next ones are decoded. A reader that
+/// does little with the contents uses [`walk`]: see [`Decoder::ahead`] for the measurements.
+///
+/// # Errors
+///
+/// As [`walk`].
+pub fn walk_decoded_ahead(
+    path: &Path,
+    limits: &PackageLimits,
+    mut on_member: impl FnMut(&Member, &mut dyn Read) -> Result<()>,
+) -> Result<()> {
+    walk_members(path, limits, Decoding::Ahead, |member, contents| {
+        on_member(member, contents)?;
+        Ok(Flow::Continue)
+    })
+}
+
+/// Which thread decodes an archive: see [`Decoder::ahead`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Decoding {
+    Direct,
+    Ahead,
+}
+
+/// The walk behind [`walk_until`] and [`walk_decoded_ahead`].
+fn walk_members(
+    path: &Path,
+    limits: &PackageLimits,
+    decoding: Decoding,
     mut on_member: impl FnMut(&Member, &mut dyn Read) -> Result<Flow>,
 ) -> Result<()> {
     // The audited door: `O_NONBLOCK`, so a FIFO named on the command line cannot hang the read,
@@ -288,8 +324,11 @@ pub fn walk_until(
     }
 
     let format = sniff_file(&mut file, path)?;
-    let decoder = Decoder::new(file, format)
-        .map_err(|source| Error::io(path, IoAction::Decompress, source))?;
+    let decoder = match decoding {
+        Decoding::Direct => Decoder::new(file, format),
+        Decoding::Ahead => Decoder::ahead(file, format),
+    }
+    .map_err(|source| Error::io(path, IoAction::Decompress, source))?;
 
     let budget = Bounds::new(limits.declared_bound(0));
     let bounded = BoundedReader::new(decoder, limits.inflated_bytes, Arc::clone(&budget));
@@ -560,7 +599,7 @@ fn tripped_limit(path: &Path, budget: &Bounds, limits: &PackageLimits) -> Option
 
 /// Builds package archives for tests.
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::arithmetic_side_effects,
     reason = "test fixtures, over fixed small inputs"
@@ -626,11 +665,7 @@ pub(crate) mod fixture {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
 

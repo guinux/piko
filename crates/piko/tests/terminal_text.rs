@@ -8,11 +8,7 @@
 //! A test output here is never a terminal, so `console` writes no styling of its own. Any escape
 //! byte in the output therefore came from the database.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{path::Path, process::Command};
 

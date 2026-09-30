@@ -19,9 +19,8 @@
 //! assertable, and a shared directory has hundreds of owners on this machine. This is the tighter
 //! of the two checks. It catches a comparison that confuses `usr/bin` with `usr/bin/`.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
 )]

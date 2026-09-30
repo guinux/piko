@@ -14,7 +14,7 @@
 //! `TcpListener` on `127.0.0.1:0`. The tests skip rather than fail when `gpg` is absent, as
 //! `signature_download.rs` does.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,

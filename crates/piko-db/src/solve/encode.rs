@@ -1862,10 +1862,9 @@ fn ignored_change(
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic,
     clippy::indexing_slicing,
     reason = "a failing assertion in a test should abort it loudly"
 )]

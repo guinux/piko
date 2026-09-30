@@ -16,9 +16,8 @@
 //! `(null)` backup hashes that motivated [`piko_db_write::Record`] occur on 2 of 1158
 //! packages.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
 )]

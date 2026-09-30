@@ -14,12 +14,7 @@
 //! nothing**. Nothing else in the suite would notice: the command succeeds, which is what it
 //! does when a signature is fine.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{path::Path, process::Command};
 

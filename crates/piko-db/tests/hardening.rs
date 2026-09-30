@@ -5,7 +5,7 @@
 //! than unit-tested internals. The properties are about what actually happens when the
 //! process opens a hostile path.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"

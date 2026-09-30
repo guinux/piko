@@ -240,17 +240,52 @@ impl Runner {
     }
 }
 
-/// The environment adjustments libalpm makes before `execv` (`util.c:688`).
+/// Gives the helper, and so the command it becomes, the environment of [`child_environment`].
 fn apply_environment(spawn: &mut std::process::Command) {
-    // bash treats itself as a login shell when stdin is a socket, and sources `~/.bashrc`. A
-    // non-zero `SHLVL` tells it otherwise. libalpm uses `setenv(..., overwrite = 0)`, so an
-    // inherited value stays as is rather than getting replaced.
-    if std::env::var_os("SHLVL").is_none() {
-        spawn.env("SHLVL", "1");
-    }
-    // bash sources `$BASH_ENV` when run non-interactively. Left alone, this would let the
-    // environment of whoever started piko inject code into every scriptlet.
-    spawn.env_remove("BASH_ENV");
+    spawn.env_clear().envs(child_environment(std::env::vars_os()));
+}
+
+/// The search path a scriptlet or hook runs with, whoever started piko.
+///
+/// systemd's default for a service. `/usr/sbin` is a link to `bin` on Arch and costs nothing
+/// there.
+const CHILD_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin";
+
+/// The home directory a scriptlet or hook runs with, as `sudo` sets it for root.
+const CHILD_HOME: &str = "/root";
+
+/// The environment a scriptlet or hook runs with, built from `inherited`.
+///
+/// A scriptlet or hook runs as root. Every variable it inherits is an input to root's code,
+/// chosen by whoever started piko: `LD_PRELOAD` and `LD_LIBRARY_PATH` load a library,
+/// `PATH` picks each command, `BASH_ENV` and an exported `BASH_FUNC_*` add shell code, and
+/// `PYTHONPATH` or `PERL5LIB` load a module into a hook written in either language. `sudo` and
+/// `run0` clear these; `su`, `sudo -E` and `doas` with `keepenv` do not. So the environment is
+/// built rather than filtered:
+///
+/// - `PATH`, `HOME` and `SHLVL` are fixed. bash treats itself as a login shell when stdin is a
+///   socket, and sources `~/.bashrc`, unless `SHLVL` is set.
+/// - The locale (`LANG`, `LANGUAGE`, `LC_*`) and `TERM` are kept, so messages keep their
+///   language and their terminal. A value holding a `/` is dropped: glibc reads such a locale
+///   name as a path, and loads the locale data it finds there.
+///
+/// Nothing else is kept.
+fn child_environment(
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    let fixed = [("PATH", CHILD_PATH), ("HOME", CHILD_HOME), ("SHLVL", "1")];
+    let mut environment: Vec<(OsString, OsString)> =
+        fixed.iter().map(|(name, value)| (OsString::from(name), OsString::from(value))).collect();
+    environment.extend(inherited.into_iter().filter(|(name, value)| is_kept(name, value)));
+    environment
+}
+
+/// Whether [`child_environment`] keeps the inherited variable `name`.
+fn is_kept(name: &OsStr, value: &OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Some(name) = name.to_str() else { return false };
+    let listed = matches!(name, "LANG" | "LANGUAGE" | "TERM") || name.starts_with("LC_");
+    listed && !value.as_bytes().contains(&b'/')
 }
 
 /// Reads `reader` to end-of-file, keeping at most [`MAX_OUTPUT_BYTES`], and calls `on_line`
@@ -390,12 +425,7 @@ pub fn is_helper_argument(argument: &OsStr) -> bool {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
 
@@ -443,6 +473,40 @@ mod tests {
         assert_eq!(executable(OsStr::new("locale-gen")), Path::new("./locale-gen"));
         assert_eq!(executable(OsStr::new("/usr/bin/true")), Path::new("/usr/bin/true"));
         assert_eq!(executable(OsStr::new("usr/bin/true")), Path::new("usr/bin/true"));
+    }
+
+    /// The environment is built, not filtered: the fixed base comes first, the locale and
+    /// `TERM` pass, and everything else is dropped, whatever it holds.
+    #[test]
+    fn a_command_gets_a_fixed_base_and_only_the_locale_and_terminal() {
+        let inherited = [
+            ("PATH", "/home/user/bin:/usr/bin"),
+            ("HOME", "/home/user"),
+            ("SHLVL", "3"),
+            ("LD_PRELOAD", "/tmp/evil.so"),
+            ("BASH_ENV", "/tmp/evil.sh"),
+            ("BASH_FUNC_ls%%", "() { rm -rf /; }"),
+            ("PYTHONPATH", "/tmp"),
+            ("LANG", "fr_FR.UTF-8"),
+            ("LANGUAGE", "fr:en"),
+            ("LC_MESSAGES", "de_DE.UTF-8"),
+            ("LC_ALL", "/tmp/evil-locale"),
+            ("TERM", "xterm-256color"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+
+        let built = child_environment(inherited);
+        let expected = [
+            ("PATH", CHILD_PATH),
+            ("HOME", CHILD_HOME),
+            ("SHLVL", "1"),
+            ("LANG", "fr_FR.UTF-8"),
+            ("LANGUAGE", "fr:en"),
+            ("LC_MESSAGES", "de_DE.UTF-8"),
+            ("TERM", "xterm-256color"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        assert_eq!(built, expected);
     }
 
     /// The helper refuses a malformed invocation rather than doing something arbitrary.

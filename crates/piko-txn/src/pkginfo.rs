@@ -88,7 +88,7 @@ pub fn name_and_version(info: &PackageInfo) -> (&alpm_types::Name, &alpm_types::
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"

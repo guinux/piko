@@ -157,12 +157,7 @@ pub fn resolve_and_print(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use piko_db::fixture::{BuiltScenario, PackageSpec, Scenario};
 

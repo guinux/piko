@@ -1546,7 +1546,6 @@ dependencies = [
  "alpm-types",
  "flate2",
  "glob",
- "libc",
  "libdeflater",
  "piko-db",
  "rustix",
@@ -1561,8 +1560,8 @@ name = "piko-db-write"
 version = "0.1.0"
 dependencies = [
  "alpm-types",
- "libc",
  "piko-db",
+ "rustix",
  "tempfile",
  "thiserror",
 ]
@@ -1600,9 +1599,9 @@ name = "piko-sig-write"
 version = "0.1.0"
 dependencies = [
  "gpgme",
- "libc",
  "piko-db",
  "piko-sig",
+ "rustix",
  "tempfile",
  "thiserror",
 ]
@@ -1614,7 +1613,6 @@ dependencies = [
  "alpm-pkginfo",
  "alpm-types",
  "base64 0.22.1",
- "libc",
  "piko-db",
  "piko-db-write",
  "piko-net",

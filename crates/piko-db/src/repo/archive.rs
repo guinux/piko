@@ -232,7 +232,8 @@ fn open_bounded(
     }
 
     let format = sniff_file(&mut file, path)?;
-    let decoder = Decoder::new(file, format)
+    // Each caller parses what it reads, and most read to the end, so the decoding overlaps it.
+    let decoder = Decoder::ahead(file, format)
         .map_err(|source| Error::io(path, IoAction::Decompress, source))?;
 
     // A repository archive declares no size, so only the fixed limit applies.
@@ -507,11 +508,7 @@ fn classify_io_error(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use std::{io::Write as _, path::PathBuf};
 

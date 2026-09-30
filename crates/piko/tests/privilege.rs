@@ -5,7 +5,7 @@
 //! The other half, a user-owned `--root` and `--dbpath` that pass it, is what every test in
 //! `side_effects.rs` and `key.rs` already does.
 
-#![allow(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::process::{Command, Output, Stdio};
 

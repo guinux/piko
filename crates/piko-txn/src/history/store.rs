@@ -300,9 +300,8 @@ fn one_line(text: &str) -> String {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::expect_used,
     reason = "a failing assertion in a test should abort it loudly"
 )]

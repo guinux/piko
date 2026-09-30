@@ -538,6 +538,7 @@ fn sources(universe: &Universe<'_>, built: &Plan, origins: PackageOrigins<'_>) -
             DownloadTarget {
                 repo_name: repo_name.to_string(),
                 servers,
+                cache_servers: config.cache_servers.len(),
                 policy,
                 size: repo_package.compressed_size(),
             },
@@ -672,7 +673,7 @@ pub fn download_only(
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"

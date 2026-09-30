@@ -21,11 +21,10 @@
 //! The numbers are checked against `stat -f`, which reads the same `statvfs` through a
 //! different implementation.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 

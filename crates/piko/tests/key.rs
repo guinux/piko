@@ -8,9 +8,8 @@
 //! are ed25519, not `init`'s RSA-4096. These tests exercise the CLI's decisions, not key
 //! generation, and `key_real_system.rs` already covers key generation.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::indexing_slicing,
     reason = "a failing assertion in a test should abort it loudly"
 )]

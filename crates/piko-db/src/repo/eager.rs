@@ -86,7 +86,7 @@ pub(crate) fn parse(text: &str, budget: &mut RelationBudget) -> Result<EagerFiel
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"

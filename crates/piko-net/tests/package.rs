@@ -8,12 +8,7 @@
 //! as the cache, and no network is used. This mirrors `tests/conditional.rs`'s harness. The
 //! same crude server works for a package fetch as for a database refresh.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -88,7 +83,7 @@ fn wanted<'a>(
     policy: Policy,
     size: Option<u64>,
 ) -> PackageFetch<'a> {
-    PackageFetch { file_name, repo_name: "core", servers, policy, size }
+    PackageFetch { file_name, repo_name: "core", servers, cache_servers: 0, policy, size }
 }
 
 fn fetch(cache: &Path, url: &str, policy: Policy) -> piko_net::Result<std::path::PathBuf> {
@@ -292,4 +287,77 @@ fn a_cancelled_download_leaves_nothing_behind() {
     assert!(error.to_string().contains("cancelled"), "{error}");
     assert!(!dir.path().join(NAME).exists(), "a cancelled download left a file behind");
     assert!(!server.is_finished(), "the server should still be waiting for a call that never came");
+}
+
+/// Ends a `serve` thread still waiting for a connection, and returns what it saw. A request
+/// this makes is empty, so a test can tell it from a real one.
+fn finish(url: &str, server: std::thread::JoinHandle<Vec<String>>) -> Vec<String> {
+    let address = url.trim_start_matches("http://");
+    drop(std::net::TcpStream::connect(address));
+    server.join().unwrap()
+}
+
+/// A host that failed three requests is not asked again by the same `Refresher`, as libalpm
+/// skips it for the rest of a transaction (`server_error_limit`, `dload.c:136`).
+#[test]
+fn a_host_that_failed_three_times_is_not_asked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let (dead, dead_server) = serve(vec![not_found(); 4]);
+    let (good, good_server) = serve(vec![ok_response(b"a real package"); 3]);
+    let file_name = file_name();
+    let refresher = Refresher::default();
+
+    let both = [format!("{dead}/core"), good.clone()];
+    let skipped = std::sync::Mutex::new(Vec::new());
+    let sink = |event: piko_net::Event| {
+        if let piko_net::Event::HostSkipped { host } = event {
+            skipped.lock().unwrap().push(host);
+        }
+    };
+    for _ in 0..3 {
+        let fetched = refresher.fetch_package_with_progress(
+            dir.path(),
+            wanted(&file_name, &both, unsigned(), None),
+            &Cancel::new(),
+            &sink,
+        );
+        assert!(fetched.is_ok(), "{fetched:?}");
+    }
+    // Said once, by the request that reached the limit.
+    assert_eq!(*skipped.lock().unwrap(), [dead.trim_start_matches("http://")]);
+    // Another path on the same host: the count is the host's.
+    let only_dead = [format!("{dead}/extra")];
+    let error = refresher
+        .fetch_package(dir.path(), wanted(&file_name, &only_dead, unsigned(), None), &Cancel::new())
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("not asked"), "{error:?}");
+
+    let seen = finish(&dead, dead_server);
+    assert_eq!(seen.iter().filter(|request| request.starts_with("GET")).count(), 3, "{seen:?}");
+    drop(finish(&good, good_server));
+}
+
+/// A `CacheServer` that does not hold a file is asked again for the next one. libalpm does not
+/// count its errors (`request_errors_ok`, `dload.c:233`).
+#[test]
+fn a_cache_server_is_asked_again_after_any_number_of_misses() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, cache_server) = serve(vec![not_found(); 5]);
+    let (good, good_server) = serve(vec![ok_response(b"a real package"); 5]);
+    let file_name = file_name();
+    let refresher = Refresher::default();
+    let servers = [cache.clone(), good.clone()];
+
+    for _ in 0..5 {
+        let fetched = refresher.fetch_package(
+            dir.path(),
+            PackageFetch { cache_servers: 1, ..wanted(&file_name, &servers, unsigned(), None) },
+            &Cancel::new(),
+        );
+        assert!(fetched.is_ok(), "{fetched:?}");
+    }
+
+    let seen = finish(&cache, cache_server);
+    assert_eq!(seen.iter().filter(|request| request.starts_with("GET")).count(), 5, "{seen:?}");
+    drop(finish(&good, good_server));
 }

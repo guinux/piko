@@ -97,10 +97,6 @@ impl DbFixture {
     ///
     /// If the temporary directory cannot be created or written to.
     #[must_use]
-    #[allow(
-        clippy::expect_used,
-        reason = "a fixture that cannot set itself up has no useful error to report"
-    )]
     pub fn new() -> Self {
         let fixture = Self::without_schema_version();
         fixture.write_schema_version(&ALPM_DB_VERSION.to_string());
@@ -113,7 +109,7 @@ impl DbFixture {
     ///
     /// If the temporary directory cannot be created.
     #[must_use]
-    #[allow(
+    #[expect(
         clippy::expect_used,
         reason = "a fixture that cannot set itself up has no useful error to report"
     )]
@@ -128,7 +124,7 @@ impl DbFixture {
     /// # Panics
     ///
     /// If the file cannot be written.
-    #[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
+    #[expect(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
     pub fn write_schema_version(&self, contents: &str) -> &Self {
         std::fs::write(self.path().join(ALPM_DB_VERSION_FILE), contents)
             .expect("failed to write the schema version file");
@@ -147,7 +143,7 @@ impl DbFixture {
     /// # Panics
     ///
     /// If the file cannot be written.
-    #[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
+    #[expect(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
     pub fn stray_file(&self, name: &str, contents: &str) -> &Self {
         std::fs::write(self.path().join(name), contents).expect("failed to write a stray file");
         self
@@ -227,7 +223,7 @@ impl PackageFixture<'_> {
     /// # Panics
     ///
     /// If the directory or any of its files cannot be written.
-    #[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
+    #[expect(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
     pub fn build(self) -> PathBuf {
         let dir = self.db.path().join(&self.entry);
         std::fs::create_dir_all(&dir).expect("failed to create an entry directory");
@@ -265,7 +261,7 @@ fn split_entry(entry: &str) -> (&str, &str) {
 /// # Panics
 ///
 /// If compression fails, which for an in-memory writer means an allocation failure.
-#[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
+#[expect(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
 #[must_use]
 pub fn gzip(bytes: &[u8]) -> Vec<u8> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -343,7 +339,6 @@ usr/bin/foo
 /// If building the tar or gzip stream fails, which for an in-memory writer means an
 /// allocation failure.
 #[must_use]
-#[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
 pub fn gzip_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
     gzip_tar_at(entries, 0)
 }
@@ -357,7 +352,7 @@ pub fn gzip_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
 ///
 /// As [`gzip_tar`].
 #[must_use]
-#[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
+#[expect(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
 pub fn gzip_tar_at(entries: &[(&str, &[u8])], mtime: u64) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for (path, content) in entries {
@@ -389,7 +384,7 @@ impl RepoFixture {
     ///
     /// If the temporary directory cannot be created.
     #[must_use]
-    #[allow(
+    #[expect(
         clippy::expect_used,
         reason = "a fixture that cannot set itself up has no useful error to report"
     )]
@@ -408,7 +403,7 @@ impl RepoFixture {
     /// # Panics
     ///
     /// If the file cannot be written.
-    #[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
+    #[expect(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
     pub fn write_archive(&self, name: &str, bytes: &[u8]) -> PathBuf {
         let path = self.dir.path().join(name);
         std::fs::write(&path, bytes).expect("failed to write an archive fixture");
@@ -714,7 +709,7 @@ impl Scenario {
     /// If a directory or archive cannot be written, or if either database fails to open.
     /// Every package a scenario describes is well-formed by construction. So a failure here
     /// is a defect in this builder, not a condition a test could meaningfully assert on.
-    #[allow(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
+    #[expect(clippy::expect_used, reason = "fixture setup failures are not recoverable")]
     pub fn build(self) -> BuiltScenario {
         let local_fixture = DbFixture::new();
         for package in &self.installed {
@@ -787,11 +782,7 @@ impl BuiltScenario {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
 

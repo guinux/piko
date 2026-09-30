@@ -23,9 +23,12 @@
 //! steps decides which key is searched, so it belongs here rather than in a front end: a second
 //! front end must reach the same answer without re-deriving it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
-use piko_db::LocalDatabase;
+use piko_db::{LocalDatabase, LocalPackage};
 
 use crate::{
     conflict::filelist::FileList,
@@ -43,7 +46,7 @@ struct Installed {
     /// Every installed package and its file list, in database order.
     packages: Vec<(String, FileList)>,
     /// Where each name sits in `packages`.
-    by_name: std::collections::HashMap<String, usize>,
+    by_name: HashMap<String, usize>,
 }
 
 /// Who owns what, loaded from the local database only once something asks.
@@ -54,13 +57,16 @@ struct Installed {
 pub struct Owners<'db> {
     local: &'db LocalDatabase,
     loaded: Option<Installed>,
+    /// File lists that [`Owners::files_of`] read one package at a time, before anything built
+    /// the index. `None` records a name that is not installed.
+    single: HashMap<String, Option<FileList>>,
 }
 
 impl<'db> Owners<'db> {
     /// An index over `local`, reading nothing yet.
     #[must_use]
-    pub const fn new(local: &'db LocalDatabase) -> Self {
-        Self { local, loaded: None }
+    pub fn new(local: &'db LocalDatabase) -> Self {
+        Self { local, loaded: None, single: HashMap::new() }
     }
 
     /// The installed set, reading it on the first call.
@@ -69,25 +75,12 @@ impl<'db> Owners<'db> {
         self.loaded.get_or_insert_with(|| {
             let packages: Vec<(String, FileList)> = local
                 .iter()
-                .map(|package| {
-                    // A package whose `files` cannot be read contributes an empty list. This is
-                    // the safe direction: it makes paths look unowned, which produces a
-                    // conflict rather than suppressing one.
-                    let files = package
-                        .file_list()
-                        .map(|paths| {
-                            FileList::new(
-                                paths.iter().map(|path| path.to_string_lossy().into_owned()),
-                            )
-                        })
-                        .unwrap_or_default();
-                    (package.name().to_string(), files)
-                })
+                .map(|package| (package.name().to_string(), file_list_of(package)))
                 .collect();
             // First occurrence wins, so the index agrees with the ordered walk about which
             // package a name refers to. A local database cannot hold two entries of one name.
             // This choice only matters for staying honest about what the index means.
-            let mut by_name = std::collections::HashMap::with_capacity(packages.len());
+            let mut by_name = HashMap::with_capacity(packages.len());
             for (index, (name, _)) in packages.iter().enumerate() {
                 by_name.entry(name.clone()).or_insert(index);
             }
@@ -127,10 +120,23 @@ impl<'db> Owners<'db> {
     /// per **path and per target**: [`crate::conflict`]'s `examine` consults it once for every
     /// other target in the transaction. So a linear scan would put the whole installed set
     /// inside two nested loops. See that module's "What it costs" note for the measurement.
+    ///
+    /// This accessor does not build the index. It reads the one package that it is asked about,
+    /// and keeps the list for the next call. The conflict check asks for every target's list,
+    /// and an upgrade seldom asks anything else, so the other packages' `files` are not read at
+    /// all. To parse every installed file list took about 0.5 s on a system with 1245 packages.
+    /// The answer is the index's answer: the same package, and an empty list when its `files`
+    /// cannot be read.
     pub(crate) fn files_of(&mut self, name: &str) -> Option<&FileList> {
-        let installed = self.installed();
-        let index = *installed.by_name.get(name)?;
-        installed.packages.get(index).map(|(_, files)| files)
+        if let Some(installed) = &self.loaded {
+            let index = *installed.by_name.get(name)?;
+            return installed.packages.get(index).map(|(_, files)| files);
+        }
+        let local = self.local;
+        self.single
+            .entry(name.to_owned())
+            .or_insert_with(|| local.get_str(name).map(file_list_of))
+            .as_ref()
     }
 
     /// Resolves `target` and names every installed package that owns it.
@@ -160,6 +166,18 @@ impl<'db> Owners<'db> {
         };
         Ok(Answer { query, owners })
     }
+}
+
+/// The file list of one installed package.
+///
+/// A package whose `files` cannot be read contributes an empty list. This is the safe
+/// direction: it makes paths look unowned, which produces a conflict rather than suppressing
+/// one.
+fn file_list_of(package: &LocalPackage) -> FileList {
+    package
+        .file_list()
+        .map(|paths| FileList::new(paths.iter().map(|path| path.to_string_lossy().into_owned())))
+        .unwrap_or_default()
 }
 
 /// An owner query's target, resolved against the host filesystem and the installation root.
@@ -307,12 +325,7 @@ fn root_prefix(root: &Path) -> String {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
     use piko_db::fixture::DbFixture;
@@ -525,6 +538,38 @@ mod tests {
         let local = LocalDatabase::open(fixture.path()).unwrap();
         let root = root(&["usr/bin/foo"]);
         assert!(owners_of_path(&local, root.path(), &root.path().join("usr/bin/foo")).is_empty());
+    }
+
+    /// One package's file list is read without the index, and gives the index's answer: the
+    /// same list, an empty one for an unreadable `files`, and `None` for a name not installed.
+    #[test]
+    fn one_file_list_is_read_without_the_index_and_agrees_with_it() {
+        let fixture = DbFixture::new();
+        fixture.package("bad-1.0.0-1").with_defaults().files("this is not a files file\n").build();
+        fixture.package("foo-1.0.0-1").with_defaults().files("%FILES%\nusr/\nusr/bin/\n").build();
+        fixture.package("other-1.0.0-1").with_defaults().files("%FILES%\nsrv/\n").build();
+        let local = LocalDatabase::open(fixture.path()).unwrap();
+        let listed = |files: Option<&FileList>| {
+            files.map(|files| files.iter().map(str::to_owned).collect::<Vec<_>>())
+        };
+
+        let mut owners = Owners::new(&local);
+        let single: Vec<_> =
+            ["foo", "bad", "absent"].map(|name| listed(owners.files_of(name))).into();
+        assert!(owners.loaded.is_none(), "one package's list built the whole index");
+        assert!(
+            local.get_str("other").is_some_and(|package| !package.is_files_loaded()),
+            "a package nobody asked about was read"
+        );
+
+        owners.all();
+        let indexed: Vec<_> =
+            ["foo", "bad", "absent"].map(|name| listed(owners.files_of(name))).into();
+        assert_eq!(single, indexed);
+        assert_eq!(
+            single,
+            [Some(vec!["usr/".to_owned(), "usr/bin/".to_owned()]), Some(Vec::new()), None]
+        );
     }
 
     /// The index is read once, however many targets are asked about. A rebuild would allocate

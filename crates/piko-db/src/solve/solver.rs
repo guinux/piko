@@ -645,10 +645,9 @@ pub fn core_kinds(problem: &Problem, core: &[ClauseId]) -> Vec<ClauseKind> {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::indexing_slicing,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 mod tests {

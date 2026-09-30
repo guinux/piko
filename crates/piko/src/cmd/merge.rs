@@ -162,10 +162,6 @@ pub fn report_pending(root: &Path, report: &piko_txn::Report, out: &mut impl Wri
 }
 
 /// Walks the pending files, asking about each one.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each argument is a distinct input; bundling them would only hide the count"
-)]
 fn resolve_all(
     root_dir: &RootDir,
     root: &Path,
@@ -281,10 +277,6 @@ fn offer_removal(
 }
 
 /// Asks what to do with one pair, and does it.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each argument is a distinct input; bundling them would only hide the count"
-)]
 fn ask(
     root_dir: &RootDir,
     root: &Path,
@@ -367,10 +359,6 @@ fn view(
 /// Merges a pair three ways, shows the result, and keeps it if the user agrees.
 ///
 /// `None` means the merge did not happen and the prompt should be asked again.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each argument is a distinct input; bundling them would only hide the count"
-)]
 fn merge_one(
     root_dir: &RootDir,
     root: &Path,
@@ -689,7 +677,7 @@ fn strip(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 

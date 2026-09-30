@@ -13,9 +13,9 @@ workspace = true
 
 [dependencies]
 alpm-types.workspace = true
-# `O_NOFOLLOW` on the atomic write's temporary file; see `local::create_temp`.
-libc.workspace = true
 piko-db.workspace = true
+# `O_NOFOLLOW` on the atomic write's temporary file; see `local::create_temp`.
+rustix.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

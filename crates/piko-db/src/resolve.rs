@@ -568,9 +568,8 @@ fn is_literally_named(dep: &RelationOrSoname, package: &RepoPackage) -> bool {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::indexing_slicing,
     reason = "a failing assertion in a test should abort it loudly"
 )]

@@ -22,7 +22,7 @@
 //!
 //! It switches to `alpm`, or to the user named by `PIKO_TEST_DOWNLOAD_USER`.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -298,8 +298,14 @@ fn fetch(
     cancel: &Cancel,
 ) -> piko_net::Result<std::path::PathBuf> {
     let file_name = PackageFileName::from_str(NAME).unwrap();
-    let wanted =
-        PackageFetch { file_name: &file_name, repo_name: "core", servers, policy, size: None };
+    let wanted = PackageFetch {
+        file_name: &file_name,
+        repo_name: "core",
+        servers,
+        cache_servers: 0,
+        policy,
+        size: None,
+    };
     refresher.fetch_package(cache, wanted, cancel)
 }
 

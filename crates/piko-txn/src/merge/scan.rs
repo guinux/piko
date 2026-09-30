@@ -175,10 +175,6 @@ pub fn scan(root: &RootDir, db: &LocalDatabase, limits: &ScanLimits) -> Scan {
 }
 
 /// Records every pending file sitting beside `target`.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each argument is a distinct input; bundling them would only hide the count"
-)]
 fn collect(
     found: &mut Scan,
     listings: &mut HashMap<PathBuf, Option<BTreeSet<OsString>>>,
@@ -205,10 +201,6 @@ fn collect(
 }
 
 /// Builds the record for one pending file, comparing it with its target.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each argument is a distinct input; bundling them would only hide the count"
-)]
 fn describe(
     found: &mut Scan,
     resolved: &Resolved,
@@ -318,12 +310,7 @@ fn strip_prefix(name: &OsStr, prefix: &OsStr) -> Option<OsString> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
     use piko_db::fixture::DbFixture;

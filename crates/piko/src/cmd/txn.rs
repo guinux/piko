@@ -1388,7 +1388,7 @@ fn shell_word(text: &str) -> std::borrow::Cow<'_, str> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use piko_txn::journal::{Recovery, Reinstall};
 

@@ -22,10 +22,9 @@
 //! The comparison runs **both ways**. A one-way diff reports a real divergence as a match,
 //! which is the failure mode a self-report in this repository has already had once.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 

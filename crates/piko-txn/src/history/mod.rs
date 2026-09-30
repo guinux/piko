@@ -761,11 +761,13 @@ fn strip_suffix(path: &Path, suffix: &str) -> PathBuf {
 ///
 /// [`std::io::Error`] if the file cannot be opened, or is not a regular file.
 pub(crate) fn open_for_append(path: &Path, mode: u32) -> std::io::Result<std::fs::File> {
+    use rustix::fs::OFlags;
     use std::os::unix::fs::OpenOptionsExt as _;
 
     let mut options = std::fs::OpenOptions::new();
     options.write(true).append(true).create(true).mode(mode);
-    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    options
+        .custom_flags((OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK).bits().cast_signed());
 
     let file = loop {
         match options.open(path) {
@@ -796,11 +798,7 @@ pub(crate) fn open_for_reading(path: &Path) -> std::io::Result<std::fs::File> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
 

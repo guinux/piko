@@ -503,7 +503,7 @@ fn read_file_targets(
 /// so this previews a `pacman -U` too. A target naming a **URL** is refused instead.
 /// Previewing it would mean downloading it, and a command whose whole purpose is to change
 /// nothing must not reach the network.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "each parameter names one concern the caller must decide, the same justification \
               `piko_net::Refresher::fetch_package_with_progress` carries"
@@ -953,11 +953,6 @@ fn signed_size(delta: i64) -> console::StyledObject<String> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
 mod tests {
     use super::*;
 

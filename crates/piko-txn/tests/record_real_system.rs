@@ -17,12 +17,7 @@
 //! Three sections are excluded: `%INSTALLDATE%`, `%REASON%`, and `%VALIDATION%`. They record
 //! the *installation*, not the package, so they legitimately differ.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::arithmetic_side_effects,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{
     collections::BTreeMap,

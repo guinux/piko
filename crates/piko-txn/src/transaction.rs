@@ -45,6 +45,7 @@ use crate::{
     hook::{self, Hooks, When},
     install::Extraction,
     journal::{Intent, Journal},
+    parallel,
     progress::{Event, StepOutcome, VerifyEvent},
     rootfs::RootDir,
     scriptlet::{self, MAX_SCRIPTLET_BYTES},
@@ -793,21 +794,6 @@ impl Transaction<Planned> {
         Ok(())
     }
 
-    /// Validates one package file, returning what was checked.
-    ///
-    /// Delegates to [`validate_package`], which is a free function. So a caller with no
-    /// `Transaction` checks a package by the same rule this does. `piko install -w` is that
-    /// caller, and it installs nothing.
-    fn validate(&self, file_name: &PackageFileName, package: &Path) -> Result<Validation> {
-        validate_package(
-            &self.verification,
-            &self.policy_overrides,
-            self.published.get(&file_name.to_string()),
-            file_name,
-            package,
-        )
-    }
-
     /// Locates and reads every package, verifies its signature, checks every entry to be
     /// removed, and finds file conflicts.
     ///
@@ -885,7 +871,7 @@ impl Transaction<Planned> {
             .collect();
         source.prefetch(&incoming)?;
 
-        let mut located = Vec::new();
+        let mut located: Vec<(&PackageFileName, crate::source::Location)> = Vec::new();
         let mut removals = Vec::new();
         let mut doomed_entries: Vec<Doomed> = Vec::new();
         // The same list extraction obeys, handed to the hooks as data. A hook told a path
@@ -893,41 +879,26 @@ impl Transaction<Planned> {
         // stay consistent only because they come from one setting and one matcher.
         let mut summary =
             hook::Summary { no_extract: self.patterns.no_extract.clone(), ..Default::default() };
-        // Known up front, so `SignatureChecked` can report a total before this loop finishes a
-        // single package. Signature checking hashes the whole file, and can be the slowest step
-        // here for a large package.
+        // Known up front, so `SignatureChecked` can report a total before a single package is
+        // checked. Signature checking hashes the whole file, and can be the slowest step here
+        // for a large package.
         let total_installs =
             self.state.steps.iter().filter(|step| matches!(step, Step::Install { .. })).count();
-        let mut signature_checked = 0_usize;
         let total_steps = self.state.steps.len();
+
+        // The steps in order, for what reads the local database or asks the package source.
+        // The first step that fails stops this pass. Its error waits until the packages located
+        // before it are validated, so that the failure of an earlier step still comes first.
+        let mut stopped = None;
         for step in &self.state.steps {
-            self.stop_if_cancelled(total_steps)?;
-            match step {
+            let taken = self.stop_if_cancelled(total_steps).and_then(|()| match step {
                 Step::Install { package, .. } => {
                     // Before the download: a stale plan is refused without fetching anything.
                     if let Some(expected) = self.expectations.get(&package.to_string()) {
                         self::check_installed(&local, package.name(), expected.replaced())?;
                     }
-                    let location = source.locate(package)?;
-                    // Runs before the archive is opened for any other purpose. A package that
-                    // fails this is not read further, so a hostile archive gets no chance to
-                    // exercise the extractor.
-                    let validation = match self.validate(package, location.path()) {
-                        Ok(validation) => validation,
-                        Err(
-                            refusal @ (Error::ChecksumMismatch { .. }
-                            | Error::SignatureRejected { unsigned: false, .. }),
-                        ) => {
-                            return Err(self::discard(source, &location, refusal));
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    located.push((package, location, validation));
-                    signature_checked = signature_checked.saturating_add(1);
-                    progress(VerifyEvent::SignatureChecked {
-                        index: signature_checked,
-                        total: total_installs,
-                    });
+                    located.push((package, source.locate(package)?));
+                    Ok(())
                 }
                 Step::Remove { entry, .. } => {
                     let Some(package) = self::check_installed(&local, entry.name(), Some(entry))?
@@ -948,90 +919,138 @@ impl Transaction<Planned> {
                     });
                     removals.push(entry.name().to_string());
                     doomed_entries.push(doomed);
+                    Ok(())
                 }
+            });
+            if let Err(error) = taken {
+                stopped = Some(error);
+                break;
             }
+        }
+
+        // Every package is validated before any archive is opened for another purpose. A
+        // package that fails this is not read further, so a hostile archive gets no chance to
+        // exercise the extractor. The packages are independent, so they are checked on a few
+        // threads, and the failure returned is the first one in step order.
+        let threads = self::verify_threads();
+        let cancel = self.cancel.as_ref();
+        let cancelled = || cancel.is_some_and(piko_net::Cancel::is_requested);
+        let mut signature_checked = 0_usize;
+        let validated = parallel::map_ordered(
+            &located,
+            threads,
+            |(package, location)| {
+                if cancelled() {
+                    return Err(Error::Cancelled { completed: 0, total: total_steps });
+                }
+                validate_package(
+                    &self.verification,
+                    &self.policy_overrides,
+                    self.published.get(&package.to_string()),
+                    package,
+                    location.path(),
+                )
+            },
+            || {
+                signature_checked = signature_checked.saturating_add(1);
+                progress(VerifyEvent::SignatureChecked {
+                    index: signature_checked,
+                    total: total_installs,
+                });
+            },
+        );
+        let validations = match validated {
+            Ok(validations) => validations,
+            Err((
+                index,
+                refusal @ (Error::ChecksumMismatch { .. }
+                | Error::SignatureRejected { unsigned: false, .. }),
+            )) => {
+                return Err(match located.get(index) {
+                    Some((_, location)) => self::discard(source, location, refusal),
+                    None => refusal,
+                });
+            }
+            Err((_, error)) => return Err(error),
+        };
+        if let Some(error) = stopped {
+            return Err(error);
         }
 
         // Reading each archive answers two questions, and nothing else can answer either. What
         // will a package not yet installed write? And is its `.PKGINFO` one piko can record?
         // pacman loads the same files for the same reason before its own check, so this is not
-        // a cost piko added. One walk answers both questions.
+        // a cost piko added. One walk answers both questions. Everything else that concerns one
+        // package alone runs on the same thread, so the first failure in step order is still
+        // the one returned.
+        let validated: Vec<_> = located
+            .iter()
+            .zip(validations)
+            .map(|((package, location), validation)| (*package, location, validation))
+            .collect();
         let mut verified_installs = 0_usize;
-        let mut targets = Vec::with_capacity(located.len());
-        let mut packages = Vec::with_capacity(located.len());
-        for (package, location, validation) in located {
-            self.stop_if_cancelled(total_steps)?;
-            let path = location.path().to_path_buf();
-            let expected = self.expectations.get(&package.to_string());
-            // Bounded by the size the plan declares, so an archive that inflates past it is
-            // refused near that size, on this read and on the extraction's.
-            let limits = expected.map_or(self.limits, |expected| {
-                self.limits.with_declared_size(expected.installed_size())
-            });
-            let conflict::LoadedPackage { target, info, raw, footprint } =
-                conflict::load_package(&path, &limits)?;
-            if let Err(refusal) = self::matches_plan(package, expected, &path, &info) {
-                return Err(self::discard(source, &location, refusal));
+        let prepared = parallel::map_ordered(
+            &validated,
+            threads,
+            |&(package, location, validation)| {
+                if cancelled() {
+                    return Err((Error::Cancelled { completed: 0, total: total_steps }, false));
+                }
+                self::prepare(
+                    &local,
+                    &self.expectations,
+                    self.limits,
+                    package,
+                    location,
+                    validation,
+                )
+            },
+            || {
+                verified_installs = verified_installs.saturating_add(1);
+                progress(VerifyEvent::PackageVerified {
+                    index: verified_installs,
+                    total: total_installs,
+                });
+            },
+        );
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err((index, (refusal, true))) => {
+                return Err(match validated.get(index) {
+                    Some((_, location, _)) => self::discard(source, location, refusal),
+                    None => refusal,
+                });
             }
-            let entry = self::entry_name(&path, &info)?;
-            // Before anything is extracted: a value the entry format cannot hold refuses the
-            // package here, rather than after its files are already in the root.
-            crate::record::check(
-                &info,
-                &raw,
-                target.files.iter(),
-                target.backups.iter().map(String::as_str),
-            )
-            .map_err(|error| Error::UnusableSource {
-                path: path.clone(),
-                reason: format!("its entry cannot be recorded: {error}"),
-            })?;
+            Err((_, (error, false))) => return Err(error),
+        };
 
-            // The installed package of the same name, looked up once and used five ways. It
-            // decides `pre_install` against `pre_upgrade`. It supplies the scriptlet's `oldver`
-            // argument. It names the entry `install_step` has to replace. It supplies the file
-            // list its fake removal deletes. And it supplies the `%BACKUP%` baseline extraction
-            // needs, to tell an edited config file from an untouched one.
-            let replaces = superseded(local.get_str(&target.name))?;
-            let old_files = replaces.as_ref().map(|old| spell(&old.files)).unwrap_or_default();
-
+        let mut targets = Vec::with_capacity(prepared.len());
+        let mut packages = Vec::with_capacity(prepared.len());
+        for (package, target) in prepared {
+            let old_files =
+                package.replaces.as_ref().map(|old| spell(&old.files)).unwrap_or_default();
             summary.added.push(hook::trigger::Added {
                 name: target.name.clone(),
                 files: target.files.iter().map(str::to_owned).collect(),
                 old_files,
-                replaces_installed: replaces.is_some(),
+                replaces_installed: package.replaces.is_some(),
             });
-            packages.push(Prepared {
-                path,
-                name: target.name.clone(),
-                version: target.version.clone(),
-                entry,
-                info,
-                raw,
-                validation,
-                limits,
-                script: target.install_script.clone(),
-                files: target.files.clone(),
-                backups: target.backups.clone(),
-                replaces,
-                footprint,
-            });
+            packages.push(package);
             targets.push(target);
-            verified_installs = verified_installs.saturating_add(1);
-            progress(VerifyEvent::PackageVerified {
-                index: verified_installs,
-                total: total_installs,
-            });
         }
 
         {
             let removed: BTreeSet<&str> = removals.iter().map(String::as_str).collect();
             // Every entry a step takes apart, removed or replaced, in one pass over the file
             // lists.
-            let mut taken_apart: Vec<&mut Superseded> = doomed_entries
+            let mut taken_apart: Vec<(&mut Superseded, Option<Replacement<'_>>)> = doomed_entries
                 .iter_mut()
-                .map(|doomed| &mut doomed.installed)
-                .chain(packages.iter_mut().filter_map(|package| package.replaces.as_mut()))
+                .map(|doomed| (&mut doomed.installed, None))
+                .chain(packages.iter_mut().filter_map(|package| {
+                    let Prepared { replaces, files, backups, .. } = package;
+                    let replacement = Replacement { files, backups };
+                    replaces.as_mut().map(|old| (old, Some(replacement)))
+                }))
                 .collect();
             self::mark_shared_directories(&local, &mut taken_apart, &removed);
         }
@@ -1232,6 +1251,89 @@ fn entry_name(package: &Path, info: &PackageInfo) -> Result<EntryName> {
     })
 }
 
+/// How many threads check signatures and read archives at `verify`.
+///
+/// Measured on 100 real packages (734 MB) on a machine with 4 cores and 8 threads. Signature
+/// checks took 3.7 s on one thread, 1.8 s on two, 1.2 s on four and 1.0 s on eight. Reading the
+/// archives took 5.0 s, 2.6 s, 1.6 s and 1.3 s. Past four, a thread gains little, and each one
+/// holds a zstd window and runs its own `gpg`.
+const VERIFY_THREADS: usize = 4;
+
+/// [`VERIFY_THREADS`], or fewer on a machine with fewer threads.
+fn verify_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get).min(VERIFY_THREADS)
+}
+
+/// Reads one validated package, and checks it against the plan and the entry format.
+///
+/// This is all of `verify`'s work that concerns one package alone, so it can run on any thread.
+/// It reads the archive, compares its `.PKGINFO` with the plan, checks that its entry can be
+/// recorded, and reads the installed version it replaces.
+///
+/// # Errors
+///
+/// The error, with `true` when the package file must be removed from the cache: the archive is
+/// not the one the plan showed. The caller removes it, because only the caller holds the
+/// source.
+fn prepare(
+    local: &LocalDatabase,
+    expectations: &HashMap<String, Expected>,
+    limits: PackageLimits,
+    package: &PackageFileName,
+    location: &crate::source::Location,
+    validation: Validation,
+) -> std::result::Result<(Prepared, conflict::Target), (Error, bool)> {
+    let plain = |error| (error, false);
+    let path = location.path().to_path_buf();
+    let expected = expectations.get(&package.to_string());
+    // Bounded by the size the plan declares, so an archive that inflates past it is refused
+    // near that size, on this read and on the extraction's.
+    let limits =
+        expected.map_or(limits, |expected| limits.with_declared_size(expected.installed_size()));
+    let conflict::LoadedPackage { target, info, raw, footprint } =
+        conflict::load_package(&path, &limits).map_err(plain)?;
+    self::matches_plan(package, expected, &path, &info).map_err(|refusal| (refusal, true))?;
+    let entry = self::entry_name(&path, &info).map_err(plain)?;
+    // Before anything is extracted: a value the entry format cannot hold refuses the package
+    // here, rather than after its files are already in the root.
+    crate::record::check(
+        &info,
+        &raw,
+        target.files.iter(),
+        target.backups.iter().map(String::as_str),
+    )
+    .map_err(|error| {
+        plain(Error::UnusableSource {
+            path: path.clone(),
+            reason: format!("its entry cannot be recorded: {error}"),
+        })
+    })?;
+
+    // The installed package of the same name, looked up once and used five ways. It decides
+    // `pre_install` against `pre_upgrade`. It supplies the scriptlet's `oldver` argument. It
+    // names the entry `install_step` has to replace. It supplies the file list its fake removal
+    // deletes. And it supplies the `%BACKUP%` baseline extraction needs, to tell an edited
+    // config file from an untouched one.
+    let replaces = superseded(local.get_str(&target.name)).map_err(plain)?;
+
+    let prepared = Prepared {
+        path,
+        name: target.name.clone(),
+        version: target.version.clone(),
+        entry,
+        info,
+        raw,
+        validation,
+        limits,
+        script: target.install_script.clone(),
+        files: target.files.clone(),
+        backups: target.backups.clone(),
+        replaces,
+        footprint,
+    };
+    Ok((prepared, target))
+}
+
 /// A file list as a hook trigger compares it: plain strings, directories keeping their `/`.
 fn spell(files: &[PathBuf]) -> Vec<String> {
     files.iter().map(|path| path.to_string_lossy().into_owned()).collect()
@@ -1299,16 +1401,28 @@ fn installed_state(entry: &EntryName, package: &LocalPackage) -> Result<Supersed
 /// the directory unowned. The entry itself is not counted either, removed or upgraded.
 ///
 /// A file list that cannot be read owns nothing, as in the conflict check's index.
+///
+/// Two filters keep the cost to the directories that the steps can remove. Neither one
+/// changes an answer:
+///
+/// - A directory that the replacement ships is not looked up. `decide_removal` tests
+///   `replacement_ships_it` before `directory_has_other_owner`, so the step never asks about
+///   it. An upgrade keeps most of its directories: 5 of 261, 4 of 592 and 23 of 4413
+///   directories were left to look up in upgrades of 5, 20 and 100 real packages.
+/// - A package is parsed only if [`LocalPackage::files_may_list`] finds one of those
+///   directories in its text. The parse sorts and validates every path of every installed
+///   package, which took 0.66 s to 0.80 s on a system with 1245 packages. The text search
+///   only rules out a package, and the parse still decides which directories a package owns.
 fn mark_shared_directories(
     local: &LocalDatabase,
-    entries: &mut [&mut Superseded],
+    entries: &mut [(&mut Superseded, Option<Replacement<'_>>)],
     removed: &BTreeSet<&str>,
 ) {
     let mut wanted: HashMap<String, Vec<usize>> = HashMap::new();
-    for (index, entry) in entries.iter().enumerate() {
+    for (index, (entry, replacement)) in entries.iter().enumerate() {
         for path in &entry.files {
             let spelled = path.to_string_lossy();
-            if spelled.ends_with('/') {
+            if spelled.ends_with('/') && !replacement.is_some_and(|new| new.ships(&spelled)) {
                 wanted.entry(spelled.into_owned()).or_default().push(index);
             }
         }
@@ -1316,12 +1430,16 @@ fn mark_shared_directories(
     if wanted.is_empty() {
         return;
     }
-    let names: Vec<String> = entries.iter().map(|entry| entry.entry.name().to_string()).collect();
+    let names: Vec<String> =
+        entries.iter().map(|(entry, _)| entry.entry.name().to_string()).collect();
 
     let mut shared: Vec<(usize, PathBuf)> = Vec::new();
     for package in local.iter() {
         let owner = package.name().to_string();
         if removed.contains(owner.as_str()) {
+            continue;
+        }
+        if !package.files_may_list(|line| wanted.contains_key(line)) {
             continue;
         }
         let Ok(files) = package.file_list() else { continue };
@@ -1337,7 +1455,7 @@ fn mark_shared_directories(
         }
     }
     for (index, directory) in shared {
-        if let Some(entry) = entries.get_mut(index) {
+        if let Some((entry, _)) = entries.get_mut(index) {
             entry.shared_directories.insert(directory);
         }
     }
@@ -1749,7 +1867,7 @@ fn read_entry_scriptlet(entry_path: &Path) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -2469,6 +2587,34 @@ mod tests {
         );
         assert_eq!(std::fs::read(root.path().join("usr/bin/ccc")).unwrap(), b"ccc");
         assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was left");
+    }
+
+    /// `verify` reads the archives on several threads. The failure it reports is still the first
+    /// one in step order, as a serial loop reports it, and nothing is written.
+    #[test]
+    fn the_first_unreadable_package_in_step_order_is_the_one_reported() {
+        use tar::EntryType::Directory;
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let names = ["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "hhh"];
+        let mut steps = Vec::new();
+        for (index, name) in names.into_iter().enumerate() {
+            let package = if index == 2 || index == 5 {
+                let file = format!("{name}-1.0.0-1-x86_64.pkg.tar");
+                std::fs::write(cache.path().join(&file), b"not an archive").unwrap();
+                file.parse().unwrap()
+            } else {
+                write_raw_package(cache.path(), name, "1.0.0-1", &[("srv/", Directory)])
+            };
+            steps.push(install_step(package));
+        }
+
+        let error = run_steps(cache.path(), db.path(), root.path(), steps).unwrap_err();
+        let reported = format!("{error:?}");
+        assert!(reported.contains("ccc-1.0.0-1"), "{reported}");
+        assert!(!root.path().join("srv").exists(), "the root was touched");
     }
 
     /// An empty directory two packages own stays when one of them is removed, as libalpm

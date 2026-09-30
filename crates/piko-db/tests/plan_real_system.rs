@@ -7,10 +7,9 @@
 //! cargo test -p piko-db --test plan_real_system -- --ignored --nocapture
 //! ```
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
     reason = "a failing assertion in a test should abort it loudly"
 )]

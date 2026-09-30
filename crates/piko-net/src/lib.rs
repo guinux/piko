@@ -124,6 +124,7 @@ pub mod cancel;
 pub mod concurrency;
 pub mod error;
 pub mod freshness;
+mod health;
 mod pool;
 pub mod progress;
 pub mod refresh;

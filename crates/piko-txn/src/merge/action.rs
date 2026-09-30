@@ -191,12 +191,7 @@ fn pacname(pending: &Pending) -> Result<std::ffi::OsString> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
     use crate::merge::{PendingKind, Verdict};

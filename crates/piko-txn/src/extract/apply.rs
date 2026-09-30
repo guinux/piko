@@ -487,7 +487,7 @@ fn io(name: &std::ffi::OsStr, action: IoAction, source: rustix::io::Errno) -> Er
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"

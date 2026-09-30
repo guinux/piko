@@ -107,11 +107,9 @@ where
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects,
     reason = "a test that cannot fail loudly is not a test"
 )]
 mod tests {

@@ -384,7 +384,7 @@ pub(crate) fn relation_text(
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,

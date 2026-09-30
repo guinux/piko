@@ -321,6 +321,36 @@ impl LocalPackage {
         self.files().map(DbFiles::backups)
     }
 
+    /// Whether the `files` file can list a path that `wanted` accepts. The file is not parsed.
+    ///
+    /// This is a cheap filter in front of [`Self::file_list`], for a caller that looks for a few
+    /// paths in every installed package. `false` is certain: the file was read, and no line of
+    /// it is a path that `wanted` accepts. `true` only means that the parse must answer. `true`
+    /// is also the answer when the file cannot be read, so that the error still comes from
+    /// [`Self::file_list`], and when the file list is already parsed.
+    ///
+    /// Each line goes to `wanted` as `alpm-db` delimits a path: the split is at `\n` or `\r\n`,
+    /// and nothing is trimmed. A line that is not a path, such as a section header or a
+    /// `%BACKUP%` entry, can only change the answer to `true`.
+    ///
+    /// The parse is the cost that this filter avoids. `alpm-db` sorts and validates every path,
+    /// at about 1.4 µs for each path, and a real system lists about 300,000 paths. To read the
+    /// text and split its lines costs about a twentieth of that.
+    pub fn files_may_list(&self, mut wanted: impl FnMut(&str) -> bool) -> bool {
+        if self.is_files_loaded() {
+            return true;
+        }
+        let Ok(text) = fs_util::read_capped_utf8_in(
+            &self.dir,
+            FILES_FILE,
+            Limit::Files,
+            self.limits.get(Limit::Files),
+        ) else {
+            return true;
+        };
+        text.lines().any(&mut wanted)
+    }
+
     /// Compares the entry directory name against the `desc` file's own claims.
     ///
     /// The directory name is authoritative: this reports disagreements, it does not resolve
@@ -545,11 +575,7 @@ impl LocalPackage {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
     use crate::fixture::{DbFixture, MINIMAL_DESC_V1, MINIMAL_FILES, MINIMAL_MTREE_V2, gzip_bomb};
@@ -889,6 +915,56 @@ mod tests {
         let backups = pkg.backups().unwrap();
         assert_eq!(backups.len(), 1);
         assert_eq!(backups.first().map(|b| b.path.to_string()), Some("etc/foo.conf".to_owned()));
+    }
+
+    #[test]
+    fn files_may_list_finds_a_listed_path_and_rules_out_an_absent_one() {
+        let db = DbFixture::new();
+        let files = "%FILES%\nsrv/\nsrv/shared/\n";
+        db.package("foo-1.0.0-1").desc(MINIMAL_DESC_V1).files(files).build();
+        let pkg = package_at(&db, "foo-1.0.0-1");
+
+        assert!(pkg.files_may_list(|line| line == "srv/shared/"));
+        assert!(!pkg.files_may_list(|line| line == "srv/other/"));
+        // The filter reads the text. It does not fill the parsed slot.
+        assert!(!pkg.is_files_loaded());
+    }
+
+    /// The filter and the parse must agree on where a path ends. A `\r\n` line ending ends a
+    /// path for both, and a false `false` would hide an owner the parse finds.
+    #[test]
+    fn files_may_list_splits_lines_as_the_parse_does() {
+        let db = DbFixture::new();
+        db.package("foo-1.0.0-1").desc(MINIMAL_DESC_V1).files("%FILES%\r\nsrv/\r\n").build();
+        let pkg = package_at(&db, "foo-1.0.0-1");
+
+        let parsed: Vec<String> = pkg
+            .file_list()
+            .unwrap()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(parsed, ["srv/"]);
+        for path in &parsed {
+            let fresh = package_at(&db, "foo-1.0.0-1");
+            assert!(fresh.files_may_list(|line| line == path), "{path:?} was ruled out");
+        }
+    }
+
+    /// An unreadable file is left for the parse to report, never ruled out.
+    #[test]
+    fn files_may_list_answers_true_when_the_file_cannot_be_read() {
+        let db = DbFixture::new();
+        db.package("foo-1.0.0-1").desc(MINIMAL_DESC_V1).files("%FILES%\nsrv/\n").build();
+        let pkg = LocalPackage::new(
+            EntryName::parse("foo-1.0.0-1").unwrap(),
+            db.path().join("foo-1.0.0-1"),
+            Limits { files_bytes: 4, ..Limits::default() },
+            UnknownSectionPolicy::default(),
+        );
+
+        assert!(pkg.files_may_list(|_| false));
+        assert!(pkg.file_list().is_err());
     }
 
     #[test]

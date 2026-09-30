@@ -24,10 +24,9 @@
 //! answer each on its own thread. A single-connection-at-a-time server cannot observe
 //! concurrency at all, and it would deadlock the moment two workers dialled it.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic,
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
@@ -188,6 +187,7 @@ fn work_is_spread_so_no_mirror_sees_more_than_the_per_host_cap() {
             file_name,
             repo_name: "core",
             servers: &servers,
+            cache_servers: 0,
             policy: unsigned_package(),
             size: None,
         })
@@ -230,6 +230,7 @@ fn parallel_downloads_of_one_never_opens_a_second_connection() {
             file_name,
             repo_name: "core",
             servers: &servers,
+            cache_servers: 0,
             policy: unsigned_package(),
             size: None,
         })
@@ -263,6 +264,7 @@ fn packages_are_fetched_largest_first_but_reported_in_input_order() {
             file_name,
             repo_name: "core",
             servers: &servers,
+            cache_servers: 0,
             policy: unsigned_package(),
             size: Some(1024 * 1024 + index as u64),
         })
@@ -365,6 +367,7 @@ fn a_cancelled_batch_stops_and_reports_what_it_never_claimed() {
             file_name,
             repo_name: "core",
             servers: &servers,
+            cache_servers: 0,
             policy: unsigned_package(),
             size: None,
         })
@@ -415,6 +418,7 @@ fn a_batch_refuses_a_duplicate_rather_than_racing_for_one_temporary() {
             file_name: &name,
             repo_name: "core",
             servers: &servers,
+            cache_servers: 0,
             policy: unsigned_package(),
             size: None,
         })
@@ -530,6 +534,7 @@ fn progress_deltas_sum_to_the_bytes_actually_received() {
             file_name,
             repo_name: "core",
             servers: &servers,
+            cache_servers: 0,
             policy: unsigned_package(),
             size: None,
         })

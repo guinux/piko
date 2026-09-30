@@ -384,6 +384,7 @@ pub fn fetch_url(
                 file_name: &file_name,
                 repo_name: url,
                 servers: std::slice::from_ref(&server.to_owned()),
+                cache_servers: 0,
                 policy,
                 size: None,
             },
@@ -394,9 +395,8 @@ pub fn fetch_url(
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"
 )]

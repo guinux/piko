@@ -4,11 +4,7 @@
 //! (`db.c:447`). `--repo` names one repository on purpose, as `pacman -Sl <repo>` does, so it
 //! still reads it.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

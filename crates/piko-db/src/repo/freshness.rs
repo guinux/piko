@@ -225,12 +225,7 @@ pub fn newest_member_time(path: impl AsRef<Path>, limits: &Limits) -> Result<Opt
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::arithmetic_side_effects,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
     use crate::fixture::{MINIMAL_REPO_DESC_V2, RepoFixture, gzip};

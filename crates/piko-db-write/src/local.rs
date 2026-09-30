@@ -516,10 +516,11 @@ pub(crate) fn set_file_mode(file: &File, path: &Path) -> Result<()> {
 fn set_dir_mode(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
+        use rustix::fs::OFlags;
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
         let directory = File::options()
             .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW).bits().cast_signed())
             .open(path)
             .map_err(|source| Error::io(path, IoAction::Open, source))?;
         directory
@@ -702,8 +703,9 @@ pub(crate) fn create_temp(temp: &Path) -> Result<File> {
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
+        use rustix::fs::OFlags;
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(FILE_MODE).custom_flags(libc::O_NOFOLLOW);
+        options.mode(FILE_MODE).custom_flags(OFlags::NOFOLLOW.bits().cast_signed());
     }
 
     match options.open(temp) {
@@ -736,11 +738,7 @@ pub(crate) fn sync_directory(directory: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
     use piko_db::LocalDatabase;

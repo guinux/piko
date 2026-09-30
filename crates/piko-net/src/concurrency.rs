@@ -93,9 +93,8 @@ impl Default for Concurrency {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::indexing_slicing,
     reason = "a test that cannot fail loudly is not a test"
 )]

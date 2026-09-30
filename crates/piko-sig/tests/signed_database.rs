@@ -23,12 +23,7 @@
 //! `PATH` to create the key, and it skips rather than fails when `gpg` is absent, the same way
 //! every other environment-dependent test here does.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{
     path::{Path, PathBuf},
@@ -64,8 +59,19 @@ impl Signer {
         Some((signer, created))
     }
 
+    /// As [`Signer::new`], with a key of `algorithm`, spelled as `--quick-generate-key` takes it.
+    fn with_algorithm(algorithm: &str) -> Option<Self> {
+        Self::generate_with(algorithm, &[], "never")
+    }
+
     /// Creates a keyring with one signing key expiring after `expiry`, with `extra` gpg options.
     fn generate(extra: &[&str], expiry: &str) -> Option<Self> {
+        // ed25519 so key creation does not wait on entropy.
+        Self::generate_with("ed25519", extra, expiry)
+    }
+
+    /// As [`Signer::generate`], with a key of `algorithm`.
+    fn generate_with(algorithm: &str, extra: &[&str], expiry: &str) -> Option<Self> {
         let home = tempfile::tempdir().ok()?;
         // 0700: gpg refuses to use a world-readable home, and says so only in a warning.
         std::fs::set_permissions(home.path(), std::os::unix::fs::PermissionsExt::from_mode(0o700))
@@ -77,10 +83,9 @@ impl Signer {
             .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
             .args(extra)
             .args([
-                // ed25519 so key creation does not wait on entropy.
                 "--quick-generate-key",
                 "piko test signer <test@example.invalid>",
-                "ed25519",
+                algorithm,
                 "sign",
                 expiry,
             ])
@@ -217,6 +222,35 @@ fn a_signature_over_a_weak_digest_is_refused() {
     );
 
     assert!(signer.sign_with(&db, &["--digest-algo", "SHA256"]), "signing failed");
+    assert_eq!(keyring.check(&db, required()).unwrap(), Verdict::Accepted { verified: true });
+}
+
+/// A good, ultimately trusted signature from a DSA key or a 1024-bit RSA key is refused and
+/// named, although GnuPG reports it good. A 2048-bit RSA key passes.
+#[test]
+fn a_signature_from_a_weak_key_is_refused() {
+    for (algorithm, name, bits) in [("rsa1024", "RSA", 1024), ("dsa2048", "DSA", 2048)] {
+        let Some(signer) = Signer::with_algorithm(algorithm) else { return };
+        let work = tempfile::tempdir().unwrap();
+        let db = database(work.path(), b"%FILES%\nnot really a database\n");
+        assert!(signer.sign(&db), "signing failed");
+
+        let verdict = Keyring::open(signer.path()).unwrap().check(&db, required()).unwrap();
+        assert!(
+            matches!(
+                &verdict,
+                Verdict::Rejected(Rejection::WeakKey { algorithm, bits: found, .. })
+                    if *algorithm == name && *found == bits
+            ),
+            "{algorithm}: got {verdict:?}"
+        );
+    }
+
+    let Some(signer) = Signer::with_algorithm("rsa2048") else { return };
+    let work = tempfile::tempdir().unwrap();
+    let db = database(work.path(), b"%FILES%\nnot really a database\n");
+    assert!(signer.sign(&db), "signing failed");
+    let keyring = Keyring::open(signer.path()).unwrap();
     assert_eq!(keyring.check(&db, required()).unwrap(), Verdict::Accepted { verified: true });
 }
 

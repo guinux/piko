@@ -2,7 +2,7 @@
 //!
 //! This module composes the other modules. It adds no rules of its own:
 //!
-//! 1. [`crate::extract::archive::walk`] reads the members.
+//! 1. [`crate::extract::archive::walk_decoded_ahead`] reads the members.
 //! 2. [`crate::extract::decision::decide`] decides what to do with each member.
 //! 3. [`fn@crate::extract::apply`] applies the decision, through [`crate::rootfs`].
 //! 4. [`crate::extract::backup`] resolves the `.pacnew` of any backup file.
@@ -203,7 +203,7 @@ pub fn install(
     // The two differ only under `NoUpgrade`, where what the package shipped is the `.pacnew`.
     let mut pending_hashes: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-    archive::walk(package, limits, |member, contents| {
+    archive::walk_decoded_ahead(package, limits, |member, contents| {
         if member.kind == MemberKind::Metadata {
             return capture_metadata(package, member, contents, &mut result);
         }
@@ -414,11 +414,9 @@ fn create_parents(root: &RootDir, path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 mod tests {

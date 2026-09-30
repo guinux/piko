@@ -51,7 +51,7 @@ pub fn verify(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
 

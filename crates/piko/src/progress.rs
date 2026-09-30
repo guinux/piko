@@ -44,7 +44,7 @@ enum Kind {
 }
 
 /// Fixed, hand-written templates, known good at compile time.
-#[allow(clippy::expect_used, reason = "a constant template string cannot fail to parse")]
+#[expect(clippy::expect_used, reason = "a constant template string cannot fail to parse")]
 fn style(kind: Kind, finished: bool) -> ProgressStyle {
     let template = match (kind, finished) {
         (Kind::Spinner, false) => "{spinner:.cyan} {msg}".to_owned(),
@@ -272,10 +272,21 @@ pub(crate) fn download_sink(
                     head.set_message(in_flight(&live));
                 }
             }
+            E::HostSkipped { host } => report_skipped_host(&host),
             // `Event` is `#[non_exhaustive]`.
             _ => {}
         }
     }
+}
+
+/// Says that a download stopped asking `host`, above the live rows, as libalpm warns
+/// (`dload.c:201`).
+fn report_skipped_host(host: &str) {
+    suspend_active(|| {
+        crate::output::warn(format_args!(
+            "too many errors from {host}, skipping it for the rest of this run"
+        ));
+    });
 }
 
 /// Everything `install` needs to hand a `DownloadingSource` its progress sink.
@@ -334,6 +345,7 @@ pub(crate) fn database_download_sink(row: Row) -> impl Fn(piko_net::Event) + Sen
                 row.set_position(0);
             }
             E::Progress { kind, bytes } if kind != Kind::Signature => row.inc(bytes),
+            E::HostSkipped { host } => report_skipped_host(&host),
             // `Event` is `#[non_exhaustive]`. A signature download gets no visible progress:
             // it is a few hundred bytes, over before a human perceives it.
             _ => {}
@@ -403,11 +415,11 @@ fn describe_step(step: &piko_txn::Step, replaces: Option<&piko_db::EntryName>) -
 /// Drives the "Downloading packages" → "Verifying signatures" → "Verifying packages" →
 /// "Checking file conflicts" rows through one `Transaction::verify_with_progress` call.
 ///
-/// The four rows are mutually exclusive in time. `verify_with_progress`'s own two loops run
-/// one after the other, never interleaved.
-/// `SignatureChecked`and `PackageVerified` both fire from the first loop, one right after the other per package.
-/// So this only ever has at most one row open at once: each event finishes whatever came
-/// before it starts.
+/// The four rows are mutually exclusive in time. `verify_with_progress` checks every signature
+/// before it reads any archive: `SignatureChecked` fires for each package during the first
+/// stage, and `PackageVerified` for each package during the second. Each stage runs on a few
+/// threads, so an event counts the packages finished so far, in no set order. So this only ever
+/// has at most one row open at once: each event finishes whatever came before it starts.
 ///
 /// As [`CommitDriver`], a finished phase is cleared and reprinted as a plain checkmark line
 /// rather than left as a permanent `indicatif` row. See that struct's doc comment for why.
@@ -744,12 +756,7 @@ fn print_step_result(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::expect_used,
-    reason = "a test that cannot unwrap or assert is not a test"
-)]
+#[expect(clippy::unwrap_used, reason = "a test that cannot unwrap or assert is not a test")]
 mod tests {
     use piko_txn::{
         exec::{Outcome, Status},

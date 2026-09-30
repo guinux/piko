@@ -7,12 +7,7 @@
 //! ```text
 //! PIKO_WRITE_BENCH_DIR=~/.cache cargo test --release -p piko-db-write --test write_cost -- --ignored --nocapture
 //! ```
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::arithmetic_side_effects,
-    reason = "a measurement harness"
-)]
+#![expect(clippy::unwrap_used, reason = "a measurement harness")]
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

@@ -996,9 +996,8 @@ const fn admits(usage: DbUsage, required: DbUsage) -> bool {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::indexing_slicing,
     reason = "a failing assertion in a test should abort it loudly"
 )]

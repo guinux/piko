@@ -9,12 +9,7 @@
 //!
 //! **Read-only.** These tests never write to the cache or to any real path.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::arithmetic_side_effects,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{path::PathBuf, str::FromStr as _};
 

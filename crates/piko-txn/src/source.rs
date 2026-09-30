@@ -817,6 +817,9 @@ pub struct DownloadTarget {
     pub repo_name: String,
     /// `Server`/`CacheServer`, tried in order.
     pub servers: Vec<String>,
+    /// How many entries at the front of [`Self::servers`] are `CacheServer`s, whose errors do
+    /// not make piko skip their host: see [`piko_net::PackageFetch::cache_servers`].
+    pub cache_servers: usize,
     /// Whether — and how — the package's signature should be checked.
     ///
     /// This only decides whether it is worth downloading a `.sig` alongside the package. The
@@ -952,6 +955,7 @@ impl PackageSource for DownloadingSource {
                     file_name,
                     repo_name: &target.repo_name,
                     servers: &target.servers,
+                    cache_servers: target.cache_servers,
                     policy: target.policy,
                     size: Some(target.size),
                 },
@@ -995,6 +999,7 @@ impl PackageSource for DownloadingSource {
                     file_name,
                     repo_name: &target.repo_name,
                     servers: &target.servers,
+                    cache_servers: target.cache_servers,
                     policy: target.policy,
                     size: Some(target.size),
                 })
@@ -1038,7 +1043,7 @@ impl PackageSource for DownloadingSource {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"
@@ -1757,6 +1762,7 @@ mod tests {
             size: 1024 * 1024,
             repo_name: "core".to_owned(),
             servers: vec![url],
+            cache_servers: 0,
             policy: piko_sig::Policy::for_package(piko_db::config::SigLevel::default()),
         }
     }

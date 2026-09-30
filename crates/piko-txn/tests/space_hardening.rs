@@ -9,11 +9,10 @@
 //! refuses a transaction which would have fitted is worse. It stops a correct install, and
 //! teaches the user to turn `CheckSpace` off.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 

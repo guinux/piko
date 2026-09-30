@@ -43,6 +43,10 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 unimplemented = "deny"
+# An exception to a lint is `#[expect(..., reason = "...")]`, never `#[allow]`: an expectation
+# that no longer suppresses anything is reported, so a stale exception cannot outlive its cause.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 
 [workspace.dependencies]
 alpm-types = "0.11"
@@ -62,9 +66,8 @@ alpm-repo-db = "0.1"
 alpm-pkginfo = "0.6"
 flate2 = "1"
 glob = "0.3"
-libc = "0.2"
-# `openat`-based path resolution for extraction. `unsafe_code = "forbid"` rules out calling
-# `libc::openat` directly.
+# `openat`-based path resolution for extraction, and the open flags (`O_NOFOLLOW`, `O_NONBLOCK`)
+# every audited open passes. `unsafe_code = "forbid"` rules out calling `libc::openat` directly.
 # `process` is for `chroot` and `umask`. See `piko_txn::exec`.
 rustix = { version = "1.1", default-features = false, features = ["fs", "process"] }
 # The download sandbox's two kernel restrictions. See `piko_net::sandbox`.

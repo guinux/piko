@@ -172,11 +172,7 @@ fn strings<T: ToString>(values: &[T]) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use std::{path::PathBuf, str::FromStr as _};
 

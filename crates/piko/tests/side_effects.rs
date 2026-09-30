@@ -16,7 +16,7 @@
 //!
 //! Everything writes into a `tempfile::TempDir`. Nothing here touches the real system.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -155,7 +155,7 @@ fn package_tar_with_backups(
 }
 
 /// [`package_tar`], with the ownership every member names spelled out.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "each argument is a distinct part of the archive this builds"
 )]
@@ -207,7 +207,7 @@ fn write_package_with_relations(
 }
 
 /// [`package_tar_owned`], with `relations` appended to the `.PKGINFO` as written.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "each argument is a distinct part of the archive this builds"
 )]
@@ -707,7 +707,7 @@ pre_remove() {
 /// check a scriptlet's side effects.
 ///
 /// The chroot path itself is exercised by `chrooted_scriptlets_and_hooks_really_run`, which
-/// needs an unprivileged user namespace and is `#[ignore]`d.
+/// needs unprivileged user and mount namespaces and is `#[ignore]`d.
 #[test]
 fn a_scriptlet_that_cannot_enter_the_root_fails_closed() {
     let sandbox = Sandbox::new();
@@ -2031,15 +2031,16 @@ fn root_slash_skips_the_chroot_but_not_the_chdir() {
 
 /// The whole sequence, with a working chroot.
 ///
-/// `#[ignore]`d because it needs `unshare --user --map-root-user` (an unprivileged user
-/// namespace, which gives `CAP_SYS_CHROOT` inside it), plus a `/bin/sh` and its loader copied
-/// into the throwaway root. Run it with:
+/// `#[ignore]`d because it needs unprivileged user and mount namespaces, plus a `/bin/sh` and
+/// its loader copied into the throwaway root. Each piko command runs through [`PRIVATE_ROOT`],
+/// which gives it `CAP_SYS_CHROOT` and a `/` that its own user owns. The test sets this up
+/// itself. Run it with:
 ///
 /// ```text
-/// cargo test -p piko --test side_effects -- --ignored --nocapture
+/// cargo test -p piko --test side_effects chrooted -- --ignored --nocapture
 /// ```
 #[test]
-#[ignore = "requires unprivileged user namespaces and a copyable /bin/sh"]
+#[ignore = "requires unprivileged user and mount namespaces, and a copyable /bin/sh"]
 fn chrooted_scriptlets_and_hooks_really_run() {
     let sandbox = Sandbox::new();
     if !populate_shell(&sandbox.path("root")) {
@@ -2052,13 +2053,29 @@ fn chrooted_scriptlets_and_hooks_really_run() {
         "50-hello.hook",
         "[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = foo\n\n\
          [Action]\nDescription = Saying hello...\nWhen = PostTransaction\n\
-         Exec = /bin/sh -c 'echo HOOK_RAN'\n",
+         Exec = /bin/sh -c 'echo HOOK_RAN; echo \"HOOK_PATH=$PATH\"; \
+         echo \"HOOK_LEAK=${PIKO_TEST_LEAK:-unset}\"'\n",
     );
 
+    let probe = Command::new("unshare")
+        .args(["--user", "--map-root-user", "--mount", "true"])
+        .stdin(Stdio::null())
+        .output();
+    if !probe.is_ok_and(|probe| probe.status.success()) {
+        eprintln!("skipping: unprivileged user and mount namespaces are unavailable here");
+        return;
+    }
+    let mount_point = tempfile::tempdir().unwrap();
     let unshared = |args: &[&std::ffi::OsStr]| {
         Command::new("unshare")
-            .args(["--user", "--map-root-user", PIKO])
+            .args(["--user", "--map-root-user", "--mount", "--", "/bin/sh", "-c", PRIVATE_ROOT])
+            .arg("private-root")
+            .arg(mount_point.path())
+            .arg(sandbox.path(""))
+            .arg(PIKO)
             .args(args)
+            // A variable of whoever started piko. The hook must not see it.
+            .env("PIKO_TEST_LEAK", "leaked")
             .stdin(Stdio::null())
             .output()
             .unwrap()
@@ -2087,10 +2104,6 @@ fn chrooted_scriptlets_and_hooks_really_run() {
     sandbox.write_repo(&[("foo", "1.0.0-1", &[])]);
     let output = run(with("install", &["--noconfirm", "foo"]));
     let seen = text(&output);
-    if seen.contains("could not enter the root") {
-        eprintln!("skipping: unprivileged user namespaces are unavailable here");
-        return;
-    }
     assert!(output.status.success(), "{seen}");
     assert!(
         seen.contains("Running post install script"),
@@ -2098,6 +2111,11 @@ fn chrooted_scriptlets_and_hooks_really_run() {
     );
     assert!(seen.contains("POST_INSTALL 1.0.0-1"), "post_install did not run:\n{seen}");
     assert!(seen.contains("HOOK_RAN"), "the hook did not run:\n{seen}");
+    assert!(
+        seen.contains("HOOK_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"),
+        "the hook did not get the fixed PATH:\n{seen}"
+    );
+    assert!(seen.contains("HOOK_LEAK=unset"), "the hook inherited piko's environment:\n{seen}");
     assert!(seen.contains("Saying hello..."), "the description was not shown:\n{seen}");
     assert!(
         !seen.contains("50-hello.hook"),
@@ -2140,6 +2158,46 @@ fn chrooted_scriptlets_and_hooks_really_run() {
     );
     assert!(seen.contains("PRE_REMOVE 2.0.0-1"), "pre_remove did not run:\n{seen}");
 }
+
+/// A shell script that runs piko with a `/` its own user owns.
+///
+/// Its arguments are an empty mount point, the sandbox directory, the piko binary, and then
+/// piko's arguments. Start it as uid 0 of new user and mount namespaces.
+///
+/// `unshare --user --map-root-user` alone is not sufficient. The outer root has no mapping in
+/// the new user namespace, so the host's `/` shows as owned by the overflow uid 65534. piko tests
+/// every directory from `/` on the way to the configuration file, the hook directory and the
+/// cache, and refuses all three because another user owns `/`.
+///
+/// So the script mounts a tmpfs, which the namespace's uid 0 owns. It binds into the tmpfs the
+/// host directories the binary needs to run (`/usr`, `/etc`, `/dev`, `/proc`), the sandbox at
+/// its own path, and the piko binary as read-only. Then `pivot_root` makes the tmpfs `/`, and
+/// the host's `/` is detached, so piko can reach no host path that the script did not bind.
+const PRIVATE_ROOT: &str = r#"
+set -eu
+new=$1 sandbox=$2 piko=$3
+shift 3
+mount -t tmpfs -o mode=0755 piko-test-root "$new"
+for dir in usr etc dev proc; do
+  mkdir "$new/$dir"
+  mount --rbind "/$dir" "$new/$dir"
+done
+ln -s usr/bin "$new/bin"
+ln -s usr/bin "$new/sbin"
+ln -s usr/lib "$new/lib"
+ln -s usr/lib "$new/lib64"
+mkdir -p "$new$sandbox" "$new$(dirname "$piko")"
+mount --bind "$sandbox" "$new$sandbox"
+touch "$new$piko"
+mount --bind -o ro "$piko" "$new$piko"
+cd "$new"
+mkdir old
+pivot_root . old
+cd /
+umount -l /old
+rmdir /old
+exec "$piko" "$@"
+"#;
 
 /// Copies `/bin/sh` and the libraries it needs into `root`, so a chroot can exec it.
 fn populate_shell(root: &Path) -> bool {

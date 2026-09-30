@@ -17,12 +17,7 @@
 //! **Read-only.** It reads the sync databases, the package cache and pacman's keyring, and writes
 //! nothing.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::arithmetic_side_effects,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::path::Path;
 

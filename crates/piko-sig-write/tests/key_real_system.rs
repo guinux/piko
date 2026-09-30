@@ -5,9 +5,8 @@
 //! a real environment dependency, a functioning `gpg-agent`. Every `cargo test` run should not
 //! pay for that. Run it explicitly with `cargo test --workspace -- --ignored`.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
-    clippy::panic,
     clippy::indexing_slicing,
     reason = "a failing assertion in a test should abort it loudly"
 )]

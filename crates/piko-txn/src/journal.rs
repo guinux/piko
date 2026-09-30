@@ -391,7 +391,9 @@ pub fn read(dbpath: &Path) -> Result<Option<Record>> {
         Err(piko_db::Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
             return Ok(None);
         }
-        Err(piko_db::Error::Io { source, .. }) if source.raw_os_error() == Some(libc::ELOOP) => {
+        Err(piko_db::Error::Io { source, .. })
+            if source.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) =>
+        {
             return unreadable(Unreadable::NotARegularFile);
         }
         Err(piko_db::Error::NotARegularFile { .. }) => {
@@ -489,8 +491,9 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<std::fs::File> {
     options.append(true).create_new(true);
     #[cfg(unix)]
     {
+        use rustix::fs::OFlags;
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o644).custom_flags(libc::O_NOFOLLOW);
+        options.mode(0o644).custom_flags(OFlags::NOFOLLOW.bits().cast_signed());
     }
 
     let mut file = match options.open(&temp) {
@@ -550,7 +553,7 @@ pub fn refuse_if_present(dbpath: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"

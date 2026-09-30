@@ -22,10 +22,9 @@
 //! under a different package's name. The conflict must be reported. It must name the true
 //! owner, which `pacman -Qo` independently confirms.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
     clippy::panic,
-    clippy::arithmetic_side_effects,
     reason = "a failing assertion in a test should abort it loudly"
 )]
 

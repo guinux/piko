@@ -15,9 +15,8 @@
 //! months. This is the same shape of oracle file-conflict detection uses. It is also the only
 //! oracle available, since there is no `pacman --print-hooks`.
 
-#![allow(
+#![expect(
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"
 )]

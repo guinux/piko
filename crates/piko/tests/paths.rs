@@ -4,7 +4,7 @@
 //! A path that does not exist is refused before any command runs, so these tests need no
 //! database, no keyring and no network.
 
-#![allow(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::process::{Command, Output, Stdio};
 

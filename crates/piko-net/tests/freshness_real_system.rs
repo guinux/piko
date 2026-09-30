@@ -10,12 +10,7 @@
 //! The Archive serves every past day of every repository under a dated URL. So it is a real
 //! server that is certain to be behind, which is the one thing a hermetic test has to fake.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{path::Path, process::Command};
 

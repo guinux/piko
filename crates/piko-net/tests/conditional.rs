@@ -19,12 +19,7 @@
 //! Both halves are pinned here: that a 304 leaves the database alone, and that a 200 with an
 //! empty body is refused rather than installed.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#![expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 
 use std::{
     io::{BufRead, BufReader, Write},

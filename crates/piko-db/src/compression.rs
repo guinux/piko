@@ -183,7 +183,61 @@ pub const fn from_extension(
 /// The decompressed stream of one archive file.
 ///
 /// It bounds nothing but the zstd window. The caller wraps it in its own counting reader.
-pub struct Decoder(Inner);
+///
+/// # Decoded ahead, on a thread of its own
+///
+/// [`Decoder::ahead`] decodes a compressed stream on a second thread, while the caller works on
+/// what came before: extraction writes files, and a repository walk parses entries. The two
+/// overlap. The commit of an upgrade of 100 real packages (734 MB compressed) took 10.0 s
+/// instead of 11.8 s this way, and the open of `extra.db` took 185 ms instead of 248 ms.
+///
+/// [`Decoder::new`] reads on the caller's thread. It is for a reader that does little with the
+/// bytes, or stops early: a thread gains it nothing, and costs a thread and a copy. The archive
+/// reads at `verify` are that case. They run four at a time already, and with a thread each they
+/// took about 0.4 s longer for 100 packages. A walk that stops at `.PKGINFO` would also decode
+/// several chunks that nobody reads.
+///
+/// The thread stays at most [`AHEAD_CHUNKS`] chunks of [`CHUNK_BYTES`] ahead of the reader,
+/// plus the chunk it fills. So the memory it holds is fixed. It can also decode that much past
+/// the bound of the caller's counting reader before the caller refuses the stream. That excess
+/// is a constant, whatever the archive declares. The thread stops at its next chunk when the
+/// reader is dropped, and at the end of the stream or at its first error. It sends the bytes
+/// decoded before an error first, so the reader gets what a direct read gets, in the same order.
+///
+/// An uncompressed tar is always read directly, since there is nothing to decode. A compressed
+/// one is read directly too when no thread can be started.
+pub struct Decoder(Source);
+
+/// How many decoded chunks the thread keeps ready ahead of the reader.
+pub const AHEAD_CHUNKS: usize = 4;
+
+/// The size of one decoded chunk.
+pub const CHUNK_BYTES: usize = 1 << 20;
+
+/// Where [`Decoder`]'s bytes come from.
+enum Source {
+    /// Read on the caller's thread.
+    Direct(Inner),
+    /// Decoded ahead on another thread.
+    Ahead(Ahead),
+}
+
+/// The reading end of a decoding thread.
+struct Ahead {
+    format: Format,
+    chunks: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    current: Vec<u8>,
+    position: usize,
+    state: AheadState,
+}
+
+/// Whether an [`Ahead`] stream can still yield bytes.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AheadState {
+    Open,
+    Ended,
+    Failed,
+}
 
 /// The decoder for each [`Format`].
 ///
@@ -195,44 +249,185 @@ enum Inner {
     Uncompressed(BufReader<File>),
 }
 
+impl Inner {
+    fn new(file: File, format: Format) -> std::io::Result<Self> {
+        Ok(match format {
+            Format::Gzip => Self::Gzip(flate2::bufread::GzDecoder::new(BufReader::new(file))),
+            Format::Zstd => {
+                let mut decoder = zstd::stream::read::Decoder::new(file)?;
+                decoder.window_log_max(ZSTD_WINDOW_LOG_MAX)?;
+                Self::Zstd(decoder)
+            }
+            Format::Uncompressed => Self::Uncompressed(BufReader::new(file)),
+        })
+    }
+
+    const fn format(&self) -> Format {
+        match self {
+            Self::Gzip(_) => Format::Gzip,
+            Self::Zstd(_) => Format::Zstd,
+            Self::Uncompressed(_) => Format::Uncompressed,
+        }
+    }
+}
+
+impl Read for Inner {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Gzip(inner) => inner.read(buf),
+            Self::Zstd(inner) => inner.read(buf),
+            Self::Uncompressed(inner) => inner.read(buf),
+        }
+    }
+}
+
 impl Decoder {
-    /// Decodes `file`, which [`sniff_file`] identified as `format`.
+    /// Decodes `file`, which [`sniff_file`] identified as `format`, on the caller's thread.
     ///
     /// # Errors
     ///
     /// Only zstd's decoder can fail to be created, when its context cannot be allocated or
     /// the window bound cannot be set.
     pub fn new(file: File, format: Format) -> std::io::Result<Self> {
-        Ok(Self(match format {
-            Format::Gzip => Inner::Gzip(flate2::bufread::GzDecoder::new(BufReader::new(file))),
-            Format::Zstd => {
-                let mut decoder = zstd::stream::read::Decoder::new(file)?;
-                decoder.window_log_max(ZSTD_WINDOW_LOG_MAX)?;
-                Inner::Zstd(decoder)
-            }
-            Format::Uncompressed => Inner::Uncompressed(BufReader::new(file)),
+        Inner::new(file, format).map(|inner| Self(Source::Direct(inner)))
+    }
+
+    /// Decodes `file`, which [`sniff_file`] identified as `format`, on a thread of its own.
+    ///
+    /// See the type's documentation for when this pays, and what it bounds.
+    ///
+    /// # Errors
+    ///
+    /// As [`Decoder::new`].
+    pub fn ahead(file: File, format: Format) -> std::io::Result<Self> {
+        let inner = Inner::new(file, format)?;
+        Ok(Self(match inner {
+            Inner::Uncompressed(_) => Source::Direct(inner),
+            Inner::Gzip(_) | Inner::Zstd(_) => Ahead::start(inner),
         }))
+    }
+}
+
+impl Ahead {
+    /// Starts a thread that decodes `inner`, or reads it directly when no thread starts.
+    fn start(inner: Inner) -> Source {
+        let format = inner.format();
+        let (sender, chunks) = std::sync::mpsc::sync_channel(AHEAD_CHUNKS);
+        // The decoder goes to the thread only once the thread runs. So a spawn that fails
+        // leaves it here, to be read directly.
+        let (handover, received) = std::sync::mpsc::channel::<Inner>();
+        let started = std::thread::Builder::new().name("piko-decode".to_owned()).spawn(move || {
+            if let Ok(inner) = received.recv() {
+                Self::produce(inner, &sender);
+            }
+        });
+        if started.is_err() {
+            return Source::Direct(inner);
+        }
+        match handover.send(inner) {
+            Ok(()) => Source::Ahead(Self {
+                format,
+                chunks,
+                current: Vec::new(),
+                position: 0,
+                state: AheadState::Open,
+            }),
+            Err(returned) => Source::Direct(returned.0),
+        }
+    }
+
+    /// Decodes `inner` into chunks until the stream ends, fails, or the reader is gone.
+    ///
+    /// An empty chunk marks the end of the stream.
+    fn produce(mut inner: Inner, sender: &std::sync::mpsc::SyncSender<std::io::Result<Vec<u8>>>) {
+        loop {
+            let mut chunk = vec![0_u8; CHUNK_BYTES];
+            let mut filled = 0_usize;
+            let failure = loop {
+                let Some(rest) = chunk.get_mut(filled..).filter(|rest| !rest.is_empty()) else {
+                    break None;
+                };
+                match inner.read(rest) {
+                    Ok(0) => break None,
+                    Ok(count) => filled = filled.saturating_add(count),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => break Some(error),
+                }
+            };
+            chunk.truncate(filled);
+            let ended = chunk.is_empty();
+            if (!ended || failure.is_none()) && sender.send(Ok(chunk)).is_err() {
+                return;
+            }
+            if let Some(error) = failure {
+                let _ = sender.send(Err(error));
+                return;
+            }
+            if ended {
+                return;
+            }
+        }
+    }
+}
+
+impl Read for Ahead {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let available = self.current.get(self.position..).unwrap_or_default();
+            if !available.is_empty() {
+                let count = available.len().min(buf.len());
+                if let (Some(to), Some(from)) = (buf.get_mut(..count), available.get(..count)) {
+                    to.copy_from_slice(from);
+                }
+                self.position = self.position.saturating_add(count);
+                return Ok(count);
+            }
+            match self.state {
+                AheadState::Open => {}
+                AheadState::Ended => return Ok(0),
+                AheadState::Failed => {
+                    return Err(std::io::Error::other("the archive stream already failed"));
+                }
+            }
+            match self.chunks.recv() {
+                Ok(Ok(chunk)) if chunk.is_empty() => self.state = AheadState::Ended,
+                Ok(Ok(chunk)) => {
+                    self.current = chunk;
+                    self.position = 0;
+                }
+                Ok(Err(error)) => {
+                    self.state = AheadState::Failed;
+                    return Err(error);
+                }
+                // The thread stopped without an end or an error: it panicked.
+                Err(_) => {
+                    self.state = AheadState::Failed;
+                    return Err(std::io::Error::other("the decoding thread stopped"));
+                }
+            }
+        }
     }
 }
 
 impl Read for Decoder {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match &mut self.0 {
-            Inner::Gzip(inner) => inner.read(buf),
-            Inner::Zstd(inner) => inner.read(buf),
-            Inner::Uncompressed(inner) => inner.read(buf),
+            Source::Direct(inner) => inner.read(buf),
+            Source::Ahead(ahead) => ahead.read(buf),
         }
     }
 }
 
 impl fmt::Debug for Decoder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let format = match self.0 {
-            Inner::Gzip(_) => Format::Gzip,
-            Inner::Zstd(_) => Format::Zstd,
-            Inner::Uncompressed(_) => Format::Uncompressed,
+        let (format, ahead) = match &self.0 {
+            Source::Direct(inner) => (inner.format(), false),
+            Source::Ahead(ahead) => (ahead.format, true),
         };
-        f.debug_tuple("Decoder").field(&format).finish()
+        f.debug_struct("Decoder").field("format", &format).field("ahead", &ahead).finish()
     }
 }
 
@@ -329,7 +524,7 @@ impl<R: Read> Read for BoundedReader<R> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, reason = "test code; a panic is the failure report")]
+#[expect(clippy::unwrap_used, reason = "test code; a panic is the failure report")]
 mod tests {
     use super::*;
 
@@ -366,6 +561,96 @@ mod tests {
         assert_eq!(from_extension(Some(Ext::Zstd)), Ok(Format::Zstd));
         assert_eq!(from_extension(Some(Ext::Xz)), Err(Unsupported::Xz));
         assert_eq!(from_extension(Some(Ext::Bzip2)), Err(Unsupported::Bzip2));
+    }
+
+    /// Bytes that do not repeat within a chunk, so both formats have work to do.
+    fn payload(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_f491_u32;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes().first().copied().unwrap_or_default()
+            })
+            .collect()
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut encoder, bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn zstd(bytes: &[u8]) -> Vec<u8> {
+        zstd::stream::encode_all(bytes, 1).unwrap()
+    }
+
+    /// A decoder over `compressed`, written to a file in `dir`.
+    fn decoder(dir: &tempfile::TempDir, compressed: &[u8]) -> Decoder {
+        let path = dir.path().join("archive");
+        std::fs::write(&path, compressed).unwrap();
+        let mut file = File::open(&path).unwrap();
+        let format = sniff_file(&mut file).unwrap().unwrap();
+        Decoder::ahead(file, format).unwrap()
+    }
+
+    /// Reads `reader` in small, uneven pieces until the end or the first error.
+    fn drain(reader: &mut impl Read) -> (Vec<u8>, Option<std::io::Error>) {
+        let mut out = Vec::new();
+        let mut buf = [0_u8; 7919];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => return (out, None),
+                Ok(count) => out.extend_from_slice(buf.get(..count).unwrap()),
+                Err(error) => return (out, Some(error)),
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_decoded_ahead_is_the_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = payload(CHUNK_BYTES.saturating_mul(AHEAD_CHUNKS.saturating_add(2)) + 12_345);
+        for compressed in [gzip(&bytes), zstd(&bytes)] {
+            let mut decoder = decoder(&dir, &compressed);
+            assert!(format!("{decoder:?}").contains("ahead: true"), "{decoder:?}");
+            let (out, error) = drain(&mut decoder);
+            assert!(error.is_none(), "{error:?}");
+            assert!(out == bytes, "the decoded bytes differ");
+            // The end stays the end.
+            assert_eq!(decoder.read(&mut [0_u8; 16]).unwrap(), 0);
+        }
+    }
+
+    /// A stream cut short yields the bytes a direct read yields, then an error.
+    #[test]
+    fn a_truncated_stream_fails_after_the_same_bytes_as_a_direct_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = payload(CHUNK_BYTES.saturating_mul(3));
+        let compressed = gzip(&bytes);
+        let cut = compressed.get(..compressed.len() / 2).unwrap();
+
+        let (ahead, ahead_error) = drain(&mut decoder(&dir, cut));
+        let mut direct = flate2::bufread::GzDecoder::new(cut);
+        let (expected, direct_error) = drain(&mut direct);
+
+        assert!(direct_error.is_some() && ahead_error.is_some());
+        assert!(!ahead.is_empty());
+        assert!(ahead == expected, "{} bytes, not {}", ahead.len(), expected.len());
+        assert!(decoder(&dir, cut).read(&mut []).is_ok());
+    }
+
+    /// A reader that stops early does not wait for the rest of the stream.
+    #[test]
+    fn a_reader_dropped_half_way_returns_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = payload(CHUNK_BYTES.saturating_mul(AHEAD_CHUNKS.saturating_add(4)));
+        let mut decoder = decoder(&dir, &zstd(&bytes));
+        let mut first = [0_u8; 4096];
+        decoder.read_exact(&mut first).unwrap();
+        assert!(first == bytes.get(..4096).unwrap());
+        drop(decoder);
     }
 
     #[test]
