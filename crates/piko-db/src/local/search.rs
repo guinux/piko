@@ -30,10 +30,10 @@ pub(crate) fn search<'a, 'q>(
 }
 
 /// A package's searchable `desc` text, lowercased once.
-fn searchable_from(desc: &crate::local::desc_compat::DescView<'_>) -> Searchable {
+fn searchable_from(desc: &crate::local::desc::DescView<'_>) -> Searchable {
     Searchable {
         provides: Searchable::provide_names(desc.provides()),
-        description: desc.description().as_ref().to_lowercase(),
+        description: desc.description().to_lowercase(),
         groups: desc.groups().iter().map(|group| group.to_lowercase()).collect(),
     }
 }

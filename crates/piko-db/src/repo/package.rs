@@ -3,12 +3,9 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    str::FromStr as _,
     sync::Arc,
 };
 
-use alpm_common::MetadataFile as _;
-use alpm_repo_db::{desc::RepoDescFile, files::RepoFilesV1};
 use alpm_types::{
     CompressedSize, FullVersion, Group, InstalledSize, Name, PackageRelation, RelationOrSoname,
 };
@@ -16,29 +13,18 @@ use alpm_types::{
 use super::{
     archive::{self, ArchiveItem},
     database::{ArchiveCheck, run_check},
-    desc_compat::RepoDescView,
+    desc::{RepoDesc, RepoDescView},
     eager::EagerFields,
     files_arena::{FilesArena, PathIter},
     repo_name::RepoName,
 };
 use crate::{
-    desc_compat::{self, TakenFields},
+    desc_compat::UnknownSectionPolicy,
     entry_name::EntryName,
     error::{Error, SharedError},
     lazy::Lazy,
     limits::Limits,
 };
-
-/// A repository `desc` entry's full typed parse, plus the fields kept beside it.
-///
-/// `%URL%` and `%PACKAGER%` are taken out of the text before the upstream parse. So a value their
-/// typed conversion refuses cannot make the entry unreadable. See
-/// [`crate::desc_compat::take_fields`].
-#[derive(Debug)]
-pub(crate) struct LoadedDesc {
-    desc: RepoDescFile,
-    taken: TakenFields,
-}
 
 /// Where a package's file list comes from, and the shared, lazily-built store for it.
 ///
@@ -117,7 +103,7 @@ impl FilesSource {
                 // One malformed `files` entry must not make every other package's file list
                 // unreachable. It surfaces later as `Error::FilesMissingForPackage` for that
                 // one package specifically.
-                if let Ok(parsed) = RepoFilesV1::from_str(&text) {
+                if let Ok(parsed) = crate::meta::files::parse_repo(&text) {
                     // A same-archive duplicate keeps the first entry. There is nowhere to
                     // report it from here, for the same reason `on_skip` below discards its
                     // diagnostics. `RepoDatabase::diagnostics()` was finalised at open time.
@@ -125,7 +111,7 @@ impl FilesSource {
                         archive_path,
                         entry.name().clone(),
                         entry.version().clone(),
-                        parsed.as_ref(),
+                        &parsed,
                         self.limits.repo_inflated_bytes,
                         self.limits.repo_max_paths,
                     )?;
@@ -193,12 +179,12 @@ impl FilesSource {
             archive::walk_matching(archive_path, &self.limits, &wanted, |entry, text| {
                 // As in `load`, a member that fails to parse here is dropped, not fatal. It
                 // surfaces as `Error::FilesMissingForPackage` for that one package.
-                if let Ok(parsed) = RepoFilesV1::from_str(&text) {
+                if let Ok(parsed) = crate::meta::files::parse_repo(&text) {
                     arena.insert(
                         archive_path,
                         entry.name().clone(),
                         entry.version().clone(),
-                        parsed.as_ref(),
+                        &parsed,
                         self.limits.repo_inflated_bytes,
                         self.limits.repo_max_paths,
                     )?;
@@ -259,14 +245,18 @@ fn collect_file_list(
 pub struct RepoPackage {
     entry: EntryName,
     eager: EagerFields,
-    /// The `desc` text, already filtered of unknown sections, retained to back [`Self::desc`].
+    /// The `desc` text, retained to back [`Self::desc`].
     raw: Box<str>,
+    /// Whether [`Self::desc`] refuses a section this build does not know.
+    policy: UnknownSectionPolicy,
     /// `%DEPENDS%`, converted on first access from the range [`EagerFields`] recorded.
     ///
     /// A third tier between the eager fields and the full `desc`. It is the only section that
     /// needed one — see `eager::Depends` for why it is worth deferring.
     depends: Lazy<Box<[RelationOrSoname]>>,
-    desc: Lazy<LoadedDesc>,
+    /// Boxed: a `Lazy` holds its value inline, empty or not, and a repository holds one
+    /// `RepoPackage` for each of its thousands of packages, most never asked for their `desc`.
+    desc: Lazy<Box<RepoDesc>>,
     files: Arc<FilesSource>,
 }
 
@@ -285,9 +275,10 @@ impl RepoPackage {
         entry: EntryName,
         eager: EagerFields,
         raw: Box<str>,
+        policy: UnknownSectionPolicy,
         files: Arc<FilesSource>,
     ) -> Self {
-        Self { entry, eager, raw, depends: Lazy::new(), desc: Lazy::new(), files }
+        Self { entry, eager, raw, policy, depends: Lazy::new(), desc: Lazy::new(), files }
     }
 
     /// The shared file-list source every package in the same database holds an `Arc` to.
@@ -393,30 +384,40 @@ impl RepoPackage {
         self.eager.installed_size
     }
 
-    /// The fully parsed `desc` entry, for every field the eager accessors above do not cover.
+    /// The whole `desc` entry, for every field the eager accessors above do not cover.
     ///
-    /// Parses the retained text on first access and caches the outcome — including a
-    /// failure. The same failure returns on every later call, rather than retrying.
+    /// Reads the retained text on first access and caches the outcome — including a
+    /// failure. The same failure returns on every later call, rather than retrying. Forces
+    /// [`Self::depends`], which the view includes.
     ///
     /// # Errors
     ///
-    /// [`Error::RepoDescUnparsable`] if the text does not parse as an
-    /// [`alpm_repo_db::desc::RepoDescFile`]. A `desc` malformed in one of the *eager* sections
-    /// never reaches here: it is dropped during the scan with
-    /// [`super::RepoDiagnostic::InvalidDesc`].
+    /// - [`Error::RepoDescUnparsable`] if a section that decides something is missing or
+    ///   invalid: `%FILENAME%`, `%NAME%`, `%VERSION%`, `%ARCH%`, `%SHA256SUM%` or `%PGPSIG%`.
+    ///   Under [`UnknownSectionPolicy::Reject`], a section this build does not know too.
+    /// - What [`Self::depends`] returns.
+    ///
+    /// A `desc` malformed in one of the *eager* sections never reaches here: it is dropped
+    /// during the scan with [`super::RepoDiagnostic::InvalidDesc`].
     pub fn desc(&self) -> std::result::Result<RepoDescView<'_>, SharedError> {
-        self.desc
-            .get_or_load(|| {
-                let (text, taken) = desc_compat::take_fields(&self.raw);
-                let desc = RepoDescFile::from_str_with_schema(&text, None).map_err(|source| {
-                    Error::RepoDescUnparsable {
-                        entry: self.entry.as_str().to_owned(),
-                        source: Box::new(source),
-                    }
-                })?;
-                Ok(LoadedDesc { desc, taken })
-            })
-            .map(|loaded| RepoDescView::new(&loaded.desc, &loaded.taken))
+        let depends = self.depends()?;
+        let desc = self.desc.get_or_load(|| {
+            let refused = |source| Error::RepoDescUnparsable {
+                entry: self.entry.as_str().to_owned(),
+                source: Box::new(source),
+            };
+            let (desc, unknown) = RepoDesc::parse(&self.raw).map_err(refused)?;
+            if self.policy == UnknownSectionPolicy::Reject
+                && let Some(section) = unknown.into_iter().next()
+            {
+                return Err(refused(crate::eager::DescFieldError::UnknownSection {
+                    keyword: section.keyword,
+                    line: section.line,
+                }));
+            }
+            Ok(Box::new(desc))
+        })?;
+        Ok(RepoDescView::new(desc, &self.eager, depends, &self.raw))
     }
 
     /// Whether the deferred `desc` parse has already run.
@@ -466,6 +467,8 @@ impl RepoPackage {
     reason = "a failing assertion in a test should abort it loudly"
 )]
 mod tests {
+    use std::str::FromStr as _;
+
     use super::*;
 
     fn entry(raw: &str) -> EntryName {
@@ -499,7 +502,7 @@ mod tests {
                 std::path::Path::new("x"),
                 Name::from_str("foo").unwrap(),
                 FullVersion::from_str("1.0.0-1").unwrap(),
-                &[std::path::PathBuf::from("usr/bin/foo")],
+                &["usr/bin/foo"],
                 1024,
                 usize::MAX,
             )
@@ -519,8 +522,15 @@ mod tests {
             MINIMAL_DESC,
             &mut crate::eager::RelationBudget::new(usize::MAX),
         )
-        .unwrap();
-        RepoPackage::new(entry(&format!("{name}-{version}")), eager, MINIMAL_DESC.into(), files)
+        .unwrap()
+        .0;
+        RepoPackage::new(
+            entry(&format!("{name}-{version}")),
+            eager,
+            MINIMAL_DESC.into(),
+            UnknownSectionPolicy::default(),
+            files,
+        )
     }
 
     #[test]
@@ -531,7 +541,7 @@ mod tests {
                 Path::new("x"),
                 Name::from_str("foo").unwrap(),
                 FullVersion::from_str("1.0.0-1").unwrap(),
-                &[PathBuf::from("usr/bin/foo")],
+                &["usr/bin/foo"],
                 1024,
                 usize::MAX,
             )
@@ -541,7 +551,7 @@ mod tests {
                 Path::new("x"),
                 Name::from_str("bar").unwrap(),
                 FullVersion::from_str("2.0.0-1").unwrap(),
-                &[PathBuf::from("usr/bin/bar")],
+                &["usr/bin/bar"],
                 1024,
                 usize::MAX,
             )
@@ -700,12 +710,18 @@ mod tests {
     fn a_malformed_depends_fails_on_access_and_is_cached() {
         let text = format!("{MINIMAL_DESC}%DEPENDS%\nbash>=\n\n");
         let files = Arc::new(FilesSource::unavailable(a_repo_name(), Limits::default()));
-        let Ok(eager) =
+        let Ok((eager, _)) =
             super::super::eager::parse(&text, &mut crate::eager::RelationBudget::new(usize::MAX))
         else {
             panic!("a malformed %DEPENDS% must not fail the open")
         };
-        let package = RepoPackage::new(entry("foo-1.0.0-1"), eager, text.into(), files);
+        let package = RepoPackage::new(
+            entry("foo-1.0.0-1"),
+            eager,
+            text.into(),
+            UnknownSectionPolicy::default(),
+            files,
+        );
 
         assert_eq!(package.compressed_size(), 1, "the eager fields still work");
 
@@ -720,15 +736,24 @@ mod tests {
     /// reports the failure identically on every access, rather than retry it.
     #[test]
     fn a_deferred_parse_failure_is_cached_not_retried() {
-        // `%PACKAGER%` is mandatory to `alpm-repo-db`, but is not one of the eager fields.
+        // `%SHA256SUM%` decides what an install checks, but is not one of the eager fields.
         // Removing it produces exactly the split this test is about.
-        let text =
-            MINIMAL_DESC.replace("%PACKAGER%\nFoobar McFooface <foobar@mcfooface.org>\n\n", "");
+        let text = MINIMAL_DESC
+            .lines()
+            .filter(|line| !line.starts_with("%SHA256SUM%") && !line.starts_with("e3b0c442"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let files = Arc::new(FilesSource::unavailable(a_repo_name(), Limits::default()));
-        let eager =
+        let (eager, _) =
             super::super::eager::parse(&text, &mut crate::eager::RelationBudget::new(usize::MAX))
                 .unwrap();
-        let package = RepoPackage::new(entry("foo-1.0.0-1"), eager, text.into(), files);
+        let package = RepoPackage::new(
+            entry("foo-1.0.0-1"),
+            eager,
+            text.into(),
+            UnknownSectionPolicy::default(),
+            files,
+        );
 
         assert_eq!(package.compressed_size(), 1, "the eager fields still work");
 

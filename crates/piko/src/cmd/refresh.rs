@@ -45,7 +45,7 @@ pub struct Options {
 ///
 /// `cancel` is already installed by the caller rather than by this function. `update` runs a
 /// refresh immediately before a transaction that installs its own handler. Sharing one
-/// registration is required, since `ctrlc::set_handler` accepts only one per process. See
+/// registration is required, since a second one would answer every signal twice. See
 /// `crate::signal`.
 pub fn refresh(
     config: &PacmanConfig,

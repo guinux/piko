@@ -5,6 +5,9 @@
 //! a `files` list. A parse error quotes those bytes too. These tests put an OSC 52 clipboard
 //! write, a title change and a carriage return in each, and run the real binary.
 //!
+//! A package file chooses its `.PKGINFO` keys the same way, and the warning that names an
+//! unknown one is tested here too.
+//!
 //! A test output here is never a terminal, so `console` writes no styling of its own. Any escape
 //! byte in the output therefore came from the database.
 
@@ -18,6 +21,9 @@ const PIKO: &str = env!("CARGO_BIN_EXE_piko");
 
 /// An OSC 52 clipboard write, then a title change, both ended by a bell.
 const PAYLOAD: &str = "\u{1b}]52;c;cHduZWQ=\u{7}\u{1b}]0;PWNED\u{7}";
+
+/// The title change of [`PAYLOAD`] alone.
+const TITLE: &str = "\u{1b}]0;PWNED\u{7}";
 
 /// The `desc` of `foo`, with `description` as its `%DESC%` and the payload in every other
 /// free-text field a reader keeps.
@@ -118,16 +124,90 @@ fn a_group_listing_escapes_the_group_name() {
     assert!(stdout.contains("grp\\u{1b}]52"), "{stdout}");
 }
 
-/// A carriage return ends the `desc` parse. The parse error quotes the line it refused, payload
-/// included, and keeps only its own line feeds.
+/// A `%PGPSIG%` that is not base64 refuses the entry. The parse error quotes the line it
+/// refused, payload and carriage return included, and keeps only its own line feeds.
 #[test]
 fn a_parse_error_escapes_the_bytes_it_quotes() {
     let dir = tempfile::tempdir().unwrap();
-    let config = setup(dir.path(), &format!("nice {PAYLOAD}\rfake"));
+    let config = setup(dir.path(), &format!("nice\n\n%PGPSIG%\n{PAYLOAD}\rfake"));
 
     let (stdout, stderr) = piko(&config, &["info", "--repo", "evil", "foo"]);
     assert_inert(&stdout);
     assert_inert(&stderr);
     assert!(stderr.contains("\\u{1b}]52"), "{stderr}");
     assert!(stderr.contains("\\r"), "{stderr}");
+}
+
+/// A shown field that does not convert is named on stderr, and the value it quotes is escaped.
+/// stdout keeps the shape `pacman -Si` prints.
+#[test]
+fn info_escapes_an_invalid_field_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = setup(dir.path(), &format!("nice\n\n%MAKEDEPENDS%\nbar{PAYLOAD}"));
+
+    let (stdout, stderr) = piko(&config, &["info", "--repo", "evil", "foo"]);
+    assert_inert(&stdout);
+    assert_inert(&stderr);
+    assert!(stderr.contains("Warning: foo: "), "{stderr}");
+    assert!(stderr.contains("MAKEDEPENDS"), "{stderr}");
+    assert!(stderr.contains("\\u{1b}]52"), "{stderr}");
+    assert!(!stdout.contains("Warning"), "{stdout}");
+}
+
+/// An unknown `.PKGINFO` key is a warning that names it, escaped. A package chose those bytes.
+///
+/// The key carries the title change alone: a key holds no `=`, and the clipboard write has one.
+#[test]
+fn plan_escapes_an_unknown_pkginfo_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = setup(dir.path(), "nice");
+    std::fs::create_dir_all(dir.path().join("local")).unwrap();
+
+    let pkginfo =
+        format!("pkgname = baz\npkgver = 1.0-1\narch = x86_64\nsize = 1\nkey{TITLE} = 1\n");
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_size(pkginfo.len() as u64);
+    header.set_cksum();
+    builder.append_data(&mut header, ".PKGINFO", pkginfo.as_bytes()).unwrap();
+    let package = dir.path().join("baz-1.0-1-x86_64.pkg.tar");
+    std::fs::write(&package, builder.into_inner().unwrap()).unwrap();
+
+    let (stdout, stderr) = piko(&config, &["plan", package.to_str().unwrap()]);
+    assert_inert(&stdout);
+    assert_inert(&stderr);
+    assert!(stderr.contains("Warning: baz: unknown key \"key\\u{1b}]0;PWNED"), "{stderr}");
+}
+
+/// An `%OPTDEPENDS%` line `piko info` reads past is named on stderr, escaped: an installed
+/// package's `desc` holds bytes its package chose.
+#[test]
+fn info_escapes_an_unread_optional_dependency() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = setup(dir.path(), "nice");
+    let local = dir.path().join("local");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("ALPM_DB_VERSION"), "9\n").unwrap();
+    for spec in [
+        piko_db::fixture::PackageSpec::new("foo", "1.0-1"),
+        piko_db::fixture::PackageSpec::new("bar", "1.0-1").optdepends([format!("b{TITLE}ad")]),
+    ] {
+        let entry = local.join(spec.entry());
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("desc"), spec.local_desc()).unwrap();
+        std::fs::write(entry.join("files"), "").unwrap();
+    }
+
+    let (stdout, stderr) = piko(&config, &["info", "foo"]);
+    assert_inert(&stdout);
+    assert_inert(&stderr);
+    assert!(
+        stderr.contains("Warning: Optional For may be incomplete: bar: "),
+        "{stdout}\n{stderr}"
+    );
+    assert!(stderr.contains("\\u{1b}]0;PWNED"), "{stderr}");
 }

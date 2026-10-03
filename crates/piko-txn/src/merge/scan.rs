@@ -392,6 +392,24 @@ mod tests {
         assert!(found.problems().is_empty(), "{:?}", found.problems());
     }
 
+    /// pacman can write one `(null)` backup entry twice. The pair beside it is found once, so
+    /// the user is asked about it once.
+    #[test]
+    fn a_repeated_null_backup_entry_yields_one_pair() {
+        let fixture = DbFixture::new();
+        fixture
+            .package("foo-1.0.0-1")
+            .with_defaults()
+            .files("%FILES%\netc/\n\n%BACKUP%\netc/foo.conf\t(null)\netc/foo.conf\t(null)\n\n")
+            .build();
+        let db = LocalDatabase::open(fixture.path()).unwrap();
+        let dir = root(&[("etc/foo.conf", b"mine"), ("etc/foo.conf.pacnew", b"theirs")]);
+
+        let found = run(&dir, &db);
+        assert_eq!(found.pending().len(), 1, "{:?}", found.pending());
+        assert!(found.problems().is_empty(), "{:?}", found.problems());
+    }
+
     #[test]
     fn a_backup_entry_with_nothing_beside_it_yields_nothing() {
         let (_fixture, db) = database(&[("foo-1.0.0-1", &["etc/foo.conf"])]);

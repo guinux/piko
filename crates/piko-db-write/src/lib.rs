@@ -62,6 +62,6 @@ mod record;
 
 pub use atomic::AtomicFile;
 pub use error::{Error, IoAction, Result};
-pub use local::{EntryWrite, LocalDbWriter};
+pub use local::{EntryWrite, LocalDbWriter, STAGING_DIR};
 pub use lock::{DbLock, LOCK_FILE};
 pub use record::{Record, RecordError, RecordKind, Section};

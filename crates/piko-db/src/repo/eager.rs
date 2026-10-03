@@ -6,7 +6,11 @@
 
 use alpm_types::{CompressedSize, Group, InstalledSize, PackageRelation, RelationOrSoname};
 
-use crate::eager::{self, DescFieldError, RelationBudget, ScanError};
+use super::desc::KNOWN_SECTIONS;
+use crate::{
+    desc_compat::UnknownSection,
+    eager::{self, DescFieldError, RelationBudget, ScanError},
+};
 
 /// The `desc` sections parsed for every package at open time.
 ///
@@ -51,9 +55,7 @@ impl EagerFields {
 
 /// Parses the eager subset out of one repository `desc` entry's text.
 ///
-/// `text` is the *filtered* text: unknown sections are already removed by
-/// [`crate::desc_compat::filter_unknown_sections`]. So an unrecognised `%KEYWORD%` here is
-/// simply one this module does not read, not one this build does not know.
+/// Returns the fields, and the sections this build does not know, which the caller reports.
 ///
 /// `budget` is the archive's, shared by every `desc` it holds.
 ///
@@ -63,26 +65,37 @@ impl EagerFields {
 ///   a relation section fails to parse. The caller drops the package and reports the
 ///   diagnostic.
 /// - [`ScanError::Budget`] if `budget` runs out. The caller fails the open.
-pub(crate) fn parse(text: &str, budget: &mut RelationBudget) -> Result<EagerFields, ScanError> {
+pub(crate) fn parse(
+    text: &str,
+    budget: &mut RelationBudget,
+) -> Result<(EagerFields, Vec<UnknownSection>), ScanError> {
     let mut compressed_size = None;
     let mut installed_size = None;
+    let mut unknown = Vec::new();
 
-    let relations = eager::scan(text, eager::Depends::Deferred, Some(budget), |keyword, line| {
-        match keyword.as_bytes() {
-            b"CSIZE" => compressed_size = Some(eager::scalar(line, "CSIZE")?),
-            b"ISIZE" => installed_size = Some(eager::scalar(line, "ISIZE")?),
-            _ => {}
+    let relations = eager::scan(text, eager::Depends::Deferred, Some(budget), |section| {
+        for line in section.values() {
+            match section.keyword.as_bytes() {
+                b"CSIZE" => compressed_size = Some(eager::scalar(line, "CSIZE")?),
+                b"ISIZE" => installed_size = Some(eager::scalar(line, "ISIZE")?),
+                _ => {}
+            }
+        }
+        if !KNOWN_SECTIONS.contains(&section.keyword) {
+            unknown
+                .push(UnknownSection { keyword: section.keyword.to_owned(), line: section.line });
         }
         Ok(())
     })?;
 
-    Ok(EagerFields {
+    let fields = EagerFields {
         relations,
         compressed_size: compressed_size
             .ok_or(DescFieldError::MissingSection { section: "CSIZE" })?,
         installed_size: installed_size
             .ok_or(DescFieldError::MissingSection { section: "ISIZE" })?,
-    })
+    };
+    Ok((fields, unknown))
 }
 
 #[cfg(test)]
@@ -96,7 +109,7 @@ mod tests {
 
     /// [`super::parse`] with a budget that cannot run out, for the tests about `desc` content.
     fn parse(text: &str) -> Result<EagerFields, ScanError> {
-        super::parse(text, &mut RelationBudget::new(usize::MAX))
+        super::parse(text, &mut RelationBudget::new(usize::MAX)).map(|(fields, _)| fields)
     }
 
     /// Every real `desc` shape this module reads, in one entry.

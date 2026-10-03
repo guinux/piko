@@ -31,6 +31,7 @@ pub struct FileTarget {
     architecture: Architecture,
     candidate: FilePackage,
     policy: Policy,
+    problems: Vec<crate::pkginfo::Problem>,
 }
 
 impl FileTarget {
@@ -67,6 +68,13 @@ impl FileTarget {
     #[must_use]
     pub const fn architecture(&self) -> &Architecture {
         &self.architecture
+    }
+
+    /// What its `.PKGINFO` holds that piko reads past, as [`crate::pkginfo::PkgInfo::problems`]
+    /// lists it. A frontend shows these before it asks to install the file.
+    #[must_use]
+    pub fn problems(&self) -> &[crate::pkginfo::Problem] {
+        &self.problems
     }
 }
 
@@ -107,6 +115,7 @@ pub fn load(path: &Path, policy: Policy, limits: &PackageLimits) -> Result<FileT
             fields.installed_size,
         ),
         policy,
+        problems: info.problems(),
     })
 }
 
@@ -125,20 +134,19 @@ struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
-    /// Both `.PKGINFO` schema versions carry every field read here. V2 adds `xdata`, which
-    /// nothing in a plan needs.
-    fn of(info: &'a alpm_pkginfo::PackageInfo) -> Self {
-        crate::pkginfo::either_version!(info, |v| Self {
-            name: &v.pkgname,
-            version: &v.pkgver,
-            architecture: &v.arch,
-            installed_size: v.size,
-            depends: &v.depend,
-            provides: &v.provides,
-            conflicts: &v.conflict,
-            replaces: &v.replaces,
-            groups: &v.group,
-        })
+    /// The fields of a `.PKGINFO` a plan reads, every one a key that decides something.
+    fn of(info: &'a crate::pkginfo::PkgInfo) -> Self {
+        Self {
+            name: &info.name,
+            version: &info.version,
+            architecture: &info.architecture,
+            installed_size: info.size,
+            depends: &info.depends,
+            provides: &info.provides,
+            conflicts: &info.conflicts,
+            replaces: &info.replaces,
+            groups: &info.groups,
+        }
     }
 }
 
@@ -157,9 +165,8 @@ fn compression_of(path: &Path) -> Option<CompressionAlgorithmFileExtension> {
 /// Refuses a file built for an architecture this machine is not configured to run.
 ///
 /// This is `check_arch` (`trans.c:69`), which libalpm runs over the whole add list before
-/// preparing a transaction. It has never had anything to do in piko: a repository serves the
-/// architecture its `Server` URL named. A file named on the command line is the case it exists
-/// for.
+/// preparing a transaction. This half covers the files named on the command line.
+/// [`crate::plan::check_architecture`] covers the repository packages a plan installs.
 ///
 /// Skipped entirely when no `Architecture` is configured, as libalpm skips it. `any` always
 /// passes. Otherwise the match is literal — `x86_64` does not admit `i686`.
@@ -168,14 +175,9 @@ fn compression_of(path: &Path) -> Option<CompressionAlgorithmFileExtension> {
 ///
 /// [`Error::WrongArchitecture`] naming every refused file.
 pub fn check_architecture(targets: &[FileTarget], configured: &[Architecture]) -> Result<()> {
-    if configured.is_empty() {
-        return Ok(());
-    }
     let refused: Vec<String> = targets
         .iter()
-        .filter(|target| {
-            target.architecture != Architecture::Any && !configured.contains(&target.architecture)
-        })
+        .filter(|target| !is_admitted(configured, &target.architecture))
         .map(|target| format!("{} ({})", target.file_name(), target.architecture))
         .collect();
     if refused.is_empty() {
@@ -185,6 +187,14 @@ pub fn check_architecture(targets: &[FileTarget], configured: &[Architecture]) -
         packages: refused,
         configured: configured.iter().map(ToString::to_string).collect(),
     })
+}
+
+/// Whether a package built for `architecture` may be installed under `configured`.
+///
+/// `check_arch`'s rule (`trans.c:69`): an empty list admits everything, `any` is always
+/// admitted, and otherwise the name must be one of `configured`.
+pub(crate) fn is_admitted(configured: &[Architecture], architecture: &Architecture) -> bool {
+    configured.is_empty() || *architecture == Architecture::Any || configured.contains(architecture)
 }
 
 /// Refuses two targets that would install the same package.
@@ -299,7 +309,9 @@ pub fn load_targets(
             }
             crate::TargetKind::Url(url) => {
                 let Urls::Fetch(fetch) = &mut urls else {
-                    return Err(Error::UrlNotLoaded { url: url.clone() });
+                    return Err(Error::UrlNotLoaded {
+                        url: piko_net::error::without_credentials(url).into_owned(),
+                    });
                 };
                 let path = fetch(url)?;
                 targets.files.push(load(&path, policies.remote, limits)?);
@@ -353,12 +365,13 @@ pub fn fetch_url(
     cancel: &piko_net::Cancel,
     progress: &(dyn Fn(piko_net::Event) + Sync),
 ) -> Result<PathBuf> {
+    let shown = || piko_net::error::without_credentials(url).into_owned();
     let (server, last) = url.rsplit_once('/').ok_or_else(|| Error::InvalidPackageUrl {
-        url: url.to_owned(),
+        url: shown(),
         reason: "it has no path component".to_owned(),
     })?;
     let file_name: PackageFileName = last.parse().map_err(|error| Error::InvalidPackageUrl {
-        url: url.to_owned(),
+        url: shown(),
         reason: format!("{last:?} is not a package file name: {error}"),
     })?;
     // Refused before the download, as `plan::check_compression` refuses a repository package.

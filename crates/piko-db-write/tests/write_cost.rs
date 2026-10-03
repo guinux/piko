@@ -67,11 +67,10 @@ fn per_file(writer: &LocalDbWriter<'_>, mtree: &[u8]) {
     }
 }
 
-/// The staged path. `replace_entry` runs, then one `EntryWrite` per entry.
+/// The staged path. One `EntryWrite` per entry, built outside `local/` and moved in whole.
 fn staged(writer: &LocalDbWriter<'_>, mtree: &[u8]) {
     for (index, entry) in entries().iter().enumerate() {
-        writer.replace_entry(None, entry).unwrap();
-        let mut write = writer.entry_write(entry);
+        let mut write = writer.entry_write(entry, None).unwrap();
         write.record(&desc(&format!("pkg{index}"), index)).unwrap();
         write.record(&files(index)).unwrap();
         write.raw("mtree", mtree, None).unwrap();
@@ -114,7 +113,7 @@ fn what_a_transactions_database_writes_cost() {
     println!("\n{PACKAGES} entries x (desc + files + mtree), under {}\n", root.display());
     println!("  per-file fsync + per-file dir fsync   {:>7.1} ms", ms(per_file_time));
     println!(
-        "  staged EntryWrite + replace_entry     {:>7.1} ms   ({:.2}x)",
+        "  staged EntryWrite, moved in whole     {:>7.1} ms   ({:.2}x)",
         ms(staged_time),
         per_file_time.as_secs_f64() / staged_time.as_secs_f64(),
     );

@@ -232,7 +232,7 @@ impl Record {
             // The line count bounds `index`, so this cannot overflow.
             let line_number = index.saturating_add(1);
 
-            if let Some(keyword) = piko_db::desc_compat::section_keyword(line) {
+            if let Some(keyword) = piko_db::meta::section::section_keyword(line) {
                 if let Some(section) = current.take() {
                     sections.push(section);
                 }
@@ -332,17 +332,38 @@ impl Record {
             return Ok(());
         }
 
-        let section = Section::new(keyword, values)?;
-        if let Some(existing) = self.sections.iter_mut().find(|s| s.keyword == keyword) {
-            *existing = section;
-            return Ok(());
-        }
+        self.put(Section::new(keyword, values)?);
+        Ok(())
+    }
 
-        match self.insertion_point(keyword) {
+    /// Sets `keyword` to a section with no value line, replacing the section in place if it
+    /// already exists.
+    ///
+    /// This is how a scalar field with an empty value is written. libalpm writes such a field
+    /// as its header, an empty value line, and the empty line that ends the section
+    /// (`be_local.c:1012`). An empty value line cannot be written: in a list, it would end the
+    /// section and lose the values after it. A section with no value line reads back the same
+    /// way. libalpm's `READ_NEXT` reads the empty line that ends it as the value, and
+    /// `piko_db`'s readers read it as an empty value.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordError::InvalidKeyword`] if `keyword` would not read back as its header.
+    pub fn set_empty(&mut self, keyword: &str) -> Result<(), RecordError> {
+        self.put(Section::new(keyword, Vec::new())?);
+        Ok(())
+    }
+
+    /// Replaces the section of the same keyword, or inserts `section` at its position.
+    fn put(&mut self, section: Section) {
+        if let Some(existing) = self.sections.iter_mut().find(|s| s.keyword == section.keyword) {
+            *existing = section;
+            return;
+        }
+        match self.insertion_point(&section.keyword) {
             Some(index) => self.sections.insert(index, section),
             None => self.sections.push(section),
         }
-        Ok(())
     }
 
     /// Removes `keyword`, reporting whether it was there.
@@ -390,7 +411,7 @@ fn check_value(keyword: &str, value: &str) -> Result<(), RecordError> {
         "an empty line ends a section"
     } else if value.contains(['\n', '\r']) {
         "a line break would read back as several values"
-    } else if piko_db::desc_compat::section_keyword(value).is_some() {
+    } else if piko_db::meta::section::section_keyword(value).is_some() {
         "it would read back as a section header"
     } else {
         return Ok(());
@@ -437,6 +458,27 @@ mod tests {
     fn preserves_a_url_without_a_trailing_slash() {
         let desc = "%URL%\nhttps://archlinux.org\n\n";
         assert_eq!(Record::parse(RecordKind::Desc, desc).unwrap().render(), desc);
+    }
+
+    /// An empty scalar is a header and the line that ends the section. It is inserted at its
+    /// canonical position, and it reads back as the same record.
+    #[test]
+    fn set_empty_writes_a_section_with_no_value() {
+        let mut record = Record::parse(RecordKind::Desc, "%NAME%\nfoo\n\n%ARCH%\nany\n\n").unwrap();
+        record.set_empty("URL").unwrap();
+        let rendered = record.render();
+
+        assert_eq!(rendered, "%NAME%\nfoo\n\n%URL%\n\n%ARCH%\nany\n\n");
+        assert_eq!(Record::parse(RecordKind::Desc, &rendered).unwrap().render(), rendered);
+        assert!(record.set_empty("A%B").is_err(), "the keyword is still checked");
+    }
+
+    /// pacman's own spelling of an empty scalar holds one more empty line. It reads as the
+    /// same section with no value.
+    #[test]
+    fn reads_pacmans_empty_scalar_as_a_section_with_no_value() {
+        let record = Record::parse(RecordKind::Desc, "%URL%\n\n\n%ARCH%\nany\n\n").unwrap();
+        assert_eq!(record.get("URL"), Some(&[][..]));
     }
 
     #[test]

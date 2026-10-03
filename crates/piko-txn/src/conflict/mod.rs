@@ -822,7 +822,7 @@ pub struct LoadedPackage {
     /// Everything file-conflict detection asks about the package.
     pub target: Target,
     /// The parsed `.PKGINFO`.
-    pub info: alpm_pkginfo::PackageInfo,
+    pub info: crate::pkginfo::PkgInfo,
     /// Its text, verbatim.
     ///
     /// [`crate::record::desc`] needs both the bytes and the interpretation, for the fields
@@ -948,7 +948,7 @@ pub fn load_package(
 pub fn load_pkginfo(
     package: &Path,
     limits: &crate::extract::PackageLimits,
-) -> Result<(alpm_pkginfo::PackageInfo, String)> {
+) -> Result<(crate::pkginfo::PkgInfo, String)> {
     let mut pkginfo: Option<String> = None;
 
     crate::extract::archive::walk_until(package, limits, |member, contents| {
@@ -1013,11 +1013,7 @@ fn read_whole(
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "a failing assertion in a test should abort it loudly"
-)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
     use piko_db::fixture::DbFixture;
@@ -1827,10 +1823,7 @@ backup = etc/foo.conf
         // And the typed parse came back from the same walk. The caller never reads the archive
         // a second time to get it.
         assert_eq!(loaded.raw, PKGINFO);
-        let alpm_pkginfo::PackageInfo::V1(v1) = &loaded.info else {
-            panic!("expected a PKGINFOv1, got {:?}", loaded.info);
-        };
-        assert_eq!(v1.pkgname.to_string(), "foo");
+        assert_eq!(loaded.info.name.to_string(), "foo");
     }
 
     /// A `.PKGINFO` the typed parse rejects fails here, where nothing has been changed yet.
@@ -1838,9 +1831,8 @@ backup = etc/foo.conf
     #[test]
     fn an_unparseable_pkginfo_fails_the_load() {
         let mut builder = tar::Builder::new(Vec::new());
-        // `packager` without an `<email>`. Everything else is valid.
-        let pkginfo = PKGINFO
-            .replace("packager = Foobar McFooface <foobar@mcfooface.org>", "packager = test");
+        // `size` that is not a number. Everything else is valid.
+        let pkginfo = PKGINFO.replace("size = 123", "size = big");
 
         let mut header = tar::Header::new_gnu();
         header.set_mode(0o644);

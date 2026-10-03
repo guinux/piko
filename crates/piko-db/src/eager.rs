@@ -1,17 +1,11 @@
-//! The `desc` sections both databases parse themselves, without `alpm-db`/`alpm-repo-db`.
+//! The `desc` sections both databases read for every package.
 //!
 //! # Why this exists
 //!
-//! `DbDescFile::from_str_with_schema` and `RepoDescFile::from_str_with_schema` are
-//! all-or-nothing. They convert every section of a `desc` into its typed form. That includes
-//! `%LICENSE%` (SPDX), `%URL%` (through the `url` crate's IDNA machinery), `%PACKAGER%`, and
-//! the checksum fields. Measured against this machine's real databases, that conversion costs
-//! **18x a raw `%KEYWORD%` section split**, and dominates opening either database.
-//!
-//! All-or-nothing is also why `%URL%` and `%PACKAGER%` are taken out of the text before either
-//! parser sees it (`desc_compat::take_fields`). A value their typed conversion refuses would
-//! otherwise cost the `desc` every other section. That reaches down to the `%FILENAME%` an
-//! install downloads.
+//! The typed conversion of a whole `desc` includes `%LICENSE%` (SPDX), `%URL%` (through the
+//! `url` crate's IDNA machinery), `%PACKAGER%`, and the checksum fields. Measured against this
+//! machine's real databases, converting every section costs **18x a raw `%KEYWORD%` section
+//! split**, and would dominate opening either database.
 //!
 //! Only a handful of sections are needed by everything. [`crate::solve::Universe`] reads the
 //! relation sections and `%GROUPS%` for every candidate in the universe, so deferring *those*
@@ -19,24 +13,22 @@
 //! behind the lazy full parse — [`crate::repo::RepoPackage::desc`] and
 //! [`crate::LocalPackage::desc`].
 //!
-//! # This is not a hand-rolled parser for a format `alpm-*` already implements
-//!
-//! Every *value* goes through `alpm-types`' own parser. This module skips only the upstream crates'
-//! typed conversion of sections it does not need. The `%KEYWORD%` section split that replaces it
-//! already exists in `desc_compat::filter_unknown_sections`.
+//! Every *value* goes through `alpm-types`' own parser. The sections come from
+//! [`crate::meta::section`], the one reader of the `%KEYWORD%` grammar.
 //!
 //! # Why one module rather than one per database
 //!
 //! The two `desc` formats differ only in which sections they carry. Both share an identical section
 //! grammar and an identical set of relation sections. The repository format adds
 //! `%CSIZE%`/`%ISIZE%`; the local format adds `%REASON%` and a dozen others. The scan that finds
-//! them is the same scan. `scan` does it once and hands every other section's lines to the
-//! caller. So neither side walks the text twice, and the two cannot drift on what a relation
+//! them is the same scan. `scan` does it once and hands every other section to the caller. So neither side walks the text twice, and the two cannot drift on what a relation
 //! section is.
 
 use std::str::FromStr;
 
 use alpm_types::{Group, PackageRelation, RelationOrSoname};
+
+use crate::meta::section::{Section as TextSection, Sections};
 
 /// The relation sections every caller of this module needs.
 #[derive(Debug, Default)]
@@ -85,9 +77,9 @@ pub(crate) enum Depends {
 /// Why a `desc` could not yield the fields every package must have.
 ///
 /// Carried by [`crate::repo::RepoDiagnostic::InvalidDesc`], whose package is dropped, and by
-/// [`crate::LocalPackage`]'s cached load failure. The full typed parse is deferred, so an
-/// `alpm_repo_db::Error` cannot occur at open time. It surfaces through the lazy `desc`
-/// accessor instead.
+/// [`crate::LocalPackage`]'s cached load failure, and by the full `desc` of either database
+/// for a section that decides something. A section that is shown only keeps its error to
+/// itself.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DescFieldError {
@@ -112,6 +104,31 @@ pub enum DescFieldError {
         /// The line that failed.
         value: String,
     },
+    /// A value line is not one of the values its section allows.
+    InvalidValue {
+        /// The `%KEYWORD%` name, without the percent signs.
+        section: &'static str,
+        /// The line that failed.
+        value: String,
+    },
+    /// A section that holds one value appears twice.
+    DuplicateSection {
+        /// The `%KEYWORD%` name, without the percent signs.
+        section: &'static str,
+    },
+    /// A section that holds one value has more than one value line.
+    TooManyValues {
+        /// The `%KEYWORD%` name, without the percent signs.
+        section: &'static str,
+    },
+    /// A section this build does not recognise, refused under
+    /// [`UnknownSectionPolicy::Reject`](crate::UnknownSectionPolicy::Reject).
+    UnknownSection {
+        /// The `%KEYWORD%` name, without the percent signs.
+        keyword: String,
+        /// The 1-based line number of the header.
+        line: usize,
+    },
 }
 
 impl std::fmt::Display for DescFieldError {
@@ -124,6 +141,16 @@ impl std::fmt::Display for DescFieldError {
             Self::InvalidSize { section, value } => {
                 write!(f, "%{section}%: {value:?} is not a decimal integer")
             }
+            Self::InvalidValue { section, value } => {
+                write!(f, "%{section}%: {value:?} is not valid")
+            }
+            Self::DuplicateSection { section } => write!(f, "section %{section}% appears twice"),
+            Self::TooManyValues { section } => {
+                write!(f, "section %{section}% holds more than one value")
+            }
+            Self::UnknownSection { keyword, line } => {
+                write!(f, "line {line}: unknown section %{keyword}%")
+            }
         }
     }
 }
@@ -132,7 +159,12 @@ impl std::error::Error for DescFieldError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidEntry { source, .. } => Some(source),
-            Self::MissingSection { .. } | Self::InvalidSize { .. } => None,
+            Self::MissingSection { .. }
+            | Self::InvalidSize { .. }
+            | Self::InvalidValue { .. }
+            | Self::DuplicateSection { .. }
+            | Self::TooManyValues { .. }
+            | Self::UnknownSection { .. } => None,
         }
     }
 }
@@ -229,7 +261,7 @@ pub(crate) fn relation_or_soname(value: &str) -> Result<RelationOrSoname, alpm_t
         .or_else(|_| RelationOrSoname::from_str(value))
 }
 
-/// Which section the scanner is currently inside.
+/// Which section a header opens.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section<'a> {
     Depends,
@@ -239,8 +271,6 @@ enum Section<'a> {
     Groups,
     /// Any other `%KEYWORD%`, carried so the caller can read the ones it cares about.
     Other(&'a str),
-    /// Before the first `%KEYWORD%` line, where a value line has no section to belong to.
-    None,
 }
 
 impl<'a> Section<'a> {
@@ -260,17 +290,15 @@ impl<'a> Section<'a> {
     }
 }
 
-/// Walks `text` once, collecting the relation sections and handing every other section's
-/// value lines to `other` as `(keyword, line)`.
+/// Walks `text` once, collecting the relation sections and handing every other section to
+/// `other`.
 ///
-/// This is libalpm's reader (`be_sync.c:595`, `be_local.c`). A section's values run to the
-/// first blank line (`READ_AND_STORE_ALL`). A line after it and before the next header belongs
-/// to no section and is skipped. A section that appears twice adds to the first, as
-/// `alpm_list_add` does. A header is what `desc_compat::section_keyword` reads as one.
+/// The sections come from [`crate::meta::section::Sections`], which is libalpm's reader
+/// (`be_sync.c:595`, `be_local.c`). A section that appears twice adds to the first, as
+/// `alpm_list_add` does.
 ///
-/// `text` is the *filtered* text. [`crate::desc_compat::filter_unknown_sections`] has already
-/// removed the unknown sections. So a keyword reaching `other` is one this build knows but
-/// this module does not read.
+/// A section reaching `other` is one this module does not read, known to this build or not.
+/// The caller decides what an unknown one means.
 ///
 /// Every relation entry is charged to `budget` before it is parsed, a deferred `%DEPENDS%`
 /// entry included. So [`parse_depends`] later builds no entry the budget has not counted.
@@ -286,68 +314,50 @@ pub(crate) fn scan<'a>(
     text: &'a str,
     depends_mode: Depends,
     mut budget: Option<&mut RelationBudget>,
-    mut other: impl FnMut(&'a str, &'a str) -> Result<(), DescFieldError>,
+    mut other: impl FnMut(&TextSection<'a>) -> Result<(), DescFieldError>,
 ) -> Result<Relations, ScanError> {
     let mut depends = Vec::new();
     let mut depends_text: Vec<(usize, usize)> = Vec::new();
-    // Byte offsets into `text`, so a deferred `%DEPENDS%` can be re-read without a second
-    // scan of the whole entry. `str::lines` yields borrowed slices of `text`, so each line's
-    // offset is recoverable from its pointer without tracking a running counter.
-    let offset_of = |line: &str| {
-        // Both pointers are into `text`; `line` is always a subslice of it.
-        (line.as_ptr() as usize).saturating_sub(text.as_ptr() as usize)
-    };
     let mut provides = Vec::new();
     let mut conflicts = Vec::new();
     let mut replaces = Vec::new();
     let mut groups = Vec::new();
-    let mut section = Section::None;
 
-    for line in text.lines() {
-        if let Some(keyword) = crate::desc_compat::section_keyword(line) {
-            section = Section::classify(keyword);
-            if section == Section::Depends && depends_mode == Depends::Deferred {
-                // The section body starts on the next line; its end is fixed up by every
-                // subsequent line that still belongs to it.
-                let start = offset_of(line).saturating_add(line.len());
-                depends_text.push((start, start));
-            }
-            continue;
-        }
-        if line.is_empty() {
-            section = Section::None;
+    for found in Sections::new(text) {
+        let section = Section::classify(found.keyword);
+        if let Section::Other(_) = section {
+            other(&found)?;
             continue;
         }
 
-        let is_relation = matches!(
-            section,
-            Section::Depends
-                | Section::Provides
-                | Section::Conflicts
-                | Section::Replaces
-                | Section::Groups
-        );
-        if is_relation && let Some(budget) = budget.as_deref_mut() {
-            budget.charge()?;
-        }
-
-        match section {
-            Section::Depends if depends_mode == Depends::Deferred => {
-                if let Some(range) = depends_text.last_mut() {
-                    range.1 = offset_of(line).saturating_add(line.len());
+        if section == Section::Depends && depends_mode == Depends::Deferred {
+            // Each entry is still charged now, so the deferred parse builds nothing uncounted.
+            if let Some(budget) = budget.as_deref_mut() {
+                for _ in found.values() {
+                    budget.charge()?;
                 }
             }
-            Section::Depends => depends.push(entry(line, "DEPENDS", relation_or_soname)?),
-            Section::Provides => provides.push(entry(line, "PROVIDES", relation_or_soname)?),
-            Section::Conflicts => {
-                conflicts.push(entry(line, "CONFLICTS", PackageRelation::from_str)?);
+            let range = found.body_range();
+            depends_text.push((range.start, range.end));
+            continue;
+        }
+
+        for line in found.values() {
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.charge()?;
             }
-            Section::Replaces => {
-                replaces.push(entry(line, "REPLACES", PackageRelation::from_str)?);
+            match section {
+                Section::Depends => depends.push(entry(line, "DEPENDS", relation_or_soname)?),
+                Section::Provides => provides.push(entry(line, "PROVIDES", relation_or_soname)?),
+                Section::Conflicts => {
+                    conflicts.push(entry(line, "CONFLICTS", PackageRelation::from_str)?);
+                }
+                Section::Replaces => {
+                    replaces.push(entry(line, "REPLACES", PackageRelation::from_str)?);
+                }
+                Section::Groups => groups.push(line.to_owned()),
+                Section::Other(_) => {}
             }
-            Section::Groups => groups.push(line.to_owned()),
-            Section::Other(keyword) => other(keyword, line)?,
-            Section::None => {}
         }
     }
 
@@ -417,7 +427,7 @@ mod tests {
 
     /// `%DEPENDS%` of `text`, read the way `mode` reads it.
     fn depends_of(text: &str, mode: Depends) -> Vec<String> {
-        let relations = scan(text, mode, None, |_, _| Ok(())).unwrap();
+        let relations = scan(text, mode, None, |_| Ok(())).unwrap();
         let depends = match mode {
             Depends::Eager => relations.depends,
             Depends::Deferred => parse_depends(text, &relations.depends_text).unwrap(),
@@ -445,12 +455,12 @@ mod tests {
         }
     }
 
-    /// A header is what `desc_compat::section_keyword` reads as one. `%A%B%` is not, so it is
-    /// not a header here either, and it does not end the section before it.
+    /// A header is what `meta::section::section_keyword` reads as one. `%A%B%` is not, so it
+    /// is not a header here either, and it does not end the section before it.
     #[test]
     fn a_header_is_read_as_the_text_filters_read_it() {
         let text = "%GROUPS%\nbase\n%A%B%\n\n%DEPENDS%\nfoo\n";
-        let relations = scan(text, Depends::Eager, None, |_, _| Ok(())).unwrap();
+        let relations = scan(text, Depends::Eager, None, |_| Ok(())).unwrap();
         assert_eq!(relations.groups.as_ref(), ["base".to_owned(), "%A%B%".to_owned()]);
     }
 

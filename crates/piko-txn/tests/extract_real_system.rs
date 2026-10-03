@@ -72,7 +72,7 @@ fn every_installed_and_cached() -> Option<Vec<(PathBuf, Vec<PathBuf>)>> {
         if !metadata.is_file() {
             continue;
         }
-        found.push((metadata.len(), path, files.to_vec()));
+        found.push((metadata.len(), path, files.map(PathBuf::from).collect::<Vec<_>>()));
     }
     found.sort_by_key(|(size, path, _)| (*size, path.clone()));
     Some(found.into_iter().map(|(_, path, files)| (path, files)).collect())
@@ -490,11 +490,7 @@ fn every_cached_package_fits_its_declared_size() {
         else {
             continue;
         };
-        let size = match &info {
-            alpm_pkginfo::PackageInfo::V1(v1) => v1.size,
-            alpm_pkginfo::PackageInfo::V2(v2) => v2.size,
-        };
-        let limits = PackageLimits::default().with_declared_size(size);
+        let limits = PackageLimits::default().with_declared_size(info.size);
         if let Err(error) = archive::walk(package, &limits, |_, _| Ok(())) {
             refused.push(format!("{}: {error}", package.display()));
         }

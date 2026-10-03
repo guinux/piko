@@ -21,9 +21,15 @@
 //! "Undoing" is not available at that point. Refusing to record a package whose files
 //! exist would be worse than a scriptlet that did not finish.
 //!
+//! A scriptlet that cannot be started does not fail it either: a `/tmp` that is full or read-only,
+//! or a version that cannot be passed to the shell safely. `_alpm_runscriptlet` returns 1 for the
+//! first (`trans.c:337`), and every caller discards it. Stopping here would leave the transaction
+//! half applied, over a script that did not run.
+//!
 //! What piko adds is that the failure is **reported** rather than dropped. [`Outcome`] carries
 //! the exit status and everything the script printed back to the caller. `Transaction`'s report
-//! carries it on to the user.
+//! carries it on to the user. A script that could not be started is [`Status::NotStarted`], with
+//! the reason.
 
 use std::path::{Path, PathBuf};
 
@@ -31,7 +37,7 @@ use rustix::fs::{Mode, OFlags};
 
 use crate::{
     error::{Error, IoAction, Result},
-    exec::{Command, Outcome, Runner},
+    exec::{Command, Outcome, Runner, Status},
     rootfs::RootDir,
 };
 
@@ -258,17 +264,16 @@ fn candidate_name(attempt: u32) -> String {
 /// `version` is the version being installed or removed. `old_version` is the one being
 /// replaced, `Some` exactly for the two `*_upgrade` kinds, matching what libalpm passes.
 ///
-/// Returns `Ok(None)` when the scriptlet does not mention `kind`'s function at all. This is the
+/// Returns `None` when the scriptlet does not mention `kind`'s function at all. This is the
 /// common case: most packages define only one or two of the six.
 ///
-/// # Errors
-///
-/// [`Error::Io`] if the scriptlet cannot be staged inside the root. [`Error::UnusableSource`]
-/// if a version string could reach the shell as code. Everything the *script* itself can do
-/// wrong comes back as an [`Outcome`] instead.
+/// Nothing here fails the transaction. A script that cannot be staged inside the root, a version
+/// string that could reach the shell as code, and a helper that cannot be started all come back
+/// as an [`Outcome`] with [`Status::NotStarted`], as everything the *script* itself does wrong
+/// comes back as an [`Outcome`].
 ///
 /// `on_line` is called with each line of the scriptlet's merged stdout/stderr as it is
-/// produced. See [`crate::exec::Runner::run`]. It is never called when this returns `Ok(None)`.
+/// produced. See [`crate::exec::Runner::run`]. It is never called when this returns `None`.
 pub fn run(
     runner: &Runner,
     root: &RootDir,
@@ -277,11 +282,31 @@ pub fn run(
     version: &str,
     old_version: Option<&str>,
     on_line: &mut dyn FnMut(&str),
-) -> Result<Option<Outcome>> {
+) -> Option<Outcome> {
     if !declares(script, kind.as_str()) {
-        return Ok(None);
+        return None;
     }
+    let outcome =
+        start(runner, root, script, kind, version, old_version, on_line).unwrap_or_else(|error| {
+            Outcome {
+                status: Status::NotStarted(error.to_string()),
+                output: Vec::new(),
+                truncated: false,
+            }
+        });
+    Some(outcome)
+}
 
+/// Stages the scriptlet and runs `kind`'s function, for [`run`].
+fn start(
+    runner: &Runner,
+    root: &RootDir,
+    script: &[u8],
+    kind: Kind,
+    version: &str,
+    old_version: Option<&str>,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Outcome> {
     // The command line is assembled by substitution, exactly as libalpm does. A version
     // carrying a shell metacharacter would become *code*. In practice these come from a parsed
     // `alpm_types` version and cannot. Refusing rather than trusting that is the difference
@@ -306,7 +331,7 @@ pub fn run(
     let outcome =
         runner.run(&Command::new(SCRIPTLET_SHELL).arg("-c").arg(&command_line), on_line)?;
     drop(staging);
-    Ok(Some(outcome))
+    Ok(outcome)
 }
 
 /// Whether `value` is safe to paste into a shell command line unquoted.
@@ -420,11 +445,57 @@ mod tests {
             "1.0.0-1",
             None,
             &mut |_| {},
-        )
-        .unwrap();
+        );
 
         assert!(result.is_none());
         assert!(!root.path().join("tmp").exists(), "a temporary directory was created anyway");
+    }
+
+    /// A script that cannot be staged is an outcome that says why, not an error. Here `tmp` is a
+    /// file, so no directory can be created inside it.
+    #[test]
+    fn a_scriptlet_that_cannot_be_staged_is_reported_as_not_started() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("tmp"), b"").unwrap();
+        let dir = RootDir::open(root.path()).unwrap();
+        let runner = Runner::new(root.path()).unwrap();
+
+        let outcome = run(
+            &runner,
+            &dir,
+            b"post_install() { :; }\n",
+            Kind::PostInstall,
+            "1.0.0-1",
+            None,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert!(matches!(outcome.status, Status::NotStarted(_)), "{outcome:?}");
+        assert!(outcome.describe().contains("could not be started"), "{}", outcome.describe());
+    }
+
+    /// A version that could reach the shell as code is refused the same way: the script does
+    /// not run, and the refusal is an outcome.
+    #[test]
+    fn a_version_carrying_shell_syntax_is_reported_as_not_started() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = RootDir::open(root.path()).unwrap();
+        let runner = Runner::new(root.path()).unwrap();
+
+        let outcome = run(
+            &runner,
+            &dir,
+            b"post_install() { :; }\n",
+            Kind::PostInstall,
+            "1.0; id",
+            None,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert!(matches!(outcome.status, Status::NotStarted(_)), "{outcome:?}");
+        assert!(!root.path().join("tmp").exists(), "the script was staged anyway");
     }
 
     /// Staging puts the script where the chroot can reach it, and takes it away again.

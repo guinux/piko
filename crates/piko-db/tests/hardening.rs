@@ -240,7 +240,7 @@ fn an_empty_files_file_is_not_treated_as_corruption() {
     fixture.package("base-3-3").desc(MINIMAL_DESC_V1).files("").build();
 
     let db = LocalDatabase::open(fixture.path()).unwrap();
-    assert!(db.get_str("base").unwrap().file_list().unwrap().is_empty());
+    assert_eq!(db.get_str("base").unwrap().file_list().unwrap().len(), 0);
 }
 
 /// A well-formed database produces no diagnostics at all. That way a diagnostic is always a

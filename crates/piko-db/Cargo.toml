@@ -20,9 +20,7 @@ fixture = ["dep:tempfile"]
 
 [dependencies]
 alpm-common.workspace = true
-alpm-db.workspace = true
 alpm-mtree.workspace = true
-alpm-repo-db.workspace = true
 alpm-types.workspace = true
 # Required: piko inflates `mtree` itself, against a bound, rather than letting
 # `alpm-mtree` do it unbounded internally.
@@ -41,7 +39,12 @@ zstd.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+# The parsers piko's own `desc` and `files` readers replace. Only the real-system differential
+# tests read them, as an oracle.
+alpm-db.workspace = true
+alpm-repo-db.workspace = true
 flate2.workspace = true
+proptest.workspace = true
 tempfile.workspace = true
 libdeflater = "1"
 # Self dev-dependency so integration tests get the fixture builder without `fixture`

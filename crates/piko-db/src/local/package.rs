@@ -5,7 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alpm_db::{desc::DbDescFile, files::DbFiles};
 use alpm_mtree::Mtree;
 use alpm_types::{
     FullVersion, Group, InstalledSize, Name, PackageInstallReason, PackageRelation,
@@ -13,13 +12,14 @@ use alpm_types::{
 };
 
 use crate::{
-    desc_compat::{self, TakenFields, UnknownSection, UnknownSectionPolicy},
+    desc_compat::{UnknownSection, UnknownSectionPolicy},
     entry_name::EntryName,
     error::{Error, IoAction, Result, SharedError},
     fs_util,
     lazy::Lazy,
     limits::{Limit, Limits},
-    local::desc_compat::DescView,
+    local::desc::{DescView, LocalDesc},
+    meta::files::{Backup, FilePaths, LocalFiles},
 };
 
 /// The gzip magic number. pacman stores `mtree` files gzip-compressed.
@@ -57,6 +57,12 @@ pub enum Inconsistency {
     },
     /// The `desc` file contained a section this build does not recognise.
     UnknownDescSection(UnknownSection),
+    /// A section that is shown only, such as `%LICENSE%`, holds an invalid value. The rest of
+    /// the `desc` is still read.
+    InvalidField {
+        /// The reason, naming the section.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for Inconsistency {
@@ -71,6 +77,7 @@ impl std::fmt::Display for Inconsistency {
             Self::UnknownDescSection(section) => {
                 write!(f, "unknown section %{}% on line {}", section.keyword, section.line)
             }
+            Self::InvalidField { reason } => f.write_str(reason),
         }
     }
 }
@@ -81,15 +88,11 @@ impl std::fmt::Display for Inconsistency {
 /// recomputed on every [`LocalPackage::check_consistency`] call.
 #[derive(Debug)]
 struct LoadedDesc {
-    desc: DbDescFile,
-    /// `%URL%` and `%PACKAGER%`, taken out of the text before the upstream parse. A value
-    /// their typed conversion refuses then cannot make the whole file unreadable. See
-    /// [`crate::desc_compat::take_fields`].
-    taken: TakenFields,
+    desc: LocalDesc,
     inconsistencies: Vec<Inconsistency>,
 }
 
-/// A `desc` file read, filtered, and converted only as far as everything needs it.
+/// A `desc` file read, and converted only as far as everything needs it.
 ///
 /// The relation sections and `%REASON%` are here. Every other section stays as `text`, and
 /// is converted by [`LocalPackage::desc`] only if something asks for it. See [`crate::eager`]
@@ -98,7 +101,7 @@ struct LoadedDesc {
 /// `crate::solve::Universe` reads nothing else.
 #[derive(Debug)]
 struct LoadedEager {
-    /// The filtered `desc` text, retained to back the deferred typed parse.
+    /// The `desc` text, retained to back the deferred typed parse.
     text: Box<str>,
     /// The relation sections, shared with the repository database's eager tier.
     relations: crate::eager::Relations,
@@ -109,7 +112,6 @@ struct LoadedEager {
     /// size delta of a transaction. Forcing the typed parse for that alone would undo the
     /// split for every package the plan touches.
     installed_size: InstalledSize,
-    unknown_sections: Vec<UnknownSection>,
 }
 
 /// The `desc` sections available without the full typed parse.
@@ -163,6 +165,11 @@ impl<'a> EagerView<'a> {
     pub const fn installed_size(&self) -> InstalledSize {
         self.inner.installed_size
     }
+
+    /// The whole `desc` text.
+    pub(crate) fn text(&self) -> &'a str {
+        &self.inner.text
+    }
 }
 
 /// An installed package.
@@ -181,8 +188,10 @@ pub struct LocalPackage {
     limits: Limits,
     policy: UnknownSectionPolicy,
     eager: Lazy<LoadedEager>,
-    desc: Lazy<LoadedDesc>,
-    files: Lazy<DbFiles>,
+    /// Boxed: a `Lazy` holds its value inline, empty or not, and most entries are never asked
+    /// for their full `desc`.
+    desc: Lazy<Box<LoadedDesc>>,
+    files: Lazy<LocalFiles>,
     mtree: Lazy<Option<Mtree>>,
 }
 
@@ -241,7 +250,8 @@ impl LocalPackage {
     /// If the file cannot be read or parsed. The failure is cached and returned again by
     /// every later call.
     pub fn desc(&self) -> std::result::Result<DescView<'_>, SharedError> {
-        self.load_desc().map(|loaded| DescView::new(&loaded.desc, &loaded.taken))
+        let eager = self.eager()?;
+        self.load_desc().map(|loaded| DescView::new(&loaded.desc, eager))
     }
 
     /// The sections every caller needs, without the full typed parse.
@@ -262,7 +272,7 @@ impl LocalPackage {
     /// # Errors
     ///
     /// If the file cannot be read or parsed.
-    pub fn files(&self) -> std::result::Result<&DbFiles, SharedError> {
+    pub fn files(&self) -> std::result::Result<&LocalFiles, SharedError> {
         self.files.get_or_load(|| self.read_files())
     }
 
@@ -290,35 +300,33 @@ impl LocalPackage {
 
     /// The paths owned by this package, relative to the installation root.
     ///
-    /// Paths are relative and carry pacman's trailing `/` on directories, e.g. `usr/bin/`
-    /// versus `usr/bin/foo`. ([`PathBuf`] keeps the string as written; only
-    /// [`Path::components`] would normalize it away.)
+    /// Paths are relative, written as the `files` file holds them, and carry pacman's trailing
+    /// `/` on directories, e.g. `usr/bin/` versus `usr/bin/foo`.
     ///
     /// # Ordering
     ///
-    /// The order is `alpm-db`'s, which sorts [`PathBuf`]s **component-wise**. pacman sorts
-    /// the raw strings **byte-wise**. So the two disagree wherever a directory name is a
-    /// prefix of a sibling. pacman puts `usr/share/makepkg-template/` before
-    /// `usr/share/makepkg/…`, because `-` (`0x2d`) sorts below `/` (`0x2f`). Component-wise
-    /// comparison puts `makepkg` first.
+    /// The order compares **component by component**, as [`Path`] does. pacman sorts the raw
+    /// strings **byte-wise**. So the two disagree wherever a directory name is a prefix of a
+    /// sibling. pacman puts `usr/share/makepkg-template/` before `usr/share/makepkg/…`,
+    /// because `-` (`0x2d`) sorts below `/` (`0x2f`). Component-wise comparison puts `makepkg`
+    /// first.
     ///
-    /// The *set* is exact either way. Sort by [`Path::as_os_str`] if you need pacman's
-    /// exact order.
+    /// The *set* is exact either way. Sort the strings if you need pacman's exact order.
     ///
     /// # Errors
     ///
     /// If the `files` file cannot be read or parsed.
-    pub fn file_list(&self) -> std::result::Result<&[PathBuf], SharedError> {
-        self.files().map(AsRef::as_ref)
+    pub fn file_list(&self) -> std::result::Result<FilePaths<'_>, SharedError> {
+        self.files().map(LocalFiles::files)
     }
 
-    /// The backup entries declared by this package.
+    /// The backup entries declared by this package, `(null)` entries included.
     ///
     /// # Errors
     ///
     /// If the `files` file cannot be read or parsed.
-    pub fn backups(&self) -> std::result::Result<&[alpm_db::files::BackupEntry], SharedError> {
-        self.files().map(DbFiles::backups)
+    pub fn backups(&self) -> std::result::Result<&[Backup], SharedError> {
+        self.files().map(LocalFiles::backups)
     }
 
     /// Whether the `files` file can list a path that `wanted` accepts. The file is not parsed.
@@ -329,11 +337,11 @@ impl LocalPackage {
     /// is also the answer when the file cannot be read, so that the error still comes from
     /// [`Self::file_list`], and when the file list is already parsed.
     ///
-    /// Each line goes to `wanted` as `alpm-db` delimits a path: the split is at `\n` or `\r\n`,
+    /// Each line goes to `wanted` as the `files` reader delimits a path: the split is at `\n` or `\r\n`,
     /// and nothing is trimmed. A line that is not a path, such as a section header or a
     /// `%BACKUP%` entry, can only change the answer to `true`.
     ///
-    /// The parse is the cost that this filter avoids. `alpm-db` sorts and validates every path,
+    /// The parse is the cost that this filter avoids. The parse sorts and validates every path,
     /// at about 1.4 µs for each path, and a real system lists about 300,000 paths. To read the
     /// text and split its lines costs about a twentieth of that.
     pub fn files_may_list(&self, mut wanted: impl FnMut(&str) -> bool) -> bool {
@@ -411,33 +419,43 @@ impl LocalPackage {
         // alone does not force `desc`.
         let eager = self.load_eager()?;
         let text = &eager.text;
-        self.desc.get_or_load(|| {
-            use alpm_common::MetadataFile as _;
-            let (text, taken) = desc_compat::take_fields(text);
-            let desc = DbDescFile::from_str_with_schema(&text, None).map_err(|source| {
-                Error::Desc { path: fs_util::join(&self.dir, DESC_FILE), source }
-            })?;
+        self.desc
+            .get_or_load(|| {
+                let path = || fs_util::join(&self.dir, DESC_FILE);
+                let fields = |source| Error::DescFields { path: path(), source: Box::new(source) };
+                let (desc, unknown) = LocalDesc::parse(text).map_err(fields)?;
+                if self.policy == UnknownSectionPolicy::Reject
+                    && let Some(section) = unknown.first()
+                {
+                    return Err(fields(crate::eager::DescFieldError::UnknownSection {
+                        keyword: section.keyword.clone(),
+                        line: section.line,
+                    }));
+                }
 
-            let view = DescView::new(&desc, &taken);
-            let mut inconsistencies = Vec::new();
-            if view.name() != self.name() {
-                inconsistencies.push(Inconsistency::NameMismatch {
-                    directory: self.name().clone(),
-                    desc: view.name().clone(),
-                });
-            }
-            if view.version() != self.version() {
-                inconsistencies.push(Inconsistency::VersionMismatch {
-                    directory: self.version().clone(),
-                    desc: view.version().clone(),
-                });
-            }
-            inconsistencies.extend(
-                eager.unknown_sections.iter().cloned().map(Inconsistency::UnknownDescSection),
-            );
+                let mut inconsistencies = Vec::new();
+                if desc.name() != self.name() {
+                    inconsistencies.push(Inconsistency::NameMismatch {
+                        directory: self.name().clone(),
+                        desc: desc.name().clone(),
+                    });
+                }
+                if desc.version() != self.version() {
+                    inconsistencies.push(Inconsistency::VersionMismatch {
+                        directory: self.version().clone(),
+                        desc: desc.version().clone(),
+                    });
+                }
+                inconsistencies.extend(unknown.into_iter().map(Inconsistency::UnknownDescSection));
+                inconsistencies.extend(
+                    desc.invalid_fields()
+                        .into_iter()
+                        .map(|reason| Inconsistency::InvalidField { reason }),
+                );
 
-            Ok(LoadedDesc { desc, taken, inconsistencies })
-        })
+                Ok(Box::new(LoadedDesc { desc, inconsistencies }))
+            })
+            .map(|loaded| &**loaded)
     }
 
     fn read_eager(&self) -> Result<LoadedEager> {
@@ -449,14 +467,6 @@ impl LocalPackage {
             self.limits.get(Limit::Desc),
         )?;
 
-        let (text, unknown_sections) = match self.policy {
-            UnknownSectionPolicy::Reject => (text, Vec::new()),
-            UnknownSectionPolicy::Warn => desc_compat::filter_unknown_sections(&text, |keyword| {
-                use std::str::FromStr as _;
-                alpm_db::desc::SectionKeyword::from_str(keyword).is_ok()
-            }),
-        };
-
         // `%REASON%` is absent for an explicitly installed package. That is exactly what
         // libalpm writes (`if(info->reason)` at `be_local.c:1029`). So the default is not a
         // fallback for a malformed file. A malformed value is still an error.
@@ -465,9 +475,9 @@ impl LocalPackage {
         // No relation budget. A local `desc` is read uncompressed and capped by
         // `Limits::desc_bytes`, so its text bounds what its parse builds. A repository archive
         // needs the budget because compression breaks that ratio.
-        let relations =
-            crate::eager::scan(&text, crate::eager::Depends::Eager, None, |keyword, line| {
-                match keyword.as_bytes() {
+        let relations = crate::eager::scan(&text, crate::eager::Depends::Eager, None, |section| {
+            for line in section.values() {
+                match section.keyword.as_bytes() {
                     b"REASON" => {
                         install_reason = match crate::eager::scalar::<u8>(line, "REASON")? {
                             0 => PackageInstallReason::Explicit,
@@ -483,29 +493,22 @@ impl LocalPackage {
                     b"SIZE" => installed_size = crate::eager::scalar(line, "SIZE")?,
                     _ => {}
                 }
-                Ok(())
-            })
-            .map_err(|error| match error {
-                crate::eager::ScanError::Field(source) => {
-                    Error::DescFields { path: path.clone(), source: Box::new(source) }
-                }
-                crate::eager::ScanError::Budget { max } => {
-                    Error::TooManyRelations { path: path.clone(), max }
-                }
-            })?;
-
-        Ok(LoadedEager {
-            text: text.into_boxed_str(),
-            relations,
-            install_reason,
-            installed_size,
-            unknown_sections,
+            }
+            Ok(())
         })
+        .map_err(|error| match error {
+            crate::eager::ScanError::Field(source) => {
+                Error::DescFields { path: path.clone(), source: Box::new(source) }
+            }
+            crate::eager::ScanError::Budget { max } => {
+                Error::TooManyRelations { path: path.clone(), max }
+            }
+        })?;
+
+        Ok(LoadedEager { text: text.into_boxed_str(), relations, install_reason, installed_size })
     }
 
-    fn read_files(&self) -> Result<DbFiles> {
-        use alpm_common::MetadataFile as _;
-
+    fn read_files(&self) -> Result<LocalFiles> {
         let path = fs_util::join(&self.dir, FILES_FILE);
         let text = fs_util::read_capped_utf8_in(
             &self.dir,
@@ -514,7 +517,7 @@ impl LocalPackage {
             self.limits.get(Limit::Files),
         )?;
 
-        DbFiles::from_str_with_schema(&text, None).map_err(|source| Error::Files { path, source })
+        crate::meta::files::parse(&text).map_err(|source| Error::Files { path, source })
     }
 
     /// Reads and parses `mtree`, decompressing it against a bound.
@@ -641,8 +644,8 @@ mod tests {
         assert!(!pkg.is_files_loaded(), "reading desc must not read files");
 
         assert_eq!(
-            pkg.file_list().unwrap(),
-            [PathBuf::from("usr"), PathBuf::from("usr/bin"), PathBuf::from("usr/bin/foo")]
+            pkg.file_list().unwrap().collect::<Vec<_>>(),
+            ["usr/", "usr/bin/", "usr/bin/foo"]
         );
         assert!(pkg.mtree().unwrap().is_some());
     }
@@ -654,7 +657,7 @@ mod tests {
         db.package("base-3-3").desc(MINIMAL_DESC_V1).files("").build();
         let pkg = package_at(&db, "base-3-3");
 
-        assert!(pkg.file_list().unwrap().is_empty());
+        assert_eq!(pkg.file_list().unwrap().len(), 0);
     }
 
     /// libalpm treats a missing `mtree` as absent, not as a failure.
@@ -938,12 +941,7 @@ mod tests {
         db.package("foo-1.0.0-1").desc(MINIMAL_DESC_V1).files("%FILES%\r\nsrv/\r\n").build();
         let pkg = package_at(&db, "foo-1.0.0-1");
 
-        let parsed: Vec<String> = pkg
-            .file_list()
-            .unwrap()
-            .iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect();
+        let parsed: Vec<String> = pkg.file_list().unwrap().map(str::to_owned).collect();
         assert_eq!(parsed, ["srv/"]);
         for path in &parsed {
             let fresh = package_at(&db, "foo-1.0.0-1");

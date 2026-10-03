@@ -71,5 +71,6 @@ pub use decision::{
 };
 pub use error::{Error, Result};
 pub use keyring::{
-    Checked, Keyring, open_context, signature_path, verify_database, verify_database_dated,
+    Checked, Keyring, MAX_SIGNATURE_BYTES, open_context, signature_path, verify_database,
+    verify_database_dated,
 };

@@ -535,6 +535,14 @@ fn signing_key(
     }
 }
 
+/// The largest detached signature piko downloads or copies: 16 KiB, libalpm's own bound
+/// (`dload.c:667`).
+///
+/// A detached signature is a few hundred bytes. The bound limits what a mirror can hand
+/// GnuPG to parse before any trust is established, which is also why it is no larger than
+/// libalpm's.
+pub const MAX_SIGNATURE_BYTES: u64 = 16 * 1024;
+
 /// The conventional location of a detached signature: the file's own name plus `.sig`.
 ///
 /// pacman uses the same convention for both packages and databases. That is why this lives

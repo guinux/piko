@@ -94,11 +94,11 @@ pub struct InstallOptions {
     pub check_space: bool,
     /// The download sandbox `pacman.conf` configures.
     pub sandbox: piko_net::Sandbox,
-    /// A `SIGINT` handler already installed by an earlier step (`update`'s pre-refresh),
-    /// reused instead of installing a second one. `ctrlc::set_handler` accepts exactly one
-    /// registration per process, and a second call would panic. `None` when nothing installed
-    /// one yet. `install` installs its own, either when it fetches a package URL or, failing
-    /// that, once its confirmation prompt has been answered.
+    /// A signal handler already installed by an earlier step (`update`'s pre-refresh), reused
+    /// instead of installing a second one. A second registration would receive every signal
+    /// the first one does. `None` when nothing installed one yet. `install` installs its own,
+    /// either when it fetches a package URL or, failing that, once its confirmation prompt has
+    /// been answered.
     pub pre_cancel: Option<crate::signal::Handoff>,
 }
 
@@ -294,7 +294,7 @@ pub fn install(
     // is not installed earlier than it has to be. An earlier one would make Ctrl+C at the prompt
     // above require two presses. `pre_cancel` carries whatever registration an earlier step
     // made, a pre-refresh or a package URL fetch. So this does not install a second one, which
-    // `ctrlc::set_handler` would refuse.
+    // would answer every signal twice.
     let cancel = match pre_cancel {
         Some(handoff) => handoff.cancel,
         None => crate::signal::install_cancel_handler().0,
@@ -312,6 +312,7 @@ pub fn install(
         sig_level: options.sig_level,
         files: &loaded.files,
         gpg_dir: &options.gpg_dir,
+        architectures: &options.architecture,
     };
     let plan = match TransactionPlan::new(
         &universe,
@@ -365,6 +366,11 @@ pub fn install(
         check_space: options.check_space,
         cancel: Some(cancel_flag),
         report_pending: !options.download_only,
+        problems_shown: loaded
+            .files
+            .iter()
+            .map(|target| target.candidate().name().to_string())
+            .collect(),
     };
     if options.download_only {
         return download_only(
@@ -511,7 +517,7 @@ fn prepare_file_targets(
     // stops the load. Nothing has been fetched yet, so the run ends quietly.
     let mut stopped = false;
     let mut fetch = |url: &str| {
-        if writeln!(out, "Fetching {url}").is_err() {
+        if writeln!(out, "Fetching {}", piko_net::error::without_credentials(url)).is_err() {
             stopped = true;
             return Err(piko_txn::Error::Cancelled { completed: 0, total: 0 });
         }
@@ -529,12 +535,35 @@ fn prepare_file_targets(
         &piko_txn::extract::PackageLimits::default(),
     );
     match loaded {
-        Ok(loaded) => Ok(loaded),
+        Ok(loaded) => {
+            report_file_problems(&loaded);
+            Ok(loaded)
+        }
         Err(_) if stopped => Err(ExitCode::SUCCESS),
         Err(error) => {
             report_error(&error);
             Err(ExitCode::FAILURE)
         }
+    }
+}
+
+/// Names, for each package file named, what its `.PKGINFO` holds that the install reads past.
+///
+/// Printed before the plan and its prompt, as libalpm warns when it loads a file. `piko plan`
+/// prints the same lines, from the same [`piko_txn::file_target::FileTarget::problems`].
+pub(crate) fn report_file_problems(loaded: &piko_txn::file_target::Targets) {
+    for target in &loaded.files {
+        report_package_problems(target.candidate().name().as_ref(), target.problems());
+    }
+}
+
+/// Names what one package's `.PKGINFO` holds that the install reads past, one warning a line.
+///
+/// None of these refuses the package. The key and the reason are bytes the package chose, so
+/// [`crate::output::warn`] escapes them.
+fn report_package_problems(package: &str, problems: &[piko_txn::pkginfo::Problem]) {
+    for problem in problems {
+        crate::output::warn(format!("{package}: {problem}"));
     }
 }
 
@@ -983,6 +1012,9 @@ struct Settings {
     ///
     /// False for `-w`, which commits nothing and so leaves none.
     report_pending: bool,
+    /// The packages whose `.PKGINFO` problems were shown before the prompt, by `pkgname`: the
+    /// named files. `verify` reads every package again, and these are not named twice.
+    problems_shown: Vec<String>,
 }
 
 /// The live step list `run` drives, bundled so its own parameter count stays under clippy's
@@ -1069,6 +1101,13 @@ fn run(
         }
     };
     report_space_problems(progress.steplist, verified.space_problems());
+    progress.steplist.suspend(|| {
+        for (package, problems) in verified.package_problems() {
+            if !settings.problems_shown.iter().any(|shown| shown == package) {
+                report_package_problems(package, &problems);
+            }
+        }
+    });
 
     // This covers the window between verification's last read and the commit's first. It is
     // also the last point where a stop leaves nothing behind. `stage` opens the journal, and
@@ -1107,25 +1146,38 @@ fn run(
             ExitCode::SUCCESS
         }
         Err(error) => {
-            // A hook that aborted the run explains itself through the error, which already
-            // carries what it printed. See `Error::HookAborted`.
             report_error(&error);
-            match error {
-                piko_txn::Error::HookAborted { .. } => {}
-                // The user requested this stop, so it is not reported as a breakage. The
-                // journal is left in place. The lock is released just below.
-                piko_txn::Error::Cancelled { .. } => eprintln!(
-                    "Note: the steps that ran are recorded; \
-                     run `piko report` to see them, then re-run to finish"
-                ),
-                _ => eprintln!(
-                    "Error: the transaction stopped part-way; \
-                     run `piko report` to see what was applied"
-                ),
+            // Asked of the disk rather than decided from the error. A commit removes its
+            // journal when it stops before its first step, and only then, so no journal means
+            // nothing was changed. An unreadable one counts as present.
+            let journal_left = !matches!(journal::read(dbpath), Ok(None));
+            if let Some(note) = stop_note(&error, journal_left) {
+                eprintln!("{note}");
             }
             let _ = lock.release();
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The line printed after a commit that failed, telling the user what the failure left.
+///
+/// `journal_left` is whether the journal is still on disk.
+fn stop_note(error: &piko_txn::Error, journal_left: bool) -> Option<&'static str> {
+    match error {
+        // A hook that aborted the run explains itself through the error, which already
+        // carries what it printed. See `Error::HookAborted`. It never leaves a journal.
+        piko_txn::Error::HookAborted { .. } => None,
+        _ if !journal_left => Some("Note: nothing was changed; no step of the transaction ran"),
+        // The user requested this stop, so it is not reported as a breakage.
+        piko_txn::Error::Cancelled { .. } => Some(
+            "Note: the steps that ran are recorded; \
+             run `piko report` to see them, then re-run to finish",
+        ),
+        _ => Some(
+            "Error: the transaction stopped part-way; \
+             run `piko report` to see what was applied",
+        ),
     }
 }
 
@@ -1399,6 +1451,25 @@ mod tests {
     }
 
     const JOURNAL: &str = "/var/lib/pacman/piko-journal";
+
+    /// A failure that left no journal changed nothing, and says so rather than sending the
+    /// user to `piko report`. One that left a journal still does.
+    #[test]
+    fn a_failure_without_a_journal_says_that_nothing_changed() {
+        let failure = piko_txn::Error::UnusableSource {
+            path: PathBuf::from("/var/cache/pacman/pkg/foo-1.0-1-x86_64.pkg.tar.zst"),
+            reason: "unreadable".to_owned(),
+        };
+        let cancelled = piko_txn::Error::Cancelled { completed: 0, total: 2 };
+
+        for error in [&failure, &cancelled] {
+            let note = stop_note(error, false).unwrap();
+            assert!(note.contains("nothing was changed"), "{note}");
+            assert!(!note.contains("piko report"), "{note}");
+        }
+        assert!(stop_note(&failure, true).unwrap().contains("stopped part-way"));
+        assert!(stop_note(&cancelled, true).unwrap().contains("steps that ran are recorded"));
+    }
 
     /// The journal goes first, since piko refuses every transaction while it is there. The cut
     /// install is alone, so `--overwrite` covers nothing else. Dependencies install before

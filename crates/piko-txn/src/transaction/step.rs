@@ -79,7 +79,7 @@ pub(super) fn install_step(
             },
             report,
             progress,
-        )?;
+        );
     }
 
     // The fake remove transaction runs at exactly libalpm's point in the sequence
@@ -146,24 +146,24 @@ pub(super) fn install_step(
     // `foo-2.0.0-1` side by side after an upgrade. The reader then reports the older of the
     // two.
     let previous = step.package.replaces.as_ref().map(|old| &old.entry);
-    writer.replace_entry(previous, entry)?;
 
     // Staged rather than written one file at a time. An entry is three or four files, and
     // `write_record`/`write_raw` each pay an `fsync` of the data *and* of the directory. One
     // `EntryWrite` pays one directory `fsync` for the whole entry and overlaps the data ones.
     // Measured: 260 ms -> 113 ms for a 42-package upgrade on btrfs (`docs/perf-study.md`
-    // §4.2). It also gives a stronger crash-safety property. No member of this entry becomes
-    // visible until every member's data is durable. So an interruption cannot leave a new
-    // `desc` beside an old `files`.
-    let mut staged = writer.entry_write(entry);
+    // §4.2). It also gives a stronger crash-safety property. The entry is built outside
+    // `local/` and moved in whole, after the one it replaces is moved out. So an interruption
+    // leaves the old entry, no entry, or the new one, and never an entry without its `desc`,
+    // which would refuse every later plan.
+    let mut staged = writer.entry_write(entry, previous)?;
     // `verify` already refused a package whose entry cannot be written (`record::check`), so
     // these two fail only if that check and these builders disagree.
     let unwritable = |kind: &str, source| piko_db_write::Error::Record {
         path: writer.entry_path(entry).join(kind),
         source,
     };
-    let desc = record::desc(&step.package.info, &step.package.raw, &facts)
-        .map_err(|source| unwritable("desc", source))?;
+    let desc =
+        record::desc(&step.package.info, &facts).map_err(|source| unwritable("desc", source))?;
     let files = record::files(&extraction).map_err(|source| unwritable("files", source))?;
     staged.record(&desc)?;
     staged.record(&files)?;
@@ -196,7 +196,7 @@ pub(super) fn install_step(
             },
             report,
             progress,
-        )?;
+        );
     }
 
     Ok(extraction)
@@ -223,22 +223,21 @@ impl InstallStep<'_> {
         call: ScriptletCall<'_>,
         report: &mut Report,
         progress: &mut dyn FnMut(Event<'_>),
-    ) -> Result<()> {
+    ) {
         let ScriptletCall { runner, script, kind, version, old_version } = call;
         if !scriptlet::declares(script, kind.as_str()) {
-            return Ok(());
+            return;
         }
         progress(Event::ScriptletStarted { package: &self.package.name, kind });
         let Some(outcome) =
             scriptlet::run(runner, self.root, script, kind, version, old_version, &mut |line| {
                 progress(Event::ScriptletOutputLine { package: &self.package.name, kind, line });
-            })?
+            })
         else {
-            return Ok(());
+            return;
         };
         progress(Event::ScriptletFinished { package: &self.package.name, kind, outcome: &outcome });
         report.scriptlets.push(ScriptletRun { package: self.package.name.clone(), kind, outcome });
-        Ok(())
     }
 }
 
@@ -285,28 +284,25 @@ pub(super) fn remove_step(
     // `-Rcs` of 35 packages from doing 35 full `readdir`s of the installed set.
     let script = doomed.script.as_deref();
     let version = entry.version().to_string();
-    let run_scriptlet = |kind: scriptlet::Kind,
-                         report: &mut Report,
-                         progress: &mut dyn FnMut(Event<'_>)|
-     -> Result<()> {
-        let (Some(runner), Some(script)) = (runner, script) else { return Ok(()) };
-        if !scriptlet::declares(script, kind.as_str()) {
-            return Ok(());
-        }
-        let package = entry.name().to_string();
-        progress(Event::ScriptletStarted { package: &package, kind });
-        let Some(outcome) =
-            scriptlet::run(runner, root, script, kind, &version, None, &mut |line| {
-                progress(Event::ScriptletOutputLine { package: &package, kind, line });
-            })?
-        else {
-            return Ok(());
+    let run_scriptlet =
+        |kind: scriptlet::Kind, report: &mut Report, progress: &mut dyn FnMut(Event<'_>)| {
+            let (Some(runner), Some(script)) = (runner, script) else { return };
+            if !scriptlet::declares(script, kind.as_str()) {
+                return;
+            }
+            let package = entry.name().to_string();
+            progress(Event::ScriptletStarted { package: &package, kind });
+            let Some(outcome) =
+                scriptlet::run(runner, root, script, kind, &version, None, &mut |line| {
+                    progress(Event::ScriptletOutputLine { package: &package, kind, line });
+                })
+            else {
+                return;
+            };
+            progress(Event::ScriptletFinished { package: &package, kind, outcome: &outcome });
+            report.scriptlets.push(ScriptletRun { package, kind, outcome });
         };
-        progress(Event::ScriptletFinished { package: &package, kind, outcome: &outcome });
-        report.scriptlets.push(ScriptletRun { package, kind, outcome });
-        Ok(())
-    };
-    run_scriptlet(scriptlet::Kind::PreRemove, report, progress)?;
+    run_scriptlet(scriptlet::Kind::PreRemove, report, progress);
 
     let (touched, pacsaves) = remove_files(
         root,
@@ -325,7 +321,7 @@ pub(super) fn remove_step(
 
     let writer = LocalDbWriter::new(dbpath, lock, Limits::default())?;
     writer.remove_entry(entry)?;
-    run_scriptlet(scriptlet::Kind::PostRemove, report, progress)?;
+    run_scriptlet(scriptlet::Kind::PostRemove, report, progress);
     Ok((touched, pacsaves))
 }
 

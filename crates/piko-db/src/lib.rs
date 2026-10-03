@@ -78,6 +78,7 @@ pub mod glob;
 pub mod groups;
 pub mod lazy;
 pub mod limits;
+pub mod meta;
 pub mod printable;
 pub mod search;
 

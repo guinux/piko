@@ -679,10 +679,10 @@ fn report_stale_repos<'a>(
 ///
 /// `update`'s pre-refresh step lives here too, since it decides what `open_all_repos` below
 /// reads rather than what `cmd::txn::install` does with it. Only this path installs the
-/// `SIGINT` handler ahead of the confirmation prompt. It threads the same `Cancel` into
+/// signal handler ahead of the confirmation prompt. It threads the same `Cancel` into
 /// `InstallOptions::pre_cancel`, so the refresh and the transaction that follows share one
-/// registration. `ctrlc::set_handler` refuses a second caller. See `crate::signal` for the
-/// Ctrl+C trade-off this makes at the confirmation prompt.
+/// registration. A second one would receive every signal the first does. See `crate::signal`
+/// for the Ctrl+C trade-off this makes at the confirmation prompt.
 fn sync(
     cli: &Cli,
     config: &ConfigCache,

@@ -136,8 +136,8 @@ impl Row {
 
 /// The draw handle of the most recently built [`StepList`].
 ///
-/// `ctrlc` runs its handler on a thread of its own. That thread has no path to the `StepList`
-/// the command built. This static is that path. See [`suspend_active`].
+/// `crate::signal` runs its handler on a thread of its own. That thread has no path to the
+/// `StepList` the command built. This static is that path. See [`suspend_active`].
 ///
 /// The newest list wins. Nothing ever unregisters. A `MultiProgress` whose rows are all
 /// finished draws nothing. So a stale handle costs one lock and a redraw of an empty stack.

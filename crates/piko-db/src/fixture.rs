@@ -465,6 +465,7 @@ pub struct PackageSpec {
     installed_size: u64,
     compressed_size: u64,
     extension: String,
+    architecture: String,
 }
 
 impl PackageSpec {
@@ -487,6 +488,7 @@ impl PackageSpec {
             installed_size: 123,
             compressed_size: 45,
             extension: "zst".to_owned(),
+            architecture: "x86_64".to_owned(),
         }
     }
 
@@ -566,6 +568,14 @@ impl PackageSpec {
         self
     }
 
+    /// Sets `%ARCH%` and the architecture in `%FILENAME%`, `x86_64` by default.
+    /// Repository-only.
+    #[must_use]
+    pub fn architecture(mut self, architecture: &str) -> Self {
+        architecture.clone_into(&mut self.architecture);
+        self
+    }
+
     /// The entry directory name this package is stored under, in both database layouts.
     #[must_use]
     pub fn entry(&self) -> String {
@@ -610,7 +620,10 @@ impl PackageSpec {
     /// distinguishes the two schemas. See [`crate::repo::RepoDescView::md5_checksum`].
     #[must_use]
     pub fn repo_desc(&self) -> String {
-        let file_name = format!("{}-{}-x86_64.pkg.tar.{}", self.name, self.version, self.extension);
+        let file_name = format!(
+            "{}-{}-{}.pkg.tar.{}",
+            self.name, self.version, self.architecture, self.extension
+        );
         let mut desc = String::new();
         desc.push_str(&section("FILENAME", std::slice::from_ref(&file_name)));
         desc.push_str(&section("NAME", std::slice::from_ref(&self.name)));
@@ -624,7 +637,7 @@ impl PackageSpec {
             "%SHA256SUM%\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n\n",
         );
         desc.push_str("%URL%\nhttps://example.org/\n\n");
-        desc.push_str("%ARCH%\nx86_64\n\n");
+        desc.push_str(&section("ARCH", std::slice::from_ref(&self.architecture)));
         desc.push_str("%BUILDDATE%\n1733737242\n\n");
         desc.push_str("%PACKAGER%\nFoobar McFooface <foobar@mcfooface.org>\n\n");
         desc.push_str(&section("REPLACES", &self.replaces));
@@ -926,8 +939,8 @@ mod tests {
             .installed(PackageSpec::new("bar", "1.0.0-1"))
             .build();
 
-        let foo = scenario.local().get_str("foo").unwrap().file_list().unwrap().to_vec();
-        let bar = scenario.local().get_str("bar").unwrap().file_list().unwrap().to_vec();
+        let foo: Vec<_> = scenario.local().get_str("foo").unwrap().file_list().unwrap().collect();
+        let bar: Vec<_> = scenario.local().get_str("bar").unwrap().file_list().unwrap().collect();
         assert!(foo.iter().any(|path| path.ends_with("usr/bin/foo")), "{foo:?}");
         assert!(bar.iter().any(|path| path.ends_with("usr/bin/bar")), "{bar:?}");
         assert!(!foo.iter().any(|path| path.ends_with("usr/bin/bar")), "{foo:?}");

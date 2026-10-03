@@ -61,13 +61,16 @@
 //!
 //! Installing one package file that already sits in a cache directory. The database lock comes
 //! first; `verify` reads the package and checks it against the rest of the system under it;
-//! `stage` writes the journal; only `commit` writes to the root. A transaction a solver planned is built with [`Transaction::from_plan`] instead, from
-//! a [`TransactionPlan`], so each package is also compared with what the plan says it is.
+//! `stage` writes the journal; only `commit` writes to the root. The signature is checked
+//! against pacman's keyring, and a caller that checks nothing must say
+//! [`Verification::Disabled`]. A transaction a solver planned is built with
+//! [`Transaction::from_plan`] instead, from a [`TransactionPlan`], so each package is also
+//! compared with what the plan says it is.
 //!
 //! ```rust,no_run
 //! use std::path::{Path, PathBuf};
 //!
-//! use piko_txn::{CacheDirSource, Step, Transaction};
+//! use piko_txn::{CacheDirSource, Step, Transaction, Verification};
 //! use piko_db_write::DbLock;
 //! use alpm_types::{PackageFileName, PackageInstallReason};
 //!
@@ -80,12 +83,16 @@
 //! }];
 //!
 //! let source = CacheDirSource::new([PathBuf::from("/var/cache/pacman/pkg")])?;
+//! let verification = Verification::Enabled {
+//!     keyring: piko_sig::Keyring::open(Path::new("/etc/pacman.d/gnupg"))?,
+//!     policy: piko_sig::Policy::for_package(piko_db::config::SigLevel::PACKAGE),
+//! };
 //!
 //! // Every check reads the local database, so it runs under `db.lck`.
 //! let lock = DbLock::acquire(dbpath)?;
 //!
 //! // Reads every package and runs file-conflict detection. Nothing is written yet.
-//! let verified = Transaction::new(root, dbpath, steps).verify(&lock, &source)?;
+//! let verified = Transaction::new(root, dbpath, steps, verification).verify(&lock, &source)?;
 //!
 //! // Fsyncs the journal. Dropping here still changes nothing.
 //! let report = verified.stage()?.commit()?;
@@ -136,4 +143,6 @@ pub use source::{
 };
 pub use space::{MemberFootprint, PartitionSpace};
 pub use target::{TargetKind, classify};
-pub use transaction::{Expected, Patterns, Published, Report, Step, Transaction, Validation};
+pub use transaction::{
+    Expected, Patterns, Published, Report, Step, Transaction, Validation, Verification,
+};

@@ -180,6 +180,44 @@ impl Error {
 /// is shared with every other crate: see [`fn@piko_db::printable`].
 pub(crate) use piko_db::printable;
 
+/// `text` with the user information taken out of every URL in it: the `user:password@` in
+/// front of a host.
+///
+/// libalpm names a server by its host alone, with the user information dropped
+/// (`curl_gethost`, `dload.c:307`). A `Server` can carry a password, and ureq sends it as HTTP
+/// basic authentication. Text that an error holds reaches a terminal, and from there a log or a
+/// bug report. So every URL piko-net puts in an error, a note or a reason goes through this
+/// first, and so does every message ureq or the download helper returns.
+///
+/// An authority ends at the first `/`, `?`, `#`, quote, angle bracket or white space after
+/// `://`. The user information is everything up to its last `@`, the same split the `http`
+/// loopback test and the per-host failure count make.
+#[must_use]
+pub fn without_credentials(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("://") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut shown = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find("://") {
+        let Some((before, after)) = rest.split_at_checked(index.saturating_add(3)) else { break };
+        shown.push_str(before);
+        let end = after
+            .find(|c: char| {
+                matches!(c, '/' | '?' | '#' | '"' | '\'' | '<' | '>' | '`') || c.is_whitespace()
+            })
+            .unwrap_or(after.len());
+        let Some((authority, tail)) = after.split_at_checked(end) else {
+            rest = after;
+            break;
+        };
+        shown.push_str(authority.rsplit_once('@').map_or(authority, |(_, host)| host));
+        rest = tail;
+    }
+    shown.push_str(rest);
+    std::borrow::Cow::Owned(shown)
+}
+
 /// Renders `error` followed by every cause in its chain, joined by `": "`.
 ///
 /// Use this where an error becomes text, as in the attempts of [`Error::AllServersFailed`].
@@ -200,13 +238,15 @@ pub(crate) fn with_causes(error: &dyn std::error::Error) -> String {
 
 /// The reason one server failed, as one attempt of [`Error::AllServersFailed`] records it.
 ///
-/// Each attempt is already listed under its URL. An [`Error::Io`] about that same URL names it
-/// again in its message, so only its causes are kept. An error about another file keeps its
-/// whole message, because which file failed is the information. The `.sig` fetched beside a
-/// download is the usual case.
+/// Each attempt is already listed under its URL, without credentials. An [`Error::Io`] about
+/// that same URL names it again in its message, so only its causes are kept. An error about
+/// another file keeps its whole message, because which file failed is the information. The
+/// `.sig` fetched beside a download is the usual case.
 pub(crate) fn attempt_reason(url: &str, error: &Error) -> String {
     match error {
-        Error::Io { path, source, .. } if path.as_os_str() == url => with_causes(source),
+        Error::Io { path, source, .. } if path.as_os_str() == &*without_credentials(url) => {
+            with_causes(source)
+        }
         other => with_causes(other),
     }
 }
@@ -271,6 +311,48 @@ mod tests {
 
     /// A rejection has to say the system was left alone. Otherwise the user's next move is to
     /// panic about a half-updated database that does not exist.
+    /// A server URL loses its user information and keeps everything else, as `curl_gethost`
+    /// drops it.
+    #[test]
+    fn a_url_loses_its_credentials() {
+        assert_eq!(
+            without_credentials("https://user:secret@mirror.example:8443/core/os/x86_64/core.db"),
+            "https://mirror.example:8443/core/os/x86_64/core.db"
+        );
+        // The host follows the last `@`, as the loopback test reads it.
+        assert_eq!(
+            without_credentials("https://a@b:c@mirror.example/x"),
+            "https://mirror.example/x"
+        );
+        assert_eq!(without_credentials("https://mirror.example/x@y"), "https://mirror.example/x@y");
+    }
+
+    /// Every URL in a message loses its credentials, and the text around them stays.
+    #[test]
+    fn every_url_in_a_message_loses_its_credentials() {
+        assert_eq!(
+            without_credentials(
+                "error sending request for url (https://u:p@a.example/core.db): \
+                 redirected to 'https://v:q@b.example/core.db'"
+            ),
+            "error sending request for url (https://a.example/core.db): \
+             redirected to 'https://b.example/core.db'"
+        );
+        assert_eq!(without_credentials("connection reset by peer"), "connection reset by peer");
+    }
+
+    /// An attempt about its own URL keeps only the causes once the path lost its credentials.
+    #[test]
+    fn attempt_reason_matches_the_url_without_its_credentials() {
+        let url = "https://user:secret@a.example/core.db";
+        let error = Error::Io {
+            path: without_credentials(url).as_ref().into(),
+            action: "download",
+            source: std::io::Error::other("unexpected HTTP status 404"),
+        };
+        assert_eq!(attempt_reason(url, &error), "unexpected HTTP status 404");
+    }
+
     #[test]
     fn a_rejection_says_the_existing_database_is_intact() {
         let error = Error::SignatureRejected {

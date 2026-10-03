@@ -92,8 +92,8 @@ fn max_hook_bytes() -> u64 {
     piko_db::Limits::default().get(piko_db::Limit::Hook)
 }
 
-/// Something wrong with one hook file. Every variant but [`Problem::Warning`] stopped it being
-/// used.
+/// Something wrong with one hook file, or with a whole phase of hooks. Every variant but
+/// [`Problem::Warning`] stopped a hook being used.
 ///
 /// Returned, not logged, like every other diagnostic in the workspace. libalpm makes a parse
 /// failure fatal for `PreTransaction` and merely noisy for `PostTransaction` (`hook.c:625`).
@@ -138,6 +138,14 @@ pub enum Problem {
     /// A `.hook` file did not parse.
     #[error("{0}")]
     Invalid(#[from] ParseError),
+    /// The `PostTransaction` hooks could not be run at all, for example because the local
+    /// database their `Depends` are read from could not be opened. Every step already
+    /// completed, so this is reported rather than failing the transaction.
+    #[error("could not run the PostTransaction hooks: {reason}")]
+    PostTransactionNotRun {
+        /// Why they could not be run.
+        reason: String,
+    },
     /// A `.hook` file parsed, and is used, but holds something libalpm warns about. See
     /// [`Hook::warnings`].
     #[error("hook {}: {reason}", path.display())]

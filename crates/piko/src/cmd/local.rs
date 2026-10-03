@@ -110,11 +110,17 @@ pub fn info(
     emit!(out, "{} {}", info_label("Description     :"), escaped(desc.description()));
     emit!(out, "{} {}", info_label("Architecture    :"), escaped(desc.architecture()));
     emit!(out, "{} {url}", info_label("URL             :"));
-    field_list!(out, "Licenses        :", desc.licenses(), 5);
+    match desc.licenses() {
+        Ok(licenses) => field_list!(out, "Licenses        :", licenses, 5),
+        Err(_) => field_list!(out, "Licenses        :", &desc.section_values("LICENSE"), 5),
+    }
     field_list!(out, "Groups          :", desc.groups(), 5);
     field_list!(out, "Provides        :", desc.provides(), 5);
     field_list!(out, "Depends On      :", desc.depends(), 5);
-    field_list!(out, "Optional Deps   :", desc.optional_depends(), 1);
+    match desc.optional_depends() {
+        Ok(optional) => field_list!(out, "Optional Deps   :", optional, 1),
+        Err(_) => field_list!(out, "Optional Deps   :", &desc.section_values("OPTDEPENDS"), 1),
+    }
     field_list!(out, "Required By     :", &dependents.required_by, 5);
     field_list!(out, "Optional For    :", &dependents.optional_for, 5);
     field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
@@ -126,8 +132,12 @@ pub fn info(
         info_label("Packager        :"),
         escaped(desc.packager_raw().unwrap_or_default())
     );
-    emit!(out, "{} {}", info_label("Build Date      :"), human_date(desc.build_date(), offset));
-    emit!(out, "{} {}", info_label("Install Date    :"), human_date(desc.install_date(), offset));
+    let date = |typed: Result<i64, _>, keyword| match typed {
+        Ok(timestamp) => human_date(timestamp, offset),
+        Err(_) => escaped(desc.section_values(keyword).join(" ")),
+    };
+    emit!(out, "{} {}", info_label("Build Date      :"), date(desc.build_date(), "BUILDDATE"));
+    emit!(out, "{} {}", info_label("Install Date    :"), date(desc.install_date(), "INSTALLDATE"));
     emit!(
         out,
         "{} {}",
@@ -135,7 +145,23 @@ pub fn info(
         styled_install_reason(desc.install_reason())
     );
     emit!(out, "{} {}", info_label("Install Script  :"), yes_no(package.has_install_scriptlet()));
-    emit!(out, "{} {}", info_label("Validated By    :"), styled_validation(desc.validation()));
+    let validation = match desc.validation() {
+        Ok(validation) => styled_validation(validation),
+        Err(_) => console::Style::new()
+            .dim()
+            .apply_to(escaped(desc.section_values("VALIDATION").join(" "))),
+    };
+    emit!(out, "{} {}", info_label("Validated By    :"), validation);
+    // A field shown as written above is named on stderr, so stdout stays what pacman prints.
+    for reason in desc.invalid_fields() {
+        crate::output::warn(format!("{}: {reason}", package.name()));
+    }
+    for unread in &dependents.unread {
+        crate::output::warn(format!(
+            "Optional For may be incomplete: {}: {}",
+            unread.package, unread.reason
+        ));
+    }
 
     ExitCode::SUCCESS
 }

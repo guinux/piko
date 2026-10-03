@@ -648,12 +648,6 @@ impl PackageSource for PlanSource {
 /// The prefix of the staging directory a [`FileSource`] creates under a cache directory.
 pub const STAGING_PREFIX: &str = "piko-staging.";
 
-/// The largest `.sig` a [`FileSource`] copies.
-///
-/// A detached signature is a few hundred bytes. The download path refuses a larger one at the
-/// same bound.
-const MAX_SIGNATURE_BYTES: u64 = 1024 * 1024;
-
 impl FileSource {
     /// Wraps `inner`, serving `files` — keyed by the name each one is addressed by — ahead of
     /// it. Copies of `files` are staged under `staging_parent`, which should be the directory
@@ -722,7 +716,8 @@ impl Named {
                 copy_bounded(
                     &signature,
                     &piko_sig::signature_path(&staged),
-                    MAX_SIGNATURE_BYTES,
+                    // The download path refuses a larger one at the same bound.
+                    piko_sig::MAX_SIGNATURE_BYTES,
                     "signature size",
                 )?;
             }

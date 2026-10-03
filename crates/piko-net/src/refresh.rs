@@ -14,7 +14,7 @@ use piko_sig::{Checked, Keyring, Policy, Verdict};
 use crate::{
     cancel::Cancel,
     concurrency::Concurrency,
-    error::{Error, Result, attempt_reason, with_causes},
+    error::{Error, Result, attempt_reason, with_causes, without_credentials},
     freshness::{Baseline, FreshnessNote, FreshnessPolicy, Refreshed},
     health::{self, Health},
     pool,
@@ -79,10 +79,10 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        // `extra.files` is ~50 MB on a current Arch mirror. 512 MB is far above any real
-        // database and far below anything that would fill a disk unnoticed.
+        // `extra.files` is ~50 MB on a current Arch mirror. 128 MiB is libalpm's own bound for
+        // a database (`be_sync.c:213`): above any real database, and no looser than pacman.
         Self {
-            max_bytes: 512 * 1024 * 1024,
+            max_bytes: 128 * 1024 * 1024,
             max_package_bytes: 8 * 1024 * 1024 * 1024,
             timeout: Duration::from_secs(60),
             freshness_probes: 3,
@@ -562,7 +562,8 @@ impl Refresher {
             tried = tried.saturating_add(1);
             let url = format!("{}/{name}", server.trim_end_matches('/'));
             if self.health.skips(server) {
-                attempts.push((url, health::skipped_reason(server)));
+                attempts
+                    .push((without_credentials(&url).into_owned(), health::skipped_reason(server)));
                 continue;
             }
             match self.attempt(&url, &attempt, force, &mut baseline)? {
@@ -578,7 +579,7 @@ impl Refresher {
                 Step::PassedOver(note) => notes.push(note),
                 Step::Failed(reason) => {
                     self.report_failure(server, progress);
-                    attempts.push((url, reason));
+                    attempts.push((without_credentials(&url).into_owned(), reason));
                 }
             }
         }
@@ -701,7 +702,7 @@ impl Refresher {
             Ok(Fetched::NotModified) => return Ok(Step::Current),
             Ok(Fetched::Behind { last_modified }) => {
                 return Ok(Step::PassedOver(FreshnessNote::Behind {
-                    server: url.to_owned(),
+                    server: without_credentials(url).into_owned(),
                     last_modified,
                 }));
             }
@@ -758,14 +759,14 @@ impl Refresher {
             None
         } else if accept_older {
             Some(FreshnessNote::AcceptedOlder {
-                server: url.to_owned(),
+                server: without_credentials(url).into_owned(),
                 candidate,
                 replaced: installed,
             })
         } else {
             // Both temporaries drop here, unlinked, and the destination never changed.
             return Ok(Step::PassedOver(FreshnessNote::RefusedOlder {
-                server: url.to_owned(),
+                server: without_credentials(url).into_owned(),
                 candidate,
                 installed,
                 comparison,
@@ -806,7 +807,7 @@ impl Refresher {
             Err(Failure::Sandbox(reason)) => return Err(Error::Sandbox { reason }),
             Err(Failure::Request(reason)) => {
                 return Err(Error::Io {
-                    path: PathBuf::from(url),
+                    path: PathBuf::from(&*without_credentials(url)),
                     action: "download",
                     source: std::io::Error::other(reason),
                 });
@@ -825,7 +826,7 @@ impl Refresher {
             304 => return Ok(Fetched::NotModified),
             other => {
                 return Err(Error::Io {
-                    path: PathBuf::from(url),
+                    path: PathBuf::from(&*without_credentials(url)),
                     action: "download",
                     source: std::io::Error::other(format!("unexpected HTTP status {other}")),
                 });
@@ -909,6 +910,7 @@ impl Refresher {
             return Ok(Signature::NotRequested);
         }
         let url = format!("{file_url}.sig");
+        let shown = without_credentials(&url);
         if cancel.is_requested() {
             return Err(Error::Cancelled);
         }
@@ -922,7 +924,7 @@ impl Refresher {
             Err(Failure::Request(reason)) => {
                 return Err(Error::SignatureUncheckable {
                     file: name.to_owned(),
-                    reason: format!("could not fetch {url}: {reason}"),
+                    reason: format!("could not fetch {shown}: {reason}"),
                 });
             }
         };
@@ -941,7 +943,7 @@ impl Refresher {
             status => {
                 return Err(Error::SignatureUncheckable {
                     file: name.to_owned(),
-                    reason: format!("{url} answered HTTP {status} rather than 200"),
+                    reason: format!("{shown} answered HTTP {status} rather than 200"),
                 });
             }
         }
@@ -955,7 +957,7 @@ impl Refresher {
         let written = stream_bounded(
             &mut reader,
             &mut file,
-            Bound::Limit(1024 * 1024),
+            Bound::Limit(piko_sig::MAX_SIGNATURE_BYTES),
             name,
             cancel,
             |bytes| {
@@ -967,7 +969,7 @@ impl Refresher {
         if written == 0 {
             return Err(Error::SignatureUncheckable {
                 file: name.to_owned(),
-                reason: format!("{url} returned an empty signature"),
+                reason: format!("{shown} returned an empty signature"),
             });
         }
         progress(Event::Downloaded { file: name.to_owned(), kind: Kind::Signature });
@@ -1127,7 +1129,8 @@ impl Refresher {
         for server in concurrency.servers_for(servers, worker) {
             let url = format!("{}/{name}", server.trim_end_matches('/'));
             if self.health.skips(server) {
-                attempts.push((url, health::skipped_reason(server)));
+                attempts
+                    .push((without_credentials(&url).into_owned(), health::skipped_reason(server)));
                 continue;
             }
             match self.fetch(
@@ -1149,7 +1152,7 @@ impl Refresher {
                 Ok(Fetched::NotModified | Fetched::Behind { .. }) => {
                     failed(server);
                     attempts.push((
-                        url,
+                        without_credentials(&url).into_owned(),
                         "the server answered \"not modified\" to an unconditional request"
                             .to_owned(),
                     ));
@@ -1173,7 +1176,7 @@ impl Refresher {
                         Err(error) => {
                             failed(server);
                             let reason = attempt_reason(&url, &error);
-                            attempts.push((url, reason));
+                            attempts.push((without_credentials(&url).into_owned(), reason));
                             continue;
                         }
                     };
@@ -1193,7 +1196,7 @@ impl Refresher {
                 Err(error) => {
                     failed(server);
                     let reason = attempt_reason(&url, &error);
-                    attempts.push((url, reason));
+                    attempts.push((without_credentials(&url).into_owned(), reason));
                 }
             }
         }

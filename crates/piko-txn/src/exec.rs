@@ -48,6 +48,15 @@ use crate::error::{Error, IoAction, Result};
 /// privileged one gains nothing that `chroot(8)` does not already give them.
 pub const HELPER_ARG: &str = "__exec-in-root";
 
+/// The executable the helper is started from: the running program itself.
+///
+/// Not the path `std::env::current_exe` reads out of this link. A transaction can replace that
+/// path, when it upgrades or removes the package that ships piko. The path then names another
+/// program, or nothing: the kernel spells a replaced file `<path> (deleted)`. Every scriptlet and
+/// hook after that step would fail to start. Opened by the link, the helper is always the
+/// program that is running, which is also the one that speaks this module's protocol.
+const SELF_EXE: &str = "/proc/self/exe";
+
 /// The umask a scriptlet or hook runs under.
 ///
 /// libalpm sets exactly this in the child before `execv` (`util.c:695`). Without it, a command
@@ -147,7 +156,7 @@ impl Command {
 pub struct Runner {
     /// The root to enter, exactly as it will be handed to the helper.
     root: PathBuf,
-    /// piko's own executable, resolved once.
+    /// piko's own executable, `SELF_EXE`.
     helper: PathBuf,
 }
 
@@ -156,12 +165,14 @@ impl Runner {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if piko's own executable cannot be located — that executable is the
-    /// helper. This check runs here rather than at the first command on purpose. A transaction
-    /// that cannot run a scriptlet should find that out before it starts changing files.
+    /// [`Error::Io`] if piko's own executable cannot be reached through `/proc/self/exe` — that
+    /// executable is the helper. `/proc` that is not mounted is the usual cause. This check
+    /// runs here rather than at the first command on purpose. A transaction that cannot run a
+    /// scriptlet should find that out before it starts changing files.
     pub fn new(root: &Path) -> Result<Self> {
-        let helper = std::env::current_exe()
-            .map_err(|source| Error::io(Path::new("/proc/self/exe"), IoAction::Read, source))?;
+        let helper = PathBuf::from(SELF_EXE);
+        rustix::fs::access(&helper, rustix::fs::Access::EXEC_OK)
+            .map_err(|source| Error::io(&helper, IoAction::Read, source.into()))?;
         Ok(Self { root: root.to_path_buf(), helper })
     }
 

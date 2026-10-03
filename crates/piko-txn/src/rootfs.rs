@@ -351,6 +351,11 @@ impl Resolved {
         &self.dir
     }
 
+    /// The directory the final component lives in, taken out of the resolution.
+    pub(crate) fn into_dir(self) -> OwnedFd {
+        self.dir
+    }
+
     /// The final path component.
     #[must_use]
     pub fn name(&self) -> &OsStr {

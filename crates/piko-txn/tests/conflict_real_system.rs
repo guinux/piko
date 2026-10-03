@@ -155,13 +155,13 @@ fn a_file_offered_under_the_wrong_name_is_caught_and_the_owner_matches_pacman() 
     let mut probes: Vec<(String, String)> = Vec::new();
     for package in local.iter().take(400) {
         let Ok(files) = package.file_list() else { continue };
-        let Some(file) = files.iter().find(|path| {
-            let text = path.to_string_lossy();
-            !text.ends_with('/') && Path::new(ROOT).join(&**path).is_file()
-        }) else {
+        let Some(file) = files
+            .into_iter()
+            .find(|path| !path.ends_with('/') && Path::new(ROOT).join(path).is_file())
+        else {
             continue;
         };
-        probes.push((package.name().to_string(), file.to_string_lossy().into_owned()));
+        probes.push((package.name().to_string(), file.to_owned()));
         if probes.len() == 25 {
             break;
         }

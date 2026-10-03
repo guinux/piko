@@ -12,7 +12,6 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-alpm-pkginfo.workspace = true
 alpm-types.workspace = true
 # `%PGPSIG%`, which a repository database spells in base64.
 base64.workspace = true
@@ -33,6 +32,10 @@ thiserror.workspace = true
 time.workspace = true
 
 [dev-dependencies]
+# The parser piko's own `.PKGINFO` reader replaces. Only `pkginfo_real_system.rs` reads it, as
+# an oracle.
+alpm-pkginfo.workspace = true
+proptest.workspace = true
 # The local-database side of conflict detection needs a database to ask, and `DbFixture`
 # builds throwaway ones. Tests use fixtures in a tempdir, never real system paths.
 piko-db = { workspace = true, features = ["fixture"] }

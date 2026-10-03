@@ -72,11 +72,10 @@ fn owned_regular_files(local: &LocalDatabase) -> Vec<String> {
         let Ok(files) = package.file_list() else { continue };
         let mut taken = 0;
         for path in files {
-            let text = path.to_string_lossy();
-            if text.ends_with('/') {
+            if path.ends_with('/') {
                 continue;
             }
-            let absolute = Path::new(ROOT).join(&**path);
+            let absolute = Path::new(ROOT).join(path);
             // `symlink_metadata`, because the lookup does not dereference the last component
             // either. A dangling symlink is still an owned entry and still a valid probe.
             if std::fs::symlink_metadata(&absolute).is_err() {

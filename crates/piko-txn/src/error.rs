@@ -530,12 +530,10 @@ pub enum Error {
         source: std::sync::Arc<piko_db::Error>,
     },
 
-    /// A package file was built for an architecture this machine is not configured to run.
+    /// A package was built for an architecture this machine is not configured to run.
     ///
     /// libalpm's `check_arch` (`trans.c:69`), which applies to every package a transaction
-    /// adds. It has nothing to say about a repository package, because a `Server` URL names
-    /// the architecture it serves. So piko raises it only for a file named on the command
-    /// line.
+    /// adds: a file named on the command line, and a repository package by its `%ARCH%`.
     #[error(
         "not built for {}: {}",
         configured.join(" or "),
@@ -570,7 +568,7 @@ pub enum Error {
     /// is not such a name has nothing to fetch.
     #[error("cannot fetch {url}: {}", said(reason))]
     InvalidPackageUrl {
-        /// The URL as the user wrote it.
+        /// The URL as the user wrote it, without the user information in front of its host.
         url: String,
         /// Why it cannot be used.
         reason: String,
@@ -583,7 +581,7 @@ pub enum Error {
     /// preview, cannot read a package it would first have to download.
     #[error("cannot read {} without downloading it", said(url))]
     UrlNotLoaded {
-        /// The URL as the user wrote it.
+        /// The URL as the user wrote it, without the user information in front of its host.
         url: String,
     },
 

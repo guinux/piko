@@ -8,7 +8,7 @@ use std::io::Read;
 
 use crate::{
     cancel::Cancel,
-    error::printable,
+    error::{printable, without_credentials},
     sandbox::{Failure, Fetch, Sandbox, Timeouts, protocol::Header},
 };
 
@@ -39,9 +39,12 @@ impl Read for Body {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         match self {
             // ureq's own messages can quote a header the server sent.
-            Self::Direct(reader) => reader
-                .read(buffer)
-                .map_err(|error| std::io::Error::new(error.kind(), printable(&error.to_string()))),
+            Self::Direct(reader) => reader.read(buffer).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    printable(&without_credentials(&error.to_string())),
+                )
+            }),
             Self::Sandboxed(fetch) => fetch.read(buffer),
         }
     }
@@ -64,14 +67,14 @@ impl Transport {
             return Err(Failure::Request(format!(
                 "refusing {}: piko downloads over https only, or over http from this machine's \
                  loopback",
-                printable(url)
+                printable(&without_credentials(url))
             )));
         }
         match self {
             Self::Direct(agent) => {
-                let response = request(agent, url, if_modified_since)
-                    .call()
-                    .map_err(|error| Failure::Request(printable(&error.to_string())))?;
+                let response = request(agent, url, if_modified_since).call().map_err(|error| {
+                    Failure::Request(printable(&without_credentials(&error.to_string())))
+                })?;
                 let Header { status, last_modified, content_length } = header(&response);
                 let body = Body::Direct(response.into_body().into_reader());
                 Ok(Response { status, last_modified, content_length, body })
@@ -80,7 +83,14 @@ impl Transport {
                 let fetched = sandbox
                     .fetch(url, if_modified_since, *timeouts, cancel)
                     .ok_or_else(|| Failure::Sandbox("the sandbox is disabled".to_owned()))?;
-                let (header, fetch) = fetched?;
+                // The helper's own messages lose their credentials where they are read, in
+                // `protocol`. This covers what the parent says about the helper.
+                let (header, fetch) = fetched.map_err(|failure| match failure {
+                    Failure::Request(reason) => {
+                        Failure::Request(without_credentials(&reason).into_owned())
+                    }
+                    other @ Failure::Sandbox(_) => other,
+                })?;
                 let Header { status, last_modified, content_length } = header;
                 Ok(Response { status, last_modified, content_length, body: Body::Sandboxed(fetch) })
             }

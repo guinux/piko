@@ -238,6 +238,28 @@ fn an_oversized_body_is_refused() {
     drop(server.join());
 }
 
+/// A signature is bounded at libalpm's 16 KiB (`dload.c:667`). One byte more is refused, and
+/// the package that came with it does not reach the cache either.
+#[test]
+fn a_signature_past_sixteen_kib_is_refused() {
+    let bound = usize::try_from(piko_sig::MAX_SIGNATURE_BYTES).unwrap();
+    assert_eq!(bound, 16 * 1024);
+
+    let dir = tempfile::tempdir().unwrap();
+    let (url, server) =
+        serve(vec![ok_response(b"a real package"), ok_response(&vec![0_u8; bound + 1])]);
+    let error = fetch(dir.path(), &url, required()).unwrap_err();
+    assert!(error.to_string().contains("16384 byte download limit"), "{error}");
+    assert!(!dir.path().join(NAME).exists(), "the package was kept without its signature");
+    drop(server.join());
+
+    let (url, server) =
+        serve(vec![ok_response(b"a real package"), ok_response(&vec![0_u8; bound])]);
+    let path = fetch(dir.path(), &url, required()).unwrap();
+    assert_eq!(std::fs::metadata(piko_sig::signature_path(&path)).unwrap().len(), 16 * 1024);
+    drop(server.join());
+}
+
 /// A package is bounded by the `%CSIZE%` its repository declares, well below the ceiling. A
 /// mirror that sends more is refused while it sends, and nothing reaches the cache.
 #[test]
@@ -287,6 +309,32 @@ fn a_cancelled_download_leaves_nothing_behind() {
     assert!(error.to_string().contains("cancelled"), "{error}");
     assert!(!dir.path().join(NAME).exists(), "a cancelled download left a file behind");
     assert!(!server.is_finished(), "the server should still be waiting for a call that never came");
+}
+
+/// A password in a server URL is sent, and never reported. libalpm names a server by its host
+/// alone (`curl_gethost`, `dload.c:307`).
+#[test]
+fn a_server_password_is_sent_and_never_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_error = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec();
+    let (url, server) = serve(vec![not_found(), ok_response(b"a real package"), server_error]);
+    let with_password = url.replace("http://", "http://user:secret@");
+
+    // The package itself fails.
+    let error = fetch(dir.path(), &with_password, unsigned()).unwrap_err();
+    let text = format!("{error} {error:?}");
+    assert!(!text.contains("secret"), "{text}");
+    assert!(text.contains(&format!("{url}/{NAME}")), "{text}");
+
+    // The package downloads and its signature fails.
+    let error = fetch(dir.path(), &with_password, required()).unwrap_err();
+    let text = format!("{error} {error:?}");
+    assert!(!text.contains("secret"), "{text}");
+    assert!(text.contains(&format!("{url}/{NAME}.sig answered HTTP 500")), "{text}");
+
+    let seen = server.join().unwrap();
+    // `user:secret`, as HTTP basic authentication spells it.
+    assert!(seen.iter().all(|request| request.contains("dXNlcjpzZWNyZXQ=")), "{seen:?}");
 }
 
 /// Ends a `serve` thread still waiting for a connection, and returns what it saw. A request

@@ -33,7 +33,7 @@ fn searchable_from(package: &RepoPackage) -> Searchable {
         provides: Searchable::provide_names(package.provides()),
         description: package
             .desc()
-            .map(|desc| desc.description().as_ref().to_lowercase())
+            .map(|desc| desc.description().to_lowercase())
             .unwrap_or_default(),
         groups: package.groups().iter().map(|group| group.to_lowercase()).collect(),
     }
@@ -43,6 +43,8 @@ fn searchable_from(package: &RepoPackage) -> Searchable {
 #[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use std::sync::Arc;
+
+    use crate::UnknownSectionPolicy;
 
     use super::{
         super::{eager, package::FilesSource, repo_name::RepoName},
@@ -60,10 +62,10 @@ mod tests {
     /// honest about which accessor is free and which one loads.
     fn package(name: &str, desc_text: &str) -> RepoPackage {
         let entry = EntryName::parse(&format!("{name}-1.0.0-1")).unwrap();
-        let eager = eager::parse(desc_text, &mut RelationBudget::new(usize::MAX)).unwrap();
+        let (eager, _) = eager::parse(desc_text, &mut RelationBudget::new(usize::MAX)).unwrap();
         let files =
             Arc::new(FilesSource::unavailable(RepoName::parse("test").unwrap(), Limits::default()));
-        RepoPackage::new(entry, eager, desc_text.into(), files)
+        RepoPackage::new(entry, eager, desc_text.into(), UnknownSectionPolicy::default(), files)
     }
 
     /// Scores one package against one query, the way [`combined_match`] would.

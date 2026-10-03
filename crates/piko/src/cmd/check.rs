@@ -223,6 +223,17 @@ fn check(
         }
     }
 
+    // An unreadable `files` is left to `verify_files` below, which reads it too and reports it.
+    if let Ok(files) = package.files() {
+        for defect in files.defects() {
+            emit!(out, "{}: {}", package.name(), crate::output::escaped(defect));
+            failed = true;
+        }
+        if files.defects_dropped() > 0 {
+            emit!(out, "{}: {} further files defect(s)", package.name(), files.defects_dropped());
+        }
+    }
+
     match package.verify_files(root, no_extract) {
         Ok(None) => emit!(out, "{}: no mtree file", package.name()),
         Ok(Some(file_report)) => {
@@ -253,4 +264,33 @@ fn check(
     }
 
     if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+mod tests {
+    use super::*;
+
+    /// A `files` defect that does not refuse the file is named, and fails the check.
+    #[test]
+    fn a_files_defect_is_named() {
+        let db = piko_db::fixture::DbFixture::new();
+        db.package("foo-1.0.0-1")
+            .desc(piko_db::fixture::MINIMAL_DESC_V1)
+            .files("%FILES%\nusr/bin/foo\n\n")
+            .build();
+        let local = piko_db::LocalDatabase::open(db.path()).unwrap();
+        let package = local.get_str("foo").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        let code = check(package, root.path(), &[], &mut out, &mut err);
+        let out = String::from_utf8(out).unwrap();
+
+        assert_eq!(code, ExitCode::FAILURE, "{out}");
+        assert!(
+            out.contains("foo: %FILES%: the parent directory of usr/bin/foo is not listed"),
+            "{out}"
+        );
+    }
 }

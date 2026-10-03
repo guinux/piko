@@ -22,15 +22,14 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    str::FromStr as _,
 };
 
-use alpm_pkginfo::PackageInfo;
 use alpm_types::{PackageFileName, PackageInstallReason, PackageValidation};
 use piko_db::LocalDatabase;
 use piko_db_write::{Record, RecordKind};
 use piko_txn::{
     extract::{MemberKind, PackageLimits, archive},
+    pkginfo::PkgInfo,
     record::{self, InstallFacts},
 };
 
@@ -69,8 +68,8 @@ fn installed_and_cached(limit: usize) -> Option<Vec<(PathBuf, String)>> {
     Some(found.into_iter().map(|(_, path, text)| (path, text)).take(limit).collect())
 }
 
-/// Reads a package's `.PKGINFO`, parsed and raw.
-fn pkginfo(archive_path: &Path) -> Option<(PackageInfo, String)> {
+/// Reads and parses a package's `.PKGINFO`.
+fn pkginfo(archive_path: &Path) -> Option<PkgInfo> {
     let mut raw = None;
     archive::walk(archive_path, &PackageLimits::default(), |member, contents| {
         if member.kind == MemberKind::Metadata && member.path == Path::new(".PKGINFO") {
@@ -81,9 +80,7 @@ fn pkginfo(archive_path: &Path) -> Option<(PackageInfo, String)> {
         Ok(())
     })
     .ok()?;
-    let raw = raw?;
-    let parsed = PackageInfo::from_str(&raw).ok()?;
-    Some((parsed, raw))
+    piko_txn::pkginfo::parse(&raw?).ok()
 }
 
 /// Every section piko builds must match what pacman recorded, field for field.
@@ -108,8 +105,8 @@ fn built_desc_matches_what_pacman_recorded() {
     let mut differing: BTreeMap<String, (usize, String)> = BTreeMap::new();
 
     for (archive_path, pacman_desc) in &packages {
-        let Some((info, raw)) = pkginfo(archive_path) else { continue };
-        let built = record::desc(&info, &raw, &facts).unwrap();
+        let Some(info) = pkginfo(archive_path) else { continue };
+        let built = record::desc(&info, &facts).unwrap();
         let theirs = Record::parse(RecordKind::Desc, pacman_desc).unwrap();
         checked += 1;
 

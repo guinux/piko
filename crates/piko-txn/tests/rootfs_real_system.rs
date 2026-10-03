@@ -41,7 +41,7 @@ fn all_installed_paths() -> Option<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for package in db.iter() {
         let Ok(list) = package.file_list() else { continue };
-        paths.extend(list.iter().cloned());
+        paths.extend(list.map(PathBuf::from));
     }
     Some(paths)
 }

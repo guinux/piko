@@ -411,15 +411,12 @@ mod tests {
         assert_eq!(code, ExitCode::FAILURE, "an installed-only group is not a repository group");
     }
 
-    /// A `%PACKAGER%` the typed parse refuses does not drop an explicit package from `-e`.
+    /// An `%ARCH%` the typed parse refuses does not drop an explicit package from `-e`.
     #[test]
     fn explicit_lists_a_package_only_the_typed_parse_refuses() {
         let db = piko_db::fixture::DbFixture::new();
-        let refused = piko_db::fixture::MINIMAL_DESC_V1.replacen(
-            "Foobar McFooface <foobar@mcfooface.org>",
-            "Some One <not-an-email>",
-            1,
-        );
+        let refused =
+            piko_db::fixture::MINIMAL_DESC_V1.replacen("%ARCH%\nx86_64", "%ARCH%\nnot an arch", 1);
         db.package("foo-1.0.0-1").desc(&refused).files(piko_db::fixture::MINIMAL_FILES).build();
         let local = LocalDatabase::open(db.path()).unwrap();
         assert!(local.iter().next().unwrap().desc().is_err(), "the fixture must be refused");

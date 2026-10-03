@@ -30,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alpm_pkginfo::PackageInfo;
+use crate::pkginfo::PkgInfo;
 use alpm_types::{PackageFileName, PackageInstallReason, PackageValidation};
 use piko_db::{EntryName, LocalDatabase, LocalPackage, resolve::PatternList};
 use piko_db_write::DbLock;
@@ -174,15 +174,17 @@ pub struct Planned {
 /// [`crate::TransactionPlan`], built from `pacman.conf`'s `SigLevel`. It cannot be set apart
 /// from that configuration: `SigLevel = Never` is how such a transaction checks nothing.
 ///
-/// [`Transaction::new`] defaults to [`Verification::Disabled`], for steps no solver planned.
-/// That keeps this crate usable without a keyring, and a chroot built from scratch has none.
-/// It also means such a caller installs unverified packages unless it calls
-/// [`Transaction::verification`]. libalpm starts at the same place: its handle is zeroed
-/// (`handle.c:46`), so nothing is checked until the frontend sets a `SigLevel`.
-#[derive(Debug, Default)]
+/// [`Transaction::new`], for steps no solver planned, takes one as an argument. It has no
+/// default: a caller that checks nothing writes [`Verification::Disabled`], and the choice is
+/// then in its code rather than in a default it never read. `Disabled` keeps this crate usable
+/// without a keyring, and a chroot built from scratch has none. libalpm's handle is zeroed
+/// instead (`handle.c:46`), so nothing is checked until the frontend sets a `SigLevel`.
+///
+/// Neither constructor lets a caller change the verification afterwards. A setter would also
+/// apply to [`Transaction::from_plan`], and remove the check its plan decided.
+#[derive(Debug)]
 pub enum Verification {
     /// Do not check signatures. `%VALIDATION%` will record `none`, truthfully.
-    #[default]
     Disabled,
     /// Check every package against `keyring`, under `policy`.
     Enabled {
@@ -329,11 +331,9 @@ struct Prepared {
     /// Its `.PKGINFO`, parsed.
     ///
     /// Parsed here rather than during the commit, and that placement is the point. A parse
-    /// after [`crate::install::install`] has run would fail the step on a `.PKGINFO`
-    /// `alpm-pkginfo` rejects. The package's payload would already be written into the root.
-    info: PackageInfo,
-    /// Its `.PKGINFO` text, verbatim, which [`record::desc`] needs as well as the parse.
-    raw: String,
+    /// after [`crate::install::install`] has run would fail the step on a `.PKGINFO` the
+    /// parser refuses. The package's payload would already be written into the root.
+    info: PkgInfo,
     /// What its validation checked.
     ///
     /// Carried rather than recomputed. This is what `%VALIDATION%` records. Re-deriving it at
@@ -501,6 +501,12 @@ pub struct Staged<'lock> {
     removals: Vec<Doomed>,
     skip_remove: std::collections::BTreeSet<PathBuf>,
     summary: hook::Summary,
+    /// The root every step writes into, opened before the journal.
+    root: RootDir,
+    /// What runs scriptlets and hooks. `None` when neither can run.
+    ///
+    /// Built before the journal, like `root`. A failure here leaves nothing behind.
+    runner: Option<Runner>,
     journal: Journal,
     /// Where this transaction records what it does. Opened with the journal, before the
     /// first mutation, so an unwritable `LogFile` is reported while nothing has changed.
@@ -577,22 +583,21 @@ impl Transaction<Planned> {
     #[must_use]
     pub fn from_plan(root: &Path, dbpath: &Path, plan: crate::plan::TransactionPlan) -> Self {
         let parts = plan.into_parts();
-        Self::new(root, dbpath, parts.steps)
-            .verification(parts.verification)
+        Self::new(root, dbpath, parts.steps, parts.verification)
             .policy_overrides(parts.policies)
             .expectations(parts.expectations)
             .published(parts.published)
     }
 
-    /// Plans `steps` against `root` and `dbpath`.
+    /// Plans `steps` against `root` and `dbpath`, checking signatures as `verification` says.
     ///
     /// For steps that no solver planned. `verify` then checks each archive's name and version
-    /// against its step, and its signature against the `.sig` beside it. It compares no other
-    /// field, and no `%SHA256SUM%` or `%PGPSIG%`, because nothing here says what they should be.
-    /// Signatures are not checked unless [`Transaction::verification`] is called. See
-    /// [`Verification`]. A caller with a solved plan uses [`Transaction::from_plan`].
+    /// against its step, and its signature against the `.sig` beside it, under
+    /// `verification`. It compares no other field, and no `%SHA256SUM%` or `%PGPSIG%`, because
+    /// nothing here says what they should be. [`Verification::Disabled`] checks no signature;
+    /// see [`Verification`]. A caller with a solved plan uses [`Transaction::from_plan`].
     #[must_use]
-    pub fn new(root: &Path, dbpath: &Path, steps: Vec<Step>) -> Self {
+    pub fn new(root: &Path, dbpath: &Path, steps: Vec<Step>, verification: Verification) -> Self {
         Self {
             root_path: root.to_path_buf(),
             dbpath: dbpath.to_path_buf(),
@@ -600,7 +605,7 @@ impl Transaction<Planned> {
             ownership: Ownership::FromArchive,
             overwrite: Overwrite::default(),
             walk_limits: WalkLimits::default(),
-            verification: Verification::Disabled,
+            verification,
             policy_overrides: HashMap::new(),
             expectations: HashMap::new(),
             published: HashMap::new(),
@@ -686,27 +691,17 @@ impl Transaction<Planned> {
         self
     }
 
-    /// Sets how package signatures are checked.
-    ///
-    /// On a [`Transaction::new`] without this, nothing is verified and `%VALIDATION%` records
-    /// `none`. See [`Verification`] for why that is the default there. A
-    /// [`Transaction::from_plan`] already holds the plan's own.
-    #[must_use]
-    pub fn verification(mut self, verification: Verification) -> Self {
-        self.verification = verification;
-        self
-    }
-
-    /// Overrides [`Transaction::verification`]'s policy for specific package files, keyed by
-    /// cache file name (matching [`crate::source::CacheDirSource`]'s own key — `PackageFileName`
-    /// has no `Hash` impl).
+    /// Overrides the verification's policy for specific package files, keyed by cache file
+    /// name (matching [`crate::source::CacheDirSource`]'s own key — `PackageFileName` has no
+    /// `Hash` impl).
     ///
     /// A repository's `SigLevel` can differ from another's, unlike a database's single value.
     /// So a package is checked against the policy that governs *its* repository, rather than
-    /// against one value for the whole transaction. `verification`'s own `policy` remains the
-    /// fallback for a file this map has no answer for.
+    /// against one value for the whole transaction. The verification's own `policy` remains the
+    /// fallback for a file this map has no answer for. [`Transaction::from_plan`] sets it from
+    /// the plan. It is not public, for the reason [`Verification`] gives.
     #[must_use]
-    pub fn policy_overrides(mut self, overrides: HashMap<String, Policy>) -> Self {
+    pub(crate) fn policy_overrides(mut self, overrides: HashMap<String, Policy>) -> Self {
         self.policy_overrides = overrides;
         self
     }
@@ -768,7 +763,8 @@ impl Transaction<Planned> {
     ///
     /// [`Transaction::commit_with_progress`] reads it once per step, before that step starts.
     /// The step already running therefore finishes. The commit then stops with the same error
-    /// and leaves the journal in place. The journal names what was applied.
+    /// and leaves the journal in place. The journal names what was applied. A stop before the
+    /// first step applied nothing, and removes the journal instead.
     ///
     /// This is the same flag a download reads, so one Ctrl+C covers every phase. Each read
     /// sits on a boundary. A flag raised inside one long extraction waits for that
@@ -1177,7 +1173,7 @@ fn matches_plan(
     planned: &PackageFileName,
     expected: Option<&Expected>,
     path: &Path,
-    info: &PackageInfo,
+    info: &PkgInfo,
 ) -> Result<()> {
     let (name, version) = crate::pkginfo::name_and_version(info);
     if name != planned.name() || version != planned.version() {
@@ -1243,7 +1239,7 @@ pub(crate) fn discard(
 /// Asked during [`Transaction::verify`], for the same reason the `.PKGINFO` is parsed there. A
 /// name and version that do not form an entry mean the package cannot be recorded. That has to
 /// be known before anything is written.
-fn entry_name(package: &Path, info: &PackageInfo) -> Result<EntryName> {
+fn entry_name(package: &Path, info: &PkgInfo) -> Result<EntryName> {
     let (name, version) = crate::pkginfo::name_and_version(info);
     EntryName::new(name, version).map_err(|error| Error::UnusableSource {
         path: package.to_path_buf(),
@@ -1290,24 +1286,19 @@ fn prepare(
     // near that size, on this read and on the extraction's.
     let limits =
         expected.map_or(limits, |expected| limits.with_declared_size(expected.installed_size()));
-    let conflict::LoadedPackage { target, info, raw, footprint } =
+    let conflict::LoadedPackage { target, info, footprint, .. } =
         conflict::load_package(&path, &limits).map_err(plain)?;
     self::matches_plan(package, expected, &path, &info).map_err(|refusal| (refusal, true))?;
     let entry = self::entry_name(&path, &info).map_err(plain)?;
     // Before anything is extracted: a value the entry format cannot hold refuses the package
     // here, rather than after its files are already in the root.
-    crate::record::check(
-        &info,
-        &raw,
-        target.files.iter(),
-        target.backups.iter().map(String::as_str),
-    )
-    .map_err(|error| {
-        plain(Error::UnusableSource {
-            path: path.clone(),
-            reason: format!("its entry cannot be recorded: {error}"),
-        })
-    })?;
+    crate::record::check(&info, target.files.iter(), target.backups.iter().map(String::as_str))
+        .map_err(|error| {
+            plain(Error::UnusableSource {
+                path: path.clone(),
+                reason: format!("its entry cannot be recorded: {error}"),
+            })
+        })?;
 
     // The installed package of the same name, looked up once and used five ways. It decides
     // `pre_install` against `pre_upgrade`. It supplies the scriptlet's `oldver` argument. It
@@ -1322,7 +1313,6 @@ fn prepare(
         version: target.version.clone(),
         entry,
         info,
-        raw,
         validation,
         limits,
         script: target.install_script.clone(),
@@ -1373,7 +1363,8 @@ fn installed_state(entry: &EntryName, package: &LocalPackage) -> Result<Supersed
             entry: entry.as_str().to_owned(),
             reason: format!("its file list is unreadable: {error}"),
         })?
-        .to_vec();
+        .map(PathBuf::from)
+        .collect();
     let backups = package
         .backups()
         .map_err(|error| Error::UnreadableEntry {
@@ -1381,7 +1372,11 @@ fn installed_state(entry: &EntryName, package: &LocalPackage) -> Result<Supersed
             reason: format!("its backup list is unreadable: {error}"),
         })?
         .iter()
-        .map(|backup| (backup.path.inner().to_path_buf(), backup.md5.to_string()))
+        // A `(null)` entry has no hash to compare against: it names a file the package does
+        // not ship. So it gives neither a `.pacsave` nor a `.pacnew` decision a baseline.
+        .filter_map(|backup| {
+            Some((backup.path.inner().to_path_buf(), backup.md5.as_ref()?.to_string()))
+        })
         .collect();
 
     Ok(Superseded { entry: entry.clone(), files, backups, shared_directories: BTreeSet::new() })
@@ -1443,12 +1438,11 @@ fn mark_shared_directories(
             continue;
         }
         let Ok(files) = package.file_list() else { continue };
-        for path in files {
-            let spelled = path.to_string_lossy();
-            let Some(indices) = wanted.get(spelled.as_ref()) else { continue };
+        for spelled in files {
+            let Some(indices) = wanted.get(spelled) else { continue };
             for &index in indices {
                 if names.get(index).is_some_and(|name| *name != owner) {
-                    let directory = spelled.strip_suffix('/').unwrap_or(&spelled);
+                    let directory = spelled.strip_suffix('/').unwrap_or(spelled);
                     shared.push((index, PathBuf::from(directory)));
                 }
             }
@@ -1515,6 +1509,21 @@ impl<'lock> Transaction<Verified<'lock>> {
         &self.state.space_problems
     }
 
+    /// What each package's `.PKGINFO` holds that the install reads past, by `pkgname`.
+    ///
+    /// A package with no problem is not listed. A problem here never refuses the package:
+    /// an invalid shown key is recorded as written, and an unknown key is not recorded.
+    /// libalpm warns about each unknown key as it loads a package.
+    #[must_use]
+    pub fn package_problems(&self) -> Vec<(&str, Vec<crate::pkginfo::Problem>)> {
+        self.state
+            .packages
+            .iter()
+            .map(|package| (package.name.as_str(), package.info.problems()))
+            .filter(|(_, problems)| !problems.is_empty())
+            .collect()
+    }
+
     /// Writes the journal under the lock `verify` was given, reaching the point of no return.
     ///
     /// The transaction's records are opened here too, beside the journal and for the same
@@ -1522,11 +1531,22 @@ impl<'lock> Transaction<Verified<'lock>> {
     /// Unlike the journal, a record that cannot be opened does not stop the transaction. See
     /// [`crate::history`].
     ///
+    /// The root and the exec helper are opened first, before the journal. A failure there is a
+    /// refusal with nothing changed, and must not leave a journal that reads as an interrupted
+    /// transaction. The exec helper is needed only when scriptlets or hooks can run.
+    ///
     /// # Errors
     ///
+    /// [`Error::Io`] if the root or the exec helper cannot be opened,
     /// [`Error::UnfinishedTransaction`] if a journal appeared since `verify` checked, and
     /// [`Error::Io`] if the journal cannot be written.
     pub fn stage(self) -> Result<Transaction<Staged<'lock>>> {
+        let root = RootDir::open(&self.root_path)?;
+        let runner = if self.scriptlets || !self.hook_dirs.is_empty() {
+            Some(Runner::new(&self.root_path)?)
+        } else {
+            None
+        };
         let intents: Vec<Intent> = self.state.steps.iter().map(Step::intent).collect();
         let journal = Journal::begin(&self.dbpath, &self.root_path, &intents)?;
         let recorder =
@@ -1538,6 +1558,8 @@ impl<'lock> Transaction<Verified<'lock>> {
             removals: verified.removals,
             skip_remove: verified.skip_remove,
             summary: verified.summary,
+            root,
+            runner,
             journal,
             recorder: Some(recorder),
             lock: verified.lock,
@@ -1628,35 +1650,36 @@ impl Transaction<Staged<'_>> {
     /// Split out of [`Staged::commit_with_progress`] so that its every `?` still passes
     /// through one place that writes the transaction's ending.
     fn apply(self, progress: &mut dyn FnMut(Event<'_>)) -> Result<Report> {
-        let root = RootDir::open(&self.root_path)?;
         let mut state = self.state;
+        let root = &state.root;
+        let runner = state.runner.as_ref();
         let mut report = Report::default();
         let mut next_package = 0_usize;
         let mut next_removal = 0_usize;
 
-        // Needed by scriptlets and hooks alike, and built even when neither will run. It only
-        // resolves piko's own executable. Doing this before the first mutation means it fails
-        // here rather than mid-transaction.
-        let runner = Runner::new(&self.root_path)?;
-
         // Runs before anything changes. A `PreTransaction` hook with `AbortOnFail` that fails
         // stops the transaction here, with the system still untouched. That is the whole reason
-        // the flag is `PreTransaction`-only.
-        let aborted = self::run_hooks(
-            &runner,
+        // the flag is `PreTransaction`-only. A hook that cannot be run at all stops it the same
+        // way.
+        let refusal = match self::run_hooks(
+            runner,
             &self.dbpath,
             &self.hook_dirs,
             When::PreTransaction,
             &state.summary,
             &mut report,
             progress,
-        )?;
-        if let Some(error) = aborted {
+        ) {
+            Ok(aborted) => aborted,
+            Err(error) => Some(error),
+        };
+        if let Some(error) = refusal {
             // The journal is removed. Nothing was applied, so leaving one behind would make a
             // refused transaction look like an interrupted one.
             state.journal.finish()?;
             return Err(error);
         }
+        let scriptlet_runner = if self.scriptlets { runner } else { None };
 
         let total = state.steps.len();
         let mut completed = 0_usize;
@@ -1667,7 +1690,14 @@ impl Transaction<Staged<'_>> {
             //
             // `PostTransaction` hooks are skipped by the early return. `alpm-hooks(5)`
             // requires that: they do not run when a transaction does not complete.
+            //
+            // A stop before the first step applied nothing, so the journal goes, as for a
+            // refusal. Kept, it would refuse the next transaction and ask for a reinstall of
+            // every target. The flag is often raised during a slow `PreTransaction` hook.
             if self.cancel.as_ref().is_some_and(piko_net::Cancel::is_requested) {
+                if completed == 0 {
+                    state.journal.finish()?;
+                }
                 return Err(Error::Cancelled { completed, total });
             }
             // Peeked, not consumed. `next_package` still advances only inside the
@@ -1693,7 +1723,7 @@ impl Transaction<Staged<'_>> {
                     let pacsaves_before = report.pacsaves.len();
                     let extraction = self::install_step(
                         &InstallStep {
-                            root: &root,
+                            root,
                             dbpath: &self.dbpath,
                             lock: state.lock,
                             package,
@@ -1701,7 +1731,7 @@ impl Transaction<Staged<'_>> {
                             ownership: self.ownership,
                             skip_remove: &state.skip_remove,
                             patterns: &self.patterns,
-                            runner: self.scriptlets.then_some(&runner),
+                            runner: scriptlet_runner,
                         },
                         &mut report,
                         progress,
@@ -1733,7 +1763,7 @@ impl Transaction<Staged<'_>> {
                     next_removal = next_removal.saturating_add(1);
                     let (touched, pacsaves) = self::remove_step(
                         &RemoveStep {
-                            root: &root,
+                            root,
                             dbpath: &self.dbpath,
                             lock: state.lock,
                             entry,
@@ -1741,7 +1771,7 @@ impl Transaction<Staged<'_>> {
                             no_save: *no_save,
                             skip_remove: &state.skip_remove,
                             patterns: &self.patterns,
-                            runner: self.scriptlets.then_some(&runner),
+                            runner: scriptlet_runner,
                         },
                         &mut report,
                         progress,
@@ -1762,15 +1792,23 @@ impl Transaction<Staged<'_>> {
         // fails to complete for any reason." So this runs after the loop. The `?`s above skip
         // it entirely.
         // `AbortOnFail` is meaningless here and is ignored, as in libalpm.
-        drop(self::run_hooks(
-            &runner,
+        //
+        // Every step is applied, so a phase that cannot run is reported, never returned.
+        // Returned, it would keep the journal and record a failure for a transaction that
+        // completed. `trans.c:238` ignores `_alpm_hook_run`'s result here too.
+        if let Err(error) = self::run_hooks(
+            runner,
             &self.dbpath,
             &self.hook_dirs,
             When::PostTransaction,
             &state.summary,
             &mut report,
             progress,
-        )?);
+        ) {
+            report
+                .hook_problems
+                .push(hook::Problem::PostTransactionNotRun { reason: error.to_string() });
+        }
 
         state.journal.finish()?;
         Ok(report)
@@ -1796,7 +1834,7 @@ impl Transaction<Staged<'_>> {
 /// the hook set once before the transaction would run a hook whose file and command were both
 /// just deleted.
 fn run_hooks(
-    runner: &Runner,
+    runner: Option<&Runner>,
     dbpath: &Path,
     hook_dirs: &[PathBuf],
     when: When,
@@ -1804,9 +1842,11 @@ fn run_hooks(
     report: &mut Report,
     progress: &mut dyn FnMut(Event<'_>),
 ) -> Result<Option<Error>> {
-    if hook_dirs.is_empty() {
+    // `stage` builds the runner whenever a hook directory is configured, so `None` means
+    // there is none.
+    let Some(runner) = runner.filter(|_| !hook_dirs.is_empty()) else {
         return Ok(None);
-    }
+    };
 
     let (hooks, problems) = Hooks::collect(hook_dirs);
     report.hook_problems.extend(problems);
@@ -1932,8 +1972,8 @@ mod tests {
         }
 
         add(&mut builder, ".PKGINFO", pkginfo(version, backups).as_bytes());
-        // A real package lists every parent directory it owns exactly once. `alpm-db`'s
-        // `files` reader requires both halves of that, so the fixture does too.
+        // A real package lists every parent directory it owns exactly once. The `files` reader
+        // requires both halves of that, so the fixture does too.
         let mut listed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for (path, contents) in payload {
             let mut prefix = String::new();
@@ -2009,7 +2049,7 @@ mod tests {
         };
 
         let lock = DbLock::acquire(db.path()).unwrap();
-        let report = Transaction::new(root.path(), db.path(), vec![step])
+        let report = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap()
@@ -2026,8 +2066,8 @@ mod tests {
         let package = local.get_str("foo").expect("the entry was not recorded");
         assert_eq!(package.version().to_string(), "1.0.0-1");
         assert_eq!(
-            package.file_list().unwrap(),
-            [PathBuf::from("usr/"), PathBuf::from("usr/bin/"), PathBuf::from("usr/bin/foo")]
+            package.file_list().unwrap().collect::<Vec<_>>(),
+            ["usr/", "usr/bin/", "usr/bin/foo"]
         );
 
         // And the journal is gone, so nothing looks interrupted.
@@ -2084,7 +2124,7 @@ mod tests {
         };
 
         let lock = DbLock::acquire(db.path()).unwrap();
-        Transaction::new(root.path(), db.path(), vec![step])
+        Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap()
@@ -2132,7 +2172,7 @@ mod tests {
 
         let mut announced = false;
         let lock = DbLock::acquire(db.path()).unwrap();
-        let verified = Transaction::new(root.path(), db.path(), vec![step])
+        let verified = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .check_space(true)
             .verify_with_progress(&lock, &source, &mut |event| {
@@ -2146,6 +2186,86 @@ mod tests {
 
         verified.stage().unwrap().commit().unwrap();
         assert!(root.path().join("usr/bin/foo").is_file());
+    }
+
+    /// A `.PKGINFO` with an invalid shown key and an unknown key installs, and `verify` names
+    /// both. A package with neither is not listed.
+    #[test]
+    fn package_problems_name_what_the_install_reads_past() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let raw = pkginfo("1.0.0-1", &[]).replace("builddate = 1733737242", "builddate = soon")
+            + "futurekey = 1\n";
+        let cache = cache_with_raw_pkginfo(name, &raw, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let verified = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
+            .ownership(Ownership::Inherit)
+            .verify(&lock, &source)
+            .unwrap();
+        let problems = verified.package_problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        let (package, found) = problems.first().unwrap();
+        assert_eq!(*package, "foo");
+        assert!(
+            matches!(
+                found.as_slice(),
+                [
+                    crate::pkginfo::Problem::InvalidField(_),
+                    crate::pkginfo::Problem::UnknownKey { .. }
+                ]
+            ),
+            "{found:?}"
+        );
+        drop(problems);
+
+        verified.stage().unwrap().commit().unwrap();
+        assert!(root.path().join("usr/bin/foo").is_file());
+    }
+
+    /// An entry whose `files` lists a file without its parent directories is still removed.
+    /// The file goes, and the directories it does not list stay, as libalpm leaves them.
+    #[test]
+    fn an_entry_without_its_parent_directories_is_removed() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let install = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+        Transaction::new(root.path(), db.path(), vec![install], Verification::Disabled)
+            .ownership(Ownership::Inherit)
+            .verify(&lock, &source)
+            .unwrap()
+            .stage()
+            .unwrap()
+            .commit()
+            .unwrap();
+        std::fs::write(db.path().join("local/foo-1.0.0-1/files"), "%FILES%\nusr/bin/foo\n\n")
+            .unwrap();
+
+        let removal =
+            Step::Remove { entry: EntryName::parse("foo-1.0.0-1").unwrap(), no_save: false };
+        Transaction::new(root.path(), db.path(), vec![removal], Verification::Disabled)
+            .verify(&lock, &source)
+            .unwrap()
+            .stage()
+            .unwrap()
+            .commit()
+            .unwrap();
+
+        assert!(!root.path().join("usr/bin/foo").exists());
+        assert!(root.path().join("usr/bin").is_dir(), "an unlisted directory is not the package's");
     }
 
     /// A transaction that installs nothing is not weighed, and says nothing about space.
@@ -2168,6 +2288,7 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .verify(&lock, &source)
@@ -2180,14 +2301,15 @@ mod tests {
         let mut announced = false;
         let removal =
             Step::Remove { entry: EntryName::parse("foo-1.0.0-1").unwrap(), no_save: false };
-        let verified = Transaction::new(root.path(), db.path(), vec![removal])
-            .check_space(true)
-            .verify_with_progress(&lock, &source, &mut |event| {
-                if matches!(event, VerifyEvent::DiskSpaceCheckStarted) {
-                    announced = true;
-                }
-            })
-            .unwrap();
+        let verified =
+            Transaction::new(root.path(), db.path(), vec![removal], Verification::Disabled)
+                .check_space(true)
+                .verify_with_progress(&lock, &source, &mut |event| {
+                    if matches!(event, VerifyEvent::DiskSpaceCheckStarted) {
+                        announced = true;
+                    }
+                })
+                .unwrap();
         assert!(!announced, "a removal-only transaction must not be weighed");
         assert!(verified.space_problems().is_empty());
     }
@@ -2227,6 +2349,7 @@ mod tests {
                 package: bar.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .verify(&lock, &source)
@@ -2244,7 +2367,7 @@ mod tests {
         // Raised from inside the commit, once the first step is over. This is the moment a
         // Ctrl+C lands in: a step has just been recorded, and the next has not started.
         let raise = cancel.clone();
-        let error = Transaction::new(root.path(), db.path(), steps)
+        let error = Transaction::new(root.path(), db.path(), steps, Verification::Disabled)
             .ownership(Ownership::Inherit)
             .cancel(cancel)
             .verify(&lock, &source)
@@ -2296,6 +2419,7 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .cancel(cancel)
@@ -2311,8 +2435,8 @@ mod tests {
     /// A flag raised after verification stops the commit before its first step.
     ///
     /// This is the one window verification's own reads cannot cover. The press lands after
-    /// verification's last read and before the first step. The journal exists by then, so it
-    /// stays behind.
+    /// verification's last read and before the first step. Nothing was applied, so the journal
+    /// `stage` wrote is removed, as for a refusal.
     #[test]
     fn a_commit_cancelled_before_its_first_step_applies_nothing() {
         let name = "foo-1.0.0-1-x86_64.pkg.tar";
@@ -2330,6 +2454,7 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .cancel(cancel.clone())
@@ -2341,8 +2466,7 @@ mod tests {
 
         assert!(matches!(error, Error::Cancelled { completed: 0, total: 1 }), "{error:?}");
         assert!(!root.path().join("usr/bin/foo").exists());
-        let record = crate::journal::read(db.path()).unwrap().expect("the journal was removed");
-        assert!(record.completed.is_empty());
+        assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was left");
     }
 
     /// Verification reads the local database, so it runs under that database's own lock. A lock
@@ -2361,7 +2485,7 @@ mod tests {
             package: name.parse().unwrap(),
             reason: PackageInstallReason::Explicit,
         };
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap_err();
@@ -2387,6 +2511,7 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .verify(&lock, &source)
@@ -2397,13 +2522,18 @@ mod tests {
         .unwrap();
 
         let entry = EntryName::parse("foo-1.0.0-1").unwrap();
-        Transaction::new(root.path(), db.path(), vec![Step::Remove { entry, no_save: false }])
-            .verify(&lock, &source)
-            .unwrap()
-            .stage()
-            .unwrap()
-            .commit()
-            .unwrap();
+        Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Remove { entry, no_save: false }],
+            Verification::Disabled,
+        )
+        .verify(&lock, &source)
+        .unwrap()
+        .stage()
+        .unwrap()
+        .commit()
+        .unwrap();
 
         assert!(!root.path().join("usr/bin/foo").exists());
         let local = LocalDatabase::open(db.path().join("local")).unwrap();
@@ -2428,6 +2558,7 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .verify(&lock, &source)
@@ -2442,6 +2573,7 @@ mod tests {
             root.path(),
             db.path(),
             vec![Step::Remove { entry: stale, no_save: false }],
+            Verification::Disabled,
         )
         .verify(&lock, &source) else {
             panic!("a stale removal must be refused");
@@ -2493,7 +2625,7 @@ mod tests {
     fn run_steps(cache: &Path, db: &Path, root: &Path, steps: Vec<Step>) -> Result<Report> {
         let source = CacheDirSource::new([cache.to_path_buf()]).unwrap();
         let lock = DbLock::acquire(db).unwrap();
-        Transaction::new(root, db, steps)
+        Transaction::new(root, db, steps, Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)?
             .stage()?
@@ -2706,6 +2838,7 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .verify(&lock, &source)
@@ -2723,10 +2856,14 @@ mod tests {
         std::fs::write(&files, text).unwrap();
 
         let entry = EntryName::parse("foo-1.0.0-1").unwrap();
-        let error =
-            Transaction::new(root.path(), db.path(), vec![Step::Remove { entry, no_save: false }])
-                .verify(&lock, &source)
-                .unwrap_err();
+        let error = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Remove { entry, no_save: false }],
+            Verification::Disabled,
+        )
+        .verify(&lock, &source)
+        .unwrap_err();
 
         // The reason names the file list, not the backup list, because one parse produced both.
         let Error::UnreadableEntry { ref reason, .. } = error else {
@@ -2768,7 +2905,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .verify(&lock, &source)
             .unwrap_err();
 
@@ -2801,7 +2938,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let planned = Transaction::new(root.path(), db.path(), vec![step]);
+        let planned = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled);
         assert!(planned.verify(&lock, &source).is_err());
         // No journal, because staging never happened.
         assert!(crate::journal::read(db.path()).unwrap().is_none());
@@ -2809,14 +2946,13 @@ mod tests {
 
     /// A `.PKGINFO` piko cannot record fails at `verify`, not half-way through the commit.
     ///
-    /// The parse must run before `install` extracts the payload. Otherwise a `packager` line
-    /// without an `<email>` fails the transaction too late. The package's file is already in the
+    /// The parse must run before `install` extracts the payload. Otherwise a `size` line that
+    /// is not a number fails the transaction too late. The package's file is already in the
     /// root by then, and the journal already on disk. The two assertions below pin exactly that.
     #[test]
     fn an_unrecordable_pkginfo_fails_before_the_root_is_touched() {
         let name = "foo-1.0.0-1-x86_64.pkg.tar";
-        let broken = pkginfo("1.0.0-1", &[])
-            .replace("packager = Foobar McFooface <foobar@mcfooface.org>", "packager = test");
+        let broken = pkginfo("1.0.0-1", &[]).replace("size = 123", "size = big");
         let cache = cache_with_raw_pkginfo(name, &broken, &[("usr/bin/foo", b"binary")]);
         let db = dbpath();
         let root = tempfile::tempdir().unwrap();
@@ -2827,7 +2963,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap_err();
@@ -2852,7 +2988,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap_err();
@@ -2922,7 +3058,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap_err();
@@ -2952,6 +3088,7 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .verify(&lock, &source)
         .unwrap()
@@ -2963,6 +3100,179 @@ mod tests {
 
         assert!(crate::journal::read(db.path()).unwrap().is_none());
         assert!(!root.path().join("usr/bin/foo").exists());
+    }
+
+    /// A root that cannot be opened is refused before the journal is written. Nothing changed,
+    /// so nothing may read as an interrupted transaction.
+    #[test]
+    fn a_root_that_cannot_be_opened_is_refused_before_the_journal() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let verified = Transaction::new(
+            &root,
+            db.path(),
+            vec![Step::Install {
+                package: name.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+            Verification::Disabled,
+        )
+        .verify(&lock, &source)
+        .unwrap();
+        std::fs::remove_dir(&root).unwrap();
+
+        let error = verified.stage().unwrap_err();
+        assert!(matches!(error, Error::Io { .. }), "got {error:?}");
+        assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was left");
+    }
+
+    /// A `PreTransaction` hook that cannot be run at all stops the transaction as a failing
+    /// `AbortOnFail` hook does: before the first step, and without a journal.
+    #[test]
+    fn a_pre_transaction_hook_that_cannot_run_leaves_no_journal() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let hooks = tempfile::tempdir().unwrap();
+        std::fs::write(
+            hooks.path().join("foo.hook"),
+            "[Trigger]\nOperation = Install\nType = Path\nTarget = usr/bin/foo\n\n\
+             [Action]\nWhen = PreTransaction\nExec = /bin/true\n",
+        )
+        .unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let staged = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Install {
+                package: name.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+            Verification::Disabled,
+        )
+        .ownership(Ownership::Inherit)
+        .hook_dirs(vec![hooks.path().to_path_buf()])
+        .verify(&lock, &source)
+        .unwrap()
+        .stage()
+        .unwrap();
+        // The hook's `Depends` is read from the local database, which is now unreadable.
+        std::fs::remove_dir_all(db.path().join("local")).unwrap();
+        std::fs::write(db.path().join("local"), b"").unwrap();
+
+        let error = staged.commit().unwrap_err();
+        assert!(matches!(error, Error::LocalDatabaseUnreadable { .. }), "got {error:?}");
+        assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was left");
+        assert!(!root.path().join("usr/bin/foo").exists(), "the step ran anyway");
+    }
+
+    /// A `PostTransaction` phase that cannot run is a problem on the report. Every step
+    /// completed, so the transaction succeeds and its journal is removed.
+    #[test]
+    fn a_post_transaction_hook_that_cannot_run_is_reported_and_the_transaction_completes() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = cache_with_package(name, &[("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let hooks = tempfile::tempdir().unwrap();
+        std::fs::write(
+            hooks.path().join("foo.hook"),
+            "[Trigger]\nOperation = Install\nType = Path\nTarget = usr/bin/foo\n\n\
+             [Action]\nWhen = PostTransaction\nExec = /bin/true\n",
+        )
+        .unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let staged = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Install {
+                package: name.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+            Verification::Disabled,
+        )
+        .ownership(Ownership::Inherit)
+        .hook_dirs(vec![hooks.path().to_path_buf()])
+        .verify(&lock, &source)
+        .unwrap()
+        .stage()
+        .unwrap();
+
+        // Once the step is done, the local database the hook's `Depends` is read from becomes
+        // unreadable.
+        let local = db.path().join("local");
+        let report = staged
+            .commit_with_progress(&mut |event| {
+                if matches!(event, Event::StepFinished { .. }) {
+                    std::fs::rename(&local, db.path().join("local.gone")).unwrap();
+                    std::fs::write(&local, b"").unwrap();
+                }
+            })
+            .unwrap();
+
+        assert!(root.path().join("usr/bin/foo").exists());
+        assert!(report.hooks.is_empty(), "{:?}", report.hooks);
+        assert!(
+            matches!(
+                report.hook_problems.as_slice(),
+                [hook::Problem::PostTransactionNotRun { .. }]
+            ),
+            "{:?}",
+            report.hook_problems
+        );
+        assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was left");
+    }
+
+    /// A scriptlet that cannot be staged does not stop the transaction half-way. Here the root's
+    /// `tmp` is a file. Both functions are reported as not started, and the package installs.
+    #[test]
+    fn a_scriptlet_that_cannot_be_staged_is_reported_and_the_transaction_completes() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let script: &[u8] = b"pre_install() { :; }\npost_install() { :; }\n";
+        let cache = cache_with_package(name, &[(".INSTALL", script), ("usr/bin/foo", b"binary")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("tmp"), b"").unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let report = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Install {
+                package: name.parse().unwrap(),
+                reason: PackageInstallReason::Explicit,
+            }],
+            Verification::Disabled,
+        )
+        .ownership(Ownership::Inherit)
+        .scriptlets(true)
+        .verify(&lock, &source)
+        .unwrap()
+        .stage()
+        .unwrap()
+        .commit()
+        .unwrap();
+
+        let kinds: Vec<_> = report.scriptlets.iter().map(|run| run.kind).collect();
+        assert_eq!(kinds, [scriptlet::Kind::PreInstall, scriptlet::Kind::PostInstall]);
+        for run in &report.scriptlets {
+            assert!(matches!(run.outcome.status, crate::exec::Status::NotStarted(_)), "{run:?}");
+        }
+        assert!(root.path().join("usr/bin/foo").exists());
+        assert!(crate::journal::read(db.path()).unwrap().is_none(), "a journal was left");
     }
 
     /// The check is wired in, and it stops the transaction at `verify`. That is before the
@@ -2995,7 +3305,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap_err();
@@ -3040,7 +3350,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        Transaction::new(root.path(), db.path(), vec![step])
+        Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .overwrite(Overwrite::new(|path| path == std::path::Path::new("usr/bin/tool")))
             .verify(&lock, &source)
@@ -3069,14 +3379,18 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
-            .ownership(Ownership::Inherit)
-            .verification(Verification::Enabled {
+        let error = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![step],
+            Verification::Enabled {
                 keyring: Keyring::open(keys.path()).unwrap(),
                 policy: Policy::for_package(piko_db::config::SigLevel::PACKAGE),
-            })
-            .verify(&lock, &source)
-            .unwrap_err();
+            },
+        )
+        .ownership(Ownership::Inherit)
+        .verify(&lock, &source)
+        .unwrap_err();
 
         assert!(matches!(error, Error::SignatureRejected { .. }), "got {error:?}");
         assert!(!root.path().join("usr/bin/foo").exists(), "nothing should have been written");
@@ -3111,7 +3425,7 @@ mod tests {
         };
 
         let lock = DbLock::acquire(db.path()).unwrap();
-        let verified = Transaction::new(root.path(), db.path(), vec![step])
+        let verified = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap();
@@ -3142,7 +3456,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap_err();
@@ -3181,7 +3495,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap_err();
@@ -3219,20 +3533,12 @@ mod tests {
         // What a repository entry with `%ISIZE% 124` and no `%DEPENDS%` would say.
         let planned = {
             let mut info = info.clone();
-            match &mut info {
-                PackageInfo::V1(v1) => {
-                    v1.size = 124;
-                    v1.depend.clear();
-                }
-                PackageInfo::V2(v2) => {
-                    v2.size = 124;
-                    v2.depend.clear();
-                }
-            }
+            info.size = 124;
+            info.depends.clear();
             Expected::of_archive(&info)
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step()])
+        let error = Transaction::new(root.path(), db.path(), vec![step()], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .expectations(HashMap::from([(name.to_owned(), planned)]))
             .verify(&lock, &source)
@@ -3246,7 +3552,7 @@ mod tests {
 
         // Put back, as a download would: the same archive under a matching expectation.
         std::fs::write(cache.path().join(name), &archive).unwrap();
-        Transaction::new(root.path(), db.path(), vec![step()])
+        Transaction::new(root.path(), db.path(), vec![step()], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .expectations(HashMap::from([(name.to_owned(), Expected::of_archive(&info))]))
             .verify(&lock, &source)
@@ -3285,6 +3591,7 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .expectations(HashMap::from([(name.to_owned(), Expected::of_archive(&info))]))
@@ -3316,7 +3623,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap_err();
@@ -3344,14 +3651,15 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Enabled {
+                keyring: Keyring::open(keys.path()).unwrap(),
+                policy: Policy::for_package(
+                    piko_db::config::SigLevel::PACKAGE
+                        | piko_db::config::SigLevel::PACKAGE_OPTIONAL,
+                ),
+            },
         )
         .ownership(Ownership::Inherit)
-        .verification(Verification::Enabled {
-            keyring: Keyring::open(keys.path()).unwrap(),
-            policy: Policy::for_package(
-                piko_db::config::SigLevel::PACKAGE | piko_db::config::SigLevel::PACKAGE_OPTIONAL,
-            ),
-        })
         .verify(&lock, &source)
         .unwrap()
         .stage()
@@ -3380,23 +3688,27 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
-            .ownership(Ownership::Inherit)
-            // The fallback would accept an unsigned package...
-            .verification(Verification::Enabled {
+        let error = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![step],
+            Verification::Enabled {
                 keyring: Keyring::open(keys.path()).unwrap(),
                 policy: Policy::for_package(
                     piko_db::config::SigLevel::PACKAGE
                         | piko_db::config::SigLevel::PACKAGE_OPTIONAL,
                 ),
-            })
-            // ...but this file's own override requires one.
-            .policy_overrides(HashMap::from([(
-                name.to_owned(),
-                Policy::for_package(piko_db::config::SigLevel::PACKAGE),
-            )]))
-            .verify(&lock, &source)
-            .unwrap_err();
+            },
+        )
+        .ownership(Ownership::Inherit)
+        // The fallback above would accept an unsigned package, but this file's own override
+        // requires one.
+        .policy_overrides(HashMap::from([(
+            name.to_owned(),
+            Policy::for_package(piko_db::config::SigLevel::PACKAGE),
+        )]))
+        .verify(&lock, &source)
+        .unwrap_err();
 
         assert!(matches!(error, Error::SignatureRejected { .. }), "got {error:?}");
     }
@@ -3411,6 +3723,7 @@ mod tests {
                 package: format!("foo-{version}-x86_64.pkg.tar").parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .verify(lock, &source)
@@ -3467,8 +3780,8 @@ mod tests {
         let package = local.get_str("foo").expect("the new entry was not recorded");
         assert_eq!(package.version().to_string(), "2.0.0-1");
         assert_eq!(
-            package.file_list().unwrap(),
-            [PathBuf::from("usr/"), PathBuf::from("usr/bin/"), PathBuf::from("usr/bin/foo")]
+            package.file_list().unwrap().collect::<Vec<_>>(),
+            ["usr/", "usr/bin/", "usr/bin/foo"]
         );
     }
 
@@ -3654,20 +3967,25 @@ mod tests {
         let local = LocalDatabase::open(db.path().join("local")).unwrap();
         let package = local.get_str("foo").expect("the entry was not recorded");
         assert_eq!(
-            package.file_list().expect("the entry piko wrote will not re-open"),
-            [PathBuf::from("usr/"), PathBuf::from("usr/bin/"), PathBuf::from("usr/bin/foo")]
+            package.file_list().expect("the entry piko wrote will not re-open").collect::<Vec<_>>(),
+            ["usr/", "usr/bin/", "usr/bin/foo"]
         );
 
         // It can actually be removed now, which is what an unreadable entry prevented.
         let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
         let entry = EntryName::parse("foo-1.0.0-1").unwrap();
-        Transaction::new(root.path(), db.path(), vec![Step::Remove { entry, no_save: false }])
-            .verify(&lock, &source)
-            .unwrap()
-            .stage()
-            .unwrap()
-            .commit()
-            .unwrap();
+        Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Remove { entry, no_save: false }],
+            Verification::Disabled,
+        )
+        .verify(&lock, &source)
+        .unwrap()
+        .stage()
+        .unwrap()
+        .commit()
+        .unwrap();
         assert!(!root.path().join("usr/bin/foo").exists());
     }
 
@@ -3771,6 +4089,7 @@ mod tests {
                 package: "foo-1.0.0-1-x86_64.pkg.tar".parse().unwrap(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .patterns(patterns.clone())
@@ -3826,6 +4145,7 @@ mod tests {
                     package: format!("foo-{version}-x86_64.pkg.tar").parse().unwrap(),
                     reason: PackageInstallReason::Explicit,
                 }],
+                Verification::Disabled,
             )
             .ownership(Ownership::Inherit)
             .patterns(patterns.clone())
@@ -3857,14 +4177,19 @@ mod tests {
 
         // The removal leaves it too.
         let entry = EntryName::parse("foo-2.0.0-1").unwrap();
-        Transaction::new(root.path(), db.path(), vec![Step::Remove { entry, no_save: false }])
-            .patterns(patterns)
-            .verify(&lock, &source)
-            .unwrap()
-            .stage()
-            .unwrap()
-            .commit()
-            .unwrap();
+        Transaction::new(
+            root.path(),
+            db.path(),
+            vec![Step::Remove { entry, no_save: false }],
+            Verification::Disabled,
+        )
+        .patterns(patterns)
+        .verify(&lock, &source)
+        .unwrap()
+        .stage()
+        .unwrap()
+        .commit()
+        .unwrap();
         assert_eq!(
             std::fs::read(root.path().join("etc/foo.conf")).unwrap(),
             b"1.0.0-1",
@@ -3889,6 +4214,7 @@ mod tests {
                 package: name.parse().unwrap(),
                 reason: PackageInstallReason::Depend,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .verify(&lock, &source)
@@ -3920,9 +4246,8 @@ mod tests {
         let published: HashMap<String, Published> =
             published.into_iter().map(|published| (name.to_owned(), published)).collect();
         let lock = DbLock::acquire(db.path()).unwrap();
-        Transaction::new(root.path(), db.path(), vec![step])
+        Transaction::new(root.path(), db.path(), vec![step], verification)
             .ownership(Ownership::Inherit)
-            .verification(verification)
             .published(published)
             .verify(&lock, &source)?
             .stage()?
@@ -4131,7 +4456,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let error = Transaction::new(root.path(), db.path(), vec![step])
+        let error = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap_err();
@@ -4154,7 +4479,7 @@ mod tests {
             reason: PackageInstallReason::Explicit,
         };
         let lock = DbLock::acquire(db.path()).unwrap();
-        let verified = Transaction::new(root.path(), db.path(), vec![step])
+        let verified = Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
             .ownership(Ownership::Inherit)
             .verify(&lock, &source)
             .unwrap();

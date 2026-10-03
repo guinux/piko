@@ -8,12 +8,10 @@ use std::{
     time::SystemTime,
 };
 
-use alpm_repo_db::files::RepoFilesV1;
 use alpm_types::Name;
 
 use super::{
     archive::{self, ArchiveItem, SkipReason, Skipped},
-    desc_compat,
     files_arena::FilesArena,
     package::{FilesSource, RepoPackage},
     repo_name::RepoName,
@@ -93,10 +91,10 @@ pub enum RepoDiagnostic {
         entry: String,
         /// The underlying parse failure.
         ///
-        /// A [`super::DescFieldError`], not an `alpm_repo_db::Error`. The full typed parse is
-        /// deferred to [`super::RepoPackage::desc`]. So the only `desc` failure that can still drop
-        /// a package at open time is one in a field read eagerly. A failure in a deferred section
-        /// surfaces as [`Error::RepoDescUnparsable`] on access instead.
+        /// The full `desc` is read on first access to [`super::RepoPackage::desc`]. So the only
+        /// `desc` failure that can drop a package at open time is one in a field read eagerly. A
+        /// failure in a deferred section surfaces as [`Error::RepoDescUnparsable`] on access
+        /// instead.
         source: crate::eager::DescFieldError,
     },
     /// A `files` member could not be parsed.
@@ -108,7 +106,7 @@ pub enum RepoDiagnostic {
         /// The entry directory name whose `files` member failed to parse.
         entry: String,
         /// The underlying parse failure.
-        source: alpm_repo_db::files::Error,
+        source: crate::meta::files::FilesError,
     },
     /// A `desc` contained a section this build does not recognise.
     UnknownDescSection {
@@ -464,7 +462,13 @@ impl RepoDatabase {
         let packages: Box<[RepoPackage]> = entries
             .into_iter()
             .map(|staged| {
-                RepoPackage::new(staged.entry, staged.eager, staged.raw, Arc::clone(&files_source))
+                RepoPackage::new(
+                    staged.entry,
+                    staged.eager,
+                    staged.raw,
+                    options.unknown_sections,
+                    Arc::clone(&files_source),
+                )
             })
             .collect();
 
@@ -659,7 +663,7 @@ impl<'a> IntoIterator for &'a RepoDatabase {
 
 /// One `desc` member staged during the archive walk, before packages are built.
 ///
-/// Holds the *eager* fields already parsed, and the filtered text they came from. That text
+/// Holds the *eager* fields already parsed, and the text they came from. That text
 /// is what [`RepoPackage`] retains to back its deferred [`RepoPackage::desc`].
 #[derive(Debug)]
 struct StagedDesc {
@@ -684,8 +688,6 @@ fn handle_item(
     saw_files_member: &mut bool,
     archive_path: &Path,
 ) -> Result<()> {
-    use std::str::FromStr as _;
-
     match item {
         ArchiveItem::Desc { entry, text } => {
             // Enforced here rather than after the walk. The bound exists to stop the
@@ -699,29 +701,23 @@ fn handle_item(
                 });
             }
 
-            let (filtered, unknown) = match options.unknown_sections {
-                UnknownSectionPolicy::Reject => (text, Vec::new()),
-                UnknownSectionPolicy::Warn => crate::desc_compat::filter_unknown_sections(
-                    &text,
-                    desc_compat::is_known_section,
-                ),
-            };
-
             // Only the fields every package needs are converted here. The rest stay as text
             // and are parsed on first access to `RepoPackage::desc`. That split accounts for
             // 67% of this open's cost on a real repository. See `super::eager` for the
             // measurement, and for why deferring *everything* would not have worked.
-            match super::eager::parse(&filtered, relations) {
-                Ok(eager) => {
+            match super::eager::parse(&text, relations) {
+                Ok((eager, unknown)) => {
                     let mut diagnostics = diagnostics.borrow_mut();
-                    for section in unknown {
+                    // Under `Reject`, the package's own `desc` refuses an unknown section.
+                    let warn = options.unknown_sections == UnknownSectionPolicy::Warn;
+                    for section in unknown.into_iter().filter(|_| warn) {
                         diagnostics.push(|| RepoDiagnostic::UnknownDescSection {
                             entry: entry.as_str().to_owned(),
                             section,
                         });
                     }
                     drop(diagnostics);
-                    entries.push(StagedDesc { entry, eager, raw: filtered.into_boxed_str() });
+                    entries.push(StagedDesc { entry, eager, raw: text.into_boxed_str() });
                 }
                 Err(ScanError::Field(source)) => {
                     diagnostics.borrow_mut().push(|| RepoDiagnostic::InvalidDesc {
@@ -738,7 +734,7 @@ fn handle_item(
         }
         ArchiveItem::Files { entry, text } => {
             *saw_files_member = true;
-            match RepoFilesV1::from_str(&text) {
+            match crate::meta::files::parse_repo(&text) {
                 Ok(parsed) => {
                     // A second entry of one name is dropped here and reported once, by
                     // `drop_duplicates`, which keeps the same entry.
@@ -746,7 +742,7 @@ fn handle_item(
                         archive_path,
                         entry.name().clone(),
                         entry.version().clone(),
-                        parsed.as_ref(),
+                        &parsed,
                         options.limits.repo_inflated_bytes,
                         options.limits.repo_max_paths,
                     )?;

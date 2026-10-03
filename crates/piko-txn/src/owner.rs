@@ -174,10 +174,7 @@ impl<'db> Owners<'db> {
 /// direction: it makes paths look unowned, which produces a conflict rather than suppressing
 /// one.
 fn file_list_of(package: &LocalPackage) -> FileList {
-    package
-        .file_list()
-        .map(|paths| FileList::new(paths.iter().map(|path| path.to_string_lossy().into_owned())))
-        .unwrap_or_default()
+    package.file_list().map(FileList::new).unwrap_or_default()
 }
 
 /// An owner query's target, resolved against the host filesystem and the installation root.

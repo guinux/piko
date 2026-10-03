@@ -56,11 +56,17 @@ pub fn repo_info(
     emit!(out, "{} {}", info_label("Description     :"), escaped(desc.description()));
     emit!(out, "{} {}", info_label("Architecture    :"), escaped(desc.architecture()));
     emit!(out, "{} {url}", info_label("URL             :"));
-    field_list!(out, "Licenses        :", desc.licenses(), 5);
+    match desc.licenses() {
+        Ok(licenses) => field_list!(out, "Licenses        :", licenses, 5),
+        Err(_) => field_list!(out, "Licenses        :", &desc.section_values("LICENSE"), 5),
+    }
     field_list!(out, "Groups          :", desc.groups(), 5);
     field_list!(out, "Provides        :", desc.provides(), 5);
     field_list!(out, "Depends On      :", desc.depends(), 5);
-    field_list!(out, "Optional Deps   :", desc.optional_depends(), 1);
+    match desc.optional_depends() {
+        Ok(optional) => field_list!(out, "Optional Deps   :", optional, 1),
+        Err(_) => field_list!(out, "Optional Deps   :", &desc.section_values("OPTDEPENDS"), 1),
+    }
     field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
     field_list!(out, "Replaces        :", desc.replaces(), 5);
     emit!(out, "{} {}", info_label("Download Size   :"), human_size(desc.compressed_size()));
@@ -71,13 +77,21 @@ pub fn repo_info(
         info_label("Packager        :"),
         escaped(desc.packager_raw().unwrap_or_default())
     );
-    emit!(out, "{} {}", info_label("Build Date      :"), human_date(desc.build_date(), offset));
+    let build_date = match desc.build_date() {
+        Ok(timestamp) => human_date(timestamp, offset),
+        Err(_) => escaped(desc.section_values("BUILDDATE").join(" ")),
+    };
+    emit!(out, "{} {}", info_label("Build Date      :"), build_date);
     emit!(
         out,
         "{} {}",
         info_label("Validated By    :"),
         styled_validation(desc.pgp_signature().is_some())
     );
+    // A field shown as written above is named on stderr, so stdout stays what pacman prints.
+    for reason in desc.invalid_fields() {
+        crate::output::warn(format!("{}: {reason}", package.name()));
+    }
 
     ExitCode::SUCCESS
 }

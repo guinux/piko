@@ -15,7 +15,7 @@
 //! [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
 
 pub(crate) mod archive;
-mod desc_compat;
+pub(crate) mod desc;
 mod eager;
 mod files_arena;
 pub mod freshness;
@@ -30,7 +30,7 @@ pub use crate::search::MatchKind;
 pub use database::{
     ArchiveCheck, FileListEntry, RepoDatabase, RepoDiagnostic, RepoOpenOptions, Variant,
 };
-pub use desc_compat::RepoDescView;
+pub use desc::RepoDescView;
 pub use package::RepoPackage;
 pub use repo_name::{RepoName, RepoNameError};
 pub use search::SearchHit;

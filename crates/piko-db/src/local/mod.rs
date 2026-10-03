@@ -16,8 +16,8 @@
 //!
 //! - [`EntryName`](crate::entry_name::EntryName) — both formats name things
 //!   `<name>-<version>`, and the repository reader parses archive members with it.
-//! - [`crate::desc_compat`] — the unknown-section filter and its policy. Only the *view* over
-//!   a parsed local `desc` is local, and that is [`desc_compat::DescView`].
+//! - [`crate::desc_compat`] — the unknown-section policy. Only the *view* over a parsed local
+//!   `desc` is local, and that is [`desc::DescView`].
 //! - [`MatchKind`](crate::search::MatchKind) — so a search ranks hits identically whichever
 //!   database answered.
 //!
@@ -27,14 +27,14 @@
 //! [alpm-db]: https://alpm.archlinux.page/specifications/alpm-db.7.html
 
 pub mod database;
-pub mod desc_compat;
+pub mod desc;
 pub mod package;
 pub mod schema_version;
 pub mod search;
 pub mod verify;
 
 pub use database::{Diagnostic, LocalDatabase, OpenOptions};
-pub use desc_compat::DescView;
+pub use desc::DescView;
 pub use package::{EagerView, Inconsistency, LocalPackage};
 pub use schema_version::{ALPM_DB_VERSION, ALPM_DB_VERSION_FILE, SchemaVersionError};
 pub use search::LocalSearchHit;

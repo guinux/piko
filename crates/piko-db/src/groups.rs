@@ -164,15 +164,13 @@ mod tests {
         assert_eq!(index.missing(&wanted), ["games"]);
     }
 
-    /// A `%PACKAGER%` the typed parse refuses does not take the package out of its groups.
+    /// An `%ARCH%` the typed parse refuses does not take the package out of its groups.
     #[test]
     fn a_desc_only_the_typed_parse_refuses_keeps_its_groups() {
         let db = crate::fixture::DbFixture::new();
-        let refused = crate::fixture::MINIMAL_DESC_V1.replacen(
-            "Foobar McFooface <foobar@mcfooface.org>",
-            "Some One <not-an-email>",
-            1,
-        ) + "%GROUPS%\ntools\n\n";
+        let refused =
+            crate::fixture::MINIMAL_DESC_V1.replacen("%ARCH%\nx86_64", "%ARCH%\nnot an arch", 1)
+                + "%GROUPS%\ntools\n\n";
         db.package("foo-1.0.0-1").desc(&refused).files(crate::fixture::MINIMAL_FILES).build();
         let local = LocalDatabase::open(db.path()).unwrap();
         let package = local.iter().next().unwrap();

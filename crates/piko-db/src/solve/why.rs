@@ -157,6 +157,19 @@ pub struct Dependents {
     pub required_by: Vec<Name>,
     /// Installed packages whose `%OPTDEPENDS%` names the target.
     pub optional_for: Vec<Name>,
+    /// What could not be read while `optional_for` was built: a package whose `desc` is
+    /// unreadable, or one invalid `%OPTDEPENDS%` line. Each may name the target, so
+    /// `optional_for` is complete only when this is empty.
+    pub unread: Vec<Unread>,
+}
+
+/// An installed package, or one line of it, that [`dependents`] could not read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Unread {
+    /// The package.
+    pub package: Name,
+    /// Why it could not be read.
+    pub reason: String,
 }
 
 /// [`Dependents`] of `target`, among installed packages.
@@ -190,18 +203,36 @@ pub fn dependents(local: &LocalDatabase, target: &str) -> crate::Result<Dependen
         .collect();
 
     let mut optional_for = Vec::new();
+    let mut unread = Vec::new();
     for package in local.iter() {
-        let Ok(desc) = package.desc() else { continue };
-        let requires_target = desc.optional_depends().iter().any(|optdep| {
-            let relation = RelationOrSoname::Relation(optdep.package_relation().clone());
-            universe.satisfiers(&relation).contains(&wanted.id())
-        });
+        let desc = match package.desc() {
+            Ok(desc) => desc,
+            Err(error) => {
+                unread.push(Unread { package: package.name().clone(), reason: error.to_string() });
+                continue;
+            }
+        };
+        let mut requires_target = false;
+        for optdep in desc.optional_depends_each() {
+            match optdep {
+                Ok(optdep) => {
+                    let relation = RelationOrSoname::Relation(optdep.package_relation().clone());
+                    requires_target |= universe.satisfiers(&relation).contains(&wanted.id());
+                }
+                Err(error) => {
+                    unread.push(Unread {
+                        package: package.name().clone(),
+                        reason: error.to_string(),
+                    });
+                }
+            }
+        }
         if requires_target {
             optional_for.push(package.name().clone());
         }
     }
 
-    Ok(Dependents { required_by, optional_for })
+    Ok(Dependents { required_by, optional_for, unread })
 }
 
 #[cfg(test)]
@@ -316,6 +347,41 @@ mod tests {
         let found = dependents(scenario.local(), "foo").unwrap();
         assert!(found.required_by.is_empty());
         assert_eq!(as_strs(&found.optional_for), ["bar"]);
+        assert!(found.unread.is_empty());
+    }
+
+    /// An invalid `%OPTDEPENDS%` line costs that line alone, and is named.
+    #[test]
+    fn optional_for_reads_past_an_invalid_line_and_names_it() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("foo", "1.0.0-1"))
+            .installed(PackageSpec::new("bar", "1.0.0-1").optdepends(["bad>", "foo: some reason"]))
+            .build();
+
+        let found = dependents(scenario.local(), "foo").unwrap();
+        assert_eq!(as_strs(&found.optional_for), ["bar"]);
+        assert_eq!(found.unread.len(), 1, "{:?}", found.unread);
+        assert!(
+            found.unread.first().is_some_and(
+                |entry| entry.package.as_ref() == "bar" && entry.reason.contains("bad>")
+            )
+        );
+    }
+
+    /// A package whose `desc` cannot be read is named, since it may name the target.
+    #[test]
+    fn optional_for_names_a_package_whose_desc_is_unreadable() {
+        let db = crate::fixture::DbFixture::new();
+        db.package("foo-1.0.0-1").with_defaults().build();
+        let broken = crate::fixture::MINIMAL_DESC_V1
+            .replacen("%NAME%\nfoo", "%NAME%\nbaz", 1)
+            .replacen("%ARCH%\nx86_64", "%ARCH%\nnot an arch", 1);
+        db.package("baz-1.0.0-1").desc(&broken).files(crate::fixture::MINIMAL_FILES).build();
+        let local = LocalDatabase::open(db.path()).unwrap();
+
+        let found = dependents(&local, "foo").unwrap();
+        let unread: Vec<&str> = found.unread.iter().map(|entry| entry.package.as_ref()).collect();
+        assert_eq!(unread, ["baz"], "{:?}", found.unread);
     }
 
     #[test]

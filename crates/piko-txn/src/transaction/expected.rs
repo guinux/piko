@@ -2,7 +2,8 @@
 
 use std::fmt::Display;
 
-use alpm_pkginfo::PackageInfo;
+use crate::pkginfo::PkgInfo;
+use alpm_types::Architecture;
 use piko_db::EntryName;
 use piko_db::solve::Solvable;
 
@@ -10,8 +11,9 @@ use piko_db::solve::Solvable;
 ///
 /// These are the fields `check_pkg_matches_db` (`sync.c:1113`) compares after the name and
 /// the version: the installed size, `%DEPENDS%`, `%CONFLICTS%`, `%REPLACES%`, `%PROVIDES%` and
-/// `%GROUPS%`. The name and the version are not here. The step's `PackageFileName` carries
-/// them for every install, whether or not the plan supplied an `Expected`.
+/// `%GROUPS%`. `%ARCH%` is one more, see [`Expected::built_for`]. The name and the version are
+/// not here. The step's `PackageFileName` carries them for every install, whether or not the
+/// plan supplied an `Expected`.
 ///
 /// Each list is compared as a multiset of rendered entries: order does not matter, and a
 /// repeated entry does. That is `alpm_list_cmp_unsorted` (`alpm_list.c:512`) over
@@ -26,6 +28,8 @@ pub struct Expected {
     replaces: Vec<String>,
     provides: Vec<String>,
     groups: Vec<String>,
+    /// `%ARCH%`, when the plan read it from a repository `desc`. `None` compares with nothing.
+    architecture: Option<Architecture>,
     /// The entry the plan expects to find installed under the same name, which the install
     /// replaces, or `None` for a fresh install. Not part of the archive comparison.
     replaced: Option<EntryName>,
@@ -47,8 +51,21 @@ impl Expected {
             replaces: rendered(candidate.replaces()),
             provides: rendered(candidate.provides()),
             groups: rendered(candidate.groups()),
+            architecture: None,
             replaced: None,
         })
+    }
+
+    /// This expectation, for a package the plan says is built for `architecture`.
+    ///
+    /// libalpm's `check_pkg_matches_db` does not compare the architecture. `check_arch`
+    /// (`trans.c:69`) reads it off the database, so a mirror that lies in its `desc` passes
+    /// that check with an archive built for another machine. The signature does not help
+    /// either: one key can sign several builds of the same version.
+    #[must_use]
+    pub fn built_for(mut self, architecture: Architecture) -> Self {
+        self.architecture = Some(architecture);
+        self
     }
 
     /// This expectation, for an install that replaces the installed entry `replaced`.
@@ -73,16 +90,17 @@ impl Expected {
 
     /// What an archive's `.PKGINFO` says.
     #[must_use]
-    pub fn of_archive(info: &PackageInfo) -> Self {
-        crate::pkginfo::either_version!(info, |v| Self {
-            installed_size: v.size,
-            depends: rendered(&v.depend),
-            conflicts: rendered(&v.conflict),
-            replaces: rendered(&v.replaces),
-            provides: rendered(&v.provides),
-            groups: rendered(&v.group),
+    pub fn of_archive(info: &PkgInfo) -> Self {
+        Self {
+            installed_size: info.size,
+            depends: rendered(&info.depends),
+            conflicts: rendered(&info.conflicts),
+            replaces: rendered(&info.replaces),
+            provides: rendered(&info.provides),
+            groups: rendered(&info.groups),
+            architecture: Some(info.architecture.clone()),
             replaced: None,
-        })
+        }
     }
 
     /// The fields where `found` differs from this expectation, named as `.PKGINFO` names them.
@@ -98,6 +116,7 @@ impl Expected {
             ("replaces", self.replaces == found.replaces),
             ("provides", self.provides == found.provides),
             ("group", self.groups == found.groups),
+            ("arch", self.architecture.is_none() || self.architecture == found.architecture),
         ];
         fields.into_iter().filter(|(_, same)| !same).map(|(name, _)| name).collect()
     }
@@ -111,6 +130,7 @@ fn rendered<T: Display>(items: impl IntoIterator<Item = T>) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
 
@@ -122,6 +142,7 @@ mod tests {
             replaces: Vec::new(),
             provides: rendered(["libfoo.so=1-64"]),
             groups: rendered(["base"]),
+            architecture: Some(Architecture::Any),
             replaced: None,
         }
     }
@@ -151,6 +172,22 @@ mod tests {
             ..expected()
         };
         assert_eq!(expected().differences(&found), ["size", "depend", "group"]);
+    }
+
+    /// An archive built for another architecture than the plan's `%ARCH%` is a difference.
+    #[test]
+    fn another_architecture_is_a_difference() {
+        let found = Expected { architecture: Some("aarch64".parse().unwrap()), ..expected() };
+        assert_eq!(expected().differences(&found), ["arch"]);
+    }
+
+    /// An expectation with no architecture accepts any: a named file's plan entry is its own
+    /// `.PKGINFO`.
+    #[test]
+    fn no_expected_architecture_compares_with_nothing() {
+        let unset = Expected { architecture: None, ..expected() };
+        let found = Expected { architecture: Some("aarch64".parse().unwrap()), ..expected() };
+        assert!(unset.differences(&found).is_empty());
     }
 
     /// A version bound is part of the entry, as `dep_not_equal` compares it.

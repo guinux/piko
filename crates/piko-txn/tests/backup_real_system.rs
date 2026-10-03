@@ -43,7 +43,7 @@ use std::{
 use alpm_types::{PackageFileName, PackageInstallReason};
 use piko_db::LocalDatabase;
 use piko_db_write::DbLock;
-use piko_txn::{CacheDirSource, Step, Transaction, extract::Ownership};
+use piko_txn::{CacheDirSource, Step, Transaction, Verification, extract::Ownership};
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";
 const CACHE: &str = "/var/cache/pacman/pkg";
@@ -152,6 +152,7 @@ fn install(archive: &Path) -> Result<BTreeMap<String, String>, piko_txn::Error> 
         &root,
         &dbpath,
         vec![Step::Install { package, reason: PackageInstallReason::Explicit }],
+        Verification::Disabled,
     )
     // The test is unprivileged, so the archive's uid/gid cannot be applied.
     .ownership(Ownership::Inherit)
@@ -303,6 +304,7 @@ fn a_real_config_file_edited_by_the_user_survives_a_reinstall() {
                 package: package.clone(),
                 reason: PackageInstallReason::Explicit,
             }],
+            Verification::Disabled,
         )
         .ownership(Ownership::Inherit)
         .verify(&lock, &source)

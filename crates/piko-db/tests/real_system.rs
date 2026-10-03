@@ -121,7 +121,7 @@ fn every_package_loads_completely() {
         if package.mtree().is_ok_and(|mtree| mtree.is_some()) {
             with_mtree += 1;
         }
-        total_files += package.file_list().map(<[_]>::len).unwrap_or(0);
+        total_files += package.file_list().map(|paths| paths.len()).unwrap_or(0);
     }
 
     println!("{} packages loaded, {with_mtree} with an mtree, {total_files} files total", db.len());
@@ -177,10 +177,10 @@ fn both_desc_schema_versions_are_present_and_readable() {
         let _ = desc.installed_size();
 
         if desc.is_v2() {
-            assert!(desc.xdata().is_some(), "a v2 desc must expose %XDATA%");
+            assert!(matches!(desc.xdata(), Ok(Some(_))), "a v2 desc must expose %XDATA%");
             v2 += 1;
         } else {
-            assert!(desc.xdata().is_none(), "a v1 desc has no %XDATA%");
+            assert!(matches!(desc.xdata(), Ok(None)), "a v1 desc has no %XDATA%");
             v1 += 1;
         }
     }

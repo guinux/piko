@@ -1,7 +1,7 @@
 //! Resource limits applied while reading a local database.
 //!
 //! Every file in an alpm-db entry is read fully into memory before being parsed. This is how
-//! the `alpm-db` and `alpm-mtree` crates work; neither offers a streaming API. A database
+//! piko's readers and the `alpm-mtree` crate work; none offers a streaming API. A database
 //! directory is therefore an untrusted input that can dictate an allocation, so each read is
 //! bounded.
 //!
@@ -273,15 +273,15 @@ pub struct Limits {
     pub repo_max_paths: usize,
     /// Maximum number of lines in a single `files` member of a repository archive.
     ///
-    /// `alpm-repo-db` parses a member into one `PathBuf` per line, about 56 bytes each, before
-    /// piko copies the paths into the files arena. The lines are counted before that parse, so
-    /// the bound stops the allocation. The count includes the `%FILES%` header line.
+    /// The reader sorts and checks a member as one borrowed `&str` per line, 16 bytes each,
+    /// before piko copies the paths into the files arena. The lines are counted before that
+    /// parse, so the bound stops the allocation. The count includes the `%FILES%` header line.
     ///
     /// Exceeding this is a hard error ([`crate::Error::TooManyEntryPaths`]).
     ///
     /// Measured on the machine this was developed against: 140 183 lines in the largest member
     /// (`gstreamer-docs`). The default leaves a headroom of 7 and bounds that parse to about
-    /// 56 MiB.
+    /// 16 MiB, plus the set of paths its checks build.
     pub repo_entry_paths: usize,
     /// Maximum size in bytes of a `pacman.conf` file, or any file it `Include`s.
     pub pacman_conf_bytes: u64,

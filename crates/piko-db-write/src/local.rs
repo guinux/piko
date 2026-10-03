@@ -15,11 +15,26 @@
 //! available over libalpm, and it costs nothing that matters. It is a handful of `fsync`s
 //! against a transaction that is about to unpack megabytes.
 //!
-//! This does **not** make the whole transaction atomic, only each file. An interruption
-//! between writing `desc` and writing `files` still leaves an entry that is internally
-//! inconsistent, just not a corrupt one. Making the transaction atomic needs the journal
-//! described for Phase C in the milestone plan. Without filesystem snapshots, even that buys
-//! recoverability, not atomicity.
+//! # A whole entry appears and disappears at once
+//!
+//! A transaction writes an entry through [`EntryWrite`], and removes one through
+//! [`LocalDbWriter::remove_entry`]. Neither ever leaves a partial entry under `local/`.
+//! [`EntryWrite`] builds the new entry in `<dbpath>/piko-staging/new/`, moves the entry it
+//! replaces out to `<dbpath>/piko-staging/old/`, and then moves the new one in. A removal moves
+//! the entry out first and deletes it there. Each move is one `rename`. So at every instant
+//! `local/` holds the old entry whole, no entry, or the new entry whole.
+//!
+//! This matters more than it looks. An entry without a readable `desc` refuses every plan, a
+//! removal included (`PlanLocalDescUnreadable`), so a partial entry cannot be repaired with
+//! piko at all. libalpm skips such an entry as corrupted (`be_local.c:627`) and removes the old
+//! entry before it extracts the new package, so its window is the whole extraction.
+//!
+//! `piko-staging` sits beside `local/`, not inside it, so neither pacman nor piko ever reads it
+//! as an entry. It must be on the same filesystem as `local/`, or the `rename` fails. What a crash
+//! leaves there is removed by the next [`LocalDbWriter::new`], under the lock.
+//!
+//! This does **not** make the whole transaction atomic, only each entry. Making the transaction
+//! recoverable is the journal's job. Without filesystem snapshots, nothing buys atomicity.
 
 use std::{
     fs::File,
@@ -43,6 +58,16 @@ use crate::{
 
 /// The directory inside a dbpath that holds the local database.
 const LOCAL_DIR: &str = "local";
+
+/// The directory inside a dbpath where an entry is built before it is published, and where a
+/// replaced or removed entry is deleted. See the module's note on atomicity.
+pub const STAGING_DIR: &str = "piko-staging";
+
+/// Inside [`STAGING_DIR`]: entries being built.
+const STAGING_NEW: &str = "new";
+
+/// Inside [`STAGING_DIR`]: entries taken out of `local/`, to be deleted.
+const STAGING_OLD: &str = "old";
 
 /// Mode for directories the writer creates, from `_alpm_local_db_prepare` (`be_local.c:941`).
 const DIR_MODE: u32 = 0o755;
@@ -81,6 +106,8 @@ const TEMP_SUFFIX: &str = ".new";
 pub struct LocalDbWriter<'lock> {
     /// `<dbpath>/local`.
     root: PathBuf,
+    /// `<dbpath>/piko-staging`.
+    staging: PathBuf,
     limits: Limits,
     /// Proof that the database lock is held for as long as this writer exists.
     _lock: &'lock DbLock,
@@ -93,6 +120,10 @@ impl<'lock> LocalDbWriter<'lock> {
     /// `lock` must be the lock for this same `dbpath`. Holding a lock on one database while
     /// writing another is a bug. The check here turns it into an error instead of a corrupted
     /// database.
+    ///
+    /// Whatever an interrupted writer left in `<dbpath>/piko-staging` is removed here. The lock
+    /// is held, so no other writer is using it. Only one writer at a time may exist for a
+    /// dbpath, as only one lock can.
     ///
     /// Creating `ALPM_DB_VERSION` is the writer's job precisely because
     /// [`piko_db::local::schema_version::check`] refuses to. Fabricating a version marker for a
@@ -128,7 +159,18 @@ impl<'lock> LocalDbWriter<'lock> {
             atomic_write(&version, format!("{ALPM_DB_VERSION}\n").as_bytes())?;
         }
 
-        Ok(Self { root, limits, _lock: lock })
+        let staging = dbpath.join(STAGING_DIR);
+        discard(&staging)?;
+
+        Ok(Self { root, staging, limits, _lock: lock })
+    }
+
+    /// `<dbpath>/piko-staging/<part>`, created if it is absent.
+    fn staging_part(&self, part: &str) -> Result<PathBuf> {
+        create_dir(&self.staging)?;
+        let path = self.staging.join(part);
+        create_dir(&path)?;
+        Ok(path)
     }
 
     /// `<dbpath>/local`.
@@ -159,37 +201,7 @@ impl<'lock> LocalDbWriter<'lock> {
         sync_directory(&self.root)
     }
 
-    /// Replaces an entry: removes `previous` and any entry already at `entry`, then creates
-    /// `entry`, with **one** `fsync` of `local/` covering all three.
-    ///
-    /// This is the upgrade sequence, and doing it in one call is not merely tidier. Each of
-    /// [`Self::create_entry`] and [`Self::remove_entry`] `fsync`s the root on its own. Called in
-    /// sequence, they cost three root `fsync`s per package where one suffices. The directory's
-    /// metadata covers every create and unlink within it, so syncing after the last one makes all
-    /// of them durable. See `docs/perf-study.md` §4.2.
-    ///
-    /// The crash window is the same in kind as for three separate calls. Before the `fsync`, a
-    /// crash may leave any prefix of the three operations visible. Re-running the same sequence
-    /// recovers from any of them, because each removal is conditional on the path existing.
-    ///
-    /// `previous` is the entry installed under this package's name at its *old* version, if any.
-    /// Passing `None` is a plain install.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::remove_entry`] and [`Self::create_entry`].
-    pub fn replace_entry(&self, previous: Option<&EntryName>, entry: &EntryName) -> Result<()> {
-        if let Some(previous) = previous.filter(|previous| self.entry_path(previous).exists()) {
-            self.remove_entry_unsynced(previous)?;
-        }
-        if self.entry_path(entry).exists() {
-            self.remove_entry_unsynced(entry)?;
-        }
-        self.create_entry_unsynced(entry)?;
-        sync_directory(&self.root)
-    }
-
-    /// [`Self::create_entry`] without the root `fsync`, for [`Self::replace_entry`] to batch.
+    /// [`Self::create_entry`] without the root `fsync`.
     fn create_entry_unsynced(&self, entry: &EntryName) -> Result<()> {
         let path = self.entry_path(entry);
         std::fs::create_dir(&path)
@@ -197,16 +209,41 @@ impl<'lock> LocalDbWriter<'lock> {
         set_dir_mode(&path)
     }
 
-    /// Begins a staged write of one entry's files, to be made durable together.
+    /// Begins writing `entry` whole, to replace `previous` and any entry already at `entry`.
     ///
-    /// This is the counterpart to calling [`Self::write_record`] and [`Self::write_raw`] in
-    /// sequence. Prefer it when an entry gets more than one file. It pays one directory `fsync`
-    /// for the whole entry instead of one per file, and it overlaps the data `fsync`s. See
-    /// [`EntryWrite`] for the measurement, and for what the crash-safety property becomes.
+    /// This is the install and upgrade sequence. The entry is built outside `local/` and moved in
+    /// by [`EntryWrite::commit`], which moves out what it replaces first. See the module's note on
+    /// atomicity. `previous` is the entry installed under this package's name at its *old*
+    /// version, if any. `None` is a plain install. A reinstall names the same entry twice, which is
+    /// fine.
     ///
-    /// The entry directory must already exist. [`Self::create_entry`] makes it.
-    pub fn entry_write(&self, entry: &EntryName) -> EntryWrite {
-        EntryWrite { dir: self.entry_path(entry), staged: Vec::new() }
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the staging directory cannot be created.
+    pub fn entry_write(
+        &self,
+        entry: &EntryName,
+        previous: Option<&EntryName>,
+    ) -> Result<EntryWrite> {
+        let dir = self.staging_part(STAGING_NEW)?.join(entry.as_str());
+        discard(&dir)?;
+        std::fs::create_dir(&dir).map_err(|source| Error::io(&dir, IoAction::CreateDir, source))?;
+        set_dir_mode(&dir)?;
+
+        let destination = self.entry_path(entry);
+        let mut replaced = vec![destination.clone()];
+        if let Some(previous) = previous.filter(|previous| *previous != entry) {
+            replaced.push(self.entry_path(previous));
+        }
+        Ok(EntryWrite {
+            dir,
+            destination,
+            replaced,
+            old: self.staging_part(STAGING_OLD)?,
+            local: self.root.clone(),
+            staged: Vec::new(),
+            committed: false,
+        })
     }
 
     /// Writes a `desc` or `files` file into an existing entry, atomically.
@@ -272,30 +309,25 @@ impl<'lock> LocalDbWriter<'lock> {
 
     /// Removes an entry's directory and everything in it.
     ///
+    /// The entry is moved out of `local/` by one `rename` first, and deleted there. So an
+    /// interruption leaves it whole or gone, never partly deleted. See the module's note on
+    /// atomicity. A failure to delete the moved entry is not an error: it is out of the database
+    /// already, and the next [`LocalDbWriter::new`] removes it.
+    ///
     /// # Errors
     ///
     /// [`Error::Io`] carrying [`std::io::ErrorKind::NotADirectory`] if the entry is a symlink
     /// rather than a real directory. Following it would delete something outside the database. Also
     /// [`Error::Io`] if the removal itself fails.
     pub fn remove_entry(&self, entry: &EntryName) -> Result<()> {
-        self.remove_entry_unsynced(entry)?;
-        sync_directory(&self.root)
-    }
-
-    /// [`Self::remove_entry`] without the root `fsync`, for [`Self::replace_entry`] to batch.
-    fn remove_entry_unsynced(&self, entry: &EntryName) -> Result<()> {
         let path = self.entry_path(entry);
         if !fs_util::is_real_directory(&path)? {
-            return Err(Error::io(
-                &path,
-                IoAction::Remove,
-                std::io::Error::new(
-                    std::io::ErrorKind::NotADirectory,
-                    "entry is not a real directory",
-                ),
-            ));
+            return Err(not_an_entry(&path));
         }
-        std::fs::remove_dir_all(&path).map_err(|source| Error::io(&path, IoAction::Remove, source))
+        let parked = park(&path, &self.staging_part(STAGING_OLD)?)?;
+        sync_directory(&self.root)?;
+        let _ = std::fs::remove_dir_all(parked);
+        Ok(())
     }
 
     /// Changes an installed package's install reason, rewriting only that section.
@@ -361,14 +393,27 @@ impl<'lock> LocalDbWriter<'lock> {
 /// cannot leave an entry with a new `desc` beside an old `files`. It is still per-entry, not
 /// per-transaction. See this module's header.
 ///
-/// Dropping without [`Self::commit`] removes every temporary, so a failed step leaves the entry
-/// exactly as it was.
+/// The entry is built in a staging directory outside `local/`, and moved into place whole. See
+/// this module's note on atomicity.
+///
+/// Dropping without [`Self::commit`] removes the staging directory, so a failed step leaves the
+/// database exactly as it was.
 #[derive(Debug)]
 #[must_use = "staged files are discarded unless commit() is called"]
 pub struct EntryWrite {
-    /// The entry directory every staged file lands in.
+    /// The staging directory every staged file lands in.
     dir: PathBuf,
+    /// Where the entry is published: `<dbpath>/local/<entry>`.
+    destination: PathBuf,
+    /// The entries this one replaces, which the commit moves out first. Each may be absent.
+    replaced: Vec<PathBuf>,
+    /// `<dbpath>/piko-staging/old`, where a replaced entry is moved to be deleted.
+    old: PathBuf,
+    /// `<dbpath>/local`, whose `fsync` makes each move durable.
+    local: PathBuf,
     staged: Vec<Temporary>,
+    /// Set once the staging directory has become the entry, so `Drop` leaves it alone.
+    committed: bool,
 }
 
 impl EntryWrite {
@@ -411,27 +456,57 @@ impl EntryWrite {
         Ok(())
     }
 
-    /// Makes every staged file durable, then publishes them all.
+    /// Makes every staged file durable, then publishes the entry whole.
     ///
-    /// The order is the one [`LocalDbWriter::write_record`] documents, widened to the whole entry.
-    /// Fsync every temporary, then rename every temporary, then fsync the directory once. A crash
-    /// at any point leaves each destination either wholly absent, wholly the old file, or wholly
-    /// the new one.
+    /// Three stages, each durable before the next starts:
+    ///
+    /// 1. Fsync every temporary, rename each to its name in the staging directory, and fsync
+    ///    that directory once. A crash here leaves `local/` untouched.
+    /// 2. Move each entry this one replaces out of `local/`, and fsync `local/`. A crash here
+    ///    leaves no entry for the package. The journal then names the step as not done, and a
+    ///    reinstall with `--overwrite` recovers it. Moving the new entry in first would instead
+    ///    leave two entries for one package.
+    /// 3. Move the new entry in, and fsync `local/`.
+    ///
+    /// The moved-out entries are deleted last. A failure there is not an error: they are out of
+    /// the database already, and the next [`LocalDbWriter::new`] removes them.
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if any `fsync` or `rename` fails. Whatever has not been renamed yet is
-    /// removed, so a partial failure does not leave temporaries behind.
+    /// [`Error::Io`] if any `fsync` or `rename` fails, or if an entry this one replaces is not a
+    /// real directory. Until stage 3, the staging directory is removed on failure.
     pub fn commit(mut self) -> Result<()> {
         // On an error, every temporary not yet renamed is dropped, which removes it.
         self.sync_all_staged()?;
         for temporary in std::mem::take(&mut self.staged) {
             temporary.publish()?;
         }
-
         // Every rename above becomes durable with this one directory sync. The directory's
         // metadata covers all of them, so syncing per rename would buy nothing.
-        sync_directory(&self.dir)
+        sync_directory(&self.dir)?;
+
+        let mut parked = Vec::new();
+        for replaced in &self.replaced {
+            match std::fs::symlink_metadata(replaced) {
+                Ok(metadata) if metadata.is_dir() => parked.push(park(replaced, &self.old)?),
+                Ok(_) => return Err(not_an_entry(replaced)),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => return Err(Error::io(replaced, IoAction::Metadata, source)),
+            }
+        }
+        if !parked.is_empty() {
+            sync_directory(&self.local)?;
+        }
+
+        std::fs::rename(&self.dir, &self.destination)
+            .map_err(|source| Error::io(&self.destination, IoAction::Rename, source))?;
+        self.committed = true;
+        sync_directory(&self.local)?;
+
+        for entry in parked {
+            let _ = std::fs::remove_dir_all(entry);
+        }
+        Ok(())
     }
 
     /// `fsync`s every staged temporary, one scoped thread each.
@@ -468,6 +543,49 @@ impl EntryWrite {
             first_error.map_or(Ok(()), Err)
         })
     }
+}
+
+impl Drop for EntryWrite {
+    fn drop(&mut self) {
+        if !self.committed {
+            // The staged temporaries are removed by their own `Drop`, which runs after this.
+            // `remove_dir_all` removes them first either way.
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
+/// Moves the entry directory `entry` into `into`, under its own name, and returns where it went.
+///
+/// Whatever a crash left at that name is removed first. The `rename` is what makes the entry
+/// leave `local/` in one step.
+fn park(entry: &Path, into: &Path) -> Result<PathBuf> {
+    let parked = into.join(entry.file_name().unwrap_or_default());
+    discard(&parked)?;
+    std::fs::rename(entry, &parked)
+        .map_err(|source| Error::io(&parked, IoAction::Rename, source))?;
+    Ok(parked)
+}
+
+/// Removes `path`, whatever it is, without following a symbolic link. An absent path is fine.
+fn discard(path: &Path) -> Result<()> {
+    let removed = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(Error::io(path, IoAction::Metadata, source)),
+    };
+    removed.map_err(|source| Error::io(path, IoAction::Remove, source))
+}
+
+/// The error for an entry path that is not a real directory, such as a symbolic link. Following
+/// one would move or delete something outside the database.
+fn not_an_entry(path: &Path) -> Error {
+    Error::io(
+        path,
+        IoAction::Remove,
+        std::io::Error::new(std::io::ErrorKind::NotADirectory, "entry is not a real directory"),
+    )
 }
 
 /// The file name a record of this kind is stored under.
@@ -777,22 +895,23 @@ mod tests {
         let lock = harness.lock();
         let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
         let name = entry("foo-1.0.0-1");
-        writer.create_entry(&name).unwrap();
 
-        let mut staged = writer.entry_write(&name);
+        let mut staged = writer.entry_write(&name, None).unwrap();
         staged.record(&desc("foo", "1.0.0-1")).unwrap();
         staged.raw("mtree", b"gzipped bytes", None).unwrap();
 
-        // Nothing is visible under its real name until `commit`. The temporaries are.
+        // Nothing is visible in `local/` until `commit`. The temporaries are, in staging.
         let dir = writer.entry_path(&name);
-        assert!(!dir.join("desc").exists(), "desc must not appear before commit");
-        assert!(dir.join("desc.new").exists(), "the temporary should be staged");
+        let staging = harness.dbpath().join(STAGING_DIR).join(STAGING_NEW).join(name.as_str());
+        assert!(!dir.exists(), "the entry must not appear before commit");
+        assert!(staging.join("desc.new").exists(), "the temporary should be staged");
 
         staged.commit().unwrap();
         assert!(dir.join("desc").exists());
         assert_eq!(std::fs::read(dir.join("mtree")).unwrap(), b"gzipped bytes");
         assert!(!dir.join("desc.new").exists(), "no temporary may survive a commit");
         assert!(!dir.join("mtree.new").exists());
+        assert!(!staging.exists(), "the staging directory became the entry");
     }
 
     /// A raw member keeps the time it was asked for, through both the staged path and the
@@ -808,10 +927,9 @@ mod tests {
         let lock = harness.lock();
         let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
         let name = entry("foo-1.0.0-1");
-        writer.create_entry(&name).unwrap();
         let dir = writer.entry_path(&name);
 
-        let mut staged = writer.entry_write(&name);
+        let mut staged = writer.entry_write(&name, None).unwrap();
         staged.raw("install", b"post_install() { :; }", Some(stamp)).unwrap();
         staged.commit().unwrap();
         writer.write_raw(&name, "changelog", b"1.0.0-1 first release", Some(stamp)).unwrap();
@@ -822,35 +940,36 @@ mod tests {
         }
 
         // A record has no time of its own to keep, so it gets the time of the write.
-        let mut staged = writer.entry_write(&name);
+        let mut staged = writer.entry_write(&name, Some(&name)).unwrap();
         staged.record(&desc("foo", "1.0.0-1")).unwrap();
         staged.commit().unwrap();
         let written = std::fs::metadata(dir.join("desc")).unwrap().modified().unwrap();
         assert!(written > stamp, "a record must not inherit some other member's time");
     }
 
-    /// Dropping without committing must leave the entry exactly as it was. Otherwise a failed
-    /// step would litter the database with `.new` files. [`create_temp`]'s one retry would then
-    /// have to clean them up on the next run.
+    /// Dropping without committing must leave the database exactly as it was, the entry it would
+    /// have replaced included, and remove what was staged.
     #[test]
-    fn dropping_a_staged_entry_write_removes_every_temporary() {
+    fn dropping_a_staged_entry_write_removes_everything_it_staged() {
         let harness = Harness::new();
         let lock = harness.lock();
         let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
-        let name = entry("foo-1.0.0-1");
-        writer.create_entry(&name).unwrap();
-        let dir = writer.entry_path(&name);
+        let old = entry("foo-1.0.0-1");
+        writer.create_entry(&old).unwrap();
+        writer.write_record(&old, &desc("foo", "1.0.0-1")).unwrap();
+        let new = entry("foo-2.0.0-1");
+        let staging = harness.dbpath().join(STAGING_DIR).join(STAGING_NEW).join(new.as_str());
 
         {
-            let mut staged = writer.entry_write(&name);
-            staged.record(&desc("foo", "1.0.0-1")).unwrap();
+            let mut staged = writer.entry_write(&new, Some(&old)).unwrap();
+            staged.record(&desc("foo", "2.0.0-1")).unwrap();
             staged.raw("install", b"post_install() { :; }", None).unwrap();
-            assert!(dir.join("desc.new").exists());
+            assert!(staging.join("desc.new").exists());
         }
 
-        assert!(!dir.join("desc.new").exists(), "the temporary must be removed on drop");
-        assert!(!dir.join("install.new").exists());
-        assert!(!dir.join("desc").exists(), "nothing may be published without a commit");
+        assert!(!staging.exists(), "the staging directory must be removed on drop");
+        assert!(!writer.entry_path(&new).exists(), "nothing may be published without a commit");
+        assert!(writer.entry_path(&old).join("desc").exists(), "the old entry must be intact");
     }
 
     /// A staged write must produce the same bytes as the per-file path it replaces. Otherwise
@@ -862,8 +981,7 @@ mod tests {
         let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
 
         let staged_entry = entry("staged-1.0.0-1");
-        writer.create_entry(&staged_entry).unwrap();
-        let mut staged = writer.entry_write(&staged_entry);
+        let mut staged = writer.entry_write(&staged_entry, None).unwrap();
         staged.record(&desc("staged", "1.0.0-1")).unwrap();
         staged.commit().unwrap();
 
@@ -889,10 +1007,9 @@ mod tests {
         }
     }
 
-    /// The upgrade sequence in one call, with one root `fsync`. The old entry must be gone,
-    /// and the new one must exist and be empty.
+    /// An upgrade: the old entry is moved out and deleted, and the new one is in place whole.
     #[test]
-    fn replace_entry_removes_the_old_entry_and_creates_the_new_one() {
+    fn an_entry_write_replaces_the_previous_version() {
         let harness = Harness::new();
         let lock = harness.lock();
         let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
@@ -902,17 +1019,21 @@ mod tests {
         writer.write_record(&old, &desc("foo", "1.0.0-1")).unwrap();
 
         let new = entry("foo-2.0.0-1");
-        writer.replace_entry(Some(&old), &new).unwrap();
+        let mut staged = writer.entry_write(&new, Some(&old)).unwrap();
+        staged.record(&desc("foo", "2.0.0-1")).unwrap();
+        staged.commit().unwrap();
 
         assert!(!writer.entry_path(&old).exists(), "the replaced entry must be gone");
-        assert!(writer.entry_path(&new).is_dir());
-        assert_eq!(std::fs::read_dir(writer.entry_path(&new)).unwrap().count(), 0);
+        let text = std::fs::read_to_string(writer.entry_path(&new).join("desc")).unwrap();
+        assert!(text.contains("2.0.0-1"), "{text}");
+        let old_dir = harness.dbpath().join(STAGING_DIR).join(STAGING_OLD);
+        assert_eq!(std::fs::read_dir(old_dir).unwrap().count(), 0, "the old entry was kept");
     }
 
-    /// A reinstall names the same entry as `previous` and as the new one. Removing it twice
-    /// would fail on the second `remove_dir_all`, so the existence check has to guard both.
+    /// A reinstall names the same entry as `previous` and as the new one. The whole entry is
+    /// replaced: a member the new one does not write is gone.
     #[test]
-    fn replace_entry_handles_the_same_entry_named_twice() {
+    fn an_entry_write_replaces_an_entry_of_the_same_name_whole() {
         let harness = Harness::new();
         let lock = harness.lock();
         let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
@@ -920,23 +1041,53 @@ mod tests {
         let name = entry("foo-1.0.0-1");
         writer.create_entry(&name).unwrap();
         writer.write_record(&name, &desc("foo", "1.0.0-1")).unwrap();
+        writer.write_raw(&name, "install", b"post_install() { :; }", None).unwrap();
 
-        writer.replace_entry(Some(&name), &name).unwrap();
+        let mut staged = writer.entry_write(&name, Some(&name)).unwrap();
+        staged.record(&desc("foo", "1.0.0-1")).unwrap();
+        staged.commit().unwrap();
 
-        assert!(writer.entry_path(&name).is_dir());
-        assert_eq!(std::fs::read_dir(writer.entry_path(&name)).unwrap().count(), 0);
+        assert!(writer.entry_path(&name).join("desc").exists());
+        assert!(!writer.entry_path(&name).join("install").exists(), "the old member survived");
     }
 
-    /// A plain install passes `None`, and an entry that is not there must not be an error.
+    /// An entry this one replaces must be a real directory. Moving a symbolic link out would
+    /// leave its target in place, and replacing it would publish the entry through it.
+    #[cfg(unix)]
     #[test]
-    fn replace_entry_with_no_previous_is_a_plain_create() {
+    fn an_entry_write_refuses_to_replace_a_symlinked_entry() {
         let harness = Harness::new();
         let lock = harness.lock();
         let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
 
+        let outside = harness.dbpath().join("outside");
+        std::fs::create_dir(&outside).unwrap();
         let name = entry("foo-1.0.0-1");
-        writer.replace_entry(None, &name).unwrap();
-        assert!(writer.entry_path(&name).is_dir());
+        std::os::unix::fs::symlink(&outside, writer.entry_path(&name)).unwrap();
+
+        let mut staged = writer.entry_write(&name, None).unwrap();
+        staged.record(&desc("foo", "1.0.0-1")).unwrap();
+        let err = staged.commit().unwrap_err();
+
+        assert!(matches!(err, Error::Io { action: IoAction::Remove, .. }), "got {err:?}");
+        assert!(writer.entry_path(&name).is_symlink(), "the symlink was replaced");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "the target was written");
+    }
+
+    /// What an interrupted writer left in `piko-staging` is removed by the next writer, and never
+    /// read as an entry.
+    #[test]
+    fn a_new_writer_removes_what_an_interrupted_one_staged() {
+        let harness = Harness::new();
+        let staging = harness.dbpath().join(STAGING_DIR);
+        std::fs::create_dir_all(staging.join(STAGING_NEW).join("foo-2.0.0-1")).unwrap();
+        std::fs::create_dir_all(staging.join(STAGING_OLD).join("foo-1.0.0-1")).unwrap();
+        std::fs::write(staging.join(STAGING_OLD).join("foo-1.0.0-1").join("desc"), b"x").unwrap();
+
+        let lock = harness.lock();
+        drop(LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap());
+
+        assert!(!staging.exists(), "the leftovers survived a new writer");
     }
 
     #[test]
@@ -1001,8 +1152,8 @@ mod tests {
         let package = db.get_str("foo").unwrap();
         assert_eq!(package.version().to_string(), "1.0.0-1");
         assert_eq!(
-            package.file_list().unwrap(),
-            [PathBuf::from("usr/"), PathBuf::from("usr/bin/"), PathBuf::from("usr/bin/foo")]
+            package.file_list().unwrap().collect::<Vec<_>>(),
+            ["usr/", "usr/bin/", "usr/bin/foo"]
         );
     }
 
@@ -1082,6 +1233,8 @@ mod tests {
 
         writer.remove_entry(&name).unwrap();
         assert!(!writer.entry_path(&name).exists());
+        let old_dir = harness.dbpath().join(STAGING_DIR).join(STAGING_OLD);
+        assert_eq!(std::fs::read_dir(old_dir).unwrap().count(), 0, "the entry was only moved");
         assert!(writer.remove_entry(&name).is_err(), "removing it twice must fail");
     }
 
@@ -1212,15 +1365,15 @@ mod tests {
         let lock = harness.lock();
         let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
         let name = entry("foo-1.0.0-1");
-        writer.create_entry(&name).unwrap();
 
         let victim = harness.dbpath().join("secret");
         std::fs::write(&victim, b"private").unwrap();
         std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        let mut staged = writer.entry_write(&name);
+        let mut staged = writer.entry_write(&name, None).unwrap();
         staged.raw("install", b"post_install() { :; }", None).unwrap();
-        let temp = temp_path(&writer.entry_path(&name).join("install"));
+        let staging = harness.dbpath().join(STAGING_DIR).join(STAGING_NEW).join(name.as_str());
+        let temp = temp_path(&staging.join("install"));
         std::fs::remove_file(&temp).unwrap();
         std::os::unix::fs::symlink(&victim, &temp).unwrap();
 
@@ -1228,7 +1381,7 @@ mod tests {
         assert!(matches!(err, Error::TemporaryReplaced { .. }), "got {err:?}");
         let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the mode change followed the planted symlink");
-        assert!(!writer.entry_path(&name).join("install").exists());
+        assert!(!writer.entry_path(&name).exists(), "a refused entry was published");
     }
 
     /// `<dbpath>/local` as a symbolic link is refused. Following it would give the link's target

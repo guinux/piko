@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alpm_types::{PackageFileName, PackageInstallReason};
+use alpm_types::{Architecture, PackageFileName, PackageInstallReason};
 use piko_db::EntryName;
 use piko_db::compression;
 use piko_db::config::RepositoryConfig;
@@ -63,6 +63,9 @@ pub struct PackageOrigins<'a> {
     /// `GPGDir`: the GnuPG keyring signatures are checked against, pacman's
     /// `/etc/pacman.d/gnupg`. Opened only when a policy asks for a check.
     pub gpg_dir: &'a Path,
+    /// `Architecture`: what a repository package must be built for. Empty admits every
+    /// architecture, as libalpm does. See [`check_architecture`].
+    pub architectures: &'a [Architecture],
 }
 
 /// A solved plan, turned into what a transaction needs: its steps, what the plan says each
@@ -120,8 +123,10 @@ impl TransactionPlan {
     /// `universe` disagree about what a step names. This should not happen, since `built` was
     /// assembled from `universe`. It is checked rather than assumed.
     /// [`Error::RepositoryPackageUnreadable`] also if a candidate's `desc` or `%DEPENDS%` cannot
-    /// be read. [`Error::UnsupportedPackageCompression`] as [`check_compression`]. [`Error::UnconfiguredSource`] if a package comes from a repository `origins` does
-    /// not configure, or is a named file `origins` does not list. [`Error::KeyringUnusable`] if
+    /// be read. [`Error::UnsupportedPackageCompression`] as [`check_compression`].
+    /// [`Error::WrongArchitecture`] as [`check_architecture`]. [`Error::UnconfiguredSource`] if
+    /// a package comes from a repository `origins` does not configure, or is a named file
+    /// `origins` does not list. [`Error::KeyringUnusable`] if
     /// a policy asks for a signature check and the keyring at `origins.gpg_dir` cannot be
     /// opened.
     ///
@@ -142,6 +147,7 @@ impl TransactionPlan {
         origins: PackageOrigins<'_>,
     ) -> Result<Self> {
         check_compression(universe, built)?;
+        check_architecture(universe, built, origins.architectures)?;
         let Sources { downloads, policies, named } = sources(universe, built, origins)?;
         let steps = install_steps(universe, built, targets, reasons)?;
         let expectations = expectations(universe, built)?;
@@ -307,7 +313,8 @@ fn install_steps(
 ///
 /// [`TransactionPlan`] carries this, and `verify` compares every archive's
 /// `.PKGINFO` with it: the installed size and `%DEPENDS%`, `%CONFLICTS%`, `%REPLACES%`,
-/// `%PROVIDES%` and `%GROUPS%`, as `check_pkg_matches_db` does (`sync.c:1113`). A repository
+/// `%PROVIDES%` and `%GROUPS%`, as `check_pkg_matches_db` does (`sync.c:1113`), and a
+/// repository package's `%ARCH%`, which libalpm does not compare. A repository
 /// candidate's entry comes from its `desc`. A package file named on the command line gets one
 /// too, from the `.PKGINFO` the plan read; libalpm checks no such file.
 ///
@@ -328,6 +335,12 @@ fn expectations(universe: &Universe<'_>, built: &Plan) -> Result<HashMap<String,
                 name: solvable.name().to_string(),
                 source: std::sync::Arc::new(source),
             })?;
+        if let Some(repo_package) = solvable.as_repository() {
+            let desc = repo_package.desc().map_err(|source| {
+                Error::RepositoryPackageUnreadable { name: solvable.name().to_string(), source }
+            })?;
+            expected = expected.built_for(desc.architecture().clone());
+        }
         if let SolveStep::Change { from, .. } = step {
             expected = expected.replacing(entry_name_of(universe, *from)?);
         }
@@ -422,6 +435,60 @@ pub fn check_compression(universe: &Universe<'_>, built: &Plan) -> Result<()> {
     } else {
         Err(Error::UnsupportedPackageCompression { packages: refused })
     }
+}
+
+/// Refuses a plan that installs a repository package built for an architecture this machine is
+/// not configured to run.
+///
+/// This is `check_arch` (`trans.c:69`), which libalpm runs over the whole add list in
+/// `alpm_trans_prepare`, repository packages included. It reads each package's `%ARCH%`. A
+/// `Server` URL that names `$arch` does not settle the question: the database is the mirror's
+/// claim, and a repository without `$arch` serves whatever it lists. Every refused package is
+/// named, not only the first. A package file named on the command line is skipped:
+/// [`crate::file_target::check_architecture`] already refused it, before the plan was solved.
+///
+/// Skipped entirely when `configured` is empty, as libalpm skips it. `any` always passes.
+/// Otherwise the match is literal — `x86_64` does not admit `i686`.
+///
+/// [`TransactionPlan::new`] runs it. A frontend that previews a plan without building a
+/// [`TransactionPlan`] runs it too, so the preview refuses what the install refuses.
+///
+/// # Errors
+///
+/// [`Error::WrongArchitecture`] naming every refused package. As [`TransactionPlan::new`] if
+/// `built` and `universe` disagree about what a step names, or a candidate's `desc` cannot be
+/// read.
+pub fn check_architecture(
+    universe: &Universe<'_>,
+    built: &Plan,
+    configured: &[Architecture],
+) -> Result<()> {
+    if configured.is_empty() {
+        return Ok(());
+    }
+    let mut refused = Vec::new();
+    for step in built.steps() {
+        let Some(id) = step.incoming() else { continue };
+        let Some(candidate) = universe.get(id) else {
+            return Err(Error::PlanInconsistent { id });
+        };
+        let Some(repo_package) = candidate.as_repository() else { continue };
+        let desc = repo_package.desc().map_err(|source| Error::RepositoryPackageUnreadable {
+            name: candidate.name().to_string(),
+            source,
+        })?;
+        let architecture = desc.architecture();
+        if !crate::file_target::is_admitted(configured, architecture) {
+            refused.push(format!("{} ({architecture})", desc.file_name()));
+        }
+    }
+    if refused.is_empty() {
+        return Ok(());
+    }
+    Err(Error::WrongArchitecture {
+        packages: refused,
+        configured: configured.iter().map(ToString::to_string).collect(),
+    })
 }
 
 /// The name a candidate's package file is addressed by.
@@ -735,11 +802,13 @@ mod tests {
             &limits,
             &piko_db::solve::NoCache,
         );
+        let architectures: [Architecture; 1] = ["x86_64".parse().unwrap()];
         let origins = PackageOrigins {
             repos,
             sig_level: piko_db::config::SigLevel::default(),
             files: &[],
             gpg_dir,
+            architectures: &architectures,
         };
         TransactionPlan::new(&universe, &built, &[app], ReasonPolicy::AsResolved, origins)
     }
@@ -786,6 +855,7 @@ mod tests {
             sig_level: piko_db::config::SigLevel::default(),
             files: &[],
             gpg_dir: &no_keyring(),
+            architectures: &[],
         };
 
         let plan = TransactionPlan::new(&universe, &built, &[], ReasonPolicy::AsResolved, origins)
@@ -819,6 +889,31 @@ mod tests {
             &[("lib-1.0.0-1-x86_64.pkg.tar.xz".to_owned(), compression::Unsupported::Xz)]
         );
         assert!(err.to_string().contains("lib-1.0.0-1-x86_64.pkg.tar.xz (xz compression)"));
+    }
+
+    /// A dependency built for another architecture refuses the plan before anything is
+    /// downloaded, as `check_arch` refuses it, and the error names the file and its `%ARCH%`.
+    #[test]
+    fn a_package_built_for_another_architecture_is_refused_before_the_download() {
+        let lib = PackageSpec::new("lib", "1.0.0-1").architecture("aarch64");
+        let repos = [core_config(piko_db::config::SigLevel::default())];
+        let Err(err) = app_plan_with(&repos, &no_keyring(), lib) else {
+            panic!("a foreign package must refuse the plan");
+        };
+        let Error::WrongArchitecture { packages, configured } = &err else {
+            panic!("got {err:?}");
+        };
+        assert_eq!(packages, &["lib-1.0.0-1-aarch64.pkg.tar.zst (aarch64)".to_owned()]);
+        assert_eq!(configured, &["x86_64".to_owned()]);
+    }
+
+    /// `any` is admitted under every configured architecture.
+    #[test]
+    fn a_package_built_for_any_architecture_is_admitted() {
+        let lib = PackageSpec::new("lib", "1.0.0-1").architecture("any");
+        let repos = [core_config(piko_db::config::SigLevel::default())];
+        let plan = app_plan_with(&repos, &no_keyring(), lib).unwrap();
+        assert!(installs(&plan).contains(&"lib-1.0.0-1-any.pkg.tar.zst".to_owned()));
     }
 
     /// The cache file names a plan installs.
@@ -950,6 +1045,7 @@ mod tests {
             sig_level: piko_db::config::SigLevel::default(),
             files,
             gpg_dir: &gpg_dir,
+            architectures: &[],
         };
         let file_name = target.file_name().to_string();
         TransactionPlan::new(&universe, &built, &[tool], ReasonPolicy::AsResolved, origins)

@@ -612,7 +612,12 @@ impl Sandbox {
 
     /// Runs `piko install` for `targets`, with the given extra arguments.
     fn run_install(&self, targets: &[&str], extra: &[&str]) -> Output {
-        let mut command = Command::new(PIKO);
+        self.run_install_as(Path::new(PIKO), targets, extra)
+    }
+
+    /// As [`Self::run_install`], running the `piko` binary at `program`.
+    fn run_install_as(&self, program: &Path, targets: &[&str], extra: &[&str]) -> Output {
+        let mut command = Command::new(program);
         command
             .arg("install")
             .arg("--config")
@@ -694,6 +699,38 @@ pre_remove() {
   echo \"PRE_REMOVE $1\"
 }
 ";
+
+/// The exec helper is the running program, never the file at its path. Here the install
+/// replaces the file piko runs from, before the scriptlet that follows it. The scriptlet must
+/// still reach the helper, which then fails closed exactly as
+/// `a_scriptlet_that_cannot_enter_the_root_fails_closed` describes. A helper started by its
+/// path would find the package's text file there, and could not be started at all.
+#[test]
+fn a_scriptlet_runs_after_the_install_replaces_the_running_binary() {
+    let sandbox = Sandbox::new();
+    let running = sandbox.path("root/usr/bin/piko");
+    std::fs::create_dir_all(running.parent().unwrap()).unwrap();
+    std::fs::copy(PIKO, &running).unwrap();
+    write_package_with(
+        &sandbox.path("cache"),
+        "foo",
+        "1.0.0-1",
+        Some(SCRIPT),
+        &[("usr/bin/piko", "not a program")],
+    );
+    sandbox.write_repo(&[("foo", "1.0.0-1", &[])]);
+
+    let output = sandbox.run_install_as(&running, &["foo"], &["--overwrite", "*"]);
+    let seen = text(&output);
+
+    assert!(output.status.success(), "{seen}");
+    assert_eq!(std::fs::read_to_string(&running).unwrap(), "not a program", "{seen}");
+    assert!(!seen.contains("could not be started"), "the helper was started by its path:\n{seen}");
+    assert!(
+        seen.contains(SCRIPTLET_FAILED) || seen.contains("POST_INSTALL 1.0.0-1"),
+        "the scriptlet did not reach the helper:\n{seen}"
+    );
+}
 
 /// The root is a temporary directory holding only the package's own files, so the scriptlet
 /// cannot run. It fails at one of two points, and the privileges of whoever runs the suite

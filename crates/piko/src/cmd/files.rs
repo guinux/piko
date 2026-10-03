@@ -70,18 +70,11 @@ pub fn files_installed(
             }
         };
 
-        // `alpm-db` orders these as `PathBuf`s, comparing component by component. pacman
-        // sorts the raw strings byte-wise, which puts `usr/share/makepkg-template` before
-        // `usr/share/makepkg/...`. Re-sort so this output can be diffed against `pacman -Ql`.
-        let mut sorted: Vec<_> = paths.iter().filter_map(|path| path.to_str()).collect();
+        // The reader orders these component by component. pacman sorts the raw strings
+        // byte-wise, which puts `usr/share/makepkg-template` before `usr/share/makepkg/...`.
+        // Re-sort so this output can be diffed against `pacman -Ql`.
+        let mut sorted: Vec<&str> = paths.collect();
         sorted.sort_unstable();
-
-        if sorted.len() != paths.len() {
-            eprintln!(
-                "Warning: {} path(s) are not valid UTF-8 and were omitted",
-                paths.len().saturating_sub(sorted.len())
-            );
-        }
 
         for path in sorted {
             emit!(out, "{}", file_line(package.name(), path, quiet));
@@ -197,15 +190,8 @@ pub fn files_installed_then_repos(
             Some(LocalOrRepo::Local(package)) => match package.file_list() {
                 Ok(paths) => {
                     // See `files_installed` for why this re-sorts.
-                    let mut sorted: Vec<_> =
-                        paths.iter().filter_map(|path| path.to_str()).collect();
+                    let mut sorted: Vec<&str> = paths.collect();
                     sorted.sort_unstable();
-                    if sorted.len() != paths.len() {
-                        eprintln!(
-                            "Warning: {} path(s) are not valid UTF-8 and were omitted",
-                            paths.len().saturating_sub(sorted.len())
-                        );
-                    }
                     for path in sorted {
                         emit!(out, "{}", file_line(package.name(), path, quiet));
                     }

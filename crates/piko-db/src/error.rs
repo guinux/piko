@@ -261,22 +261,10 @@ pub enum Error {
         source: SharedError,
     },
 
-    /// A `desc` file could not be parsed.
-    #[error("failed to parse {}", path.display())]
-    Desc {
-        /// The path of the `desc` file.
-        path: PathBuf,
-        /// The underlying parse failure.
-        #[source]
-        source: alpm_db::Error,
-    },
-
-    /// A `desc` file's eager sections could not be read.
-    ///
-    /// Separate from [`Self::Desc`] because it comes from a different parser. The relation
-    /// sections and `%REASON%` go through [`crate::eager`], not `alpm-db`'s typed conversion.
-    /// Only the latter can produce an `alpm_db::Error`.
-    #[error("failed to read the dependency sections of {}", path.display())]
+    /// A local `desc` file is missing a section that decides something, or holds an invalid
+    /// one: a relation section, `%SIZE%` or `%REASON%` in the eager tier, `%NAME%`,
+    /// `%VERSION%` or `%ARCH%` in the full one.
+    #[error("failed to read {}", path.display())]
     DescFields {
         /// The path of the `desc` file.
         path: PathBuf,
@@ -309,7 +297,7 @@ pub enum Error {
         path: PathBuf,
         /// The underlying parse failure.
         #[source]
-        source: alpm_db::files::Error,
+        source: crate::meta::files::FilesError,
     },
 
     /// An `mtree` file could not be parsed.
@@ -399,17 +387,16 @@ pub enum Error {
     /// this. That package is dropped during the scan instead, with
     /// [`crate::repo::RepoDiagnostic::InvalidDesc`].
     ///
-    /// The source is boxed because `alpm_repo_db::Error` carries a rendered `winnow`
-    /// diagnostic. Inlining it pushes `Result<_, Error>` past clippy's `result_large_err`
-    /// threshold — the same thing that already happened once, recorded on
-    /// [`Error::FilesVersionSkew`]'s doc comment.
-    #[error("{entry}: failed to parse desc")]
+    /// Only a section that decides something produces this: `%FILENAME%`, `%NAME%`,
+    /// `%VERSION%`, `%ARCH%`, `%SHA256SUM%` or `%PGPSIG%`. A section that is shown only costs
+    /// its own field, through [`crate::repo::RepoDescView::invalid_fields`].
+    #[error("{entry}: failed to read desc")]
     RepoDescUnparsable {
         /// The entry directory name of the package whose `desc` could not be parsed.
         entry: String,
-        /// The underlying parse failure.
+        /// The underlying parse failure. Boxed for the reason [`Self::RepoDescFields`] documents.
         #[source]
-        source: Box<alpm_repo_db::Error>,
+        source: Box<crate::eager::DescFieldError>,
     },
 
     /// A package's file list is absent from the `.files` archive that was consulted.

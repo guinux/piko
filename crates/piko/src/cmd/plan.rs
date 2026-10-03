@@ -477,7 +477,10 @@ fn read_file_targets(
         piko_txn::file_target::Urls::Refuse,
         &piko_txn::extract::PackageLimits::default(),
     ) {
-        Ok(loaded) => Ok(loaded),
+        Ok(loaded) => {
+            super::txn::report_file_problems(&loaded);
+            Ok(loaded)
+        }
         Err(piko_txn::Error::UrlNotLoaded { url }) => {
             eprintln!(
                 "Error: cannot plan {url}: previewing a package URL would have to \
@@ -611,7 +614,9 @@ pub fn plan(
 
     let built = planned.plan;
     // `piko install` refuses these in `TransactionPlan::new`, before it downloads anything.
-    if let Err(error) = piko_txn::plan::check_compression(&universe, &built) {
+    if let Err(error) = piko_txn::plan::check_compression(&universe, &built)
+        .and_then(|()| piko_txn::plan::check_architecture(&universe, &built, architecture))
+    {
         report(&error);
         return ExitCode::FAILURE;
     }

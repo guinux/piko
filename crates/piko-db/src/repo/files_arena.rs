@@ -1,8 +1,7 @@
 //! A compact store for every package's file list in a repository database.
 //!
-//! `RepoFilesV1` (via [`alpm_repo_db::files::RepoFilesV1`]) hands back a `Vec<PathBuf>` per
-//! package. A full `.files` archive holds millions of paths. The real `extra` repository
-//! measures 7 639 616 of them, 509 MiB of path bytes. Storing one `Vec<PathBuf>` per package
+//! A full `.files` archive holds millions of paths. The real `extra` repository measures
+//! 7 639 616 of them, 509 MiB of path bytes. Storing one `Vec<PathBuf>` per package
 //! would cost roughly 800 MiB for that repository, once allocator overhead is counted.
 //! Concatenating every path into one `String` and indexing into it with `u32` offsets measures
 //! 538 MiB for the same data. That is smaller, with far fewer allocations.
@@ -73,7 +72,7 @@ impl FilesArena {
         archive_path: &Path,
         name: Name,
         version: FullVersion,
-        paths: &[std::path::PathBuf],
+        paths: &[&str],
         max_bytes: u64,
         max_paths: usize,
     ) -> Result<()> {
@@ -125,18 +124,7 @@ impl FilesArena {
     }
 
     /// Appends one path's bytes and records its offsets.
-    fn push_path(
-        &mut self,
-        archive_path: &Path,
-        path: &std::path::Path,
-        max_bytes: u64,
-    ) -> Result<()> {
-        // Every path here was parsed by `RepoFilesV1::from_str` out of a UTF-8 `&str`, so
-        // `to_str` cannot fail in practice. `to_string_lossy` is used anyway rather than an
-        // `unwrap`. Should that invariant ever be violated, replacement characters are the
-        // safer outcome. A panic is worse, as is an error variant with no real source.
-        let text = path.to_string_lossy();
-
+    fn push_path(&mut self, archive_path: &Path, text: &str, max_bytes: u64) -> Result<()> {
         let start = self.byte_len_as_u32(archive_path, max_bytes)?;
 
         let new_len = self
@@ -149,7 +137,7 @@ impl FilesArena {
         }
         let end = u32::try_from(new_len).map_err(|_| limit_exceeded(archive_path, max_bytes))?;
 
-        self.data.push_str(&text);
+        self.data.push_str(text);
         self.starts.push(start);
         self.ends.push(end);
         Ok(())
@@ -237,7 +225,7 @@ impl ExactSizeIterator for PathIter<'_> {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
-    use std::{path::PathBuf, str::FromStr as _};
+    use std::str::FromStr as _;
 
     use super::*;
 
@@ -249,8 +237,8 @@ mod tests {
         FullVersion::from_str(s).unwrap()
     }
 
-    fn paths(items: &[&str]) -> Vec<PathBuf> {
-        items.iter().map(PathBuf::from).collect()
+    fn paths<'a>(items: &[&'a str]) -> Vec<&'a str> {
+        items.to_vec()
     }
 
     #[test]

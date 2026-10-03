@@ -52,7 +52,12 @@ allow_attributes_without_reason = "deny"
 alpm-types = "0.11"
 # The same library libalpm itself verifies with.
 gpgme = "0.11"
+# Dev-dependencies only: the oracles of the differential tests of piko's own readers.
 alpm-db = "0.2"
+alpm-pkginfo = "0.6"
+alpm-repo-db = "0.1"
+# Dev-dependency only: the property tests of piko's metadata readers.
+proptest = "1"
 # We would only need `default-features = false` here because the default `creation` feature is
 # only needed to *write* mtree files, piko only reads them.
 # But  it does not build, because of an upstream bug.
@@ -62,8 +67,6 @@ alpm-common = "0.2"
 # Without the default features: `legacy` decodes the pre-1.0 frame formats, which no package
 # or database uses, and the other two are for compressing.
 zstd = { version = "0.13", default-features = false }
-alpm-repo-db = "0.1"
-alpm-pkginfo = "0.6"
 flate2 = "1"
 glob = "0.3"
 # `openat`-based path resolution for extraction, and the open flags (`O_NOFOLLOW`, `O_NONBLOCK`)
@@ -93,8 +96,9 @@ clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 # CLI-only progress bar/spinner for downloads and transaction steps
 indicatif = "0.18"
-# CLI-only Ctrl+C handling for cancelling an in-progress download.
-ctrlc = "3"
+# CLI-only signal handling: Ctrl+C, a hangup and a terminate request stop a download or a
+# commit at a step boundary. It tells the three apart, which `ctrlc` cannot.
+signal-hook = "0.4"
 # CLI-only ANSI styling for the transaction progress display.
 console = "0.16"
 

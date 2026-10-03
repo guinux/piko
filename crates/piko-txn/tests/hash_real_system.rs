@@ -53,14 +53,14 @@ fn piko_agrees_with_the_hashes_pacman_recorded() {
     let mut edited_examples = Vec::new();
 
     for package in db.iter() {
-        // A `%BACKUP%` entry with a literal `(null)` hash, written when pacman could not hash
-        // the file, fails the typed parse. Such a package has nothing to compare against.
         let Ok(backups) = package.backups() else {
             unparsed += 1;
             continue;
         };
         for entry in backups {
-            let recorded = entry.md5.to_string();
+            // A `(null)` entry, written for a file the package does not ship, has no hash to
+            // compare against.
+            let Some(recorded) = entry.md5.as_ref().map(ToString::to_string) else { continue };
 
             let path = entry.path.inner();
             let Ok(resolved) = root.resolve_parent(path) else {

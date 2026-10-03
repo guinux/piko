@@ -118,10 +118,10 @@ fn both_desc_schema_versions_are_present_and_readable() {
         let _ = package.depends();
 
         if desc.is_v2() {
-            assert!(desc.pgp_signature().is_none() || desc.md5_checksum().is_none());
+            assert!(matches!(desc.md5_checksum(), Ok(None)), "a v2 desc has no %MD5SUM%");
             v2 += 1;
         } else {
-            assert!(desc.md5_checksum().is_some(), "a v1 desc must have %MD5SUM%");
+            assert!(matches!(desc.md5_checksum(), Ok(Some(_))), "a v1 desc must have %MD5SUM%");
             assert!(desc.pgp_signature().is_some(), "%PGPSIG% is mandatory in v1");
             v1 += 1;
         }

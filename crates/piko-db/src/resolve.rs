@@ -1384,7 +1384,7 @@ Foobar McFooface <foobar@mcfooface.org>
 
     /// `installed_satisfier` reads the eager tier, which holds `%PROVIDES%`.
     ///
-    /// The entry named `aaa` carries a `%PACKAGER%` the typed parse refuses. Two things must
+    /// The entry named `aaa` carries an `%ARCH%` the typed parse refuses. Two things must
     /// still work past it. A package listed after it is found. Its own `%PROVIDES%` is read.
     ///
     /// The hook engine's `Depends` check is the only caller, and it reads an error as "nothing
@@ -1395,7 +1395,7 @@ Foobar McFooface <foobar@mcfooface.org>
         let refused = crate::fixture::MINIMAL_DESC_V1
             .replacen("%NAME%\nfoo", "%NAME%\naaa", 1)
             .replacen("%BASE%\nfoo", "%BASE%\naaa", 1)
-            .replacen("Foobar McFooface <foobar@mcfooface.org>", "Some One <not-an-email>", 1)
+            .replacen("%ARCH%\nx86_64", "%ARCH%\nnot an arch", 1)
             + "%PROVIDES%\nsnapshot-tool\n\n";
         db.package("aaa-1.0.0-1").desc(&refused).files(crate::fixture::MINIMAL_FILES).build();
         db.package("timeshift-1.0.0-1").with_defaults().build();

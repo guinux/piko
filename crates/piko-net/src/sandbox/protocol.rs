@@ -16,7 +16,7 @@
 
 use std::io::{self, Read, Write};
 
-use crate::error::printable;
+use crate::error::{printable, without_credentials};
 
 /// The first line of a request. It changes whenever the format does.
 const REQUEST_MAGIC: &str = "piko-fetch 1";
@@ -321,7 +321,7 @@ impl<R: Read> Reader<R> {
     /// Reads the first frame.
     pub(crate) fn opening(&mut self) -> io::Result<Opening> {
         let (tag, payload) = self.frame()?;
-        let text = || printable(&String::from_utf8_lossy(&payload));
+        let text = || printable(&without_credentials(&String::from_utf8_lossy(&payload)));
         match tag {
             Tag::Setup => Ok(Opening::Setup(text())),
             Tag::Failure => Ok(Opening::Failure(text())),
@@ -347,7 +347,8 @@ impl<R: Read> Read for Reader<R> {
                 }
                 Tag::End => self.finished = true,
                 Tag::Failure => {
-                    return Err(io::Error::other(printable(&String::from_utf8_lossy(&payload))));
+                    let text = String::from_utf8_lossy(&payload);
+                    return Err(io::Error::other(printable(&without_credentials(&text))));
                 }
                 Tag::Data | Tag::Setup | Tag::Header => {
                     return Err(invalid("a frame out of order"));
