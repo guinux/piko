@@ -28,8 +28,10 @@ tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 # Timestamps for `pacman.log` and the transaction history. Formatting is done by hand;
-# only the calendar arithmetic and the local UTC offset come from here.
+# only the calendar arithmetic comes from here.
 time.workspace = true
+# The local time zone's rules, for the UTC offset at each instant.
+jiff.workspace = true
 
 [dev-dependencies]
 # The parser piko's own `.PKGINFO` reader replaces. Only `pkginfo_real_system.rs` reads it, as

@@ -25,7 +25,7 @@ use crate::output::emit;
 pub fn installed(
     db: &LocalDatabase,
     names: &[String],
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let mut ok = true;
@@ -39,7 +39,7 @@ pub fn installed(
             ok = false;
             continue;
         };
-        if local::info(db, package, offset, out) != ExitCode::SUCCESS {
+        if local::info(db, package, zone, out) != ExitCode::SUCCESS {
             ok = false;
         }
     }
@@ -52,7 +52,7 @@ pub fn installed(
 pub fn repo(
     db: &RepoDatabase,
     names: &[String],
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let mut ok = true;
@@ -66,7 +66,7 @@ pub fn repo(
             ok = false;
             continue;
         };
-        if crate::cmd::repo::repo_info(db, package, offset, out) != ExitCode::SUCCESS {
+        if crate::cmd::repo::repo_info(db, package, zone, out) != ExitCode::SUCCESS {
             ok = false;
         }
     }
@@ -88,7 +88,7 @@ pub fn installed_then_repos(
     local: &LocalDatabase,
     dbs: &[RepoDatabase],
     names: &[String],
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let mut ok = true;
@@ -99,13 +99,13 @@ pub fn installed_then_repos(
         }
         match resolve_installed_or_repo(local, dbs, name) {
             Some(LocalOrRepo::Local(package)) => {
-                if self::local::info(local, package, offset, out) != ExitCode::SUCCESS {
+                if self::local::info(local, package, zone, out) != ExitCode::SUCCESS {
                     ok = false;
                 }
             }
             Some(LocalOrRepo::Repo(index, package)) => {
                 if let Some(db) = dbs.get(index)
-                    && crate::cmd::repo::repo_info(db, package, offset, out) != ExitCode::SUCCESS
+                    && crate::cmd::repo::repo_info(db, package, zone, out) != ExitCode::SUCCESS
                 {
                     ok = false;
                 }

@@ -181,10 +181,10 @@ pub(crate) use field_list;
 pub(crate) fn info_date<E>(
     typed: Result<i64, E>,
     raw: &[&str],
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
 ) -> String {
     match typed {
-        Ok(timestamp) => crate::output::human_date(timestamp, offset),
+        Ok(timestamp) => crate::output::human_date(timestamp, zone),
         Err(_) => crate::output::escaped(raw.join(" ")),
     }
 }
@@ -230,7 +230,7 @@ pub(crate) use info_description_fields;
 /// `pacman -Qi` and `pacman -Si` print alike. See `info_description_fields!` for why this is a
 /// macro.
 macro_rules! info_build_fields {
-    ($out:expr, $desc:expr, $offset:expr) => {{
+    ($out:expr, $desc:expr, $zone:expr) => {{
         use $crate::output::{emit, escaped, human_size};
         use $crate::style::{info_date, info_label};
 
@@ -242,7 +242,7 @@ macro_rules! info_build_fields {
             info_label("Packager        :"),
             escaped(desc.packager_raw().unwrap_or_default())
         );
-        let build_date = info_date(desc.build_date(), &desc.section_values("BUILDDATE"), $offset);
+        let build_date = info_date(desc.build_date(), &desc.section_values("BUILDDATE"), $zone);
         emit!($out, "{} {build_date}", info_label("Build Date      :"));
     }};
 }

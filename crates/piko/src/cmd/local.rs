@@ -76,13 +76,13 @@ fn yes_no(value: bool) -> &'static str {
     if value { "Yes" } else { "No" }
 }
 
-/// `offset` is the UTC offset the two date fields are rendered in, captured in `main`.
+/// `zone` is the time zone the two date fields are rendered in, read in `main`.
 ///
 /// See [`crate::output::human_date`].
 pub fn info(
     local: &LocalDatabase,
     package: &LocalPackage,
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let desc = match package.desc() {
@@ -106,8 +106,8 @@ pub fn info(
     field_list!(out, "Optional For    :", &dependents.optional_for, 5);
     field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
     field_list!(out, "Replaces        :", desc.replaces(), 5);
-    info_build_fields!(out, desc, offset);
-    let install_date = info_date(desc.install_date(), &desc.section_values("INSTALLDATE"), offset);
+    info_build_fields!(out, desc, zone);
+    let install_date = info_date(desc.install_date(), &desc.section_values("INSTALLDATE"), zone);
     emit!(out, "{} {install_date}", info_label("Install Date    :"));
     emit!(
         out,

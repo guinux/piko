@@ -87,10 +87,11 @@ thiserror = "2"
 # rustls + platform-verifier: keeps piko's TLS stack pure Rust while still validating
 # against the system CA store, same as libcurl/pacman.
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
-# `local-offset` is what lets a timestamp be rendered in the machine's own time zone, the
-# way `pacman.log` spells one. The feature is gated because the offset can only be read
-# soundly while the process is single-threaded — see `piko_txn::history::LocalOffset`.
-time = { version = "0.3", features = ["local-offset"] }
+time = "0.3"
+# Reads the machine's time zone rules (TZif, or a POSIX `TZ` string), so a timestamp is
+# rendered in the offset that applied at that instant. piko reads the bytes itself, bounded;
+# no feature that searches the system or bundles a database is turned on.
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 # CLI-only progress bar/spinner for downloads and transaction steps

@@ -24,8 +24,8 @@ pub struct Options {
     pub until: Option<String>,
     /// `--quiet`: one line per transaction, no per-package detail.
     pub quiet: bool,
-    /// The UTC offset timestamps are rendered in, captured in `main`.
-    pub offset: piko_txn::LocalOffset,
+    /// The time zone timestamps are rendered in, read in `main`.
+    pub zone: piko_txn::LocalZone,
 }
 
 /// Prints the transactions the two records describe, oldest first.
@@ -36,8 +36,8 @@ pub fn history(
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let (since, until) = match (
-        parse_when(options.since.as_deref(), Bound::Start, options.offset),
-        parse_when(options.until.as_deref(), Bound::End, options.offset),
+        parse_when(options.since.as_deref(), Bound::Start, options.zone),
+        parse_when(options.until.as_deref(), Bound::End, options.zone),
     ) {
         (Ok(since), Ok(until)) => (since, until),
         (Err(bad), _) | (_, Err(bad)) => {
@@ -150,7 +150,7 @@ fn print_record(
     // found in `pacman.log` by searching for it.
     let when = record.started.map_or_else(
         || "unknown date".to_owned(),
-        |epoch| piko_txn::history::render_timestamp(epoch, options.offset),
+        |epoch| piko_txn::history::render_timestamp(epoch, options.zone),
     );
 
     // The count answers a question the detail below cannot: how big was the transaction this
@@ -319,8 +319,8 @@ enum Bound {
     End,
 }
 
-/// The last second of a day, from its midnight.
-const DAY_END: i64 = 24 * 60 * 60 - 1;
+/// The length of a day on a clock that does not change: from one midnight to the next.
+const DAY: i64 = 24 * 60 * 60;
 
 /// Parses `--since`/`--until`: a full timestamp, or a bare `YYYY-MM-DD` naming a whole day.
 ///
@@ -330,14 +330,15 @@ const DAY_END: i64 = 24 * 60 * 60 - 1;
 /// transaction of the 23rd. It would also make `--since D --until D` return nothing for any
 /// day. That is the one range a reader is most likely to ask for.
 ///
-/// A bare date is read in `offset`, the offset every time in the listing is rendered in. So
+/// A bare date is read in `zone`, the zone every time in the listing is rendered in. So
 /// `--since D` keeps exactly the transactions the listing dates D or later. A day read in UTC
 /// would, east of Greenwich, drop the first hours of day D the listing shows, and keep the last
-/// hours of the day before.
+/// hours of the day before. The day ends where the next one starts, so a day that changes the
+/// clock lasts 23 or 25 hours, as it does on the wall.
 fn parse_when(
     text: Option<&str>,
     bound: Bound,
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
 ) -> Result<Option<i64>, String> {
     let Some(text) = text else {
         return Ok(None);
@@ -348,13 +349,12 @@ fn parse_when(
         return piko_txn::history::parse_timestamp(text).map(Some).ok_or_else(|| text.to_owned());
     }
 
-    // Local midnight is UTC midnight moved back by the offset east of UTC.
+    // The day's midnight as a wall clock, spelled as if it were UTC.
     let midnight = piko_txn::history::parse_timestamp(&format!("{text}T00:00:00+0000"))
-        .ok_or_else(|| text.to_owned())?
-        .saturating_sub(i64::from(offset.seconds()));
+        .ok_or_else(|| text.to_owned())?;
     Ok(Some(match bound {
-        Bound::Start => midnight,
-        Bound::End => midnight.saturating_add(DAY_END),
+        Bound::Start => zone.instant_of(midnight),
+        Bound::End => zone.instant_of(midnight.saturating_add(DAY)).saturating_sub(1),
     }))
 }
 
@@ -363,7 +363,7 @@ fn parse_when(
 mod tests {
     use super::*;
 
-    const UTC: piko_txn::LocalOffset = piko_txn::LocalOffset::UTC;
+    const UTC: piko_txn::LocalZone = piko_txn::LocalZone::UTC;
 
     #[test]
     fn a_bare_date_starts_a_range_at_its_midnight() {
@@ -374,7 +374,7 @@ mod tests {
     /// and a transaction at 01:00 local time belongs to the day the listing shows it on.
     #[test]
     fn a_bare_date_is_the_day_in_the_offset_the_listing_uses() {
-        let paris = piko_txn::LocalOffset::from_seconds(2 * 3600);
+        let paris = piko_txn::LocalZone::from_seconds(2 * 3600);
         let start = parse_when(Some("2026-09-27"), Bound::Start, paris).unwrap().unwrap();
         let end = parse_when(Some("2026-09-27"), Bound::End, paris).unwrap().unwrap();
 
@@ -519,7 +519,7 @@ mod tests {
             since: None,
             until: None,
             quiet: false,
-            offset: piko_txn::LocalOffset::UTC,
+            zone: piko_txn::LocalZone::UTC,
         };
         assert!(Widths::over(&records, &listing).name > 0);
         assert_eq!(Widths::over(&records, &Options { quiet: true, ..listing }).name, 0);
@@ -537,7 +537,7 @@ mod tests {
             since: None,
             until: None,
             quiet: false,
-            offset: piko_txn::LocalOffset::UTC,
+            zone: piko_txn::LocalZone::UTC,
         };
         assert_eq!(Widths::over(&records, &options).name, "foo".len());
     }
@@ -571,7 +571,7 @@ mod tests {
             since: None,
             until: None,
             quiet: false,
-            offset: UTC,
+            zone: UTC,
         };
 
         for quiet in [false, true] {

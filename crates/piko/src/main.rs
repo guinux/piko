@@ -49,13 +49,11 @@ fn main() -> ExitCode {
         return code;
     }
 
-    // Read here, before anything spawns a thread. `time` refuses to read the local UTC
-    // offset from a multi-threaded process, and piko is multi-threaded by the time a
-    // transaction runs. See `piko_txn::LocalOffset`. Every timestamp piko writes uses this.
-    let offset = piko_txn::LocalOffset::capture();
+    // Read once, so every timestamp piko writes or shows uses one zone.
+    let zone = piko_txn::LocalZone::capture();
     let cli = Cli::parse();
 
-    match run(&cli, offset) {
+    match run(&cli, zone) {
         Ok(code) => code,
         Err(error) => {
             report(&error);
@@ -84,7 +82,7 @@ fn exec_helper() -> Option<ExitCode> {
     Some(ExitCode::FAILURE)
 }
 
-fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
+fn run(cli: &Cli, zone: piko_txn::LocalZone) -> Result<ExitCode, Error> {
     // stdout is locked once and buffered here, because `piko list` writes over a thousand
     // lines.
     let stdout = io::stdout();
@@ -199,19 +197,19 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 cmd::info::repo(
                     &open_repo_by_name(&dbpath, &repo, cli, &config)?,
                     packages,
-                    offset,
+                    zone,
                     &mut out,
                 )
             }
             None if *installed => {
-                cmd::info::installed(&open_local_db(cli, &config)?, packages, offset, &mut out)
+                cmd::info::installed(&open_local_db(cli, &config)?, packages, zone, &mut out)
             }
             None => {
                 let local = open_local_db(cli, &config)?;
                 let missing: Vec<String> =
                     packages.iter().filter(|name| local.get_str(name).is_none()).cloned().collect();
                 let dbs = open_repos_for_packages(cli, &config, &missing)?;
-                cmd::info::installed_then_repos(&local, &dbs, packages, offset, &mut out)
+                cmd::info::installed_then_repos(&local, &dbs, packages, zone, &mut out)
             }
         },
         Command::Check { packages } => {
@@ -274,7 +272,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             };
             // A frozen database makes this command answer "no updates" and nothing else. That
             // is exactly the harm an old database does, so it is said on stderr.
-            report_stale_repos(repos.iter(), *max_age, offset);
+            report_stale_repos(repos.iter(), *max_age, zone);
             let (ignore_pkg, ignore_group) = ignore_lists(cli, &config);
             let ignores = IgnoreList::new(&ignore_pkg, &ignore_group);
             cmd::sync::check_updates(&local, &repos, &ignores, *quiet, &mut out)
@@ -301,7 +299,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             let local = open_local_db(cli, &config)?;
             let opened = open_all_repos(cli, &config)?;
             if *sysupgrade {
-                report_stale_repos(opened.iter().map(|(_, db)| db), *max_age, offset);
+                report_stale_repos(opened.iter().map(|(_, db)| db), *max_age, zone);
             }
             let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
             let format = if *names { cmd::plan::Format::Names } else { cmd::plan::Format::Full };
@@ -377,7 +375,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                     hookdir,
                     noconfirm: *noconfirm,
                     download_only: *download_only,
-                    offset,
+                    zone,
                 },
                 &mut out,
             )?
@@ -417,7 +415,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                     hookdir,
                     noconfirm: *noconfirm,
                     download_only: *download_only,
-                    offset,
+                    zone,
                 },
                 &mut out,
             )?
@@ -440,7 +438,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             // fallbacks, a broken config would remove a held package without asking, as pacman,
             // which refuses to run at all, never does.
             require_pacman_config(cli, &config)?;
-            let record = recording(cli, &config, &resolve_dbpath(cli, &config), offset);
+            let record = recording(cli, &config, &resolve_dbpath(cli, &config), zone);
             cmd::txn::note(
                 &record,
                 &format!("Running '{}'", record.command.as_deref().unwrap_or("piko")),
@@ -475,7 +473,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                     named: cli.dbpath.is_some(),
                 },
             )?;
-            let record = recording(cli, &config, &resolve_dbpath(cli, &config), offset);
+            let record = recording(cli, &config, &resolve_dbpath(cli, &config), zone);
             cmd::txn::note(
                 &record,
                 &format!("Running '{}'", record.command.as_deref().unwrap_or("piko")),
@@ -492,7 +490,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                     freshness: freshness_policy(*accept_older, *max_age),
                 },
                 &cancel,
-                offset,
+                zone,
             )
         }
         Command::Report => {
@@ -507,7 +505,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
                 since: since.clone(),
                 until: until.clone(),
                 quiet: *quiet,
-                offset,
+                zone,
             },
             &mut out,
         ),
@@ -632,9 +630,8 @@ struct SyncArgs<'a> {
     noconfirm: bool,
     /// `-w`/`--downloadonly`.
     download_only: bool,
-    /// The UTC offset every timestamp is rendered in, captured in `main` — see
-    /// [`piko_txn::LocalOffset`].
-    offset: piko_txn::LocalOffset,
+    /// The time zone every timestamp is rendered in, read in `main`.
+    zone: piko_txn::LocalZone,
 }
 
 /// The freshness policy for a refresh, from `--accept-older` and `--max-age`, at the current
@@ -651,14 +648,14 @@ fn freshness_policy(accept_older: bool, max_age_days: u64) -> piko_net::Freshnes
 fn report_stale_repos<'a>(
     repos: impl IntoIterator<Item = &'a piko_db::repo::RepoDatabase>,
     max_age_days: u64,
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
 ) {
     let dated: Vec<_> = repos.into_iter().map(|db| (db.name(), db.publication())).collect();
     cmd::freshness::report_stale(
         dated,
         std::time::SystemTime::now(),
         cmd::freshness::max_age(max_age_days),
-        offset,
+        zone,
     );
 }
 
@@ -692,7 +689,7 @@ fn sync(
     let parsed = require_pacman_config(cli, config)?;
     let local = open_local_db(cli, config)?;
     let dbpath = resolve_dbpath(cli, config);
-    let record = recording(cli, config, &dbpath, args.offset);
+    let record = recording(cli, config, &dbpath, args.zone);
     // pacman's frontend logs the same two lines, in the same order and at the same points
     // (`Running '…'` at startup, `starting full system upgrade` for `-u`).
     cmd::txn::note(&record, &format!("Running '{}'", record.command.as_deref().unwrap_or("piko")));
@@ -707,7 +704,7 @@ fn sync(
             files: false,
             freshness: freshness_policy(args.accept_older, args.max_age),
         };
-        let code = cmd::refresh::refresh(parsed, &dbpath, &[], options, &cancel, args.offset);
+        let code = cmd::refresh::refresh(parsed, &dbpath, &[], options, &cancel, args.zone);
         if code != ExitCode::SUCCESS {
             return Ok(code);
         }
@@ -719,7 +716,7 @@ fn sync(
     // The refresh above already reported each database's age, after asking other mirrors. With
     // `--norefresh`, the plan rests on whatever is on disk, and only an age can be reported.
     if !args.refresh && args.sysupgrade.is_some() {
-        report_stale_repos(opened.iter().map(|(_, db)| db), args.max_age, args.offset);
+        report_stale_repos(opened.iter().map(|(_, db)| db), args.max_age, args.zone);
     }
     let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
     let signing = signing_policy(parsed);

@@ -132,7 +132,7 @@ pub use conflict::{Blocker, Check, FileConflict, filelist::FileList};
 pub use error::{Error, Result};
 pub use extract::{BackupAction, Disposition, EntryContext};
 pub use file_target::FileTarget;
-pub use history::{Action, LocalOffset, Recording};
+pub use history::{Action, LocalZone, Recording};
 pub use install::{Extraction, Filters, install};
 pub use plan::{DownloadOnlyOutcome, PackageOrigins, ReasonPolicy, TransactionPlan, download_only};
 pub use remove::{RemovalContext, RemovalDisposition, decide_removal, pacsave_rotation};

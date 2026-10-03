@@ -49,7 +49,7 @@ use piko_db::EntryName;
 pub use self::{
     pacman_log::{CALLER, PacmanLog, SCRIPTLET_CALLER},
     store::HISTORY_FILE,
-    time_fmt::{LocalOffset, now, parse as parse_timestamp, render as render_timestamp},
+    time_fmt::{LocalZone, now, parse as parse_timestamp, render as render_timestamp},
 };
 use crate::progress::{Event, StepOutcome};
 
@@ -316,15 +316,15 @@ pub struct Recording {
     pub store: Option<PathBuf>,
     /// The command line to record, as the user typed it.
     pub command: Option<String>,
-    /// The offset timestamps are rendered in. See [`LocalOffset`].
-    pub offset: LocalOffset,
+    /// The time zone timestamps are rendered in. See [`LocalZone`].
+    pub zone: LocalZone,
 }
 
 impl Recording {
     /// Records into `<dbpath>/piko-history` and, when `log_file` names one, into that log.
     #[must_use]
-    pub fn new(dbpath: &Path, log_file: Option<PathBuf>, offset: LocalOffset) -> Self {
-        Self { log_file, store: Some(store::path(dbpath)), command: None, offset }
+    pub fn new(dbpath: &Path, log_file: Option<PathBuf>, zone: LocalZone) -> Self {
+        Self { log_file, store: Some(store::path(dbpath)), command: None, zone }
     }
 
     /// Records `command` as the command line that asked for the transaction.
@@ -532,7 +532,7 @@ pub fn note(recording: &Recording, message: &str) -> Result<(), Problem> {
     let Some(path) = recording.log_file.as_ref() else {
         return Ok(());
     };
-    let mut log = PacmanLog::open(path, recording.offset)
+    let mut log = PacmanLog::open(path, recording.zone)
         .map_err(|error| Problem::Log { path: path.clone(), reason: error.to_string() })?;
     log.line(CALLER, message)
         .map_err(|error| Problem::Log { path: path.clone(), reason: error.to_string() })
@@ -549,7 +549,7 @@ pub(crate) struct Recorder {
     log: Option<PacmanLog>,
     log_path: Option<PathBuf>,
     store_path: Option<PathBuf>,
-    offset: LocalOffset,
+    zone: LocalZone,
     entry: Entry,
     problems: Vec<Problem>,
 }
@@ -561,7 +561,7 @@ impl Recorder {
     pub(crate) fn open(recording: &Recording, root: &Path, dbpath: &Path, started: i64) -> Self {
         let mut problems = Vec::new();
         let log = recording.log_file.as_ref().and_then(|path| {
-            match PacmanLog::open(path, recording.offset) {
+            match PacmanLog::open(path, recording.zone) {
                 Ok(log) => Some(log),
                 Err(error) => {
                     problems.push(Problem::Log { path: path.clone(), reason: error.to_string() });
@@ -574,7 +574,7 @@ impl Recorder {
             log,
             log_path: recording.log_file.clone(),
             store_path: recording.store.clone(),
-            offset: recording.offset,
+            zone: recording.zone,
             entry: Entry {
                 id: self::transaction_id(started),
                 started,
@@ -704,7 +704,7 @@ impl Recorder {
         self.entry.finished = Some(finished);
 
         if let Some(path) = self.store_path.clone()
-            && let Err(error) = store::append(&path, &self.entry, self.offset)
+            && let Err(error) = store::append(&path, &self.entry, self.zone)
         {
             self.problems.push(Problem::Store { path, reason: error.to_string() });
         }

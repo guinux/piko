@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{Action, LocalOffset, Outcome, time_fmt};
+use super::{Action, LocalZone, Outcome, time_fmt};
 
 /// The bracketed name piko writes its own lines under, where libalpm writes `ALPM`.
 pub const CALLER: &str = "PIKO";
@@ -47,7 +47,7 @@ pub const MAX_LOG_BYTES: u64 = 64 * 1024 * 1024;
 pub struct PacmanLog {
     path: PathBuf,
     file: std::fs::File,
-    offset: LocalOffset,
+    zone: LocalZone,
 }
 
 impl PacmanLog {
@@ -63,9 +63,9 @@ impl PacmanLog {
     /// # Errors
     ///
     /// [`std::io::Error`] if the file cannot be opened.
-    pub fn open(path: &Path, offset: LocalOffset) -> std::io::Result<Self> {
+    pub fn open(path: &Path, zone: LocalZone) -> std::io::Result<Self> {
         let file = super::open_for_append(path, LOG_MODE)?;
-        Ok(Self { path: path.to_path_buf(), file, offset })
+        Ok(Self { path: path.to_path_buf(), file, zone })
     }
 
     /// The file being written.
@@ -96,7 +96,7 @@ impl PacmanLog {
     ///
     /// [`std::io::Error`] if the line cannot be written.
     pub fn line_at(&mut self, epoch: i64, caller: &str, message: &str) -> std::io::Result<()> {
-        let stamp = time_fmt::render(epoch, self.offset);
+        let stamp = time_fmt::render(epoch, self.zone);
         let message = message.strip_suffix('\n').unwrap_or(message).replace(['\n', '\r'], " ");
         // One `write_all`, so a concurrent writer on the same `O_APPEND` file cannot land
         // between the leader and the message.
@@ -336,7 +336,7 @@ mod tests {
         let log = dir.path().join("pacman.log");
         std::os::unix::fs::symlink(&victim, &log).unwrap();
 
-        assert!(PacmanLog::open(&log, LocalOffset::UTC).is_err(), "a symbolic link was followed");
+        assert!(PacmanLog::open(&log, LocalZone::UTC).is_err(), "a symbolic link was followed");
         assert_eq!(std::fs::read(&victim).unwrap(), b"untouched\n");
         std::fs::remove_file(&log).unwrap();
 
@@ -346,14 +346,14 @@ mod tests {
             eprintln!("skipping the FIFO half: mkfifo is unavailable");
             return;
         }
-        assert!(PacmanLog::open(&log, LocalOffset::UTC).is_err(), "a FIFO was opened");
+        assert!(PacmanLog::open(&log, LocalZone::UTC).is_err(), "a FIFO was opened");
         assert!(read(&log).is_err(), "a FIFO was read");
     }
     #[test]
     fn a_line_matches_the_libalpm_leader() {
         let dir = temp();
         let path = dir.path().join("pacman.log");
-        let mut log = PacmanLog::open(&path, LocalOffset::from_seconds(7200)).unwrap();
+        let mut log = PacmanLog::open(&path, LocalZone::from_seconds(7200)).unwrap();
         log.line_at(0, CALLER, "installed foo (1.0.0-1)").unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -367,7 +367,7 @@ mod tests {
     fn a_trailing_newline_is_not_doubled() {
         let dir = temp();
         let path = dir.path().join("pacman.log");
-        let mut log = PacmanLog::open(&path, LocalOffset::UTC).unwrap();
+        let mut log = PacmanLog::open(&path, LocalZone::UTC).unwrap();
         log.line_at(0, SCRIPTLET_CALLER, "creating a user\n").unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -380,7 +380,7 @@ mod tests {
     fn a_message_cannot_forge_a_line() {
         let dir = temp();
         let path = dir.path().join("pacman.log");
-        let mut log = PacmanLog::open(&path, LocalOffset::UTC).unwrap();
+        let mut log = PacmanLog::open(&path, LocalZone::UTC).unwrap();
         log.line_at(
             0,
             "PIKO",
@@ -399,7 +399,7 @@ mod tests {
         let dir = temp();
         let path = dir.path().join("pacman.log");
         std::fs::write(&path, "[1970-01-01T00:00:00+0000] [ALPM] transaction started\n").unwrap();
-        let mut log = PacmanLog::open(&path, LocalOffset::UTC).unwrap();
+        let mut log = PacmanLog::open(&path, LocalZone::UTC).unwrap();
         log.line_at(1, CALLER, "installed foo (1.0.0-1)").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("[ALPM] transaction started"), "{text}");
@@ -412,7 +412,7 @@ mod tests {
     fn a_missing_directory_is_reported_not_created() {
         let dir = temp();
         let path = dir.path().join("var/log/pacman.log");
-        assert!(PacmanLog::open(&path, LocalOffset::UTC).is_err());
+        assert!(PacmanLog::open(&path, LocalZone::UTC).is_err());
     }
 
     #[test]

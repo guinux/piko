@@ -275,15 +275,14 @@ fn configured_path(
 /// Builds the transaction record for this invocation. That is the shared `LogFile` and the history
 /// store beside `dbpath`, stamped with the command line that asked for it.
 ///
-/// `offset` must be the value captured at the top of `main`. See [`piko_txn::LocalOffset`] for
-/// why it cannot be read later.
+/// `zone` is the time zone read at the top of `main`.
 pub fn recording(
     cli: &Cli,
     config: &ConfigCache,
     dbpath: &Path,
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
 ) -> piko_txn::Recording {
-    piko_txn::Recording::new(dbpath, Some(resolve_log_file(cli, config)), offset)
+    piko_txn::Recording::new(dbpath, Some(resolve_log_file(cli, config)), zone)
         .command(self::command_line())
 }
 

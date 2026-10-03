@@ -54,7 +54,7 @@ pub fn refresh(
     only: &[String],
     options: Options,
     cancel: &Cancel,
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
 ) -> ExitCode {
     let lock = match piko_db_write::DbLock::acquire(dbpath) {
         Ok(lock) => lock,
@@ -63,7 +63,7 @@ pub fn refresh(
             return ExitCode::FAILURE;
         }
     };
-    let code = refresh_locked(config, dbpath, &lock, only, options, cancel, offset);
+    let code = refresh_locked(config, dbpath, &lock, only, options, cancel, zone);
     crate::cmd::release_lock(lock);
     code
 }
@@ -76,7 +76,7 @@ fn refresh_locked(
     only: &[String],
     options: Options,
     cancel: &Cancel,
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
 ) -> ExitCode {
     let Options { force, files, freshness } = options;
     let sync_dir = dbpath.join("sync");
@@ -150,12 +150,12 @@ fn refresh_locked(
                     }
                 }
                 notes.extend(
-                    refreshed.notes.iter().map(|note| freshness::render_note(&file, note, offset)),
+                    refreshed.notes.iter().map(|note| freshness::render_note(&file, note, zone)),
                 );
                 // After the notes, which name each server that was passed over and why. This
                 // line is their conclusion.
                 if refreshed.outcome == Outcome::Kept {
-                    notes.push(freshness::render_kept(&file, refreshed.publication, offset));
+                    notes.push(freshness::render_kept(&file, refreshed.publication, zone));
                 }
             }
             Err(error) => {

@@ -82,6 +82,13 @@
 //! |------------------------------|-------------------------------|---------------|
 //! | `keyring_list_bytes`         | 1.5 KB (`archlinux-revoked`)  | 1 MiB |
 //!
+//! A time zone file, `/etc/localtime` or the file `TZ` names, decides the offset every date
+//! is shown in.
+//!
+//! | file                        | largest observed              | default limit |
+//! |------------------------------|-------------------------------|---------------|
+//! | `time_zone_bytes`            | 3.6 KB (`America/Nuuk`)       | 1 MiB |
+//!
 //! Diagnostics are bounded separately (`max_diagnostics`, default 4096). They are the one
 //! part of an open whose size is attacker-controlled *without* the package count growing. A
 //! directory of a million badly-named entries yields no packages at all. So neither
@@ -132,6 +139,8 @@ pub enum Limit {
     Journal,
     /// The maximum size of a keyring's trust list, `<name>-trusted` or `<name>-revoked`.
     KeyringList,
+    /// The maximum size of a time zone file: `/etc/localtime`, or the file `TZ` names.
+    TimeZone,
 }
 
 impl Limit {
@@ -152,6 +161,7 @@ impl Limit {
             Self::MountTable => "mount table",
             Self::Journal => "transaction journal",
             Self::KeyringList => "keyring trust list",
+            Self::TimeZone => "time zone file",
         }
     }
 }
@@ -301,6 +311,10 @@ pub struct Limits {
     ///
     /// 1 MiB holds more than 20,000 fingerprints.
     pub keyring_list_bytes: u64,
+    /// Maximum size in bytes of a time zone file: `/etc/localtime`, or the file `TZ` names.
+    ///
+    /// 1 MiB holds hundreds of times the largest zone in `/usr/share/zoneinfo`.
+    pub time_zone_bytes: u64,
     /// Maximum number of candidate packages a single planning run may consider.
     ///
     /// One candidate per installed package plus one per package in every configured
@@ -426,6 +440,7 @@ impl Default for Limits {
             mount_table_bytes: 4 * MIB,
             journal_bytes: 16 * MIB,
             keyring_list_bytes: MIB,
+            time_zone_bytes: MIB,
             solve_max_solvables: 1 << 21,
             solve_max_conflicts: 1 << 20,
             solve_max_clauses: 1 << 24,
@@ -458,6 +473,7 @@ impl Limits {
             Limit::MountTable => self.mount_table_bytes,
             Limit::Journal => self.journal_bytes,
             Limit::KeyringList => self.keyring_list_bytes,
+            Limit::TimeZone => self.time_zone_bytes,
         }
     }
 }

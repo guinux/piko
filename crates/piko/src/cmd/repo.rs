@@ -27,13 +27,13 @@ fn styled_validation(has_signature: bool) -> console::StyledObject<String> {
     style.apply_to(validation_label(has_signature))
 }
 
-/// `offset` is the UTC offset `Build Date` is rendered in, captured in `main`.
+/// `zone` is the time zone `Build Date` is rendered in, read in `main`.
 ///
 /// See [`crate::output::human_date`].
 pub fn repo_info(
     db: &RepoDatabase,
     package: &RepoPackage,
-    offset: piko_txn::LocalOffset,
+    zone: piko_txn::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     // `info`'s repository-side rendering prints every field, so it needs the deferred parse.
@@ -52,7 +52,7 @@ pub fn repo_info(
     field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
     field_list!(out, "Replaces        :", desc.replaces(), 5);
     emit!(out, "{} {}", info_label("Download Size   :"), human_size(desc.compressed_size()));
-    info_build_fields!(out, desc, offset);
+    info_build_fields!(out, desc, zone);
     emit!(
         out,
         "{} {}",

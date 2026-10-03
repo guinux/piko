@@ -36,7 +36,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{Action, Entry, LocalOffset, Outcome, time_fmt};
+use super::{Action, Entry, LocalZone, Outcome, time_fmt};
 
 /// The history's file name, inside the database path.
 pub const HISTORY_FILE: &str = "piko-history";
@@ -70,20 +70,20 @@ pub fn path(dbpath: &Path) -> PathBuf {
 /// # Errors
 ///
 /// [`std::io::Error`] if the file cannot be opened, written, or flushed.
-pub fn append(path: &Path, entry: &Entry, offset: LocalOffset) -> std::io::Result<()> {
+pub fn append(path: &Path, entry: &Entry, zone: LocalZone) -> std::io::Result<()> {
     let mut file = super::open_for_append(path, FILE_MODE)?;
-    file.write_all(self::render(entry, offset).as_bytes())?;
+    file.write_all(self::render(entry, zone).as_bytes())?;
     file.sync_data()
 }
 
 /// Renders one block.
 #[must_use]
-pub fn render(entry: &Entry, offset: LocalOffset) -> String {
+pub fn render(entry: &Entry, zone: LocalZone) -> String {
     let mut block = String::new();
     block.push_str(&format!(
         "txn {VERSION} {} {}\n",
         entry.id,
-        time_fmt::render(entry.started, offset)
+        time_fmt::render(entry.started, zone)
     ));
     block.push_str(&format!("root {}\n", entry.root.display()));
     block.push_str(&format!("dbpath {}\n", entry.dbpath.display()));
@@ -110,13 +110,13 @@ pub fn render(entry: &Entry, offset: LocalOffset) -> String {
     match &entry.outcome {
         Outcome::Failed { reason } => block.push_str(&format!(
             "end failed {} {}\n",
-            time_fmt::render(finished, offset),
+            time_fmt::render(finished, zone),
             self::one_line(reason)
         )),
         outcome => block.push_str(&format!(
             "end {} {}\n",
             outcome.as_str(),
-            time_fmt::render(finished, offset)
+            time_fmt::render(finished, zone)
         )),
     }
     block
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn an_entry_round_trips() {
         let entry = sample();
-        let text = render(&entry, LocalOffset::UTC);
+        let text = render(&entry, LocalZone::UTC);
         assert_eq!(parse(&text), vec![entry]);
     }
 
@@ -345,7 +345,7 @@ mod tests {
             outcome: Outcome::Failed { reason: "the hook 30-foo.hook refused it".to_owned() },
             ..sample()
         };
-        let text = render(&entry, LocalOffset::UTC);
+        let text = render(&entry, LocalZone::UTC);
         assert_eq!(parse(&text), vec![entry]);
     }
 
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn a_cancelled_entry_round_trips() {
         let entry = Entry { outcome: Outcome::Cancelled, ..sample() };
-        let text = render(&entry, LocalOffset::UTC);
+        let text = render(&entry, LocalZone::UTC);
         assert!(text.contains("end cancelled "), "{text}");
         assert_eq!(parse(&text), vec![entry]);
     }
@@ -368,7 +368,7 @@ mod tests {
             outcome: Outcome::Failed { reason: "it failed".to_owned() },
             ..sample()
         };
-        let parsed = parse(&render(&entry, LocalOffset::UTC));
+        let parsed = parse(&render(&entry, LocalZone::UTC));
         assert!(matches!(parsed.first().map(|e| e.outcome.clone()), Some(Outcome::Failed { .. })));
     }
 
@@ -378,7 +378,7 @@ mod tests {
         let path = dir.path().join(HISTORY_FILE);
         for index in 0..3_i64 {
             let entry = Entry { started: 1_757_000_000 + index, ..sample() };
-            append(&path, &entry, LocalOffset::UTC).unwrap();
+            append(&path, &entry, LocalZone::UTC).unwrap();
         }
         assert_eq!(read_last(&path, 10, DEFAULT_TAIL_BYTES).unwrap().len(), 3);
     }
@@ -399,7 +399,7 @@ mod tests {
         for index in 0..5_i64 {
             let entry =
                 Entry { id: format!("id-{index}"), started: 1_757_000_000 + index, ..sample() };
-            append(&path, &entry, LocalOffset::UTC).unwrap();
+            append(&path, &entry, LocalZone::UTC).unwrap();
         }
         let entries = read_last(&path, 2, DEFAULT_TAIL_BYTES).unwrap();
         assert_eq!(
@@ -418,7 +418,7 @@ mod tests {
         for index in 0..4_i64 {
             let started = 1_757_000_000_i64.saturating_add(index);
             let entry = Entry { id: format!("id-{index}"), started, ..sample() };
-            append(&path, &entry, LocalOffset::UTC).unwrap();
+            append(&path, &entry, LocalZone::UTC).unwrap();
         }
         let whole = std::fs::metadata(&path).unwrap().len();
         assert_eq!(whole % 4, 0, "the four blocks are not of equal width");
@@ -463,7 +463,7 @@ mod tests {
     fn a_truncated_block_does_not_swallow_the_next_one() {
         let text = format!(
             "txn 1 first 1970-01-01T00:00:00+0000\nroot /\ninstalled foo 1.0.0-1\n{}",
-            render(&sample(), LocalOffset::UTC)
+            render(&sample(), LocalZone::UTC)
         );
         let entries = parse(&text);
         assert_eq!(entries.len(), 2);
@@ -478,7 +478,7 @@ mod tests {
         let text = format!(
             "{}txn 99 future 1970-01-01T00:00:00+0000\ninstalled ghost 9.9-9\nend completed \
              1970-01-01T00:00:00+0000\n",
-            render(&sample(), LocalOffset::UTC)
+            render(&sample(), LocalZone::UTC)
         );
         let entries = parse(&text);
         assert_eq!(entries.len(), 1);
