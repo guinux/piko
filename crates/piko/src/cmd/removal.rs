@@ -24,8 +24,7 @@ use piko_db::solve::RemovalFailure;
 ///
 /// Only the scan differs. Whether one pattern covers one name is `piko_db::glob::matches`,
 /// which `matches_any` calls too. So the two rules differ in the way they are meant to, and in
-/// no other way. That shared rule carries the fallback to an exact-string comparison for a
-/// malformed glob.
+/// no other way. That shared rule is glibc's `fnmatch` grammar, which pacman's check calls.
 fn is_held(name: &str, hold_pkg: &[String]) -> bool {
     hold_pkg.iter().any(|pattern| piko_db::glob::matches(pattern, name))
 }

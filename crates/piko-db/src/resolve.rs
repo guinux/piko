@@ -333,8 +333,7 @@ pub fn matches_any(patterns: &[String], text: &str) -> bool {
 /// of on a real Arch system.
 ///
 /// Only the scan is here. Whether one pattern covers one string is [`crate::glob::Glob`], which
-/// every pattern rule in the crate shares. That includes its fallback to an exact-string match
-/// for a malformed glob.
+/// every pattern rule in the crate shares: glibc's `fnmatch` grammar.
 ///
 /// # Compiled once
 ///
@@ -853,10 +852,10 @@ Foobar McFooface <foobar@mcfooface.org>
             assert!(!matches_any(&[], "anything"));
         }
 
-        /// A pattern `glob` refuses to compile falls back to an exact comparison rather than
-        /// matching everything.
+        /// A `[` with no closing `]` is an ordinary character, as `fnmatch` reads it. It
+        /// neither matches everything nor refuses the list.
         #[test]
-        fn a_malformed_pattern_is_compared_literally() {
+        fn an_unclosed_bracket_is_an_ordinary_character() {
             let list = patterns(&["foo[bar"]);
             assert!(matches_any(&list, "foo[bar"));
             assert!(!matches_any(&list, "foob"));

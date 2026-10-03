@@ -71,7 +71,7 @@ impl Term {
 /// metacharacter.
 ///
 /// The compile happens here, once per search. Compiling inside the per-package loop would
-/// build the same `glob::Pattern` once per (package, term) pair. On a real `extra` that is
+/// decode the same pattern once per (package, term) pair. On a real `extra` that is
 /// about 15 000 times per term. This is the same reason each side's `combined_match` hoists the
 /// package's own lowercasing out of [`best_match`].
 ///

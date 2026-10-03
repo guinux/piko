@@ -7,8 +7,9 @@
 //! spuriously warn about it, and silently dropped.
 //!
 //! A missing or unreadable `Include` target is a **fatal** error, not a soft diagnostic.
-//! This matches `globdir`'s `GLOB_NOCHECK` flag in `conf.c`: a pattern that matches nothing
-//! is not silently skipped. It is retried as a literal path, which then fails to open and
+//! This matches the `GLOB_NOCHECK` flag `conf.c` passes to `glob`, which
+//! [`crate::glob::expand`] transcribes: a pattern that matches nothing is not silently
+//! skipped. It is retried as a literal path, which then fails to open and
 //! aborts the whole parse. A syntactically valid but unrecognized directive name is
 //! non-fatal instead, mirroring `pm_printf(ALPM_LOG_WARNING, ...)`. It is reported via
 //! [`PacmanConfig::diagnostics`].
@@ -531,7 +532,7 @@ impl<'a> Parser<'a> {
         if depth >= MAX_INCLUDE_DEPTH {
             return Err(Error::ConfigIncludeDepthExceeded { path: path.to_path_buf(), line });
         }
-        for included in expand_include(pattern) {
+        for included in crate::glob::expand(pattern) {
             self.parse_file(&included, depth.saturating_add(1))?;
         }
         Ok(())
@@ -695,20 +696,6 @@ fn require_value<'v>(
         value: String::new(),
         reason: "directive needs a value".to_owned(),
     })
-}
-
-/// Resolves an `Include` pattern to the file(s) it names, replicating `globdir`'s
-/// `GLOB_NOCHECK` behavior. A pattern that matches nothing is not dropped — it is retried
-/// as a single literal path. That path then simply fails to open, like any other missing
-/// file. See the module docs for why that is deliberately fatal here.
-fn expand_include(pattern: &str) -> Vec<PathBuf> {
-    match glob::glob(pattern) {
-        Ok(paths) => {
-            let matches: Vec<PathBuf> = paths.filter_map(|entry| entry.ok()).collect();
-            if matches.is_empty() { vec![PathBuf::from(pattern)] } else { matches }
-        }
-        Err(_) => vec![PathBuf::from(pattern)],
-    }
 }
 
 fn set_first_path(field: &mut Option<PathBuf>, value: &str) {
@@ -1226,6 +1213,28 @@ mod tests {
 
         let err = PacmanConfig::open(&path).unwrap_err();
         assert!(matches!(err, Error::Io { .. }), "got {err:?}");
+    }
+
+    /// A `*` in an `Include` does not select a hidden name, as `glob(3)` does not. An editor's
+    /// lock file, a dangling link named `.#a.conf`, would otherwise refuse the configuration.
+    /// The files are read in byte order.
+    #[test]
+    fn an_include_pattern_skips_a_hidden_file_and_reads_in_order() {
+        let dir = TempDir::new().unwrap();
+        let included = dir.path().join("conf.d");
+        std::fs::create_dir(&included).unwrap();
+        std::fs::write(included.join("b.conf"), "CacheDir = /b\n").unwrap();
+        std::fs::write(included.join("a.conf"), "CacheDir = /a\n").unwrap();
+        std::os::unix::fs::symlink("nowhere", included.join(".#a.conf")).unwrap();
+        let path = write_conf(
+            &dir,
+            "pacman.conf",
+            &format!("[options]\nInclude = {}/*.conf\n", included.display()),
+        );
+
+        let config = PacmanConfig::open(&path).unwrap();
+
+        assert_eq!(config.options.cache_dirs, [PathBuf::from("/a"), PathBuf::from("/b")]);
     }
 
     #[test]

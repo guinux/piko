@@ -25,7 +25,6 @@ alpm-types.workspace = true
 # Required: piko inflates `mtree` itself, against a bound, rather than letting
 # `alpm-mtree` do it unbounded internally.
 flate2.workspace = true
-glob.workspace = true
 tar.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
