@@ -514,7 +514,7 @@ fn read_file_targets(
 pub fn plan(
     local: &LocalDatabase,
     repos: &[(DbUsage, RepoDatabase)],
-    ignores: IgnoreList<'_>,
+    ignores: &IgnoreList,
     targets: &[String],
     mode: Mode<'_>,
     format: Format,

@@ -437,7 +437,6 @@ mod tests {
 
     /// The verdict that deletes a file without asking must never come from a file the scan
     /// could not read.
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_pacnew_is_unreadable_and_is_not_followed() {
         let (_fixture, db) = database(&[("foo-1.0.0-1", &["etc/foo.conf"])]);
@@ -459,7 +458,6 @@ mod tests {
 
     /// A parent component that has become a symlink is a path piko will not act inside. So
     /// nothing is listed for it at all.
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_parent_lists_nothing_and_is_reported() {
         let (_fixture, db) = database(&[("foo-1.0.0-1", &["etc/foo.conf"])]);
@@ -479,7 +477,6 @@ mod tests {
     }
 
     /// Reading a FIFO would block the scan forever.
-    #[cfg(unix)]
     #[test]
     fn a_fifo_target_is_unreadable_and_never_blocks() {
         let (_fixture, db) = database(&[("foo-1.0.0-1", &["etc/foo.conf"])]);

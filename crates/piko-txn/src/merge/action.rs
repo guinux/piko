@@ -259,7 +259,6 @@ mod tests {
 
     /// The merged file is the user's file with changes folded in, so it keeps the user's
     /// file's identity: the same inode, and with it the mode, the owner and any hard link.
-    #[cfg(unix)]
     #[test]
     fn use_merged_rewrites_the_target_in_place() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -280,7 +279,6 @@ mod tests {
     }
 
     /// A target that has become a symlink must fail rather than be followed out of the root.
-    #[cfg(unix)]
     #[test]
     fn use_merged_refuses_a_symlinked_target() {
         let dir = tempfile::tempdir().unwrap();

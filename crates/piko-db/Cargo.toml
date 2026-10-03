@@ -45,7 +45,6 @@ alpm-repo-db.workspace = true
 flate2.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
-libdeflater = "1"
 # Self dev-dependency so integration tests get the fixture builder without `fixture`
 # becoming a default feature (which would pull tempfile into production builds).
 piko-db = { path = ".", features = ["fixture"] }

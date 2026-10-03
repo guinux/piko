@@ -987,10 +987,11 @@ mod tests {
 
         let limits = Limits::default();
         let ignored = ["newleaf".to_owned()];
+        let ignores = IgnoreList::new(&ignored, &[]);
         let universe = Universe::build(
             scenario.local(),
             scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
-            UniverseOptions::new().ignores(IgnoreList::new(&ignored, &[])),
+            UniverseOptions::new().ignores(&ignores),
         )
         .unwrap();
         let id = resolve_target(&universe, &"app".parse().unwrap()).unwrap();
@@ -1238,10 +1239,11 @@ mod tests {
 
         let limits = Limits::default();
         let ignored = ["newleaf".to_owned()];
+        let ignores = IgnoreList::new(&ignored, &[]);
         let universe = Universe::build(
             scenario.local(),
             scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
-            UniverseOptions::new().ignores(IgnoreList::new(&ignored, &[])),
+            UniverseOptions::new().ignores(&ignores),
         )
         .unwrap();
         let id = resolve_target(&universe, &"app".parse().unwrap()).unwrap();
@@ -1441,10 +1443,11 @@ mod tests {
 
         let limits = Limits::default();
         let ignored = ["newleaf".to_owned()];
+        let ignores = IgnoreList::new(&ignored, &[]);
         let universe = Universe::build(
             scenario.local(),
             scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
-            UniverseOptions::new().ignores(IgnoreList::new(&ignored, &[])),
+            UniverseOptions::new().ignores(&ignores),
         )
         .unwrap();
         let id = resolve_target(&universe, &"app".parse().unwrap()).unwrap();

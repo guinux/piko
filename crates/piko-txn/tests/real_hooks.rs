@@ -123,9 +123,9 @@ fn hooks_come_back_in_name_order() {
 
 /// The two real hooks built on an inverted `Target` must exclude what they say they exclude.
 ///
-/// This is the check that would have caught `matches_any` ignoring `!`. Before the fix, both
-/// of these hooks reported the files *below* the directory as matched targets. So
-/// `gtk-update-icon-cache` would have run against paths its author explicitly excluded.
+/// This is the check that catches a pattern-list scan that ignores `!`. Under such a scan, both
+/// of these hooks report the files *below* the directory as matched targets. So
+/// `gtk-update-icon-cache` would run against paths its author explicitly excluded.
 #[test]
 #[ignore = "requires a real ALPM system"]
 fn inverted_targets_in_real_hooks_exclude_what_they_name() {

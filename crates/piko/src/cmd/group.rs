@@ -12,13 +12,7 @@ use piko_db::solve::{GroupChoice, GroupTarget, SolvableId, Universe};
 
 use crate::output;
 
-/// Writes the numbered member list, grouped by the repository each member came from.
-///
-/// The numbering runs across the whole list rather than restarting per repository, because the
-/// answer indexes the list, not the repository.
-///
-/// One member per line. piko reads no terminal width anywhere, and pacman's multi-column
-/// layout is the only thing that would need it.
+/// Writes the numbered member list under its header.
 fn print_members(
     out: &mut impl Write,
     universe: &Universe<'_>,
@@ -31,22 +25,7 @@ fn print_members(
     } else {
         writeln!(out, ":: There are {count} members in group {}:", piko_db::printable(group))?;
     }
-
-    let mut current: Option<String> = None;
-    for (index, id) in members.iter().enumerate() {
-        let origin = crate::cmd::origin_label(universe, *id);
-        if current.as_deref() != Some(origin.as_str()) {
-            writeln!(out, ":: {origin}")?;
-            current = Some(origin);
-        }
-        let described = universe.get(*id).map_or_else(
-            || "<unknown>".to_owned(),
-            |solvable| format!("{} {}", solvable.name(), solvable.version()),
-        );
-        // `index` is bounded by `members.len()`, and the list is what was just counted.
-        writeln!(out, "   {}) {described}", index.saturating_add(1))?;
-    }
-    Ok(())
+    crate::cmd::write_candidates(out, universe, members)
 }
 
 /// Asks which members of each group in `groups` to install, returning one answer per group.
@@ -91,26 +70,18 @@ pub fn report_defaults(universe: &Universe<'_>, groups: &[GroupTarget]) {
     if groups.is_empty() {
         return;
     }
-    let name_of =
-        |id| universe.get(id).map_or_else(|| "<unknown>".to_owned(), |s| s.name().to_string());
     eprintln!(
         "Note: {} group target(s) were taken whole (an interactive `piko install` asks which \
          members to install)",
         groups.len()
     );
     for group in groups {
-        // Named rather than counted, but not all of them. `gnome` carries 66 members, and a
-        // note is not the prompt. The prompt lists every one, because there the list is what
-        // the user answers.
-        const SHOWN: usize = 5;
-        let listed: Vec<String> = group.members.iter().take(SHOWN).map(|id| name_of(*id)).collect();
-        let rest = group.members.len().saturating_sub(listed.len());
-        let among = if rest == 0 {
-            listed.join(", ")
-        } else {
-            format!("{}, and {rest} more", listed.join(", "))
-        };
-        eprintln!("  {}: took all {} members, {among}", group.name, group.members.len());
+        eprintln!(
+            "  {}: took all {} members, {}",
+            group.name,
+            group.members.len(),
+            crate::cmd::candidate_sample(universe, &group.members)
+        );
     }
 }
 

@@ -52,12 +52,6 @@ impl<'a> Section<'a> {
         self.body.lines()
     }
 
-    /// The first value line, if the section has one.
-    #[must_use]
-    pub fn first_value(&self) -> Option<&'a str> {
-        self.values().next()
-    }
-
     /// Where the value lines are in the text, as a byte range.
     ///
     /// For a section with no value, the range is empty and starts at the end of the header.

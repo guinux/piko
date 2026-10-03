@@ -1872,6 +1872,7 @@ mod tests {
     use super::*;
     use crate::config::DbUsage;
     use crate::fixture::{BuiltScenario, PackageSpec, Scenario};
+    use crate::resolve::IgnoreList;
     use crate::solve::UniverseOptions;
 
     fn universe_of(scenario: &BuiltScenario, usage: DbUsage) -> Universe<'_> {
@@ -2068,18 +2069,12 @@ mod tests {
             "core carries app at the installed version, so extra is never consulted"
         );
     }
-    /// A universe built with `IgnorePkg = <packages>` / `IgnoreGroup = <groups>`.
-    fn ignoring<'a>(
-        scenario: &'a BuiltScenario,
-        packages: &'a [String],
-        groups: &'a [String],
-    ) -> Universe<'a> {
+    /// A universe built with `ignores` as its `IgnorePkg` and `IgnoreGroup` lists.
+    fn ignoring<'a>(scenario: &'a BuiltScenario, ignores: &'a IgnoreList) -> Universe<'a> {
         Universe::build(
             scenario.local(),
             scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
-            UniverseOptions::new()
-                .usage(DbUsage::ALL)
-                .ignores(crate::resolve::IgnoreList::new(packages, groups)),
+            UniverseOptions::new().usage(DbUsage::ALL).ignores(ignores),
         )
         .unwrap()
     }
@@ -2091,7 +2086,8 @@ mod tests {
             .repo("core", [PackageSpec::new("gedit", "47.0-1")])
             .build();
         let ignored = vec!["gedit".to_owned()];
-        let universe = ignoring(&scenario, &ignored, &[]);
+        let ignores = IgnoreList::new(&ignored, &[]);
+        let universe = ignoring(&scenario, &ignores);
 
         let result = sysupgrade(&universe, false, &[]);
         assert!(result.upgrades.is_empty());
@@ -2110,7 +2106,8 @@ mod tests {
             .build();
         let ignored = vec!["gedit".to_owned()];
 
-        assert!(sysupgrade(&ignoring(&scenario, &ignored, &[]), false, &[]).ignored.is_empty());
+        let ignores = IgnoreList::new(&ignored, &[]);
+        assert!(sysupgrade(&ignoring(&scenario, &ignores), false, &[]).ignored.is_empty());
     }
 
     /// Without `-Suu` an older repository version was never going to be taken, so nothing was
@@ -2122,7 +2119,8 @@ mod tests {
             .repo("core", [PackageSpec::new("gedit", "46.2-1")])
             .build();
         let ignored = vec!["gedit".to_owned()];
-        let universe = ignoring(&scenario, &ignored, &[]);
+        let ignores = IgnoreList::new(&ignored, &[]);
+        let universe = ignoring(&scenario, &ignores);
 
         assert!(sysupgrade(&universe, false, &[]).ignored.is_empty());
         let downgraded = sysupgrade(&universe, true, &[]);
@@ -2138,7 +2136,8 @@ mod tests {
             .repo("core", [PackageSpec::new("new", "2.0.0-1").replaces(["old"])])
             .build();
         let ignored = vec!["new".to_owned()];
-        let universe = ignoring(&scenario, &ignored, &[]);
+        let ignores = IgnoreList::new(&ignored, &[]);
+        let universe = ignoring(&scenario, &ignores);
 
         let result = sysupgrade(&universe, false, &[]);
         assert!(result.replacements.is_empty());
@@ -2157,7 +2156,8 @@ mod tests {
             .repo("core", [PackageSpec::new("app", "2.0.0-1")])
             .build();
         let groups = vec!["held".to_owned()];
-        let universe = ignoring(&scenario, &[], &groups);
+        let ignores = IgnoreList::new(&[], &groups);
+        let universe = ignoring(&scenario, &ignores);
 
         let result = sysupgrade(&universe, false, &[]);
         assert!(
@@ -2182,7 +2182,8 @@ mod tests {
             .repo("extra", [PackageSpec::new("app", "3.0.0-1")])
             .build();
         let groups = vec!["held".to_owned()];
-        let universe = ignoring(&scenario, &[], &groups);
+        let ignores = IgnoreList::new(&[], &groups);
+        let universe = ignoring(&scenario, &ignores);
 
         let result = sysupgrade(&universe, false, &[]);
         assert!(

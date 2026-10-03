@@ -1323,24 +1323,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
-name = "libdeflate-sys"
-version = "1.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7870e5fbd2766179a937c725fb11f4ca0ef025d982beb61bd3ce755425bd19c"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "libdeflater"
-version = "1.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cbb8285d2e2bd4b8d4155840ae81929354b4ba0d7b3c272c84761ffa2141e1f"
-dependencies = [
- "libdeflate-sys",
-]
-
-[[package]]
 name = "libgpg-error-sys"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1495,7 +1477,6 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "piko"
 version = "0.1.0"
 dependencies = [
- "alpm-mtree",
  "alpm-types",
  "clap",
  "console",
@@ -1525,7 +1506,6 @@ dependencies = [
  "alpm-repo-db",
  "alpm-types",
  "flate2",
- "libdeflater",
  "piko-db",
  "proptest",
  "rustix",

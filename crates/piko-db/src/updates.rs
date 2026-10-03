@@ -103,7 +103,7 @@ pub struct Updates<'a> {
 pub(crate) fn check_updates_ignoring<'a>(
     local: &'a LocalDatabase,
     repos: impl IntoIterator<Item = &'a RepoDatabase>,
-    ignores: IgnoreList<'_>,
+    ignores: &IgnoreList,
 ) -> Result<Updates<'a>> {
     let mut updates = Updates { available: Vec::new(), ignored: Vec::new() };
     for update in check_updates(local, repos) {
@@ -384,10 +384,8 @@ Foobar McFooface <foobar@mcfooface.org>
         let packages = vec!["gedit".to_owned()];
         let groups = vec!["base-devel".to_owned()];
 
-        let updates = scenario
-            .local()
-            .check_updates_ignoring(scenario.repos(), IgnoreList::new(&packages, &groups))
-            .unwrap();
+        let ignores = IgnoreList::new(&packages, &groups);
+        let updates = scenario.local().check_updates_ignoring(scenario.repos(), &ignores).unwrap();
 
         let available: Vec<String> =
             updates.available.iter().map(|update| update.installed().name().to_string()).collect();
@@ -417,10 +415,8 @@ Foobar McFooface <foobar@mcfooface.org>
             .build();
         let groups = vec!["base-devel".to_owned()];
 
-        let updates = scenario
-            .local()
-            .check_updates_ignoring(scenario.repos(), IgnoreList::new(&[], &groups))
-            .unwrap();
+        let ignores = IgnoreList::new(&[], &groups);
+        let updates = scenario.local().check_updates_ignoring(scenario.repos(), &ignores).unwrap();
 
         assert!(updates.available.is_empty());
         let groups: Vec<String> = updates

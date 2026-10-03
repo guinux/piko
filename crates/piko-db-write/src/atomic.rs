@@ -224,7 +224,6 @@ mod tests {
     }
 
     /// A file this process must never touch, with a mode it must keep.
-    #[cfg(unix)]
     fn victim(dir: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let victim = dir.join("secret");
@@ -237,7 +236,6 @@ mod tests {
     /// it is written. The mode change must not reach the link's target, which would make a root
     /// process `chmod 644` any file it names. And the link must not be renamed over the
     /// destination.
-    #[cfg(unix)]
     #[test]
     fn a_temporary_swapped_for_a_symlink_is_neither_followed_nor_installed() {
         use std::os::unix::fs::PermissionsExt as _;

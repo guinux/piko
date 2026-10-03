@@ -481,6 +481,9 @@ fn parse(text: &str) -> std::result::Result<Record, Unreadable> {
 ///
 /// [`Error::UnfinishedTransaction`] if `path` exists. [`Error::Io`] otherwise.
 fn write_new(path: &Path, contents: &[u8]) -> Result<std::fs::File> {
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     let directory = path.parent().unwrap_or(Path::new("."));
     let mut temp = path.as_os_str().to_os_string();
     temp.push(".new");
@@ -488,13 +491,11 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<std::fs::File> {
 
     let mut options = std::fs::File::options();
     // Append mode, because the caller keeps this descriptor for the progress lines.
-    options.append(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use rustix::fs::OFlags;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o644).custom_flags(OFlags::NOFOLLOW.bits().cast_signed());
-    }
+    options
+        .append(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed());
 
     let mut file = match options.open(&temp) {
         Ok(file) => file,

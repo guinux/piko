@@ -68,15 +68,6 @@ pub enum FilesDefect {
     },
 }
 
-impl From<FilesDefect> for FilesError {
-    fn from(defect: FilesDefect) -> Self {
-        match defect {
-            FilesDefect::DuplicatePath { path } => Self::DuplicatePath { path },
-            FilesDefect::MissingParent { path } => Self::MissingParent { path },
-        }
-    }
-}
-
 /// A parsed `files` file.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalFiles {
@@ -185,19 +176,10 @@ pub enum FilesError {
         value: String,
     },
 
-    /// A path listed twice.
-    #[error("%FILES%: {} is listed twice", path.display())]
-    DuplicatePath {
-        /// The path.
-        path: PathBuf,
-    },
-
-    /// A path whose parent directory is not listed.
-    #[error("%FILES%: the parent directory of {} is not listed", path.display())]
-    MissingParent {
-        /// The path.
-        path: PathBuf,
-    },
+    /// A rule a local `files` breaks without being refused, which refuses a repository member
+    /// ([`parse_repo`]).
+    #[error(transparent)]
+    Defect(#[from] FilesDefect),
 
     /// A `%BACKUP%` line that is not `<path>\t<md5>` or `<path>\t(null)`.
     #[error("%BACKUP%: {value:?} is not a backup entry")]
@@ -690,10 +672,13 @@ mod tests {
     /// A repository member still refuses both: refusing it costs only its file listing.
     #[test]
     fn a_repository_member_refuses_a_duplicate_and_a_missing_parent() {
-        assert!(matches!(parse_repo("%FILES%\netc/foo\n"), Err(FilesError::MissingParent { .. })));
+        assert!(matches!(
+            parse_repo("%FILES%\netc/foo\n"),
+            Err(FilesError::Defect(FilesDefect::MissingParent { .. }))
+        ));
         assert!(matches!(
             parse_repo("%FILES%\netc/\netc/\n"),
-            Err(FilesError::DuplicatePath { .. })
+            Err(FilesError::Defect(FilesDefect::DuplicatePath { .. }))
         ));
     }
 
@@ -723,7 +708,10 @@ mod tests {
 
         let backup = format!("%FILES%\netc/\netc/a\n\n%BACKUP%\netc/a\t{MD5}\n");
         assert!(matches!(parse_repo(&backup), Err(FilesError::UnknownSection { .. })));
-        assert!(matches!(parse_repo("%FILES%\nusr/bin/\n"), Err(FilesError::MissingParent { .. })));
+        assert!(matches!(
+            parse_repo("%FILES%\nusr/bin/\n"),
+            Err(FilesError::Defect(FilesDefect::MissingParent { .. }))
+        ));
     }
 
     #[test]

@@ -262,7 +262,6 @@ mod tests {
     }
 
     /// An unreadable file is unknown, and unknown keeps the user's copy, and says so.
-    #[cfg(unix)]
     #[test]
     fn an_unreadable_local_file_is_reported_and_keeps_both() {
         let (dir, root) = scenario(None, Some("new"));

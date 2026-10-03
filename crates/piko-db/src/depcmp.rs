@@ -143,19 +143,8 @@ pub(crate) fn provides_satisfies(provided: &RelationOrSoname, dep: &RelationOrSo
 fn v1_requirement(dep: &RelationOrSoname) -> Option<VersionRequirement> {
     match dep {
         RelationOrSoname::Relation(relation) => relation.version_requirement.clone(),
-        RelationOrSoname::SonameV1(SonameV1::Basic(_)) => None,
-        RelationOrSoname::SonameV1(SonameV1::Explicit { version, architecture, .. }) => {
-            format!("{version}-{architecture}")
-                .parse()
-                .ok()
-                .map(|version| VersionRequirement { comparison: VersionComparison::Equal, version })
-        }
-        RelationOrSoname::SonameV1(SonameV1::Unversioned { soname, architecture, .. }) => {
-            format!("{soname}-{architecture}")
-                .parse()
-                .ok()
-                .map(|version| VersionRequirement { comparison: VersionComparison::Equal, version })
-        }
+        RelationOrSoname::SonameV1(soname) => soname_v1_version(soname)
+            .map(|version| VersionRequirement { comparison: VersionComparison::Equal, version }),
         RelationOrSoname::SonameV2(_) => None,
     }
 }
@@ -171,14 +160,23 @@ fn exact_v1_version(provided: &RelationOrSoname) -> Option<Version> {
             (requirement.comparison == VersionComparison::Equal)
                 .then(|| requirement.version.clone())
         }
-        RelationOrSoname::SonameV1(SonameV1::Basic(_)) => None,
-        RelationOrSoname::SonameV1(SonameV1::Explicit { version, architecture, .. }) => {
+        RelationOrSoname::SonameV1(soname) => soname_v1_version(soname),
+        RelationOrSoname::SonameV2(_) => None,
+    }
+}
+
+/// The version a v1 soname states, as libalpm's one version string: `<version>-<arch>`
+/// reassembled from the two typed fields and parsed back. Returns `None` for a basic soname,
+/// which states none, and for a string that is not a valid `Version`.
+fn soname_v1_version(soname: &SonameV1) -> Option<Version> {
+    match soname {
+        SonameV1::Basic(_) => None,
+        SonameV1::Explicit { version, architecture, .. } => {
             format!("{version}-{architecture}").parse().ok()
         }
-        RelationOrSoname::SonameV1(SonameV1::Unversioned { soname, architecture, .. }) => {
+        SonameV1::Unversioned { soname, architecture, .. } => {
             format!("{soname}-{architecture}").parse().ok()
         }
-        RelationOrSoname::SonameV2(_) => None,
     }
 }
 

@@ -176,6 +176,79 @@ macro_rules! field_list {
 
 pub(crate) use field_list;
 
+/// Renders a date field of `piko info`: `typed` in the local time zone, or the section's lines
+/// `raw` as the `desc` holds them when they are not a timestamp.
+pub(crate) fn info_date<E>(
+    typed: Result<i64, E>,
+    raw: &[&str],
+    offset: piko_txn::LocalOffset,
+) -> String {
+    match typed {
+        Ok(timestamp) => crate::output::human_date(timestamp, offset),
+        Err(_) => crate::output::escaped(raw.join(" ")),
+    }
+}
+
+/// Prints the `piko info` fields from `Name` to `Optional Deps`, which `pacman -Qi` and
+/// `pacman -Si` print alike.
+///
+/// This is a macro rather than a function because a local `DescView` and a repository
+/// `RepoDescView` have the same accessors and no trait in common. Like `field_list!`, it returns
+/// from the enclosing function if a write fails.
+macro_rules! info_description_fields {
+    ($out:expr, $package:expr, $desc:expr) => {{
+        use $crate::output::{emit, escaped};
+        use $crate::style::{field_list, info_label, info_url};
+
+        let (package, desc) = ($package, $desc);
+        let bold = console::Style::new().bold();
+        let version = console::Style::new().cyan().bold();
+        let url = info_url(desc.url().map(ToString::to_string), desc.url_raw());
+
+        emit!($out, "{} {}", info_label("Name            :"), bold.apply_to(package.name()));
+        emit!($out, "{} {}", info_label("Version         :"), version.apply_to(package.version()));
+        emit!($out, "{} {}", info_label("Description     :"), escaped(desc.description()));
+        emit!($out, "{} {}", info_label("Architecture    :"), escaped(desc.architecture()));
+        emit!($out, "{} {url}", info_label("URL             :"));
+        match desc.licenses() {
+            Ok(licenses) => field_list!($out, "Licenses        :", licenses, 5),
+            Err(_) => field_list!($out, "Licenses        :", &desc.section_values("LICENSE"), 5),
+        }
+        field_list!($out, "Groups          :", desc.groups(), 5);
+        field_list!($out, "Provides        :", desc.provides(), 5);
+        field_list!($out, "Depends On      :", desc.depends(), 5);
+        match desc.optional_depends() {
+            Ok(optional) => field_list!($out, "Optional Deps   :", optional, 1),
+            Err(_) => field_list!($out, "Optional Deps   :", &desc.section_values("OPTDEPENDS"), 1),
+        }
+    }};
+}
+
+pub(crate) use info_description_fields;
+
+/// Prints the `piko info` fields `Installed Size`, `Packager` and `Build Date`, which
+/// `pacman -Qi` and `pacman -Si` print alike. See `info_description_fields!` for why this is a
+/// macro.
+macro_rules! info_build_fields {
+    ($out:expr, $desc:expr, $offset:expr) => {{
+        use $crate::output::{emit, escaped, human_size};
+        use $crate::style::{info_date, info_label};
+
+        let desc = $desc;
+        emit!($out, "{} {}", info_label("Installed Size  :"), human_size(desc.installed_size()));
+        emit!(
+            $out,
+            "{} {}",
+            info_label("Packager        :"),
+            escaped(desc.packager_raw().unwrap_or_default())
+        );
+        let build_date = info_date(desc.build_date(), &desc.section_values("BUILDDATE"), $offset);
+        emit!($out, "{} {build_date}", info_label("Build Date      :"));
+    }};
+}
+
+pub(crate) use info_build_fields;
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {

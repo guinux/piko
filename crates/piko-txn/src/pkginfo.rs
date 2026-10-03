@@ -165,6 +165,12 @@ pub struct PkgInfo {
     pub replaces: Vec<PackageRelation>,
     /// `group`.
     pub groups: Vec<Group>,
+    /// `backup`, each value as written, as libalpm keeps it (`be_package.c:242`).
+    ///
+    /// A value is compared with the archive's member paths as a string, so it is not converted:
+    /// a typed path could normalise a spelling and change which member it names. A value that
+    /// names no member protects nothing, as in libalpm.
+    pub backups: Vec<String>,
     /// `pkgbase`.
     pub base: Shown,
     /// `pkgdesc`, with its white space folded.
@@ -283,6 +289,7 @@ pub fn parse(raw: &str) -> Result<PkgInfo, PkgInfoError> {
         conflicts: read.list("conflict")?,
         replaces: read.list("replaces")?,
         groups: read.all("group").map(str::to_owned).collect(),
+        backups: read.all("backup").map(str::to_owned).collect(),
         base: read.shown_one::<Name>("pkgbase"),
         description: read.shown_one::<PackageDescription>("pkgdesc"),
         url: read.as_written("url"),
@@ -457,6 +464,17 @@ mod tests {
         assert!(info.xdata.values.is_empty());
         assert!(info.invalid_fields().is_empty());
         assert!(info.unknown.is_empty());
+    }
+
+    /// Each `backup` value is kept as written, in text order, white space included: it is
+    /// compared with the archive's member paths as a string. A line in a comment is not one.
+    #[test]
+    fn backup_values_are_kept_as_written() {
+        let raw = pkginfo("Jane Doe <jane@example.org>")
+            + "backup = etc/foo.conf\n# backup = etc/old.conf\nbackup = etc/./bar.conf \n";
+        let info = parse(&raw).unwrap();
+        assert_eq!(info.backups, ["etc/foo.conf", "etc/./bar.conf "]);
+        assert!(parse(&pkginfo("Jane Doe <jane@example.org>")).unwrap().backups.is_empty());
     }
 
     /// makepkg's default packager is kept, and is not reported: it is a documented default.

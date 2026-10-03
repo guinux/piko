@@ -372,7 +372,7 @@ mod tests {
     use crate::resolve::IgnoreList;
     use crate::solve::UniverseOptions;
 
-    fn universe_of<'a>(scenario: &'a BuiltScenario, ignores: IgnoreList<'a>) -> Universe<'a> {
+    fn universe_of<'a>(scenario: &'a BuiltScenario, ignores: &'a IgnoreList) -> Universe<'a> {
         Universe::build(
             scenario.local(),
             scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn a_pattern_expands_to_the_names_it_matches_sorted() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let expanded =
             expand_installable_targets(&universe, &owned(&["app-*"]), &Limits::default()).unwrap();
 
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn a_literal_target_passes_through_in_place() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let expanded =
             expand_installable_targets(&universe, &owned(&["other", "app-*"]), &Limits::default())
                 .unwrap();
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn a_pattern_matching_a_group_name_expands_to_its_members() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let expanded =
             expand_installable_targets(&universe, &owned(&["tool*"]), &Limits::default()).unwrap();
 
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn an_installed_only_name_is_not_installable() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let failure =
             expand_installable_targets(&universe, &owned(&["app-o*"]), &Limits::default())
                 .unwrap_err();
@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn a_removal_pattern_expands_against_installed_names() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let (names, expansions) =
             expand_installed_targets(&universe, &owned(&["app-*"]), &Limits::default()).unwrap();
 
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn a_removal_pattern_expands_an_installed_group_name() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let (names, expansions) =
             expand_installed_targets(&universe, &owned(&["installed-*"]), &Limits::default())
                 .unwrap();
@@ -499,7 +499,8 @@ mod tests {
     fn a_pattern_reports_the_ignored_candidates_it_passed_over() {
         let scenario = scenario();
         let ignore_pkg = [String::from("app-b")];
-        let universe = universe_of(&scenario, IgnoreList::new(&ignore_pkg, &[]));
+        let ignores = IgnoreList::new(&ignore_pkg, &[]);
+        let universe = universe_of(&scenario, &ignores);
         let expanded =
             expand_installable_targets(&universe, &owned(&["app-*"]), &Limits::default()).unwrap();
 
@@ -515,7 +516,8 @@ mod tests {
     fn a_wholly_ignored_pattern_is_not_reported_as_a_miss() {
         let scenario = scenario();
         let ignore_pkg = [String::from("app-*")];
-        let universe = universe_of(&scenario, IgnoreList::new(&ignore_pkg, &[]));
+        let ignores = IgnoreList::new(&ignore_pkg, &[]);
+        let universe = universe_of(&scenario, &ignores);
         let failure = expand_installable_targets(&universe, &owned(&["app-*"]), &Limits::default())
             .unwrap_err();
 
@@ -531,7 +533,7 @@ mod tests {
     #[test]
     fn a_pattern_wider_than_the_bound_is_refused() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let limits = Limits { glob_max_expansion: 1, ..Limits::default() };
         let failure =
             expand_installable_targets(&universe, &owned(&["app-*"]), &limits).unwrap_err();
@@ -545,7 +547,7 @@ mod tests {
     #[test]
     fn a_pattern_exactly_at_the_bound_is_accepted() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let limits = Limits { glob_max_expansion: 2, ..Limits::default() };
         let expanded = expand_installable_targets(&universe, &owned(&["app-*"]), &limits).unwrap();
 
@@ -555,7 +557,7 @@ mod tests {
     #[test]
     fn a_versioned_pattern_is_refused_rather_than_expanded() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let failure =
             expand_installable_targets(&universe, &owned(&["app-*>=1.0"]), &Limits::default())
                 .unwrap_err();
@@ -569,7 +571,7 @@ mod tests {
     #[test]
     fn a_versioned_literal_still_passes_through() {
         let scenario = scenario();
-        let universe = universe_of(&scenario, IgnoreList::default());
+        let universe = universe_of(&scenario, IgnoreList::NONE);
         let expanded =
             expand_installable_targets(&universe, &owned(&["app-a>=1.0"]), &Limits::default())
                 .unwrap();

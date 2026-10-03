@@ -612,17 +612,9 @@ fn create_dir(path: &Path) -> Result<()> {
 /// `path` names the file in an error. It is never used to reach the file, because a path can
 /// name a symbolic link planted since the file was opened.
 pub(crate) fn set_file_mode(file: &File, path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(std::fs::Permissions::from_mode(FILE_MODE))
-            .map_err(|source| Error::io(path, IoAction::Metadata, source))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (file, path);
-    }
-    Ok(())
+    use std::os::unix::fs::PermissionsExt as _;
+    file.set_permissions(std::fs::Permissions::from_mode(FILE_MODE))
+        .map_err(|source| Error::io(path, IoAction::Metadata, source))
 }
 
 /// Sets a directory to [`DIR_MODE`] through a descriptor opened `O_DIRECTORY | O_NOFOLLOW`.
@@ -632,24 +624,17 @@ pub(crate) fn set_file_mode(file: &File, path: &Path) -> Result<()> {
 /// by someone else gets the mode, which changes nothing outside the directory they could
 /// already write into.
 fn set_dir_mode(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use rustix::fs::OFlags;
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        let directory = File::options()
-            .read(true)
-            .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW).bits().cast_signed())
-            .open(path)
-            .map_err(|source| Error::io(path, IoAction::Open, source))?;
-        directory
-            .set_permissions(std::fs::Permissions::from_mode(DIR_MODE))
-            .map_err(|source| Error::io(path, IoAction::Metadata, source))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let directory = File::options()
+        .read(true)
+        .custom_flags((OFlags::DIRECTORY | OFlags::NOFOLLOW).bits().cast_signed())
+        .open(path)
+        .map_err(|source| Error::io(path, IoAction::Open, source))?;
+    directory
+        .set_permissions(std::fs::Permissions::from_mode(DIR_MODE))
+        .map_err(|source| Error::io(path, IoAction::Metadata, source))
 }
 
 /// Refuses to rename `temp` unless it still names the file this process wrote through `file`.
@@ -668,21 +653,14 @@ fn set_dir_mode(path: &Path) -> Result<()> {
 /// - [`Error::TemporaryReplaced`] if `temp` names another file, or nothing.
 /// - [`Error::Io`] if the descriptor cannot be stat'ed.
 pub(crate) fn ensure_unreplaced(file: &File, temp: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let written =
-            file.metadata().map_err(|source| Error::io(temp, IoAction::Metadata, source))?;
-        let named = std::fs::symlink_metadata(temp).ok();
-        let same =
-            named.is_some_and(|named| named.dev() == written.dev() && named.ino() == written.ino());
-        if !same {
-            return Err(Error::TemporaryReplaced { path: temp.to_path_buf() });
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (file, temp);
+    use std::os::unix::fs::MetadataExt as _;
+
+    let written = file.metadata().map_err(|source| Error::io(temp, IoAction::Metadata, source))?;
+    let named = std::fs::symlink_metadata(temp).ok();
+    let same =
+        named.is_some_and(|named| named.dev() == written.dev() && named.ino() == written.ino());
+    if !same {
+        return Err(Error::TemporaryReplaced { path: temp.to_path_buf() });
     }
     Ok(())
 }
@@ -817,14 +795,15 @@ impl Drop for Temporary {
 /// rather than following it. One retry, not a loop: if the file reappears immediately,
 /// something else is writing to this database, and stopping is correct.
 pub(crate) fn create_temp(temp: &Path) -> Result<File> {
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     let mut options = File::options();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use rustix::fs::OFlags;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(FILE_MODE).custom_flags(OFlags::NOFOLLOW.bits().cast_signed());
-    }
+    options
+        .write(true)
+        .create_new(true)
+        .mode(FILE_MODE)
+        .custom_flags(OFlags::NOFOLLOW.bits().cast_signed());
 
     match options.open(temp) {
         Ok(file) => Ok(file),
@@ -976,6 +955,8 @@ mod tests {
     /// the batching would be a silent behavior change rather than a durability one.
     #[test]
     fn staged_and_per_file_writes_produce_identical_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let harness = Harness::new();
         let lock = harness.lock();
         let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
@@ -996,15 +977,11 @@ mod tests {
             String::from_utf8(direct_bytes).unwrap().replace("direct", "X"),
         );
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(writer.entry_path(&staged_entry).join("desc"))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, FILE_MODE, "a staged file keeps the explicit mode");
-        }
+        let mode = std::fs::metadata(writer.entry_path(&staged_entry).join("desc"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, FILE_MODE, "a staged file keeps the explicit mode");
     }
 
     /// An upgrade: the old entry is moved out and deleted, and the new one is in place whole.
@@ -1053,7 +1030,6 @@ mod tests {
 
     /// An entry this one replaces must be a real directory. Moving a symbolic link out would
     /// leave its target in place, and replacing it would publish the entry through it.
-    #[cfg(unix)]
     #[test]
     fn an_entry_write_refuses_to_replace_a_symlinked_entry() {
         let harness = Harness::new();
@@ -1159,26 +1135,20 @@ mod tests {
 
     #[test]
     fn entry_directories_and_files_get_pacmans_modes() {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
 
-            let harness = Harness::new();
-            let lock = harness.lock();
-            let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
-            let name = entry("foo-1.0.0-1");
-            writer.create_entry(&name).unwrap();
-            writer.write_record(&name, &desc("foo", "1.0.0-1")).unwrap();
+        let harness = Harness::new();
+        let lock = harness.lock();
+        let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
+        let name = entry("foo-1.0.0-1");
+        writer.create_entry(&name).unwrap();
+        writer.write_record(&name, &desc("foo", "1.0.0-1")).unwrap();
 
-            let dir_mode =
-                std::fs::metadata(writer.entry_path(&name)).unwrap().permissions().mode();
-            let file_mode = std::fs::metadata(writer.entry_path(&name).join("desc"))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert_eq!(dir_mode & 0o777, DIR_MODE, "{:o}", dir_mode & 0o777);
-            assert_eq!(file_mode & 0o777, FILE_MODE, "{:o}", file_mode & 0o777);
-        }
+        let dir_mode = std::fs::metadata(writer.entry_path(&name)).unwrap().permissions().mode();
+        let file_mode =
+            std::fs::metadata(writer.entry_path(&name).join("desc")).unwrap().permissions().mode();
+        assert_eq!(dir_mode & 0o777, DIR_MODE, "{:o}", dir_mode & 0o777);
+        assert_eq!(file_mode & 0o777, FILE_MODE, "{:o}", file_mode & 0o777);
     }
 
     /// Silently writing into an existing entry would merge two packages' metadata.
@@ -1239,7 +1209,6 @@ mod tests {
     }
 
     /// Following a symlinked entry would delete a directory outside the database.
-    #[cfg(unix)]
     #[test]
     fn refuses_to_remove_a_symlinked_entry() {
         let harness = Harness::new();
@@ -1260,7 +1229,6 @@ mod tests {
 
     /// A symlink planted where the temporary file goes must not be written through. The
     /// naive `create(true).truncate(true)` open does exactly that, as root.
-    #[cfg(unix)]
     #[test]
     fn never_writes_through_a_symlinked_temporary_file() {
         let harness = Harness::new();
@@ -1284,7 +1252,6 @@ mod tests {
 
     /// The destination is safe for a different reason: `rename` replaces a symlink instead of
     /// resolving it. This is worth pinning down rather than relying on.
-    #[cfg(unix)]
     #[test]
     fn never_writes_through_a_symlinked_destination() {
         let harness = Harness::new();
@@ -1356,7 +1323,6 @@ mod tests {
 
     /// A staged member's temporary swapped for a symbolic link is refused at commit. Its mode
     /// was set through the descriptor at staging, so it never reached the link's target.
-    #[cfg(unix)]
     #[test]
     fn a_staged_temporary_swapped_for_a_symlink_is_neither_followed_nor_installed() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1386,7 +1352,6 @@ mod tests {
 
     /// `<dbpath>/local` as a symbolic link is refused. Following it would give the link's target
     /// the database's `0755`, and write the database there.
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_local_directory_is_refused_and_its_target_keeps_its_mode() {
         use std::os::unix::fs::PermissionsExt as _;

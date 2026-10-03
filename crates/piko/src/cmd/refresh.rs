@@ -33,7 +33,8 @@ pub struct Options {
 /// `<dbpath>/db.lck` is held for the whole refresh, and taken before anything else, as
 /// libalpm's `alpm_db_update` does (`be_sync.c:163`). A held lock fails the command at once,
 /// before any download. The lock is released when this function returns, so `update` can take
-/// it again for its transaction, as pacman's `-Syu` does.
+/// it again for its transaction, as pacman's `-Syu` does. A lock file that cannot be removed is
+/// a warning, and leaves the exit code as it was, as in libalpm.
 ///
 /// A repository that fails does not stop the others. One dead mirror set should not prevent
 /// the rest of the system from being refreshed. The exit code still reports that something
@@ -55,11 +56,6 @@ pub fn refresh(
     cancel: &Cancel,
     offset: piko_txn::LocalOffset,
 ) -> ExitCode {
-    let Options { force, files, freshness } = options;
-    let sync_dir = dbpath.join("sync");
-    let refresher =
-        Refresher::default().with_sandbox(piko_net::Sandbox::from_options(&config.options));
-
     let lock = match piko_db_write::DbLock::acquire(dbpath) {
         Ok(lock) => lock,
         Err(error) => {
@@ -67,6 +63,25 @@ pub fn refresh(
             return ExitCode::FAILURE;
         }
     };
+    let code = refresh_locked(config, dbpath, &lock, only, options, cancel, offset);
+    crate::cmd::release_lock(lock);
+    code
+}
+
+/// [`refresh`] once `db.lck` is held. The caller releases the lock, whatever this returns.
+fn refresh_locked(
+    config: &PacmanConfig,
+    dbpath: &Path,
+    lock: &piko_db_write::DbLock,
+    only: &[String],
+    options: Options,
+    cancel: &Cancel,
+    offset: piko_txn::LocalOffset,
+) -> ExitCode {
+    let Options { force, files, freshness } = options;
+    let sync_dir = dbpath.join("sync");
+    let refresher =
+        Refresher::default().with_sandbox(piko_net::Sandbox::from_options(&config.options));
 
     // Which archives, under which policy, checked by which keyring: `RefreshTargets`
     // decides all three from the configuration.
@@ -106,7 +121,7 @@ pub fn refresh(
 
     let results = refresher.refresh_all(
         &sync_dir,
-        &lock,
+        lock,
         requests,
         targets.keyring(),
         Concurrency::new(config.options.parallel_downloads),

@@ -402,12 +402,12 @@ mod tests {
         solve_with_removals,
     };
 
-    /// The universe a scenario builds, with `ignore_pkg` applied as `pacman.conf` would.
-    fn universe<'a>(scenario: &'a BuiltScenario, ignore_pkg: &'a [String]) -> Universe<'a> {
+    /// The universe a scenario builds, with `ignores` applied as `pacman.conf` would.
+    fn universe<'a>(scenario: &'a BuiltScenario, ignores: &'a IgnoreList) -> Universe<'a> {
         Universe::build(
             scenario.local(),
             scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
-            UniverseOptions::new().ignores(IgnoreList::new(ignore_pkg, &[])),
+            UniverseOptions::new().ignores(ignores),
         )
         .unwrap()
     }
@@ -441,7 +441,7 @@ mod tests {
                 ],
             )
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let app = candidate(&universe, "app");
         let lib = candidate(&universe, "lib");
 
@@ -471,7 +471,7 @@ mod tests {
                 ],
             )
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let top = candidate(&universe, "top");
         let middle = candidate(&universe, "middle");
         let bottom = candidate(&universe, "bottom");
@@ -502,7 +502,7 @@ mod tests {
                 ],
             )
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let one = candidate(&universe, "one");
         let two = candidate(&universe, "two");
         let shared = candidate(&universe, "shared");
@@ -532,7 +532,7 @@ mod tests {
                 ],
             )
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let root = candidate(&universe, "root");
         let shared = candidate(&universe, "shared");
 
@@ -554,7 +554,7 @@ mod tests {
                 ],
             )
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let named = candidate(&universe, "named");
         let shared = candidate(&universe, "shared");
 
@@ -572,7 +572,7 @@ mod tests {
             .installed(PackageSpec::new("old", "1.0.0-1"))
             .repo("core", [PackageSpec::new("old", "2.0.0-1")])
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let request = Request::new().with_sysupgrade(&universe, false);
         let newer = candidate(&universe, "old");
 
@@ -587,7 +587,7 @@ mod tests {
             .installed(PackageSpec::new("gone", "1.0.0-1"))
             .repo("core", [PackageSpec::new("heir", "1.0.0-1").replaces(["gone"])])
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let request = Request::new().with_sysupgrade(&universe, false);
         let heir = candidate(&universe, "heir");
         let gone = universe.installed_named("gone").unwrap().id();
@@ -607,7 +607,7 @@ mod tests {
             .installed(PackageSpec::new("old-thing", "1.0.0-1"))
             .repo("core", [PackageSpec::new("new-thing", "1.0.0-1").conflicts(["old-thing"])])
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let incoming = candidate(&universe, "new-thing");
         let old = universe.installed_named("old-thing").unwrap().id();
 
@@ -631,7 +631,7 @@ mod tests {
             .installed(PackageSpec::new("base", "1.0.0-1"))
             .installed(PackageSpec::new("dependent", "1.0.0-1").depends(["base"]))
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let base = universe.installed_named("base").unwrap().id();
         let dependent = universe.installed_named("dependent").unwrap().id();
 
@@ -665,7 +665,7 @@ mod tests {
                     .reason(alpm_types::PackageInstallReason::Depend),
             )
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let helper = universe.installed_named("helper").unwrap().id();
 
         let removal = plan_removal(
@@ -688,7 +688,7 @@ mod tests {
     #[test]
     fn a_removal_plan_carries_no_explanation_unless_asked() {
         let scenario = Scenario::new().installed(PackageSpec::new("app", "1.0.0-1")).build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
 
         let removal = plan_removal(
             scenario.local(),
@@ -717,7 +717,8 @@ mod tests {
             )
             .build();
         let ignore = ["fancy".to_owned()];
-        let universe = universe(&scenario, &ignore);
+        let ignores = IgnoreList::new(&ignore, &[]);
+        let universe = universe(&scenario, &ignores);
         let app = candidate(&universe, "app");
         let plain = candidate(&universe, "plain");
 
@@ -746,7 +747,7 @@ mod tests {
                 ],
             )
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let app = candidate(&universe, "app");
 
         let (planned, explanation) = explained(&universe, &Request::new().target(app));
@@ -774,7 +775,7 @@ mod tests {
             .installed(PackageSpec::new("untouched", "1.0.0-1"))
             .repo("core", [PackageSpec::new("app", "1.0.0-1")])
             .build();
-        let universe = universe(&scenario, &[]);
+        let universe = universe(&scenario, IgnoreList::NONE);
         let app = candidate(&universe, "app");
         let untouched = universe.installed_named("untouched").unwrap().id();
 

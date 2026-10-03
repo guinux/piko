@@ -47,7 +47,6 @@ fn with_timeout(timeout: Duration, body: impl FnOnce() + Send + 'static) {
 /// A FIFO open for reading blocks until a writer appears. `O_NONBLOCK` plus the regular-file
 /// check turns that into an immediate error instead.
 #[test]
-#[cfg(unix)]
 fn a_fifo_in_place_of_a_metadata_file_does_not_block() {
     let fixture = DbFixture::new();
     let dir = fixture.package("foo-1.0.0-1").desc(MINIMAL_DESC_V1).build();
@@ -75,7 +74,6 @@ fn a_fifo_in_place_of_a_metadata_file_does_not_block() {
 
 /// `/dev/zero` never reaches EOF. The regular-file check rejects it outright.
 #[test]
-#[cfg(unix)]
 fn a_character_device_is_refused() {
     let zero = Path::new("/dev/zero");
     if !zero.exists() {
@@ -100,7 +98,6 @@ fn a_character_device_is_refused() {
 
 /// A symlink must not be able to redirect a read outside the entry directory.
 #[test]
-#[cfg(unix)]
 fn a_symlinked_metadata_file_is_not_followed() {
     let fixture = DbFixture::new();
     let outside = fixture.path().join("outside-secret");
@@ -307,7 +304,6 @@ fn non_package_entries_never_consume_the_package_budget() {
 /// later, on first access. An entry swapped for a symlink in between must not redirect those
 /// reads: the entry directory is opened by descriptor with `O_NOFOLLOW`, not only the file in
 /// it.
-#[cfg(unix)]
 #[test]
 fn an_entry_swapped_for_a_symlink_after_the_scan_is_not_followed() {
     let db = DbFixture::new();

@@ -435,7 +435,7 @@ impl LocalDatabase {
     pub fn check_updates_ignoring<'a>(
         &'a self,
         repos: impl IntoIterator<Item = &'a crate::repo::RepoDatabase>,
-        ignores: crate::resolve::IgnoreList<'_>,
+        ignores: &crate::resolve::IgnoreList,
     ) -> crate::Result<crate::updates::Updates<'a>> {
         crate::updates::check_updates_ignoring(self, repos, ignores)
     }
@@ -609,7 +609,6 @@ mod tests {
         assert!(db.diagnostics().iter().all(|d| matches!(d, Diagnostic::InvalidEntryName { .. })));
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_entry_is_reported_and_skipped() {
         let fixture = DbFixture::new();
@@ -628,7 +627,6 @@ mod tests {
 
     /// A dangling symlink is not a directory either way. It should be ignored quietly,
     /// not reported as a redirection attempt.
-    #[cfg(unix)]
     #[test]
     fn a_dangling_symlink_is_skipped_silently() {
         let fixture = DbFixture::new();

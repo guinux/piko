@@ -5,7 +5,7 @@
 //! 1. **Does this one pattern match this one string?** [`matches()`], and [`Glob`] for the same
 //!    question asked in a loop. Forward, anchored to the whole string, and with no `!`
 //!    inversion.
-//! 2. **Does this *list* of patterns select this string?** [`crate::resolve::matches_any`],
+//! 2. **Does this *list* of patterns select this string?** [`crate::resolve::PatternList`],
 //!    which is libalpm's `_alpm_fnmatch_patterns` (`util.c:1528`): a backwards scan where a
 //!    leading `!` de-selects.
 //! 3. **Does `HoldPkg` name this package?** `cmd::removal::is_held`, in the `piko` crate. It

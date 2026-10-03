@@ -9,7 +9,6 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-alpm-mtree.workspace = true
 alpm-types.workspace = true
 clap.workspace = true
 console.workspace = true
@@ -24,11 +23,11 @@ piko-txn.workspace = true
 # `signal` points the standard streams at `/dev/null` once the terminal hangs up.
 rustix = { workspace = true, features = ["stdio"] }
 signal-hook.workspace = true
-# The CLI has failure modes no library crate has a type for — an unreadable `pacman.conf`,
-# a mistyped repository name, a rejected repository signature.
 # A merge writes the base and the merged result into a private scratch directory. Writing a
 # correct `mkdtemp` by hand, in a process that may be root, is not worth the saving.
 tempfile.workspace = true
+# The CLI has failure modes no library crate has a type for — an unreadable `pacman.conf`,
+# a mistyped repository name, a rejected repository signature.
 thiserror.workspace = true
 time.workspace = true
 

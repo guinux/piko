@@ -72,6 +72,7 @@ fn every_cached_pkginfo_agrees_with_alpm_pkginfo() {
             assert_eq!(ours.conflicts, v.conflict, "{name}");
             assert_eq!(ours.replaces, v.replaces, "{name}");
             assert_eq!(ours.groups, v.group, "{name}");
+            assert_eq!(ours.backups, strings(&v.backup), "{name}");
             assert_eq!(ours.base.values, [v.pkgbase.to_string()], "{name}");
             assert_eq!(ours.description.values, [v.pkgdesc.to_string()], "{name}");
             assert_eq!(ours.build_date.values, [v.builddate.to_string()], "{name}");

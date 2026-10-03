@@ -859,15 +859,7 @@ pub fn load_package(
     crate::extract::archive::walk(package, limits, |member, contents| {
         if member.kind == crate::extract::archive::MemberKind::Metadata {
             if member.path == Path::new(".PKGINFO") {
-                // A `.PKGINFO` that is not valid UTF-8 leaves nothing to parse. It is reported
-                // below as the absence it amounts to.
-                pkginfo = String::from_utf8(read_whole(
-                    contents,
-                    package,
-                    ".PKGINFO size",
-                    MAX_PKGINFO_BYTES,
-                )?)
-                .ok();
+                pkginfo = read_pkginfo(contents, package)?;
             } else if member.path == Path::new(".INSTALL") {
                 install_script =
                     Some(read_whole(contents, package, "scriptlet size", MAX_SCRIPTLET_BYTES)?);
@@ -897,28 +889,10 @@ pub fn load_package(
         Ok(())
     })?;
 
-    let Some(raw) = pkginfo else {
-        return Err(crate::Error::UnusableSource {
-            path: package.to_path_buf(),
-            reason: "the package has no readable .PKGINFO".to_owned(),
-        });
-    };
-    let info = crate::pkginfo::parse(&raw).map_err(|error| crate::Error::UnusableSource {
-        path: package.to_path_buf(),
-        reason: format!("its .PKGINFO is unreadable: {error}"),
-    })?;
-
+    let (info, raw) = parse_pkginfo(pkginfo, package)?;
     let (name, version) = crate::pkginfo::name_and_version(&info);
     let (name, version) = (name.to_string(), version.to_string());
-    // `%BACKUP%` paths are taken from the text rather than from the parsed `Backup` values.
-    // They are compared against the paths the *archive* spells. A round trip through a typed
-    // path that normalises anything could make that comparison miss. `record::desc` avoids the
-    // same hazard for `%URL%`.
-    let backups: BTreeSet<String> = raw
-        .lines()
-        .filter_map(|line| line.strip_prefix("backup = "))
-        .map(|value| value.trim().to_owned())
-        .collect();
+    let backups: BTreeSet<String> = info.backups.iter().cloned().collect();
 
     Ok(LoadedPackage {
         target: Target { name, version, files: FileList::new(paths), backups, install_script },
@@ -957,14 +931,36 @@ pub fn load_pkginfo(
         {
             return Ok(crate::extract::archive::Flow::Continue);
         }
-        // A `.PKGINFO` that is not valid UTF-8 leaves nothing to parse. It is reported below
-        // as the absence it amounts to.
-        pkginfo =
-            String::from_utf8(read_whole(contents, package, ".PKGINFO size", MAX_PKGINFO_BYTES)?)
-                .ok();
+        pkginfo = read_pkginfo(contents, package)?;
         Ok(crate::extract::archive::Flow::Stop)
     })?;
 
+    parse_pkginfo(pkginfo, package)
+}
+
+/// Reads the `.PKGINFO` member of `package` whole.
+///
+/// A `.PKGINFO` that is not valid UTF-8 leaves nothing to parse. It is `None`, and
+/// [`parse_pkginfo`] reports it as the absence it amounts to.
+///
+/// # Errors
+///
+/// As [`read_whole`].
+fn read_pkginfo(contents: &mut dyn std::io::Read, package: &Path) -> Result<Option<String>> {
+    let bytes = read_whole(contents, package, ".PKGINFO size", MAX_PKGINFO_BYTES)?;
+    Ok(String::from_utf8(bytes).ok())
+}
+
+/// Parses the `.PKGINFO` text [`read_pkginfo`] found in `package`, returning it beside its
+/// parse.
+///
+/// # Errors
+///
+/// [`crate::Error::UnusableSource`] if there is no text, or if the parse refuses it.
+fn parse_pkginfo(
+    pkginfo: Option<String>,
+    package: &Path,
+) -> Result<(crate::pkginfo::PkgInfo, String)> {
     let Some(raw) = pkginfo else {
         return Err(crate::Error::UnusableSource {
             path: package.to_path_buf(),

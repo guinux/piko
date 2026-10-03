@@ -51,7 +51,7 @@ use crate::output::{emit, report};
 pub fn check_updates(
     local: &LocalDatabase,
     repos: &[RepoDatabase],
-    ignores: IgnoreList<'_>,
+    ignores: &IgnoreList,
     quiet: bool,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
@@ -107,7 +107,7 @@ pub fn check_updates(
 
 pub fn resolve_and_print(
     opened: &[(DbUsage, RepoDatabase)],
-    ignores: IgnoreList<'_>,
+    ignores: IgnoreList,
     target: &str,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
@@ -176,7 +176,7 @@ mod tests {
         check_updates(
             scenario.local(),
             scenario.repos(),
-            IgnoreList::new(ignore_pkg, ignore_group),
+            &IgnoreList::new(ignore_pkg, ignore_group),
             quiet,
             &mut out,
         );

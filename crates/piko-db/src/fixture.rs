@@ -154,12 +154,6 @@ impl DbFixture {
     pub fn path(&self) -> &Path {
         self.dir.path()
     }
-
-    /// Takes ownership of the temporary directory, keeping it alive independently.
-    #[must_use]
-    pub fn into_temp_dir(self) -> TempDir {
-        self.dir
-    }
 }
 
 impl Default for DbFixture {

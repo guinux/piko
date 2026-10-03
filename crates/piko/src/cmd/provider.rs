@@ -15,10 +15,7 @@ fn relation_of(universe: &Universe<'_>, ambiguity: &Ambiguity) -> String {
     crate::cmd::plan::relation_of(universe, ambiguity.dependent, ambiguity.dependency)
 }
 
-/// Writes the numbered candidate list, grouped by the repository each came from.
-///
-/// The grouping is pacman's. The numbering runs across the whole list rather than restarting
-/// per group, because the answer indexes the list, not the group.
+/// Writes the numbered provider list under its header.
 fn print_providers(
     out: &mut impl Write,
     universe: &Universe<'_>,
@@ -26,22 +23,7 @@ fn print_providers(
     providers: &[SolvableId],
 ) -> std::io::Result<()> {
     writeln!(out, ":: There are {} providers available for {relation}:", providers.len())?;
-
-    let mut current: Option<String> = None;
-    for (index, id) in providers.iter().enumerate() {
-        let origin = crate::cmd::origin_label(universe, *id);
-        if current.as_deref() != Some(origin.as_str()) {
-            writeln!(out, ":: {origin}")?;
-            current = Some(origin);
-        }
-        let described = universe.get(*id).map_or_else(
-            || "<unknown>".to_owned(),
-            |solvable| format!("{} {}", solvable.name(), solvable.version()),
-        );
-        // `index` is bounded by `providers.len()`, and the list is what was just counted.
-        writeln!(out, "   {}) {described}", index.saturating_add(1))?;
-    }
-    Ok(())
+    crate::cmd::write_candidates(out, universe, providers)
 }
 
 /// Asks which provider answers `question`, the `%DEPENDS%` entry `relation`.
@@ -73,31 +55,21 @@ pub fn report_defaults(universe: &Universe<'_>, report: &AmbiguityReport) {
     if report.is_empty() {
         return;
     }
-    let name_of =
-        |id| universe.get(id).map_or_else(|| "<unknown>".to_owned(), |s| s.name().to_string());
     eprintln!(
         "Note: {} dependency requirement(s) have several providers; the first was taken \
          (an interactive `piko install` asks which one to use)",
         report.found().len()
     );
     for ambiguity in report.found() {
-        // Named rather than counted, but not all of them. `tesseract requires tessdata` has
-        // 128 providers on a real system, and a note is not the prompt. The prompt lists
-        // every one, because there the list is what is being answered.
-        const SHOWN: usize = 5;
-        let listed: Vec<String> =
-            ambiguity.providers.iter().take(SHOWN).map(|id| name_of(*id)).collect();
-        let rest = ambiguity.providers.len().saturating_sub(listed.len());
-        let among = if rest == 0 {
-            listed.join(", ")
-        } else {
-            format!("{}, and {rest} more", listed.join(", "))
-        };
+        let taken = ambiguity
+            .providers
+            .first()
+            .map_or_else(|| "?".to_owned(), |id| crate::cmd::candidate_name(universe, *id));
         eprintln!(
-            "  {} requires {}: took {}, among {among}",
-            name_of(ambiguity.dependent),
+            "  {} requires {}: took {taken}, among {}",
+            crate::cmd::candidate_name(universe, ambiguity.dependent),
             relation_of(universe, ambiguity),
-            listed.first().map_or("?", String::as_str),
+            crate::cmd::candidate_sample(universe, &ambiguity.providers),
         );
     }
     if report.dropped() > 0 {

@@ -168,27 +168,7 @@ impl RootDir {
     /// - [`Error::PathEscapesRoot`] if a component is a symlink, or is not a directory.
     /// - [`Error::Io`] if a component cannot be opened.
     pub fn resolve_parent(&self, relative: &Path) -> Result<Resolved> {
-        let parts = components(relative)?;
-        // `components` guarantees at least one part, so the split always succeeds.
-        let Some((last, leading)) = parts.split_last() else {
-            return Err(Error::UnsafeArchivePath {
-                path: relative.to_path_buf(),
-                reason: UnsafePath::Empty,
-            });
-        };
-
-        if let Some(dir) = self.open_beneath(leading) {
-            return Ok(Resolved { dir, name: (*last).to_os_string() });
-        }
-
-        let mut current = self.duplicate()?;
-        let mut walked = PathBuf::new();
-        for part in leading {
-            walked.push(part);
-            current = self.descend(&current, part, &walked, relative)?;
-        }
-
-        Ok(Resolved { dir: current, name: (*last).to_os_string() })
+        self.walk(relative, false)
     }
 
     /// Creates every directory in `relative`, then resolves it.
@@ -201,7 +181,15 @@ impl RootDir {
     ///
     /// As [`RootDir::resolve_parent`], plus [`Error::Io`] if a directory cannot be created.
     pub fn create_dir_all(&self, relative: &Path) -> Result<Resolved> {
+        self.walk(relative, true)
+    }
+
+    /// Resolves the parent of `relative` one component at a time, as
+    /// [`RootDir::resolve_parent`] describes. With `create`, each missing directory on the way
+    /// is created first, as [`RootDir::create_dir_all`] describes.
+    fn walk(&self, relative: &Path, create: bool) -> Result<Resolved> {
         let parts = components(relative)?;
+        // `components` guarantees at least one part, so the split always succeeds.
         let Some((last, leading)) = parts.split_last() else {
             return Err(Error::UnsafeArchivePath {
                 path: relative.to_path_buf(),
@@ -209,8 +197,8 @@ impl RootDir {
             });
         };
 
-        // When every directory is already there, nothing is created, and the walk below would
-        // end at the same directory.
+        // When every directory is already there, nothing is created, and the walk below ends at
+        // the same directory.
         if let Some(dir) = self.open_beneath(leading) {
             return Ok(Resolved { dir, name: (*last).to_os_string() });
         }
@@ -219,15 +207,17 @@ impl RootDir {
         let mut walked = PathBuf::new();
         for part in leading {
             walked.push(part);
-            // `EEXIST` is the ordinary case here, not an error. Anything else is.
-            match rustix::fs::mkdirat(&current, *part, Mode::from_raw_mode(0o755)) {
-                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                Err(source) => {
-                    return Err(Error::io(
-                        self.display.join(&walked),
-                        crate::error::IoAction::CreateDir,
-                        source.into(),
-                    ));
+            if create {
+                // `EEXIST` is the ordinary case here, not an error. Anything else is.
+                match rustix::fs::mkdirat(&current, *part, Mode::from_raw_mode(0o755)) {
+                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                    Err(source) => {
+                        return Err(Error::io(
+                            self.display.join(&walked),
+                            crate::error::IoAction::CreateDir,
+                            source.into(),
+                        ));
+                    }
                 }
             }
             current = self.descend(&current, part, &walked, relative)?;
@@ -489,7 +479,6 @@ mod tests {
         assert_eq!(refused(""), UnsafePath::Empty);
     }
 
-    #[cfg(unix)]
     #[test]
     fn refuses_a_component_containing_nul() {
         use std::os::unix::ffi::OsStrExt as _;
@@ -545,7 +534,6 @@ mod tests {
 
     /// The escape a string check cannot catch. The path is entirely innocent; the filesystem
     /// is what redirects it.
-    #[cfg(unix)]
     #[test]
     fn refuses_to_descend_through_a_symlinked_directory() {
         let (dir, root) = root();
@@ -560,7 +548,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(outside.path().join("passwd")).unwrap(), "root:x:0:0");
     }
 
-    #[cfg(unix)]
     #[test]
     fn refuses_to_descend_through_a_symlink_to_a_directory_inside_the_root() {
         // Even an *internal* symlink is refused. `SECURE_SYMLINKS` cares whether the final
@@ -636,7 +623,6 @@ mod tests {
     }
 
     /// Creating directories must not become a way around the symlink rule.
-    #[cfg(unix)]
     #[test]
     fn create_dir_all_still_refuses_a_symlinked_component() {
         let (dir, root) = root();

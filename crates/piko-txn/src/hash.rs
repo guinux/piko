@@ -297,7 +297,6 @@ mod tests {
     }
 
     /// A backup path replaced by a symlink must not be followed to hash something else.
-    #[cfg(unix)]
     #[test]
     fn refuses_to_follow_a_symlink() {
         let (dir, root) = root();
@@ -310,7 +309,6 @@ mod tests {
     }
 
     /// Reading a FIFO would block forever.
-    #[cfg(unix)]
     #[test]
     fn refuses_a_non_regular_file() {
         let (dir, root) = root();
@@ -395,7 +393,6 @@ mod tests {
 
     /// The answer that would delete the user's file must never come from a file piko could
     /// not read.
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_side_is_an_error_not_a_match() {
         let (dir, root) = root();

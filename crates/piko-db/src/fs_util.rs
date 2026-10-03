@@ -39,15 +39,11 @@ use crate::{
 
 /// Opens `path` for reading without following a final symlink and without blocking.
 fn open_no_follow(path: &Path) -> Result<File> {
-    let mut options = File::options();
-    options.read(true);
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::OpenOptionsExt as _;
 
-    #[cfg(unix)]
-    {
-        use rustix::fs::OFlags;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits().cast_signed());
-    }
+    let mut options = File::options();
+    options.read(true).custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits().cast_signed());
 
     options.open(path).map_err(|source| Error::io(path, IoAction::Open, source))
 }
@@ -85,15 +81,11 @@ pub(crate) fn ensure_regular_file(file: &File, path: &Path) -> Result<std::fs::M
 /// - [`Error::Io`] if the path cannot be opened or stat'ed.
 /// - [`Error::NotARegularFile`] if it is a directory, FIFO, socket or device node.
 pub fn open_following_symlinks(path: &Path) -> Result<File> {
-    let mut options = File::options();
-    options.read(true);
+    use rustix::fs::OFlags;
+    use std::os::unix::fs::OpenOptionsExt as _;
 
-    #[cfg(unix)]
-    {
-        use rustix::fs::OFlags;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(OFlags::NONBLOCK.bits().cast_signed());
-    }
+    let mut options = File::options();
+    options.read(true).custom_flags(OFlags::NONBLOCK.bits().cast_signed());
 
     let file = options.open(path).map_err(|source| Error::io(path, IoAction::Open, source))?;
     ensure_regular_file(&file, path)?;
@@ -179,21 +171,16 @@ impl std::fmt::Display for Distrust {
 /// [`Distrust`].
 #[must_use]
 pub fn distrust(metadata: &std::fs::Metadata) -> Option<Distrust> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::MetadataExt as _;
 
-        let uid = metadata.uid();
-        if uid != 0 && uid != rustix::process::geteuid().as_raw() {
-            return Some(Distrust::ForeignOwner { uid });
-        }
-        let mode = metadata.mode() & 0o7777;
-        if mode & 0o022 != 0 {
-            return Some(Distrust::GroupOrOtherWritable { mode });
-        }
+    let uid = metadata.uid();
+    if uid != 0 && uid != rustix::process::geteuid().as_raw() {
+        return Some(Distrust::ForeignOwner { uid });
     }
-    #[cfg(not(unix))]
-    let _ = metadata;
+    let mode = metadata.mode() & 0o7777;
+    if mode & 0o022 != 0 {
+        return Some(Distrust::GroupOrOtherWritable { mode });
+    }
     None
 }
 
@@ -451,51 +438,36 @@ pub fn read_capped_utf8_in(dir: &Path, name: &str, limit: Limit, max: u64) -> Re
 /// Returns `true` if `name` exists inside the entry directory `dir`, following no symbolic link
 /// at either level. A symbolic link named `name` exists; one in place of `dir` does not.
 pub fn exists_in(dir: &Path, name: &str) -> bool {
-    #[cfg(unix)]
-    {
-        use rustix::fs::{AtFlags, CWD, Mode};
-        let Some((parent, entry)) = split_dir(dir) else { return false };
-        let Ok(parent) = rustix::fs::openat(CWD, parent, parent_flags(), Mode::empty()) else {
-            return false;
-        };
-        let Ok(entry) = rustix::fs::openat(&parent, entry, entry_flags(), Mode::empty()) else {
-            return false;
-        };
-        rustix::fs::statat(&entry, name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
-    }
-    #[cfg(not(unix))]
-    {
-        exists_no_follow(&join(dir, name))
-    }
+    use rustix::fs::{AtFlags, CWD, Mode};
+    let Some((parent, entry)) = split_dir(dir) else { return false };
+    let Ok(parent) = rustix::fs::openat(CWD, parent, parent_flags(), Mode::empty()) else {
+        return false;
+    };
+    let Ok(entry) = rustix::fs::openat(&parent, entry, entry_flags(), Mode::empty()) else {
+        return false;
+    };
+    rustix::fs::statat(&entry, name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
 }
 
 /// Opens `name` inside `dir` as [`read_capped_in`] describes.
 fn open_in(dir: &Path, name: &str) -> std::io::Result<File> {
-    #[cfg(unix)]
-    {
-        use rustix::fs::{Mode, OFlags};
-        let (parent, entry) = split_dir(dir).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
-        })?;
-        let parent = rustix::fs::openat(rustix::fs::CWD, parent, parent_flags(), Mode::empty())?;
-        let entry = rustix::fs::openat(&parent, entry, entry_flags(), Mode::empty())?;
-        let file = rustix::fs::openat(
-            &entry,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?;
-        Ok(File::from(file))
-    }
-    #[cfg(not(unix))]
-    {
-        File::open(join(dir, name))
-    }
+    use rustix::fs::{Mode, OFlags};
+    let (parent, entry) = split_dir(dir).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent directory")
+    })?;
+    let parent = rustix::fs::openat(rustix::fs::CWD, parent, parent_flags(), Mode::empty())?;
+    let entry = rustix::fs::openat(&parent, entry, entry_flags(), Mode::empty())?;
+    let file = rustix::fs::openat(
+        &entry,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    Ok(File::from(file))
 }
 
 /// Splits an entry directory into its parent and its own name. A bare name has the current
 /// directory as its parent.
-#[cfg(unix)]
 fn split_dir(dir: &Path) -> Option<(&Path, &std::ffi::OsStr)> {
     let entry = dir.file_name()?;
     let parent = dir.parent().filter(|parent| !parent.as_os_str().is_empty());
@@ -504,14 +476,12 @@ fn split_dir(dir: &Path) -> Option<(&Path, &std::ffi::OsStr)> {
 
 /// The flags the parent of an entry directory is opened with. It follows symbolic links,
 /// because the caller named it.
-#[cfg(unix)]
 fn parent_flags() -> rustix::fs::OFlags {
     use rustix::fs::OFlags;
     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC
 }
 
 /// The flags an entry directory is opened with: never through a symbolic link.
-#[cfg(unix)]
 fn entry_flags() -> rustix::fs::OFlags {
     use rustix::fs::OFlags;
     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
@@ -619,7 +589,6 @@ mod tests {
         assert!(matches!(err, Error::Io { .. } | Error::NotARegularFile { .. }), "got {err:?}");
     }
 
-    #[cfg(unix)]
     #[test]
     fn refuses_a_symlink() {
         let dir = tempfile::tempdir().unwrap();
@@ -640,7 +609,6 @@ mod tests {
         assert!(err.to_string().contains("desc"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn open_following_symlinks_follows_a_symlink() {
         let dir = tempfile::tempdir().unwrap();
@@ -670,7 +638,6 @@ mod tests {
         assert!(err.to_string().contains("absent"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn is_real_directory_rejects_a_symlink_to_a_directory() {
         let dir = tempfile::tempdir().unwrap();

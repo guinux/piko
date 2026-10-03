@@ -2188,6 +2188,37 @@ mod tests {
         assert!(root.path().join("usr/bin/foo").is_file());
     }
 
+    /// A `backup` value is kept as written, white space included, as libalpm keeps it
+    /// (`be_package.c:242`). `etc/foo.conf ` then names no member, so the member
+    /// `etc/foo.conf` is not a backup file.
+    #[test]
+    fn a_backup_value_is_kept_as_written() {
+        let name = "foo-1.0.0-1-x86_64.pkg.tar";
+        let cache = tempfile::tempdir().unwrap();
+        write_package(cache.path(), name, "1.0.0-1", &["etc/foo.conf "], &[("etc/foo.conf", b"x")]);
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let step = Step::Install {
+            package: name.parse().unwrap(),
+            reason: PackageInstallReason::Explicit,
+        };
+
+        let lock = DbLock::acquire(db.path()).unwrap();
+        Transaction::new(root.path(), db.path(), vec![step], Verification::Disabled)
+            .ownership(Ownership::Inherit)
+            .verify(&lock, &source)
+            .unwrap()
+            .stage()
+            .unwrap()
+            .commit()
+            .unwrap();
+
+        let local = LocalDatabase::open(db.path().join("local")).unwrap();
+        let backups = local.get_str("foo").unwrap().backups().unwrap().to_vec();
+        assert!(backups.is_empty(), "{backups:?}");
+    }
+
     /// A `.PKGINFO` with an invalid shown key and an unknown key installs, and `verify` names
     /// both. A package with neither is not listed.
     #[test]

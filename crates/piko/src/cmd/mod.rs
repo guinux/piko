@@ -28,13 +28,82 @@ pub mod txn;
 pub mod why;
 
 use piko_db::solve::{SolvableId, Universe};
+use piko_db_write::DbLock;
 
-/// Where a candidate came from, as the heading a numbered list groups it under.
+/// Releases `db.lck`, and warns when the file cannot be removed.
 ///
-/// Two questions render a numbered list of candidates. [`provider`] asks which provider
-/// satisfies a dependency. [`group`] asks which members of a group to install. Both head each
-/// run of candidates with the repository it came from, as pacman does.
-pub(crate) fn origin_label(universe: &Universe<'_>, id: SolvableId) -> String {
+/// libalpm warns too, and still returns success (`_alpm_handle_unlock`, `handle.c:171`): the
+/// command's work is done, so its exit code stays what it was. A lock file left behind makes the
+/// next command refuse with "database locked", and this warning is the one place that says why.
+/// A lock file that is already gone is not reported, because [`DbLock::release`] counts it as
+/// released.
+pub(crate) fn release_lock(lock: DbLock) {
+    if let Some(warning) = release_warning(lock) {
+        crate::output::warn(warning);
+    }
+}
+
+/// Releases `lock`, and returns the warning a failure to remove the file calls for.
+fn release_warning(lock: DbLock) -> Option<String> {
+    let path = lock.path().to_path_buf();
+    let error = lock.release().err()?;
+    let cause =
+        std::error::Error::source(&error).map_or_else(String::new, |cause| format!(": {cause}"));
+    Some(format!("could not remove lock file {}{cause}", path.display()))
+}
+
+/// Writes a numbered candidate list, grouped by the repository each candidate came from.
+///
+/// Two questions render this list. [`provider`] asks which provider satisfies a dependency.
+/// [`group`] asks which members of a group to install. The grouping is pacman's. The numbering
+/// runs across the whole list rather than restarting per repository, because the answer
+/// indexes the list, not the repository.
+///
+/// One candidate per line. piko reads no terminal width anywhere, and pacman's multi-column
+/// layout is the only thing that would need it.
+pub(crate) fn write_candidates(
+    out: &mut impl std::io::Write,
+    universe: &Universe<'_>,
+    candidates: &[SolvableId],
+) -> std::io::Result<()> {
+    let mut current: Option<String> = None;
+    for (index, id) in candidates.iter().enumerate() {
+        let origin = origin_label(universe, *id);
+        if current.as_deref() != Some(origin.as_str()) {
+            writeln!(out, ":: {origin}")?;
+            current = Some(origin);
+        }
+        let described = universe.get(*id).map_or_else(
+            || "<unknown>".to_owned(),
+            |solvable| format!("{} {}", solvable.name(), solvable.version()),
+        );
+        // `index` is bounded by `candidates.len()`.
+        writeln!(out, "   {}) {described}", index.saturating_add(1))?;
+    }
+    Ok(())
+}
+
+/// The name of candidate `id`, or `<unknown>`.
+pub(crate) fn candidate_name(universe: &Universe<'_>, id: SolvableId) -> String {
+    universe.get(id).map_or_else(|| "<unknown>".to_owned(), |solvable| solvable.name().to_string())
+}
+
+/// Names the first few `candidates` and counts the rest: `a, b, c, d, e, and 3 more`.
+///
+/// A note that reports a default answer names candidates rather than counting them, but not all
+/// of them. `tesseract requires tessdata` has 128 providers on a real system, and `gnome` carries
+/// 66 members. A note is not the prompt. The prompt lists every one, because there the list is
+/// what the user answers.
+pub(crate) fn candidate_sample(universe: &Universe<'_>, candidates: &[SolvableId]) -> String {
+    const SHOWN: usize = 5;
+    let listed: Vec<String> =
+        candidates.iter().take(SHOWN).map(|id| candidate_name(universe, *id)).collect();
+    let rest = candidates.len().saturating_sub(listed.len());
+    if rest == 0 { listed.join(", ") } else { format!("{}, and {rest} more", listed.join(", ")) }
+}
+
+/// Where a candidate came from, as the heading [`write_candidates`] groups it under.
+fn origin_label(universe: &Universe<'_>, id: SolvableId) -> String {
     match universe.get(id).map(|solvable| solvable.origin()) {
         Some(piko_db::solve::Origin::Repository(index)) => universe
             .repository_name(index)
@@ -45,5 +114,37 @@ pub(crate) fn origin_label(universe: &Universe<'_>, id: SolvableId) -> String {
         // An installed candidate is never listed: it suppresses a provider question, and a
         // group's members are the repository side only.
         Some(piko_db::solve::Origin::Installed) | None => "Installed".to_owned(),
+    }
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    /// A lock file that cannot be removed is named, with the reason. One that can is not.
+    #[test]
+    fn a_lock_file_that_stays_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(release_warning(DbLock::acquire(dir.path()).unwrap()), None);
+
+        // Root removes a file from a directory it cannot write, so the test has nothing to show.
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        let lock = DbLock::acquire(dir.path()).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let warning = release_warning(lock);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let warning = warning.unwrap();
+        let path = dir.path().join(piko_db_write::LOCK_FILE);
+        assert!(
+            warning.starts_with(&format!("could not remove lock file {}: ", path.display())),
+            "{warning}"
+        );
+        assert!(path.exists(), "the lock file stays");
     }
 }

@@ -1654,7 +1654,6 @@ mod tests {
 
     /// A link to a real package is skipped, and the next directory serves the package. libalpm
     /// follows the link.
-    #[cfg(unix)]
     #[test]
     fn a_symlink_to_a_real_package_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
@@ -1675,7 +1674,6 @@ mod tests {
     }
 
     /// A dangling symlink is skipped as a link, not taken for absence.
-    #[cfg(unix)]
     #[test]
     fn a_dangling_symlink_is_not_a_package() {
         let dir = tempfile::tempdir().unwrap();
@@ -1687,7 +1685,6 @@ mod tests {
     }
 
     /// A cache directory that is a link is followed, as a configured path.
-    #[cfg(unix)]
     #[test]
     fn a_symlinked_cache_directory_is_followed() {
         let store = tempfile::tempdir().unwrap();

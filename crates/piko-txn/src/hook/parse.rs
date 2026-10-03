@@ -81,7 +81,7 @@ pub struct Trigger {
     /// The `Type` line. `None` until one is seen, which validation then refuses.
     pub kind: Option<TriggerKind>,
     /// The `Target` lines, in file order. Order matters: the last one that matches decides
-    /// (see [`piko_db::resolve::matches_any`]).
+    /// (see [`piko_db::resolve::PatternList`]).
     pub targets: Vec<String>,
 }
 
@@ -603,7 +603,7 @@ Exec = /bin/sh -c 'oops
         assert!(error.contains("invalid value"), "{error}");
     }
 
-    /// Inverted targets are kept verbatim and in order. Interpreting them is `matches_any`'s
+    /// Inverted targets are kept verbatim and in order. Interpreting them is `PatternList`'s
     /// job, and order is what makes it work.
     #[test]
     fn inverted_targets_are_preserved_in_order() {

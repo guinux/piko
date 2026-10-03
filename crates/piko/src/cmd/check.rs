@@ -24,7 +24,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use piko_db::{LocalDatabase, LocalPackage};
+use piko_db::{LocalDatabase, LocalPackage, resolve::PatternList};
 
 use crate::{
     output::{emit, write_report},
@@ -41,7 +41,7 @@ pub fn check_selected(
     db: &LocalDatabase,
     names: &[String],
     root: &Path,
-    no_extract: &[String],
+    no_extract: &PatternList,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     // Resolved before any checking starts. A mistyped name is then reported at once, rather
@@ -72,7 +72,7 @@ pub fn check_selected(
 pub fn check_all(
     db: &LocalDatabase,
     root: &Path,
-    no_extract: &[String],
+    no_extract: &PatternList,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let packages: Vec<&LocalPackage> = db.into_iter().collect();
@@ -118,7 +118,7 @@ fn workers(packages: usize) -> usize {
 fn run_checks(
     packages: &[&LocalPackage],
     root: &Path,
-    no_extract: &[String],
+    no_extract: &PatternList,
     row: &Row,
 ) -> Vec<Checked> {
     let cursor = AtomicUsize::new(0);
@@ -204,7 +204,7 @@ fn summary(total: usize, with_problems: usize, out: &mut impl std::io::Write) ->
 fn check(
     package: &LocalPackage,
     root: &Path,
-    no_extract: &[String],
+    no_extract: &PatternList,
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> ExitCode {
@@ -284,7 +284,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (mut out, mut err) = (Vec::new(), Vec::new());
 
-        let code = check(package, root.path(), &[], &mut out, &mut err);
+        let code = check(package, root.path(), &PatternList::EMPTY, &mut out, &mut err);
         let out = String::from_utf8(out).unwrap();
 
         assert_eq!(code, ExitCode::FAILURE, "{out}");

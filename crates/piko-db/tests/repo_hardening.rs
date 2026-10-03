@@ -166,7 +166,6 @@ fn an_oversized_member_is_refused() {
     assert!(matches!(&err, Error::LimitExceeded { limit: Limit::RepoEntry, .. }), "got {err:?}");
 }
 
-#[cfg(unix)]
 #[test]
 fn a_fifo_named_like_an_archive_does_not_block() {
     let fixture = RepoFixture::new();
@@ -405,7 +404,6 @@ fn dating_an_oversized_archive_is_refused_before_decompression() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn dating_a_fifo_does_not_block() {
     let fixture = RepoFixture::new();
@@ -428,7 +426,6 @@ fn dating_a_fifo_does_not_block() {
 
 /// A symlink to a FIFO is followed, as an archive's final symlink is, and then refused by the
 /// same regular-file check.
-#[cfg(unix)]
 #[test]
 fn dating_a_symlink_to_a_fifo_does_not_block() {
     let fixture = RepoFixture::new();

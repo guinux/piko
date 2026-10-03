@@ -9,9 +9,9 @@ use piko_db::solve::RemovalFailure;
 
 /// Whether `name` is designated by one of `pacman.conf`'s `HoldPkg` patterns.
 ///
-/// # Not [`piko_db::resolve::matches_any`], deliberately
+/// # Not [`piko_db::resolve::PatternList`], deliberately
 ///
-/// The two implement different functions. `matches_any` is libalpm's `_alpm_fnmatch_patterns`
+/// The two implement different functions. `PatternList` is libalpm's `_alpm_fnmatch_patterns`
 /// (`util.c:1528`). It scans backwards, and a leading `!` inverts the match. pacman's
 /// `HoldPkg` check is `alpm_list_find(config->holdpkg, name, fnmatch_cmp)` (`remove.c:137`),
 /// and `fnmatch_cmp` is a bare `fnmatch(pattern, string, 0)` (`remove.c:33`): a forward scan
@@ -19,11 +19,11 @@ use piko_db::solve::RemovalFailure;
 ///
 /// The difference is reachable. `HoldPkg = !foo` holds a package literally named `!foo` under
 /// pacman's rule, and holds nothing under libalpm's. That is an odd thing to write. But the
-/// direction it fails in is the dangerous one. `matches_any` would decide a held package is
+/// direction it fails in is the dangerous one. `PatternList` would decide a held package is
 /// not held. Treating the two rules as interchangeable is therefore unsafe.
 ///
 /// Only the scan differs. Whether one pattern covers one name is `piko_db::glob::matches`,
-/// which `matches_any` calls too. So the two rules differ in the way they are meant to, and in
+/// which `PatternList` calls too. So the two rules differ in the way they are meant to, and in
 /// no other way. That shared rule is glibc's `fnmatch` grammar, which pacman's check calls.
 fn is_held(name: &str, hold_pkg: &[String]) -> bool {
     hold_pkg.iter().any(|pattern| piko_db::glob::matches(pattern, name))
@@ -102,6 +102,8 @@ pub fn report(failure: &RemovalFailure) {
 
 #[cfg(test)]
 mod tests {
+    use piko_db::resolve::PatternList;
+
     use super::{hold_pkg_allows, is_held};
 
     fn patterns(entries: &[&str]) -> Vec<String> {
@@ -129,9 +131,9 @@ mod tests {
         assert!(!is_held("util-linux", &held));
     }
 
-    /// The whole reason [`is_held`] exists instead of a call to
-    /// `piko_db::resolve::matches_any`: pacman's `HoldPkg` check is a bare `fnmatch`, with no
-    /// `!` inversion. `matches_any` would read this entry as "everything except `foo`" and
+    /// The whole reason [`is_held`] exists instead of a `piko_db::resolve::PatternList`:
+    /// pacman's `HoldPkg` check is a bare `fnmatch`, with no `!` inversion. `PatternList` would
+    /// read this entry as "everything except `foo`" and
     /// answer `false`, deciding a held package is not held. That is the dangerous direction.
     #[test]
     fn a_leading_bang_is_a_literal_character_not_an_inversion() {
@@ -139,9 +141,9 @@ mod tests {
         assert!(is_held("!foo", &held), "pacman's fnmatch matches it literally");
         assert!(!is_held("foo", &held), "and it does not hold `foo` itself");
         assert!(
-            !piko_db::resolve::matches_any(&held, "!foo"),
+            !PatternList::new(held).matches("!foo"),
             "the libalpm rule really does disagree here; if this ever starts passing, \
-             `is_held` may be collapsible into `matches_any`"
+             `is_held` may be collapsible into `PatternList`"
         );
     }
 
@@ -153,15 +155,15 @@ mod tests {
         let held = patterns(&["glibc", "!glibc"]);
         assert!(is_held("glibc", &held));
         assert!(
-            !piko_db::resolve::matches_any(&held, "glibc"),
+            !PatternList::new(held).matches("glibc"),
             "under libalpm's scan the later `!glibc` wins, which is the rule `is_held` refuses"
         );
     }
 
-    /// Same fallback `matches_any` takes, and for the same reason. `fnmatch` has no invalid
-    /// pattern to report, so an unbalanced bracket must not swallow every name.
+    /// A `[` with no closing `]` is an ordinary character, as `fnmatch` reads it, so it must not
+    /// swallow every name.
     #[test]
-    fn a_malformed_pattern_falls_back_to_an_exact_comparison() {
+    fn an_unclosed_bracket_is_an_ordinary_character() {
         let held = patterns(&["foo[bar"]);
         assert!(is_held("foo[bar", &held));
         assert!(!is_held("foob", &held));

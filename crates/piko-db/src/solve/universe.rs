@@ -386,7 +386,7 @@ impl<'a> IgnoredCandidate<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct UniverseOptions<'a> {
     usage: DbUsage,
-    ignores: IgnoreList<'a>,
+    ignores: &'a IgnoreList,
     limits: Limits,
     files: &'a [&'a FilePackage],
 }
@@ -395,7 +395,7 @@ impl Default for UniverseOptions<'_> {
     fn default() -> Self {
         Self {
             usage: DbUsage::INSTALL.union(DbUsage::UPGRADE),
-            ignores: IgnoreList::default(),
+            ignores: IgnoreList::NONE,
             limits: Limits::default(),
             files: &[],
         }
@@ -430,7 +430,7 @@ impl<'a> UniverseOptions<'a> {
     /// [`Universe::ignored`]. Nothing can select it, and the caller can still say what was
     /// passed over.
     #[must_use]
-    pub const fn ignores(mut self, ignores: IgnoreList<'a>) -> Self {
+    pub const fn ignores(mut self, ignores: &'a IgnoreList) -> Self {
         self.ignores = ignores;
         self
     }
@@ -498,7 +498,7 @@ pub struct Universe<'a> {
     /// The lists that produced `ignored`, kept so [`crate::solve::sysupgrade`] can apply the
     /// same test to an *installed* package. `check_literal` (`sync.c:93`) tests both sides,
     /// and only the repository side can be filtered at intern time.
-    ignores: IgnoreList<'a>,
+    ignores: &'a IgnoreList,
     /// How many package files [`UniverseOptions::files`] gave, so a caller can check that
     /// [`Universe::file_candidates`] lost none of them.
     files_named: usize,
@@ -758,7 +758,7 @@ impl<'a> Universe<'a> {
     /// interning. An installed package is always interned, because `IgnorePkg` means "do not
     /// upgrade it", not "pretend it is not there". So the installed half is asked here instead.
     #[must_use]
-    pub const fn ignores(&self) -> IgnoreList<'a> {
+    pub const fn ignores(&self) -> &'a IgnoreList {
         self.ignores
     }
 
@@ -1264,10 +1264,11 @@ mod tests {
             .repo("core", [PackageSpec::new("foo", "2.0.0-1")])
             .build();
         let ignored = vec!["foo".to_owned()];
+        let ignores = IgnoreList::new(&ignored, &[]);
         let universe = Universe::build(
             scenario.local(),
             scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
-            UniverseOptions::new().ignores(IgnoreList::new(&ignored, &[])),
+            UniverseOptions::new().ignores(&ignores),
         )
         .unwrap();
 
@@ -1295,10 +1296,11 @@ mod tests {
             .repo("core", [PackageSpec::new("libfoo", "1.0.0-1").provides(["foo=1.0.0-1"])])
             .build();
         let ignored = vec!["libfoo".to_owned()];
+        let ignores = IgnoreList::new(&ignored, &[]);
         let universe = Universe::build(
             scenario.local(),
             scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
-            UniverseOptions::new().ignores(IgnoreList::new(&ignored, &[])),
+            UniverseOptions::new().ignores(&ignores),
         )
         .unwrap();
 
@@ -1323,10 +1325,11 @@ mod tests {
             )
             .build();
         let ignored = vec!["gcc".to_owned()];
+        let ignores = IgnoreList::new(&ignored, &[]);
         let universe = Universe::build(
             scenario.local(),
             scenario.repos().iter().map(|db| (DbUsage::ALL, db)),
-            UniverseOptions::new().ignores(IgnoreList::new(&ignored, &[])),
+            UniverseOptions::new().ignores(&ignores),
         )
         .unwrap();
 

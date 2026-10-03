@@ -190,20 +190,30 @@ impl<'a> Resolved<'a> {
 /// its own name matches any `IgnorePkg` pattern. It is also ignored if any of its `%GROUPS%`
 /// matches any `IgnoreGroup` pattern.
 ///
-/// The default (`IgnoreList::default()`, two empty lists) ignores nothing. That is the same as an
+/// The default ([`IgnoreList::NONE`], two empty lists) ignores nothing. That is the same as an
 /// absent `IgnorePkg`/`IgnoreGroup` directive.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct IgnoreList<'a> {
-    packages: &'a [String],
-    groups: &'a [String],
+///
+/// Both lists are compiled once, by [`Self::new`]. The test runs once for each repository
+/// package while a [`crate::solve::Universe`] is built.
+#[derive(Clone, Debug, Default)]
+pub struct IgnoreList {
+    packages: PatternList,
+    groups: PatternList,
 }
 
-impl<'a> IgnoreList<'a> {
-    /// Pairs `pacman.conf`'s `IgnorePkg` and `IgnoreGroup` values (see
+impl IgnoreList {
+    /// The lists that ignore nothing.
+    pub const NONE: &'static Self =
+        &Self { packages: PatternList::EMPTY, groups: PatternList::EMPTY };
+
+    /// Compiles `pacman.conf`'s `IgnorePkg` and `IgnoreGroup` values (see
     /// [`crate::config::Options::ignore_pkg`]/[`crate::config::Options::ignore_group`]).
     #[must_use]
-    pub const fn new(packages: &'a [String], groups: &'a [String]) -> Self {
-        Self { packages, groups }
+    pub fn new(packages: &[String], groups: &[String]) -> Self {
+        Self {
+            packages: PatternList::new(packages.to_vec()),
+            groups: PatternList::new(groups.to_vec()),
+        }
     }
 
     /// Why a package with this name and these `%GROUPS%` is ignored, or `None` if it is not.
@@ -218,13 +228,11 @@ impl<'a> IgnoreList<'a> {
     /// covered by both reports the name match.
     #[must_use]
     pub fn reason(&self, name: &str, groups: &[alpm_types::Group]) -> Option<IgnoreReason> {
-        let packages = PatternList::new(self.packages.to_vec());
-        if let Some(pattern) = packages.matching_pattern(name) {
+        if let Some(pattern) = self.packages.matching_pattern(name) {
             return Some(IgnoreReason::Package { pattern: pattern.to_owned() });
         }
-        let patterns = PatternList::new(self.groups.to_vec());
         groups.iter().find_map(|group| {
-            patterns.matching_pattern(group).map(|pattern| IgnoreReason::Group {
+            self.groups.matching_pattern(group).map(|pattern| IgnoreReason::Group {
                 group: group.clone(),
                 pattern: pattern.to_owned(),
             })
@@ -232,7 +240,7 @@ impl<'a> IgnoreList<'a> {
     }
 
     /// Whether `IgnoreGroup` names any pattern, so that a group test can match at all.
-    pub(crate) const fn has_groups(&self) -> bool {
+    pub(crate) fn has_groups(&self) -> bool {
         !self.groups.is_empty()
     }
 
@@ -299,21 +307,12 @@ impl std::fmt::Display for IgnoreReason {
     }
 }
 
-/// Whether `patterns` selects `text`, as libalpm's `_alpm_fnmatch_patterns` does (`util.c:1528`).
-///
-/// This compiles `patterns` for one test. A caller that tests many strings against one list
-/// builds a [`PatternList`] once instead, which is the same rule.
-///
-/// Public because `--overwrite`, `NoExtract`, `NoUpgrade` and a hook's `Target` are the same
-/// `fnmatch` against a path, rather than against a package name. libalpm uses the one function
-/// for all of them. A second copy would be a second chance for these rules to drift.
-#[must_use]
-pub fn matches_any(patterns: &[String], text: &str) -> bool {
-    PatternList::new(patterns.to_vec()).matches(text)
-}
-
 /// A list of shell-glob patterns, compiled once, and scanned as libalpm's
 /// `_alpm_fnmatch_patterns` scans it (`util.c:1528`).
+///
+/// `IgnorePkg`, `IgnoreGroup`, `--overwrite`, `NoExtract`, `NoUpgrade` and a hook's `Target`
+/// all use this one type. libalpm uses the one function for all of them. A second copy would be
+/// a second chance for these rules to drift.
 ///
 /// # The list is scanned backwards, and a `!` inverts
 ///
@@ -346,7 +345,7 @@ pub struct PatternList {
     /// The patterns as given, sigils included.
     given: Vec<String>,
     /// Each pattern with its sigil stripped and compiled, and whether it inverts.
-    compiled: Box<[(bool, crate::glob::Glob)]>,
+    compiled: Vec<(bool, crate::glob::Glob)>,
 }
 
 /// Two lists are equal when they were given the same patterns: the compiled form follows.
@@ -359,6 +358,9 @@ impl PartialEq for PatternList {
 impl Eq for PatternList {}
 
 impl PatternList {
+    /// The list that selects nothing.
+    pub const EMPTY: Self = Self { given: Vec::new(), compiled: Vec::new() };
+
     /// Compiles `patterns`, in the order given.
     #[must_use]
     pub fn new(patterns: Vec<String>) -> Self {
@@ -420,7 +422,7 @@ impl PatternList {
 #[derive(Clone, Debug, Default)]
 pub struct SyncRepos<'a> {
     repos: Vec<SyncRepo<'a>>,
-    ignores: IgnoreList<'a>,
+    ignores: IgnoreList,
 }
 
 impl<'a> SyncRepos<'a> {
@@ -435,7 +437,7 @@ impl<'a> SyncRepos<'a> {
     /// Applies `pacman.conf`'s `IgnorePkg`/`IgnoreGroup` to every subsequent
     /// [`Self::find_literal_satisfier`] call.
     #[must_use]
-    pub fn with_ignores(mut self, ignores: IgnoreList<'a>) -> Self {
+    pub fn with_ignores(mut self, ignores: IgnoreList) -> Self {
         self.ignores = ignores;
         self
     }
@@ -795,10 +797,15 @@ Foobar McFooface <foobar@mcfooface.org>
 
     /// The pattern list, exercised directly rather than through `IgnorePkg`.
     mod fnmatch_patterns {
-        use super::super::{PatternList, matches_any};
+        use super::super::PatternList;
 
         fn patterns(list: &[&str]) -> Vec<String> {
             list.iter().map(|entry| (*entry).to_owned()).collect()
+        }
+
+        /// Whether `list` selects `text`.
+        fn selects(list: &[String], text: &str) -> bool {
+            PatternList::new(list.to_vec()).matches(text)
         }
 
         fn matching_pattern<'a>(list: &'a PatternList, text: &str) -> Option<&'a str> {
@@ -808,9 +815,9 @@ Foobar McFooface <foobar@mcfooface.org>
         #[test]
         fn a_plain_list_selects_what_it_matches() {
             let list = patterns(&["usr/share/icons/*", "etc/foo.conf"]);
-            assert!(matches_any(&list, "usr/share/icons/hicolor"));
-            assert!(matches_any(&list, "etc/foo.conf"));
-            assert!(!matches_any(&list, "usr/bin/foo"));
+            assert!(selects(&list, "usr/share/icons/hicolor"));
+            assert!(selects(&list, "etc/foo.conf"));
+            assert!(!selects(&list, "usr/bin/foo"));
         }
 
         /// The idiom two real hooks on an Arch system are built out of: select a directory,
@@ -820,9 +827,9 @@ Foobar McFooface <foobar@mcfooface.org>
         fn an_inverted_pattern_deselects_what_an_earlier_one_selected() {
             let list = patterns(&["usr/share/icons/*", "!usr/share/icons/*/?*"]);
 
-            assert!(matches_any(&list, "usr/share/icons/hicolor"), "the directory itself");
+            assert!(selects(&list, "usr/share/icons/hicolor"), "the directory itself");
             assert!(
-                !matches_any(&list, "usr/share/icons/hicolor/48x48/apps/foo.png"),
+                !selects(&list, "usr/share/icons/hicolor/48x48/apps/foo.png"),
                 "a file below it was selected; the ! was ignored or the scan ran forwards"
             );
         }
@@ -834,22 +841,22 @@ Foobar McFooface <foobar@mcfooface.org>
             let deny_then_allow = patterns(&["!usr/lib/*", "usr/lib/*"]);
             let allow_then_deny = patterns(&["usr/lib/*", "!usr/lib/*"]);
 
-            assert!(matches_any(&deny_then_allow, "usr/lib/libc.so"));
-            assert!(!matches_any(&allow_then_deny, "usr/lib/libc.so"));
+            assert!(selects(&deny_then_allow, "usr/lib/libc.so"));
+            assert!(!selects(&allow_then_deny, "usr/lib/libc.so"));
         }
 
         /// A leading literal `!` or `\` is escaped with a backslash, which is stripped before
         /// matching. Otherwise a path really called `!odd` could not be named at all.
         #[test]
         fn a_backslash_escapes_a_literal_leading_sigil() {
-            assert!(matches_any(&patterns(&[r"\!odd"]), "!odd"));
-            assert!(!matches_any(&patterns(&[r"\!odd"]), r"\!odd"));
+            assert!(selects(&patterns(&[r"\!odd"]), "!odd"));
+            assert!(!selects(&patterns(&[r"\!odd"]), r"\!odd"));
         }
 
         /// An empty list selects nothing, which is what an absent directive means.
         #[test]
         fn an_empty_list_selects_nothing() {
-            assert!(!matches_any(&[], "anything"));
+            assert!(!selects(&[], "anything"));
         }
 
         /// A `[` with no closing `]` is an ordinary character, as `fnmatch` reads it. It
@@ -857,8 +864,8 @@ Foobar McFooface <foobar@mcfooface.org>
         #[test]
         fn an_unclosed_bracket_is_an_ordinary_character() {
             let list = patterns(&["foo[bar"]);
-            assert!(matches_any(&list, "foo[bar"));
-            assert!(!matches_any(&list, "foob"));
+            assert!(selects(&list, "foo[bar"));
+            assert!(!selects(&list, "foob"));
             assert_eq!(matching_pattern(&PatternList::new(list), "foo[bar"), Some("foo[bar"));
         }
 

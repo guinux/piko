@@ -131,7 +131,7 @@ pub struct Catalog<'a> {
     /// The configured repositories, in priority order.
     pub repos: &'a [(DbUsage, RepoDatabase)],
     /// `pacman.conf`'s `IgnorePkg`/`IgnoreGroup`.
-    pub ignores: IgnoreList<'a>,
+    pub ignores: &'a IgnoreList,
     /// The parsed configuration for every repository in [`Catalog::repos`]: servers, cache
     /// servers, and `SigLevel`. It resolves where a missing package can be downloaded from.
     pub configs: &'a [RepositoryConfig],
@@ -1069,6 +1069,37 @@ fn run(
         }
     };
 
+    let report_pending = settings.report_pending;
+    let (code, report) = run_locked(root, dbpath, &lock, plan, source, progress, settings, out);
+    // Released before the follow-up, and on every path out of `run_locked`. What is on disk is
+    // already final: the `PostTransaction` hooks ran inside `commit`, and the follow-up reads
+    // only the report.
+    crate::cmd::release_lock(lock);
+    if let Some(report) = report.filter(|_| report_pending) {
+        crate::cmd::merge::report_pending(root, &report, out);
+    }
+    code
+}
+
+/// [`run`] once `db.lck` is held: verifies, stages and commits.
+///
+/// Returns the exit code, and the commit's report when the commit succeeded. The caller
+/// releases the lock, whatever this returns.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`run`'s own parameters plus the lock it took; `run` exists to release that lock \
+              on every path out of this function"
+)]
+fn run_locked(
+    root: &Path,
+    dbpath: &Path,
+    lock: &piko_db_write::DbLock,
+    plan: TransactionPlan,
+    source: &dyn PackageSource,
+    progress: Progress<'_>,
+    settings: Settings,
+    out: &mut impl std::io::Write,
+) -> (ExitCode, Option<piko_txn::Report>) {
     let total_steps = plan.steps().len();
     let planned = Transaction::from_plan(root, dbpath, plan)
         .overwrite(settings.overwrite)
@@ -1091,13 +1122,13 @@ fn run(
         progress.download_head,
     );
     let verified =
-        planned.verify_with_progress(&lock, source, &mut |event| verify_driver.handle(event));
+        planned.verify_with_progress(lock, source, &mut |event| verify_driver.handle(event));
     verify_driver.finish();
     let verified = match verified {
         Ok(verified) => verified,
         Err(error) => {
             report_refusal(&error);
-            return ExitCode::FAILURE;
+            return (ExitCode::FAILURE, None);
         }
     };
     report_space_problems(progress.steplist, verified.space_problems());
@@ -1117,14 +1148,14 @@ fn run(
     // same thing wherever it lands.
     if settings.cancel.as_ref().is_some_and(piko_net::Cancel::is_requested) {
         report_error(&piko_txn::Error::Cancelled { completed: 0, total: total_steps });
-        return ExitCode::FAILURE;
+        return (ExitCode::FAILURE, None);
     }
 
     let staged = match verified.stage() {
         Ok(staged) => staged,
         Err(error) => {
             report_refusal(&error);
-            return ExitCode::FAILURE;
+            return (ExitCode::FAILURE, None);
         }
     };
 
@@ -1135,15 +1166,7 @@ fn run(
     match result {
         Ok(report) => {
             report_side_effects(&report);
-            // Released before the follow-up, not after. An editor left open for ten minutes
-            // must not hold `db.lck`. What is on disk is already final: the `PostTransaction`
-            // hooks ran inside `commit`, and the scan that follows reopens the local database
-            // read-only, which needs no lock.
-            let _ = lock.release();
-            if settings.report_pending {
-                crate::cmd::merge::report_pending(root, &report, out);
-            }
-            ExitCode::SUCCESS
+            (ExitCode::SUCCESS, Some(report))
         }
         Err(error) => {
             report_error(&error);
@@ -1154,8 +1177,7 @@ fn run(
             if let Some(note) = stop_note(&error, journal_left) {
                 eprintln!("{note}");
             }
-            let _ = lock.release();
-            ExitCode::FAILURE
+            (ExitCode::FAILURE, None)
         }
     }
 }

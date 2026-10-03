@@ -7,8 +7,8 @@ use std::process::ExitCode;
 
 use piko_db::repo::{RepoDatabase, RepoPackage};
 
-use crate::output::{emit, escaped, human_date, human_size, join, report};
-use crate::style::{field_list, info_label, info_url};
+use crate::output::{emit, human_size, join, report};
+use crate::style::{field_list, info_build_fields, info_description_fields, info_label};
 
 /// Builds `pacman -Si`'s "Validated By" label.
 ///
@@ -47,41 +47,12 @@ pub fn repo_info(
     };
 
     let bold = console::Style::new().bold();
-    let version = console::Style::new().cyan().bold();
-    let url = info_url(desc.url().map(ToString::to_string), desc.url_raw());
-
     emit!(out, "{} {}", info_label("Repository      :"), bold.apply_to(db.name()));
-    emit!(out, "{} {}", info_label("Name            :"), bold.apply_to(package.name()));
-    emit!(out, "{} {}", info_label("Version         :"), version.apply_to(package.version()));
-    emit!(out, "{} {}", info_label("Description     :"), escaped(desc.description()));
-    emit!(out, "{} {}", info_label("Architecture    :"), escaped(desc.architecture()));
-    emit!(out, "{} {url}", info_label("URL             :"));
-    match desc.licenses() {
-        Ok(licenses) => field_list!(out, "Licenses        :", licenses, 5),
-        Err(_) => field_list!(out, "Licenses        :", &desc.section_values("LICENSE"), 5),
-    }
-    field_list!(out, "Groups          :", desc.groups(), 5);
-    field_list!(out, "Provides        :", desc.provides(), 5);
-    field_list!(out, "Depends On      :", desc.depends(), 5);
-    match desc.optional_depends() {
-        Ok(optional) => field_list!(out, "Optional Deps   :", optional, 1),
-        Err(_) => field_list!(out, "Optional Deps   :", &desc.section_values("OPTDEPENDS"), 1),
-    }
+    info_description_fields!(out, package, desc);
     field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
     field_list!(out, "Replaces        :", desc.replaces(), 5);
     emit!(out, "{} {}", info_label("Download Size   :"), human_size(desc.compressed_size()));
-    emit!(out, "{} {}", info_label("Installed Size  :"), human_size(desc.installed_size()));
-    emit!(
-        out,
-        "{} {}",
-        info_label("Packager        :"),
-        escaped(desc.packager_raw().unwrap_or_default())
-    );
-    let build_date = match desc.build_date() {
-        Ok(timestamp) => human_date(timestamp, offset),
-        Err(_) => escaped(desc.section_values("BUILDDATE").join(" ")),
-    };
-    emit!(out, "{} {}", info_label("Build Date      :"), build_date);
+    info_build_fields!(out, desc, offset);
     emit!(
         out,
         "{} {}",

@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use alpm_types::{PackageInstallReason, PackageValidation};
 use piko_db::{LocalDatabase, LocalPackage};
 
-use crate::output::{emit, escaped, human_date, human_size, join, report};
-use crate::style::{field_list, info_label, info_url};
+use crate::output::{emit, escaped, join, report};
+use crate::style::{field_list, info_build_fields, info_date, info_description_fields, info_label};
 
 /// Builds `pacman -Qi`'s "Install Reason" text.
 ///
@@ -101,43 +101,14 @@ pub fn info(
         }
     };
 
-    let bold = console::Style::new().bold();
-    let version = console::Style::new().cyan().bold();
-    let url = info_url(desc.url().map(ToString::to_string), desc.url_raw());
-
-    emit!(out, "{} {}", info_label("Name            :"), bold.apply_to(package.name()));
-    emit!(out, "{} {}", info_label("Version         :"), version.apply_to(package.version()));
-    emit!(out, "{} {}", info_label("Description     :"), escaped(desc.description()));
-    emit!(out, "{} {}", info_label("Architecture    :"), escaped(desc.architecture()));
-    emit!(out, "{} {url}", info_label("URL             :"));
-    match desc.licenses() {
-        Ok(licenses) => field_list!(out, "Licenses        :", licenses, 5),
-        Err(_) => field_list!(out, "Licenses        :", &desc.section_values("LICENSE"), 5),
-    }
-    field_list!(out, "Groups          :", desc.groups(), 5);
-    field_list!(out, "Provides        :", desc.provides(), 5);
-    field_list!(out, "Depends On      :", desc.depends(), 5);
-    match desc.optional_depends() {
-        Ok(optional) => field_list!(out, "Optional Deps   :", optional, 1),
-        Err(_) => field_list!(out, "Optional Deps   :", &desc.section_values("OPTDEPENDS"), 1),
-    }
+    info_description_fields!(out, package, desc);
     field_list!(out, "Required By     :", &dependents.required_by, 5);
     field_list!(out, "Optional For    :", &dependents.optional_for, 5);
     field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
     field_list!(out, "Replaces        :", desc.replaces(), 5);
-    emit!(out, "{} {}", info_label("Installed Size  :"), human_size(desc.installed_size()));
-    emit!(
-        out,
-        "{} {}",
-        info_label("Packager        :"),
-        escaped(desc.packager_raw().unwrap_or_default())
-    );
-    let date = |typed: Result<i64, _>, keyword| match typed {
-        Ok(timestamp) => human_date(timestamp, offset),
-        Err(_) => escaped(desc.section_values(keyword).join(" ")),
-    };
-    emit!(out, "{} {}", info_label("Build Date      :"), date(desc.build_date(), "BUILDDATE"));
-    emit!(out, "{} {}", info_label("Install Date    :"), date(desc.install_date(), "INSTALLDATE"));
+    info_build_fields!(out, desc, offset);
+    let install_date = info_date(desc.install_date(), &desc.section_values("INSTALLDATE"), offset);
+    emit!(out, "{} {install_date}", info_label("Install Date    :"));
     emit!(
         out,
         "{} {}",

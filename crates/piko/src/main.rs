@@ -217,7 +217,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
         Command::Check { packages } => {
             let root = resolve_root_dir(cli, &config);
             let patterns = path_patterns(cli, &config);
-            let no_extract = patterns.no_extract.as_slice();
+            let no_extract = &patterns.no_extract;
             let db = open_local_db(cli, &config)?;
             if packages.is_empty() {
                 cmd::check::check_all(&db, &root, no_extract, &mut out)
@@ -277,7 +277,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             report_stale_repos(repos.iter(), *max_age, offset);
             let (ignore_pkg, ignore_group) = ignore_lists(cli, &config);
             let ignores = IgnoreList::new(&ignore_pkg, &ignore_group);
-            cmd::sync::check_updates(&local, &repos, ignores, *quiet, &mut out)
+            cmd::sync::check_updates(&local, &repos, &ignores, *quiet, &mut out)
         }
         Command::Resolve { target } => {
             let parsed = require_pacman_config(cli, &config)?;
@@ -334,7 +334,7 @@ fn run(cli: &Cli, offset: piko_txn::LocalOffset) -> Result<ExitCode, Error> {
             cmd::plan::plan(
                 &local,
                 &opened,
-                ignores,
+                &ignores,
                 targets,
                 mode,
                 format,
@@ -728,7 +728,12 @@ fn sync(
         args.root,
         &dbpath,
         cache_dirs(config, cli),
-        cmd::txn::Catalog { local: &local, repos: &opened, ignores, configs: &registered },
+        cmd::txn::Catalog {
+            local: &local,
+            repos: &opened,
+            ignores: &ignores,
+            configs: &registered,
+        },
         args.targets,
         cmd::txn::InstallOptions {
             reasons: args.reasons,

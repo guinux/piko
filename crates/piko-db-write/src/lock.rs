@@ -66,6 +66,8 @@ impl DbLock {
     /// - [`Error::Io`] if the directory cannot be created or the file cannot be opened for
     ///   any other reason.
     pub fn acquire(dbpath: &Path) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
         let path = dbpath.join(LOCK_FILE);
 
         // libalpm creates the lock file's directory before opening it. A fresh `--dbpath` is
@@ -77,12 +79,7 @@ impl DbLock {
 
         let mut options = File::options();
         // `create_new` is O_CREAT | O_EXCL. Rust already opens with O_CLOEXEC.
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o000);
-        }
+        options.write(true).create_new(true).mode(0o000);
 
         loop {
             return match options.open(&path) {
@@ -206,7 +203,6 @@ mod tests {
         lock.release().unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn the_lock_file_has_mode_0000() {
         use std::os::unix::fs::PermissionsExt as _;

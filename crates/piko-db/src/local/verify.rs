@@ -114,7 +114,7 @@ impl LocalPackage {
     /// `-Qkk`'s own "no mtree file" case, rather than treating it as a failure.
     ///
     /// `no_extract` is `NoExtract` from `pacman.conf`, matched the same way `--overwrite`
-    /// patterns are ([`resolve::matches_any`]). A missing file matching one of these
+    /// patterns are ([`resolve::PatternList`]). A missing file matching one of these
     /// patterns is not reported at all, mirroring `alpm_option_match_noextract`.
     ///
     /// No mtree entry leads the check outside `root`. An entry with a component other than a
@@ -130,7 +130,7 @@ impl LocalPackage {
     pub fn verify_files(
         &self,
         root: &Path,
-        no_extract: &[String],
+        no_extract: &resolve::PatternList,
     ) -> std::result::Result<Option<FileCheckReport>, SharedError> {
         let Some(mtree) = self.mtree()? else {
             return Ok(None);
@@ -226,7 +226,7 @@ impl LocalPackage {
         entry: &v2::Path,
         normalized: &Path,
         root: &Path,
-        no_extract: &[String],
+        no_extract: &resolve::PatternList,
         backups: &HashSet<&Path>,
         problems: &mut Vec<FileProblem>,
     ) -> std::result::Result<(), SharedError> {
@@ -245,7 +245,7 @@ impl LocalPackage {
         for error in errors {
             match &error {
                 PathValidationError::PathMissing { .. }
-                    if resolve::matches_any(no_extract, &normalized.to_string_lossy()) =>
+                    if no_extract.matches(&normalized.to_string_lossy()) =>
                 {
                     // NoExtract. pacman does not report this file at all.
                 }
@@ -300,6 +300,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::resolve::PatternList;
     use crate::{
         UnknownSectionPolicy,
         entry_name::EntryName,
@@ -389,7 +390,7 @@ mod tests {
         db.package("foo-1.0.0-1").desc(MINIMAL_DESC_V1).files(MINIMAL_FILES).build();
         let pkg = package_at(&db, "foo-1.0.0-1");
 
-        assert!(pkg.verify_files(root.path(), &[]).unwrap().is_none());
+        assert!(pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().is_none());
     }
 
     #[test]
@@ -399,7 +400,7 @@ mod tests {
         let stanza = file_stanza("usr/bin/foo", &meta, CONTENT.len() as u64, CONTENT_SHA256);
         let (_db, pkg) = package_with_mtree("foo-1.0.0-1", &stanza);
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert_eq!(report.total, 1);
         assert!(report.problems.is_empty(), "got {:?}", report.problems);
     }
@@ -413,7 +414,7 @@ mod tests {
         stanza.push_str(&file_stanza("usr/bin/foo", &meta, 4, CONTENT_SHA256));
         let (_db, pkg) = package_with_mtree("foo-1.0.0-1", &stanza);
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert_eq!(report.altered_files(), 1);
         assert!(
             report
@@ -431,7 +432,7 @@ mod tests {
         let stanza = file_stanza("usr/bin/foo", &meta, 999, CONTENT_SHA256);
         let (_db, pkg) = package_with_mtree("foo-1.0.0-1", &stanza);
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert_eq!(report.altered_files(), 1);
         assert!(report.problems.iter().any(
             |p| p.is_error() && matches!(p.error, PathValidationError::PathSizeMismatch { .. })
@@ -451,7 +452,7 @@ mod tests {
                        sha256digest=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\n";
         let (_db, pkg) = package_with_mtree("foo-1.0.0-1", stanza);
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert_eq!(report.total, 0);
         assert!(report.problems.is_empty(), "got {:?}", report.problems);
     }
@@ -496,7 +497,7 @@ etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e
             .build();
         let pkg = package_at(&db, "foo-1.0.0-1");
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert_eq!(report.altered_files(), 0, "a backup file's size mismatch is not a failure");
         assert!(!report.problems.is_empty(), "the mismatch is still reported");
         assert!(report.problems.iter().all(|p| !p.is_error()));
@@ -510,7 +511,10 @@ etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e
         stanza.push_str(&file_stanza("usr/bin/foo", &meta, 4, CONTENT_SHA256));
         let (_db, pkg) = package_with_mtree("foo-1.0.0-1", &stanza);
 
-        let report = pkg.verify_files(root.path(), &["usr/bin/foo".to_owned()]).unwrap().unwrap();
+        let report = pkg
+            .verify_files(root.path(), &PatternList::new(vec!["usr/bin/foo".to_owned()]))
+            .unwrap()
+            .unwrap();
         assert!(report.problems.is_empty(), "got {:?}", report.problems);
     }
 
@@ -530,7 +534,7 @@ etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e
         // The directory's own stale time must not add a second one.
         let (_db, pkg) = package_with_mtree("foo-1.0.0-1", &stanza);
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert!(
             report
                 .problems
@@ -552,7 +556,7 @@ etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e
         let stanza = file_stanza("usr/bin/foo", &meta, 4, CONTENT_SHA256);
         let (_db, pkg) = package_with_mtree("foo-1.0.0-1", &stanza);
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert_eq!(report.altered_files(), 1);
         assert!(
             report
@@ -572,7 +576,7 @@ etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e
         let stanza = link_stanza("usr/bin/foo", &meta, "/usr/bin/baz");
         let (_db, pkg) = package_with_mtree("foo-1.0.0-1", &stanza);
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert_eq!(report.altered_files(), 1);
         assert!(
             report
@@ -602,7 +606,7 @@ etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e
         let pkg = package_at(&db, "foo-1.0.0-1");
         let root = TempDir::new().unwrap();
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert!(report.problems.is_empty(), "got {:?}", report.problems);
     }
 
@@ -617,7 +621,7 @@ etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e
         let stanza = file_stanza("../outside", &meta, CONTENT.len() as u64, CONTENT_SHA256);
         let (_db, pkg) = package_with_mtree("foo-1.0.0-1", &stanza);
 
-        let error = pkg.verify_files(&root, &[]).unwrap_err();
+        let error = pkg.verify_files(&root, &PatternList::EMPTY).unwrap_err();
         assert!(
             matches!(&*error, Error::UnsafeMtreePath { entry, .. } if entry == Path::new("../outside")),
             "got {error:?}"
@@ -646,7 +650,7 @@ etc/foo.conf\td41d8cd98f00b204e9800998ecf8427e
         let pkg = package_at(&db, "foo-1.0.0-1");
         let root = TempDir::new().unwrap();
 
-        let report = pkg.verify_files(root.path(), &[]).unwrap().unwrap();
+        let report = pkg.verify_files(root.path(), &PatternList::EMPTY).unwrap().unwrap();
         assert!(
             report
                 .problems
