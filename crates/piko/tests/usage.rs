@@ -60,6 +60,23 @@ fn piko(config: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// A package only a repository without `Search` usage holds is not found, and the search
+/// fails, as `pacman -Ss` does when nothing matches.
+#[test]
+fn a_search_the_skipped_repository_alone_would_answer_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = setup(dir.path());
+
+    let output = Command::new(PIKO)
+        .arg("--config")
+        .arg(&config)
+        .args(["search", "--repos", "--quiet", "foobar"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+}
+
 #[test]
 fn a_search_skips_a_repository_without_search_usage() {
     let dir = tempfile::tempdir().unwrap();

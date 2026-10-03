@@ -28,6 +28,7 @@ pub fn installed(
     zone: piko_txn::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
+    let installed = local::Installed::new(db);
     let mut ok = true;
 
     for (index, name) in names.iter().enumerate() {
@@ -39,7 +40,7 @@ pub fn installed(
             ok = false;
             continue;
         };
-        if local::info(db, package, zone, out) != ExitCode::SUCCESS {
+        if local::info(&installed, package, zone, out) != ExitCode::SUCCESS {
             ok = false;
         }
     }
@@ -91,6 +92,7 @@ pub fn installed_then_repos(
     zone: piko_txn::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
+    let installed = local::Installed::new(local);
     let mut ok = true;
 
     for (index, name) in names.iter().enumerate() {
@@ -99,7 +101,7 @@ pub fn installed_then_repos(
         }
         match resolve_installed_or_repo(local, dbs, name) {
             Some(LocalOrRepo::Local(package)) => {
-                if self::local::info(local, package, zone, out) != ExitCode::SUCCESS {
+                if self::local::info(&installed, package, zone, out) != ExitCode::SUCCESS {
                     ok = false;
                 }
             }

@@ -24,7 +24,9 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH", value_parser = resolved_path)]
     pub dbpath: Option<PathBuf>,
 
-    /// Path to the pacman.conf-style configuration file, used by the `conf` subcommand.
+    /// Path to the pacman.conf-style configuration file. Every subcommand reads its defaults
+    /// from it: `DBPath`, `RootDir`, `CacheDir`, `LogFile`, the repositories and their
+    /// `SigLevel`. `conf` prints it.
     #[arg(long, global = true, default_value = DEFAULT_CONFIG_PATH, value_name = "PATH")]
     pub config: PathBuf,
 
@@ -192,8 +194,8 @@ pub enum Command {
         quiet: bool,
     },
 
-    /// Show one or more packages' metadata, from their `desc` file (installed) or a repository
-    /// database archive (same as `list --repo`).
+    /// Show one or more packages' metadata, from the installed database or from a repository
+    /// database.
     ///
     /// With neither `--installed` nor `--repo`, each package is looked up among installed
     /// packages first. It is then looked up in the configured repositories, in file (priority)
@@ -201,11 +203,11 @@ pub enum Command {
     /// `resolve` applies to a literal name. `--installed` restricts the lookup to installed
     /// packages only. `--repo <NAME>` looks every package up in that one repository only.
     ///
-    /// A repository package's metadata carries fields an installed package's `desc` does not
-    /// (File Name, Make/Check Deps, Compressed Size, checksums, PGP-signature presence). It
-    /// lacks fields an installed package's `desc` does have (Install Date, Install Reason,
-    /// Validated By). The two forms print different field sets, the same as `pacman -Qi` vs
-    /// `-Si`.
+    /// The two forms print different field sets, as `pacman -Qi` and `-Si` do. A repository
+    /// package adds `Repository` and `Download Size`, and its `Validated By` names the checksum
+    /// and the signature its repository publishes. An installed package adds `Required By`,
+    /// `Optional For`, `Install Date`, `Install Reason` and `Install Script`, and its
+    /// `Validated By` names how it was checked when it was installed.
     ///
     /// More than one package prints each entry in turn, separated by a blank line. A name that
     /// cannot be found, or whose `desc` cannot be read, is reported to stderr. The rest are
@@ -265,6 +267,9 @@ pub enum Command {
     /// installed has nothing to do with any one repository. Every configured repository whose
     /// `Usage` includes `Search` is searched, in file (priority) order, when `--repo` is
     /// omitted. It conflicts with `--installed`.
+    ///
+    /// The exit code is non-zero when nothing matches, as for `pacman -Ss`. A search whose every
+    /// term is blank is refused.
     #[command(visible_alias = "se")]
     Search {
         /// The search term(s); a package must match all of them.

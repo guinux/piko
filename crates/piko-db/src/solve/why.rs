@@ -174,9 +174,26 @@ pub struct Unread {
 
 /// [`Dependents`] of `target`, among installed packages.
 ///
-/// Builds its own installed-only universe internally, the same scope
-/// [`explain_why_installed`]/[`orphans`] already use. So the caller needs nothing but the
-/// local database, never `Universe`/`UniverseOptions` directly.
+/// This builds a [`DependentsIndex`] and asks it once. A caller with more than one target builds
+/// the index itself, and asks it for each: the build reads the whole installed set.
+///
+/// # Errors
+///
+/// If the local database cannot be scanned.
+pub fn dependents(local: &LocalDatabase, target: &str) -> crate::Result<Dependents> {
+    Ok(DependentsIndex::build(local)?.get(target))
+}
+
+/// The [`Dependents`] of every installed package, computed in one pass over the installed set.
+///
+/// `pacman -Qi` asks "Required By" and "Optional For" of every package it shows, and each
+/// answer reads every installed package. Built once, the index answers each package with a
+/// lookup: `piko info` over a whole system then reads the installed set once rather than once
+/// per package.
+///
+/// It builds an installed-only universe, the same scope [`explain_why_installed`] and
+/// [`orphans`] use. So the caller needs nothing but the local database, never
+/// `Universe`/`UniverseOptions` directly.
 ///
 /// `optional_for` reuses [`Universe::satisfiers`], the same depcmp machinery `required_by`
 /// matches through, rather than a literal name comparison. An `%OPTDEPENDS%` entry carries a
@@ -185,54 +202,98 @@ pub struct Unread {
 /// identically. `Universe` never resolves `%OPTDEPENDS%` on its own, because the planner has no
 /// use for it. So this walks [`LocalDatabase::iter`] directly instead of going through a
 /// `Solvable` accessor.
-///
-/// # Errors
-///
-/// If the local database cannot be scanned.
-pub fn dependents(local: &LocalDatabase, target: &str) -> crate::Result<Dependents> {
-    let universe = Universe::build(local, [], UniverseOptions::new())?;
-    let Some(wanted) = universe.installed_named(target) else {
-        return Ok(Dependents::default());
-    };
+#[derive(Clone, Debug, Default)]
+pub struct DependentsIndex {
+    /// Every installed package, by name, with what requires it and what names it optionally.
+    ///
+    /// Keyed by the name's text, so [`Self::get`] looks a `&str` up without parsing it.
+    by_target: HashMap<String, (Vec<Name>, Vec<Name>)>,
+    /// What could not be read while the optional dependents were collected.
+    unread: Vec<Unread>,
+}
 
-    let required_by = required_by_index(&universe)
-        .remove(&wanted.id())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|id| universe.get(*id).map(|solvable| solvable.name().clone()))
-        .collect();
+impl DependentsIndex {
+    /// Reads the dependents of every installed package in `local`.
+    ///
+    /// # Errors
+    ///
+    /// If the local database cannot be scanned.
+    pub fn build(local: &LocalDatabase) -> crate::Result<Self> {
+        let universe = Universe::build(local, [], UniverseOptions::new())?;
 
-    let mut optional_for = Vec::new();
-    let mut unread = Vec::new();
-    for package in local.iter() {
-        let desc = match package.desc() {
-            Ok(desc) => desc,
-            Err(error) => {
-                unread.push(Unread { package: package.name().clone(), reason: error.to_string() });
-                continue;
+        let mut by_target: HashMap<String, (Vec<Name>, Vec<Name>)> = universe
+            .iter()
+            .filter(Solvable::is_installed)
+            .map(|solvable| (solvable.name().to_string(), (Vec::new(), Vec::new())))
+            .collect();
+
+        // `required_by_index` lists each target's dependents in installed-set order, and each
+        // once.
+        let name_of = |id: &SolvableId| universe.get(*id).map(|solvable| solvable.name().clone());
+        for (target, dependents) in required_by_index(&universe) {
+            let Some(target) = name_of(&target) else { continue };
+            if let Some((required_by, _)) = by_target.get_mut(target.as_ref()) {
+                required_by.extend(dependents.iter().filter_map(name_of));
             }
-        };
-        let mut requires_target = false;
-        for optdep in desc.optional_depends_each() {
-            match optdep {
-                Ok(optdep) => {
-                    let relation = RelationOrSoname::Relation(optdep.package_relation().clone());
-                    requires_target |= universe.satisfiers(&relation).contains(&wanted.id());
-                }
+        }
+
+        let mut unread = Vec::new();
+        for package in local.iter() {
+            let desc = match package.desc() {
+                Ok(desc) => desc,
                 Err(error) => {
                     unread.push(Unread {
                         package: package.name().clone(),
                         reason: error.to_string(),
                     });
+                    continue;
+                }
+            };
+            // A package is listed once for a target, however many of its `%OPTDEPENDS%`
+            // entries that target satisfies.
+            let mut targets: Vec<SolvableId> = Vec::new();
+            for optdep in desc.optional_depends_each() {
+                match optdep {
+                    Ok(optdep) => {
+                        let relation =
+                            RelationOrSoname::Relation(optdep.package_relation().clone());
+                        for satisfier in universe.satisfiers(&relation) {
+                            if !targets.contains(&satisfier) {
+                                targets.push(satisfier);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        unread.push(Unread {
+                            package: package.name().clone(),
+                            reason: error.to_string(),
+                        });
+                    }
+                }
+            }
+            for target in targets.iter().filter_map(name_of) {
+                if let Some((_, optional_for)) = by_target.get_mut(target.as_ref()) {
+                    optional_for.push(package.name().clone());
                 }
             }
         }
-        if requires_target {
-            optional_for.push(package.name().clone());
-        }
+
+        Ok(Self { by_target, unread })
     }
 
-    Ok(Dependents { required_by, optional_for, unread })
+    /// The [`Dependents`] of `target`: both lists empty, and nothing unread, for a target that
+    /// is not installed.
+    #[must_use]
+    pub fn get(&self, target: &str) -> Dependents {
+        let Some((required_by, optional_for)) = self.by_target.get(target) else {
+            return Dependents::default();
+        };
+        Dependents {
+            required_by: required_by.clone(),
+            optional_for: optional_for.clone(),
+            unread: self.unread.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +443,80 @@ mod tests {
         let found = dependents(&local, "foo").unwrap();
         let unread: Vec<&str> = found.unread.iter().map(|entry| entry.package.as_ref()).collect();
         assert_eq!(unread, ["baz"], "{:?}", found.unread);
+    }
+
+    /// The dependents of `target` computed alone, by a scan of the whole installed set: the
+    /// reference [`DependentsIndex`] must agree with for every package.
+    fn one_by_one(local: &LocalDatabase, target: &str) -> Dependents {
+        let universe = Universe::build(local, [], UniverseOptions::new()).unwrap();
+        let Some(wanted) = universe.installed_named(target) else {
+            return Dependents::default();
+        };
+        let required_by = required_by_index(&universe)
+            .remove(&wanted.id())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|id| universe.get(*id).map(|solvable| solvable.name().clone()))
+            .collect();
+        let mut optional_for = Vec::new();
+        let mut unread = Vec::new();
+        for package in local.iter() {
+            let Ok(desc) = package.desc() else {
+                unread.push(package.name().clone());
+                continue;
+            };
+            let mut requires_target = false;
+            for optdep in desc.optional_depends_each() {
+                match optdep {
+                    Ok(optdep) => {
+                        let relation =
+                            RelationOrSoname::Relation(optdep.package_relation().clone());
+                        requires_target |= universe.satisfiers(&relation).contains(&wanted.id());
+                    }
+                    Err(_) => unread.push(package.name().clone()),
+                }
+            }
+            if requires_target {
+                optional_for.push(package.name().clone());
+            }
+        }
+        let unread =
+            unread.into_iter().map(|package| Unread { package, reason: String::new() }).collect();
+        Dependents { required_by, optional_for, unread }
+    }
+
+    /// One index answers every package as a scan for that package alone does: the same
+    /// dependents in the same order, through names, `%PROVIDES%`, sonames and version
+    /// constraints, each dependent once.
+    #[test]
+    fn the_index_agrees_with_a_scan_per_package() {
+        let scenario =
+            Scenario::new()
+                .installed(PackageSpec::new("lib", "2.0.0-1").provides(["libfoo.so=1-64", "virt"]))
+                .installed(PackageSpec::new("old", "1.0.0-1"))
+                .installed(
+                    PackageSpec::new("app", "1.0.0-1")
+                        .depends(["lib", "libfoo.so=1-64"])
+                        .optdepends(["virt: extras", "old>=2: too new", "lib: again"]),
+                )
+                .installed(PackageSpec::new("tool", "1.0.0-1").depends(["virt", "old"]))
+                .installed(PackageSpec::new("extra", "1.0.0-1").optdepends(["bad>", "tool: x"]))
+                .build();
+        let local = scenario.local();
+        let index = DependentsIndex::build(local).unwrap();
+
+        for name in ["lib", "old", "app", "tool", "extra", "absent"] {
+            let (indexed, scanned) = (index.get(name), one_by_one(local, name));
+            assert_eq!(as_strs(&indexed.required_by), as_strs(&scanned.required_by), "{name}");
+            assert_eq!(as_strs(&indexed.optional_for), as_strs(&scanned.optional_for), "{name}");
+            let unread = |found: &Dependents| {
+                found.unread.iter().map(|entry| entry.package.to_string()).collect::<Vec<_>>()
+            };
+            assert_eq!(unread(&indexed), unread(&scanned), "{name}");
+        }
+        assert_eq!(as_strs(&index.get("lib").required_by), ["app", "tool"]);
+        assert_eq!(as_strs(&index.get("lib").optional_for), ["app"]);
+        assert!(index.get("old").optional_for.is_empty(), "old>=2 is not met by old 1.0.0-1");
     }
 
     #[test]

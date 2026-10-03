@@ -8,7 +8,9 @@ use std::process::ExitCode;
 use piko_db::repo::{RepoDatabase, RepoPackage};
 
 use crate::output::{emit, human_size, join, report};
-use crate::style::{field_list, info_build_fields, info_description_fields, info_label};
+use crate::style::{
+    field_list, info_build_fields, info_description_fields, info_label, optional_deps,
+};
 
 /// Builds `pacman -Si`'s "Validated By" label.
 ///
@@ -48,7 +50,9 @@ pub fn repo_info(
 
     let bold = console::Style::new().bold();
     emit!(out, "{} {}", info_label("Repository      :"), bold.apply_to(db.name()));
-    info_description_fields!(out, package, desc);
+    let optional =
+        optional_deps(desc.optional_depends(), desc.section_values("OPTDEPENDS"), |_| false);
+    info_description_fields!(out, package, desc, &optional);
     field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
     field_list!(out, "Replaces        :", desc.replaces(), 5);
     emit!(out, "{} {}", info_label("Download Size   :"), human_size(desc.compressed_size()));

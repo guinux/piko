@@ -108,9 +108,9 @@ use crate::{
 /// over the local database.
 ///
 /// The repository-side functions below answer "what could I install". This answers "what is
-/// already here", a different question with a different caller. libalpm's hook engine asks it
-/// for every `Depends` line of every triggered hook (`hook.c:507`). That is the only place in
-/// piko that needs it.
+/// already here", a different question with different callers. libalpm's hook engine asks it
+/// for every `Depends` line of every triggered hook (`hook.c:507`), and `pacman -Qi` asks it for
+/// every optional dependency it marks ` [installed]` (`package.c:163`).
 ///
 /// # A package with an unreadable `desc` is an error, not a package that provides nothing
 ///

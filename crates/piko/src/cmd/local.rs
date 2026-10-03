@@ -4,13 +4,15 @@
 //! `list`, `search`, and `files`' installed-side file listing live in [`crate::cmd::list`],
 //! [`crate::cmd::search`], and [`crate::cmd::files`], which also read repositories.
 
-use std::process::ExitCode;
+use std::{cell::OnceCell, process::ExitCode};
 
 use alpm_types::{PackageInstallReason, PackageValidation};
-use piko_db::{LocalDatabase, LocalPackage};
+use piko_db::{LocalDatabase, LocalPackage, solve::DependentsIndex};
 
 use crate::output::{emit, escaped, join, report};
-use crate::style::{field_list, info_build_fields, info_date, info_description_fields, info_label};
+use crate::style::{
+    field_list, info_build_fields, info_date, info_description_fields, info_label, optional_deps,
+};
 
 /// Builds `pacman -Qi`'s "Install Reason" text.
 ///
@@ -76,15 +78,44 @@ fn yes_no(value: bool) -> &'static str {
     if value { "Yes" } else { "No" }
 }
 
+/// The installed database, with its "Required By" and "Optional For" index built on first use.
+///
+/// One value serves every package an `info` command shows. Building the index reads the whole
+/// installed set, so it is built once, and only once a package from the installed database is
+/// shown: a lookup that ends in a repository builds nothing.
+#[derive(Debug)]
+pub struct Installed<'a> {
+    local: &'a LocalDatabase,
+    dependents: OnceCell<piko_db::Result<DependentsIndex>>,
+}
+
+impl<'a> Installed<'a> {
+    /// The installed database `local`, with no index built yet.
+    pub const fn new(local: &'a LocalDatabase) -> Self {
+        Self { local, dependents: OnceCell::new() }
+    }
+
+    /// The installed database.
+    pub const fn local(&self) -> &'a LocalDatabase {
+        self.local
+    }
+
+    /// The dependents index, built on the first call.
+    fn dependents(&self) -> Result<&DependentsIndex, &piko_db::Error> {
+        self.dependents.get_or_init(|| DependentsIndex::build(self.local)).as_ref()
+    }
+}
+
 /// `zone` is the time zone the two date fields are rendered in, read in `main`.
 ///
 /// See [`crate::output::human_date`].
 pub fn info(
-    local: &LocalDatabase,
+    installed: &Installed<'_>,
     package: &LocalPackage,
     zone: piko_txn::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
+    let local = installed.local();
     let desc = match package.desc() {
         Ok(desc) => desc,
         Err(error) => {
@@ -93,15 +124,28 @@ pub fn info(
         }
     };
 
-    let dependents = match piko_db::solve::dependents(local, package.name().as_ref()) {
-        Ok(dependents) => dependents,
+    let dependents = match installed.dependents() {
+        Ok(index) => index.get(package.name().as_ref()),
         Err(error) => {
-            report(&error);
+            report(error);
             return ExitCode::FAILURE;
         }
     };
 
-    info_description_fields!(out, package, desc);
+    // An installed package's optional dependency is marked when something installed satisfies
+    // it, by name or `%PROVIDES%`, as `alpm_find_satisfier` over the local database answers.
+    let mut unanswered = None;
+    let optional =
+        optional_deps(desc.optional_depends(), desc.section_values("OPTDEPENDS"), |dep| {
+            match piko_db::resolve::installed_satisfier(local, dep.package_relation()) {
+                Ok(found) => found.is_some(),
+                Err(error) => {
+                    unanswered.get_or_insert(error);
+                    false
+                }
+            }
+        });
+    info_description_fields!(out, package, desc, &optional);
     field_list!(out, "Required By     :", &dependents.required_by, 5);
     field_list!(out, "Optional For    :", &dependents.optional_for, 5);
     field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
@@ -127,6 +171,12 @@ pub fn info(
     for reason in desc.invalid_fields() {
         crate::output::warn(format!("{}: {reason}", package.name()));
     }
+    if let Some(error) = unanswered {
+        crate::output::warn(format!(
+            "{}: the optional dependencies marked [installed] may be incomplete: {error}",
+            package.name()
+        ));
+    }
     for unread in &dependents.unread {
         crate::output::warn(format!(
             "Optional For may be incomplete: {}: {}",
@@ -135,4 +185,57 @@ pub fn info(
     }
 
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+mod tests {
+    use piko_db::fixture::{PackageSpec, Scenario};
+
+    use super::*;
+
+    /// An optional dependency something installed satisfies is marked, by name or by
+    /// `%PROVIDES%`, as `pacman -Qi` marks it. A version the installed package does not meet,
+    /// or a name nothing provides, is not.
+    #[test]
+    fn an_installed_optional_dependency_is_marked() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("app", "1.0.0-1").optdepends([
+                "cups: printing",
+                "pdf-tool: viewing",
+                "libfoo>=2: plugins",
+                "absent: nothing",
+            ]))
+            .installed(PackageSpec::new("cups", "2.4.0-1"))
+            .installed(PackageSpec::new("viewer", "1.0.0-1").provides(["pdf-tool"]))
+            .installed(PackageSpec::new("libfoo", "1.0.0-1"))
+            .build();
+        let local = scenario.local();
+        let package = local.get_str("app").unwrap();
+
+        let mut out = Vec::new();
+        let installed = Installed::new(local);
+        assert_eq!(
+            info(&installed, package, piko_txn::LocalZone::UTC, &mut out),
+            ExitCode::SUCCESS
+        );
+        let text = String::from_utf8(out).unwrap();
+        let text = console::strip_ansi_codes(&text);
+        let lines: Vec<&str> = text
+            .lines()
+            .skip_while(|line| !line.starts_with("Optional Deps"))
+            .take(4)
+            .map(|line| line.strip_prefix("Optional Deps   :").unwrap_or(line).trim())
+            .collect();
+
+        assert_eq!(
+            lines,
+            [
+                "cups: printing [installed]",
+                "pdf-tool: viewing [installed]",
+                "libfoo>=2: plugins",
+                "absent: nothing"
+            ]
+        );
+    }
 }

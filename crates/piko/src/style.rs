@@ -189,14 +189,35 @@ pub(crate) fn info_date<E>(
     }
 }
 
+/// The `Optional Deps` entries of `piko info`, one per optional dependency.
+///
+/// `typed` is `%OPTDEPENDS%` as parsed, and `raw` its lines as written, shown when the parse
+/// failed. An entry `installed` answers `true` for is marked ` [installed]`, as pacman's
+/// `optdeplist_display` marks it (`package.c:163`). pacman marks only an installed package's
+/// entries, so the repository side passes a test that answers `false`.
+pub(crate) fn optional_deps<E>(
+    typed: Result<&[alpm_types::OptionalDependency], E>,
+    raw: Vec<&str>,
+    mut installed: impl FnMut(&alpm_types::OptionalDependency) -> bool,
+) -> Vec<String> {
+    match typed {
+        Ok(optional) => optional
+            .iter()
+            .map(|dep| if installed(dep) { format!("{dep} [installed]") } else { dep.to_string() })
+            .collect(),
+        Err(_) => raw.into_iter().map(str::to_owned).collect(),
+    }
+}
+
 /// Prints the `piko info` fields from `Name` to `Optional Deps`, which `pacman -Qi` and
-/// `pacman -Si` print alike.
+/// `pacman -Si` print alike. `$optional` holds the `Optional Deps` entries, built by
+/// [`optional_deps`].
 ///
 /// This is a macro rather than a function because a local `DescView` and a repository
 /// `RepoDescView` have the same accessors and no trait in common. Like `field_list!`, it returns
 /// from the enclosing function if a write fails.
 macro_rules! info_description_fields {
-    ($out:expr, $package:expr, $desc:expr) => {{
+    ($out:expr, $package:expr, $desc:expr, $optional:expr) => {{
         use $crate::output::{emit, escaped};
         use $crate::style::{field_list, info_label, info_url};
 
@@ -217,10 +238,7 @@ macro_rules! info_description_fields {
         field_list!($out, "Groups          :", desc.groups(), 5);
         field_list!($out, "Provides        :", desc.provides(), 5);
         field_list!($out, "Depends On      :", desc.depends(), 5);
-        match desc.optional_depends() {
-            Ok(optional) => field_list!($out, "Optional Deps   :", optional, 1),
-            Err(_) => field_list!($out, "Optional Deps   :", &desc.section_values("OPTDEPENDS"), 1),
-        }
+        field_list!($out, "Optional Deps   :", $optional, 1);
     }};
 }
 

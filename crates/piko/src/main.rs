@@ -224,6 +224,10 @@ fn run(cli: &Cli, zone: piko_txn::LocalZone) -> Result<ExitCode, Error> {
             }
         }
         Command::Search { terms, installed, repos, repo, quiet } => {
+            if cmd::search::all_blank(terms) {
+                eprintln!("Error: every search term is blank; name what to search for");
+                return Ok(ExitCode::FAILURE);
+            }
             if *installed {
                 cmd::search::installed(&open_local_db(cli, &config)?, terms, *quiet, &mut out)
             } else {

@@ -9,6 +9,10 @@
 //! the rest of the CLI. That is a colored icon, name/version columns aligned across the whole
 //! listing, and a one-line summary at the end. See [`Row`] and [`print_rows`]. `--quiet` opts
 //! out of all of it, down to one bare name per line, matching [`crate::cmd::list`]'s `--quiet`.
+//!
+//! A search that finds nothing exits non-zero, as `pacman -Ss` and `-Qs` do, so a script can
+//! test for a match by the exit code alone. A search whose every term is blank is refused
+//! before any database is opened ([`all_blank`]).
 
 use std::process::ExitCode;
 
@@ -33,7 +37,17 @@ struct Row {
     installed: bool,
 }
 
-/// Prints every row.
+/// Whether every term in `terms` is blank, which the search drops.
+///
+/// Such a search has no term left to match, and `piko_db`'s search answers nothing for it rather
+/// than everything. Answering nothing would read as "no package matches", so the caller refuses
+/// it instead. `pacman -Ss ''` lists every package; `piko search` never lists every package from
+/// a term that says nothing.
+pub fn all_blank(terms: &[String]) -> bool {
+    terms.iter().all(|term| term.trim().is_empty())
+}
+
+/// Prints every row, and returns failure when there is none.
 ///
 /// In quiet mode, prints just `row.name`, one per line, nothing else: no icon, no repository
 /// prefix, no version, no description, no summary. Otherwise, aligns rows into name/version
@@ -41,6 +55,9 @@ struct Row {
 /// summary reads `"N found"`, or `"N found · M installed"` once `installed_count` is `Some`
 /// and distinguishes them. A search restricted to `--installed` passes `None`, since every row
 /// is installed there and the clause would be redundant.
+///
+/// No row prints `0 found`, or nothing in quiet mode, and returns [`ExitCode::FAILURE`]: the
+/// exit code `pacman -Ss` and `-Qs` give when nothing matches.
 fn print_rows(
     rows: &[Row],
     installed_count: Option<usize>,
@@ -48,7 +65,10 @@ fn print_rows(
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     if rows.is_empty() {
-        return ExitCode::SUCCESS;
+        if !quiet {
+            emit!(out, "0 found");
+        }
+        return ExitCode::FAILURE;
     }
 
     if quiet {
@@ -178,4 +198,46 @@ pub fn merged(
         rows.extend(hits.into_iter().map(|(package, _)| repo_row(db, package)));
     }
     print_rows(&rows, Some(installed_count), quiet, out)
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+mod tests {
+    use super::*;
+
+    /// A search that finds nothing fails, as `pacman -Ss` does, and says so unless it is quiet.
+    #[test]
+    fn no_match_is_a_failure() {
+        let mut out = Vec::new();
+        assert_eq!(print_rows(&[], None, false, &mut out), ExitCode::FAILURE);
+        assert_eq!(String::from_utf8(out).unwrap(), "0 found\n");
+
+        let mut quiet = Vec::new();
+        assert_eq!(print_rows(&[], None, true, &mut quiet), ExitCode::FAILURE);
+        assert!(quiet.is_empty());
+    }
+
+    /// A match succeeds.
+    #[test]
+    fn a_match_is_a_success() {
+        let row = Row {
+            prefix: String::new(),
+            name: "foo".to_owned(),
+            version: "1.0-1".to_owned(),
+            description: String::new(),
+            installed: true,
+        };
+        let mut out = Vec::new();
+        assert_eq!(print_rows(&[row], None, true, &mut out), ExitCode::SUCCESS);
+        assert_eq!(String::from_utf8(out).unwrap(), "foo\n");
+    }
+
+    /// Only a search with no term left after the blank ones are dropped is refused.
+    #[test]
+    fn only_a_search_of_blank_terms_is_all_blank() {
+        let terms = |list: &[&str]| list.iter().map(|term| (*term).to_owned()).collect::<Vec<_>>();
+        assert!(all_blank(&terms(&[""])));
+        assert!(all_blank(&terms(&["", " \t"])));
+        assert!(!all_blank(&terms(&["", "foo"])));
+    }
 }

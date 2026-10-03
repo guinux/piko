@@ -414,7 +414,10 @@ pub fn join<T: ToString>(items: &[T]) -> String {
 
 /// Renders a byte count using binary (1024-based) units, e.g. `"5.04 MiB"`.
 ///
-/// Matches pacman's own `-Qi` output, which uses the same binary prefixes.
+/// The prefixes are pacman's, and the unit rule is not: this changes unit at 1024 and prints a
+/// byte count bare, where pacman's `humanize_size` changes unit only past 2048 and prints two
+/// decimals everywhere. So `1.68 MiB` here is `1723.35 KiB` in `pacman -Qi`, and `0 B` is
+/// `0.00 B`. The progress bars render sizes by the same rule as this function.
 pub fn human_size(bytes: u64) -> String {
     indicatif::BinaryBytes(bytes).to_string()
 }

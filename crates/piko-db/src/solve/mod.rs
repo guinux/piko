@@ -51,4 +51,4 @@ pub use removal::{
 };
 pub use solver::{Outcome, Solution, Solver, Unsatisfiable, core_kinds};
 pub use universe::{IgnoredCandidate, Origin, Solvable, SolvableId, Universe, UniverseOptions};
-pub use why::{Dependents, WhyResult, dependents, explain_why_installed, orphans};
+pub use why::{Dependents, DependentsIndex, WhyResult, dependents, explain_why_installed, orphans};
