@@ -592,9 +592,20 @@ mod tests {
         )
     }
 
-    /// A package built by makepkg with no `PACKAGER` set must stay fully readable. Both
-    /// parsers convert every section or none, so this one value would otherwise cost the
-    /// entry its `desc` entirely.
+    /// A full `desc` is boxed inside its `Lazy`. A `Lazy` holds its value inline, read or not,
+    /// and most entries are never asked for their full `desc`.
+    #[test]
+    fn an_unread_desc_costs_a_package_one_pointer() {
+        assert!(
+            std::mem::size_of::<LocalPackage>() < std::mem::size_of::<LoadedDesc>(),
+            "LocalPackage is {} bytes, LoadedDesc {}",
+            std::mem::size_of::<LocalPackage>(),
+            std::mem::size_of::<LoadedDesc>()
+        );
+    }
+
+    /// A package built by makepkg with no `PACKAGER` set stays fully readable, and its default
+    /// packager is not reported as a defect.
     #[test]
     fn a_package_built_with_makepkgs_default_packager_is_readable() {
         let db = DbFixture::new();

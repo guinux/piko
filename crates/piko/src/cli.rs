@@ -743,8 +743,7 @@ pub enum Command {
     ///
     /// Read-only: it describes what was interrupted and how far it got, and prints the
     /// commands that finish it. It cannot undo what was applied. piko keeps no copy of
-    /// overwritten files, so there is nothing to roll back to. See `docs/locking.md` and the
-    /// `journal` module.
+    /// overwritten files, so there is nothing to roll back to.
     Report,
 
     /// Show the transactions this system has run, newest last.

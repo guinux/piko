@@ -1067,6 +1067,15 @@ mod tests {
         assert!(plan.downloads.is_empty(), "a named file is not downloaded");
     }
 
+    /// A named file's own policy counts when the plan decides whether to open the keyring:
+    /// under `SigLevel = Never` with `LocalFileSigLevel = Required`, the file is still checked.
+    #[test]
+    fn a_named_file_policy_opens_the_keyring_the_global_one_does_not_ask_for() {
+        let required = Policy::for_package(piko_db::config::SigLevel::PACKAGE);
+        let (plan, _, _dir) = named_file_plan(required, true).unwrap();
+        assert!(matches!(plan.verification(), Verification::Enabled { .. }));
+    }
+
     /// The source of a plan with signature checking left to nothing: `cache` searched, no
     /// download expected.
     fn source_over(plan: &TransactionPlan, cache: &Path) -> PlanSource {
@@ -1118,6 +1127,55 @@ mod tests {
         for file_name in installs(&plan) {
             let location = source.locate(&file_name.parse().unwrap()).unwrap();
             assert_eq!(location.path(), cache.path().join(&file_name));
+        }
+    }
+
+    /// A source whose `prefetch` writes every missing package into `cache`, as a download
+    /// would. The fixture publishes the checksum of an empty file, so an empty file validates.
+    #[derive(Debug)]
+    struct Prefetching {
+        cache: PathBuf,
+        lookup: CacheDirSource,
+    }
+
+    impl PackageSource for Prefetching {
+        fn locate(&self, file_name: &PackageFileName) -> Result<crate::source::Location> {
+            self.lookup.locate(file_name)
+        }
+
+        fn prefetch(&self, file_names: &[PackageFileName]) -> Result<()> {
+            for file_name in file_names {
+                let path = self.cache.join(file_name.to_string());
+                if !path.exists() {
+                    std::fs::write(path, b"").unwrap();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// `download_only` asks the cache what it holds before `prefetch` fills it. Asked after, it
+    /// would report a package the run just downloaded as one that was already there.
+    #[test]
+    fn download_only_reports_a_prefetched_package_as_downloaded() {
+        let plan =
+            app_plan(&[core_config(piko_db::config::SigLevel::default())], &no_keyring()).unwrap();
+        let installs = installs(&plan);
+        let (cached, downloaded) = installs.split_first().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(cache.path().join(cached), b"").unwrap();
+        let lookup = || CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let source = Prefetching { cache: cache.path().to_path_buf(), lookup: lookup() };
+
+        let mut outcomes = Vec::new();
+        download_only(&source, &lookup(), &plan, |outcome| {
+            outcomes.push((outcome.package.to_string(), outcome.was_cached));
+        })
+        .unwrap();
+
+        assert!(outcomes.contains(&(cached.clone(), true)), "{outcomes:?}");
+        for file_name in downloaded {
+            assert!(outcomes.contains(&(file_name.clone(), false)), "{outcomes:?}");
         }
     }
 

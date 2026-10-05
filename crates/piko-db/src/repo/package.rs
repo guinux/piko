@@ -485,6 +485,19 @@ mod tests {
         assert_send_sync::<RepoPackage>();
     }
 
+    /// A full `desc` is boxed inside its `Lazy`. A `Lazy` holds its value inline, read or not,
+    /// and a repository holds one `RepoPackage` per package, so an unboxed `desc` makes every
+    /// package at least as large as a parsed `desc`.
+    #[test]
+    fn an_unread_desc_costs_a_package_one_pointer() {
+        assert!(
+            std::mem::size_of::<RepoPackage>() < std::mem::size_of::<RepoDesc>(),
+            "RepoPackage is {} bytes, RepoDesc {}",
+            std::mem::size_of::<RepoPackage>(),
+            std::mem::size_of::<RepoDesc>()
+        );
+    }
+
     #[test]
     fn file_list_reports_unavailable_when_there_is_no_files_archive() {
         let files = Arc::new(FilesSource::unavailable(a_repo_name(), Limits::default()));

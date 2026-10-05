@@ -1,8 +1,7 @@
 //! The one piece of the CLI's visual language shared verbatim across command modules.
 //!
-//! See `docs/cli-style.md` for the full set of conventions this, [`crate::progress`], and
-//! [`crate::cmd::plan`] follow. Most conventions are domain-specific and stay local to the
-//! module that draws them.
+//! [`crate::progress`] and [`crate::cmd::plan`] follow the same conventions. Most conventions are
+//! domain-specific and stay local to the module that draws them.
 
 /// Returns the green check for "this is done", "this is already the case", or "this is the
 /// line naming what follows".

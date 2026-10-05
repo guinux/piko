@@ -61,7 +61,7 @@ pub(crate) struct Relations {
 /// `crate::solve::encode` reads dependencies. It reads them only for the solvables inside its
 /// reachable cone — **2629 of 16 429** on this machine's sysupgrade, 16%.
 ///
-/// Deferring it is worth 61 ms -> 27 ms across `extra.db` (`docs/perf-study.md` §3.4).
+/// Deferring it takes the serial eager parse of `extra.db` from 61 ms to 27 ms.
 ///
 /// It is deferred for **repository** candidates only. Every installed package is a seed of
 /// that cone, so a local `desc`'s `%DEPENDS%` is always needed. Deferring it would buy

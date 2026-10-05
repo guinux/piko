@@ -150,11 +150,10 @@ pub(super) fn install_step(
     // Staged rather than written one file at a time. An entry is three or four files, and
     // `write_record`/`write_raw` each pay an `fsync` of the data *and* of the directory. One
     // `EntryWrite` pays one directory `fsync` for the whole entry and overlaps the data ones.
-    // Measured: 260 ms -> 113 ms for a 42-package upgrade on btrfs (`docs/perf-study.md`
-    // §4.2). It also gives a stronger crash-safety property. The entry is built outside
-    // `local/` and moved in whole, after the one it replaces is moved out. So an interruption
-    // leaves the old entry, no entry, or the new one, and never an entry without its `desc`,
-    // which would refuse every later plan.
+    // Measured: 260 ms -> 113 ms for a 42-package upgrade on btrfs. It also gives a stronger
+    // crash-safety property. The entry is built outside `local/` and moved in whole, after the
+    // one it replaces is moved out. So an interruption leaves the old entry, no entry, or the
+    // new one, and never an entry without its `desc`, which would refuse every later plan.
     let mut staged = writer.entry_write(entry, previous)?;
     // `verify` already refused a package whose entry cannot be written (`record::check`), so
     // these two fail only if that check and these builders disagree.

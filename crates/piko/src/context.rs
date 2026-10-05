@@ -681,6 +681,18 @@ mod tests {
         );
     }
 
+    /// A command with no `--root` installs into the configured `RootDir`, as `piko check` reads
+    /// it, never into `/` by default.
+    #[test]
+    fn without_root_the_configured_root_dir_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = directory(dir.path(), "root");
+        let path = write_conf(dir.path(), &format!("[options]\nRootDir = {root}\n"));
+        let cli = cli(&["--config", &path]);
+
+        assert_eq!(resolve_root_dir(&cli, &ConfigCache::default()), PathBuf::from(root));
+    }
+
     /// The flag must not need a readable config. A caller installing into a new root names both
     /// `--config` and `--cachedir`. An unreadable config must not turn that into the host cache
     /// directory alone.

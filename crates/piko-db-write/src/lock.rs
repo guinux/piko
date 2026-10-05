@@ -3,7 +3,7 @@
 //! Interoperability dictates everything here, not what a lock "should" be. pacman and piko
 //! must not both believe they hold the database. piko therefore reproduces
 //! `_alpm_handle_lock` (`handle.c:119`) exactly, including the parts that are arguably
-//! defects — see [`DbLock::acquire`]. `docs/locking.md` records the full derivation.
+//! defects — see [`DbLock::acquire`].
 
 use std::{
     fs::File,

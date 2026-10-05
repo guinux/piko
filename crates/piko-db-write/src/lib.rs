@@ -26,7 +26,9 @@
 //!    therefore keeps its own raw-preserving representation; see [`Record`].
 //!
 //! [`DbLock`] handles concurrency. It is byte-compatible with pacman's `db.lck`, not with any
-//! better locking scheme. `docs/locking.md` explains why that constraint is not negotiable.
+//! better locking scheme. pacman tests only that file's existence, so a lock of another kind
+//! (`flock`, `fcntl`) is invisible to pacman, and both tools then write the database at once.
+//! That is worse than the stale `db.lck` a crash leaves behind.
 //!
 //! # Example
 //!

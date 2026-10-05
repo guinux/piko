@@ -384,7 +384,7 @@ impl<'lock> LocalDbWriter<'lock> {
 /// together lets the filesystem merge them into fewer commits. That is why [`Self::commit`] uses
 /// a scoped thread per staged file rather than a loop.
 ///
-/// Measured, same corpus, `docs/perf-study.md` §4.2: **260 ms → 113 ms, 2.3x.**
+/// Measured on the same 42-package upgrade: **260 ms → 113 ms, 2.3x.**
 ///
 /// # What this does not change
 ///

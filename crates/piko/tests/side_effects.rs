@@ -2891,6 +2891,24 @@ fn an_upgrade_that_leaves_a_pacnew_says_so_after_the_transaction() {
     assert!(listed.contains("etc/foo.conf.pacnew"), "{listed}");
 }
 
+/// `pacman.log` names a `.pacnew` by its absolute path, as libalpm joins the root before it writes
+/// the warning. `piko-history` keeps the root-relative form: its block names the root on a line
+/// of its own.
+#[test]
+fn a_pacnew_is_logged_by_its_absolute_path_and_stored_by_its_relative_one() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+    sandbox.install_with_backup("2.0.0-1", "shipped by version two");
+
+    let conf = std::fs::canonicalize(sandbox.path("root")).unwrap().join("etc/foo.conf");
+    let warning = format!("warning: {} installed as {}.pacnew", conf.display(), conf.display());
+    let log = sandbox.log();
+    assert!(log.contains(&warning), "{log}");
+    let history = sandbox.history();
+    assert!(history.lines().any(|line| line == "pacnew etc/foo.conf.pacnew"), "{history}");
+}
+
 /// `--output` is the non-interactive mode. It lists and changes nothing.
 #[test]
 fn merge_output_lists_a_pacnew_and_changes_nothing() {
