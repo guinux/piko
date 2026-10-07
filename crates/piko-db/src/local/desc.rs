@@ -20,7 +20,7 @@ use crate::{
     desc_compat::UnknownSection,
     eager::DescFieldError,
     meta::{
-        desc::{Index, PackagerField, UrlField, named, non_empty, number, typed},
+        desc::{Index, PackagerField, UrlField, named, non_empty, number, typed, typed_comparable},
         section::Sections,
     },
 };
@@ -80,7 +80,7 @@ impl LocalDesc {
 
         let desc = Self {
             name: index.required("NAME", typed("NAME"))?,
-            version: index.required("VERSION", typed("VERSION"))?,
+            version: index.required("VERSION", typed_comparable("VERSION"))?,
             architecture: index.required("ARCH", typed("ARCH"))?,
             base: index.required("BASE", typed("BASE")),
             description: index.required("DESC", |value| Ok(PackageDescription::from(value))),
@@ -92,7 +92,7 @@ impl LocalDesc {
             validation: index
                 .list("VALIDATION", named("VALIDATION"))
                 .and_then(|list| non_empty(list, "VALIDATION")),
-            optional_depends: index.list("OPTDEPENDS", typed("OPTDEPENDS")),
+            optional_depends: index.list("OPTDEPENDS", typed_comparable("OPTDEPENDS")),
             xdata: xdata(&index),
         };
         Ok((desc, index.unknown))
@@ -287,7 +287,7 @@ impl<'a> DescView<'a> {
     pub fn optional_depends_each(
         &self,
     ) -> impl Iterator<Item = Result<OptionalDependency, DescFieldError>> + 'a {
-        self.section_values("OPTDEPENDS").into_iter().map(typed("OPTDEPENDS"))
+        self.section_values("OPTDEPENDS").into_iter().map(typed_comparable("OPTDEPENDS"))
     }
 
     /// `%XDATA%`, the extra data section. `Ok(None)` for a v1 `desc`, which has no such section.

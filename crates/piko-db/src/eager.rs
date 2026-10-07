@@ -28,6 +28,7 @@ use std::str::FromStr;
 
 use alpm_types::{Group, PackageRelation, RelationOrSoname};
 
+use crate::comparable::{self, Comparable as _};
 use crate::meta::section::{Section as TextSection, Sections};
 
 /// The relation sections every caller of this module needs.
@@ -251,14 +252,19 @@ impl RelationBudget {
 /// reports the error `RelationOrSoname::from_str` would have reported, rather than
 /// `PackageRelation`'s narrower one. That keeps this observationally identical to the parser
 /// it replaces. The cost is paid only on input that was going to be rejected anyway.
+///
+/// A value whose version `alpm-types` cannot compare is refused: see [`crate::comparable`].
 pub(crate) fn relation_or_soname(value: &str) -> Result<RelationOrSoname, alpm_types::Error> {
     // The screen, first: anything that could be either soname form goes to the real parser.
-    if value.contains(':') || value.contains(".so") {
-        return RelationOrSoname::from_str(value);
-    }
-    PackageRelation::from_str(value)
-        .map(RelationOrSoname::Relation)
-        .or_else(|_| RelationOrSoname::from_str(value))
+    let parsed = if value.contains(':') || value.contains(".so") {
+        RelationOrSoname::from_str(value)
+    } else {
+        PackageRelation::from_str(value)
+            .map(RelationOrSoname::Relation)
+            .or_else(|_| RelationOrSoname::from_str(value))
+    }?;
+    parsed.check_comparable()?;
+    Ok(parsed)
 }
 
 /// Which section a header opens.
@@ -350,10 +356,10 @@ pub(crate) fn scan<'a>(
                 Section::Depends => depends.push(entry(line, "DEPENDS", relation_or_soname)?),
                 Section::Provides => provides.push(entry(line, "PROVIDES", relation_or_soname)?),
                 Section::Conflicts => {
-                    conflicts.push(entry(line, "CONFLICTS", PackageRelation::from_str)?);
+                    conflicts.push(entry(line, "CONFLICTS", comparable::parse::<PackageRelation>)?);
                 }
                 Section::Replaces => {
-                    replaces.push(entry(line, "REPLACES", PackageRelation::from_str)?);
+                    replaces.push(entry(line, "REPLACES", comparable::parse::<PackageRelation>)?);
                 }
                 Section::Groups => groups.push(line.to_owned()),
                 Section::Other(_) => {}
@@ -452,6 +458,23 @@ mod tests {
         let text = "%DEPENDS%\nfoo\n\n%PROVIDES%\nbaz\n\n%DEPENDS%\nbar\n";
         for mode in [Depends::Eager, Depends::Deferred] {
             assert_eq!(depends_of(text, mode), ["foo", "bar"], "{mode:?}");
+        }
+    }
+
+    /// A relation whose version `alpm-types` cannot compare is refused, in each relation
+    /// section and either way `%DEPENDS%` is read.
+    #[test]
+    fn a_relation_alpm_types_cannot_compare_is_refused() {
+        let big = "99999999999999999999";
+        for section in ["DEPENDS", "PROVIDES", "CONFLICTS", "REPLACES"] {
+            let text = format!("%{section}%\nfoo>={big}\n");
+            for mode in [Depends::Eager, Depends::Deferred] {
+                let refused = match scan(&text, mode, None, |_| Ok(())) {
+                    Err(_) => true,
+                    Ok(relations) => parse_depends(&text, &relations.depends_text).is_err(),
+                };
+                assert!(refused, "{section} {mode:?}");
+            }
         }
     }
 

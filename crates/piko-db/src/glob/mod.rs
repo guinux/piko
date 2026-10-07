@@ -211,6 +211,21 @@ mod tests {
             ("[[=a=]]", "a", true),
             ("[[.a.]]", "a", true),
             ("[[.ab.]]", "a", false),
+            // A range compares collation sequence values, which `C.UTF-8` gives to the
+            // characters below U+0100 only. A character past that is in no range, and a range
+            // that ends past it holds its first character only.
+            ("[à-ê]", "é", true),
+            ("[Ā-ʒ]", "ɐ", false),
+            ("[!Ā-ʒ]", "ɐ", true),
+            ("[ʒ-ʒ]", "ʒ", false),
+            ("[é-ʒ]", "ö", false),
+            ("[é-ʒ]", "é", true),
+            ("[a-[.ʒ.]]", "b", false),
+            // For a character with no value, glibc reads on past the `-` before it reads the
+            // range's end. The `]` of a `[.z.]` end then closes the expression.
+            ("[!a-[.z.]]", "ɐ", false),
+            ("[!a-[.z.]]", "ɐ]", true),
+            ("[!a-[.z.]]", "é", true),
             // A text glibc's wide reading refuses is read again byte by byte.
             ("?", "é", true),
             ("??", "é", true),

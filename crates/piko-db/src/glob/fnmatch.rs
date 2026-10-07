@@ -32,7 +32,10 @@
 //! `en_US.UTF-8`, `[a-z]` matches `é`, and `[a-Z]` is a valid range. A pattern in `pacman.conf` or
 //! in a hook decides what a transaction does, and the same configuration must decide the same
 //! thing for every user. This module answers as glibc answers in `C.UTF-8`. A range compares
-//! code points. A character class follows the character's Unicode properties, which glibc's
+//! collation sequence values, and `C.UTF-8` gives one only to the characters below U+0100, equal
+//! to the code point. A character past that is in no range, and a range that ends past it holds
+//! its first character only (see `range_tail`). A byte always has a value, equal to the byte.
+//! A character class follows the character's Unicode properties, which glibc's
 //! `C.UTF-8` tables are generated from. For ASCII the classes are exact. The `combining` class,
 //! which only `C.UTF-8` and the locales built on it define, is not known here, so a pattern that
 //! names it matches nothing.
@@ -132,6 +135,9 @@ trait Text {
     fn end(&self) -> usize;
     /// Whether `unit` belongs to `class`: `iswctype` or `_ISCTYPE`.
     fn in_class(class: Class, unit: u32) -> bool;
+    /// The collation sequence value of `unit`, which a range compares, or `None` when the locale
+    /// gives it none: `__collseq_table_lookup` in the wide version, `collseq[]` in the byte one.
+    fn collation_sequence(unit: u32) -> Option<u32>;
 }
 
 /// The text by character, as glibc's wide version reads it. A position is a byte offset.
@@ -153,6 +159,12 @@ impl Text for Wide<'_> {
 
     fn in_class(class: Class, unit: u32) -> bool {
         char::from_u32(unit).is_some_and(|c| class.contains(c))
+    }
+
+    /// `C.UTF-8`'s wide table holds the characters below U+0100 only, each valued at its code
+    /// point. Measured with glibc 2.44 over every code point.
+    fn collation_sequence(unit: u32) -> Option<u32> {
+        (unit < 0x100).then_some(unit)
     }
 }
 
@@ -176,6 +188,11 @@ impl Text for Narrow<'_> {
     /// class.
     fn in_class(class: Class, unit: u32) -> bool {
         u8::try_from(unit).is_ok_and(|byte| byte.is_ascii() && class.contains(char::from(byte)))
+    }
+
+    /// `C.UTF-8`'s byte table values every byte at the byte itself.
+    fn collation_sequence(unit: u32) -> Option<u32> {
+        Some(unit)
     }
 }
 
@@ -438,17 +455,17 @@ fn bracket<T: Text>(pattern: &[u32], mut p: usize, current: u32) -> Bracket {
             if unit(pattern, p) == NUL {
                 return Bracket::Fail;
             }
-            normal_member(pattern, unit(pattern, p), p.saturating_add(1), current)
+            normal_member::<T>(pattern, unit(pattern, p), p.saturating_add(1), current)
         } else if c == OPEN && unit(pattern, p) == COLON {
             class_member::<T>(pattern, p, current)
         } else if c == OPEN && unit(pattern, p) == EQUALS {
-            equivalence_member(pattern, p, current)
+            equivalence_member::<T>(pattern, p, current)
         } else if c == NUL {
             return Bracket::Literal;
         } else if c == OPEN && unit(pattern, p) == DOT {
-            collating_member(pattern, p, current)
+            collating_member::<T>(pattern, p, current)
         } else {
-            normal_member(pattern, c, p, current)
+            normal_member::<T>(pattern, c, p, current)
         };
 
         match member {
@@ -483,7 +500,7 @@ fn class_member<T: Text>(pattern: &[u32], open: usize, current: u32) -> Member {
             break;
         }
         if !(LOWER_A..LOWER_Z).contains(&c) {
-            return normal_member(pattern, OPEN, open, current);
+            return normal_member::<T>(pattern, OPEN, open, current);
         }
         name.push(c);
     }
@@ -495,13 +512,13 @@ fn class_member<T: Text>(pattern: &[u32], open: usize, current: u32) -> Member {
 }
 
 /// `[=c=]`, with `p` on the first `=`. In a locale with no collation rules, it names `c`.
-fn equivalence_member(pattern: &[u32], open: usize, current: u32) -> Member {
+fn equivalence_member<T: Text>(pattern: &[u32], open: usize, current: u32) -> Member {
     let named = unit(pattern, open.saturating_add(1));
     if named == NUL
         || unit(pattern, open.saturating_add(2)) != EQUALS
         || unit(pattern, open.saturating_add(3)) != CLOSE
     {
-        return normal_member(pattern, OPEN, open, current);
+        return normal_member::<T>(pattern, OPEN, open, current);
     }
     let p = open.saturating_add(4);
     if current == named {
@@ -512,7 +529,7 @@ fn equivalence_member(pattern: &[u32], open: usize, current: u32) -> Member {
 
 /// `[.c.]`, with `p` on the first `.`. In a locale with no collation rules, only a symbol of
 /// one character exists. It can start a range.
-fn collating_member(pattern: &[u32], open: usize, current: u32) -> Member {
+fn collating_member<T: Text>(pattern: &[u32], open: usize, current: u32) -> Member {
     let Some((symbol, mut p)) = collating_symbol(pattern, open) else { return Member::Fail };
     let is_range = unit(pattern, p) == DASH && unit(pattern, p.saturating_add(1)) != NUL;
     if !is_range && current == symbol {
@@ -520,7 +537,7 @@ fn collating_member(pattern: &[u32], open: usize, current: u32) -> Member {
     }
     let c = unit(pattern, p);
     p = p.saturating_add(1);
-    range_tail(pattern, symbol, c, p, current)
+    range_tail::<T>(pattern, symbol, c, p, current)
 }
 
 /// Reads `[.c.]` with `open` on the first `.`: the one character it names, and the position
@@ -543,24 +560,42 @@ fn collating_symbol(pattern: &[u32], open: usize) -> Option<(u32, usize)> {
 }
 
 /// glibc's `normal_bracket`: the member `c`, read just before `p`, which can start a range.
-fn normal_member(pattern: &[u32], c: u32, p: usize, current: u32) -> Member {
+fn normal_member<T: Text>(pattern: &[u32], c: u32, p: usize, current: u32) -> Member {
     let after = unit(pattern, p.saturating_add(1));
     let is_range = unit(pattern, p) == DASH && after != NUL && after != CLOSE;
     if !is_range && c == current {
         return Member::Matched(p);
     }
     let next = unit(pattern, p);
-    range_tail(pattern, c, next, p.saturating_add(1), current)
+    range_tail::<T>(pattern, c, next, p.saturating_add(1), current)
 }
 
 /// Reads a range from `cold` when `c` is a `-` that does not end the expression. `p` follows
 /// `c`.
-fn range_tail(pattern: &[u32], cold: u32, c: u32, mut p: usize, current: u32) -> Member {
+///
+/// glibc compares collation sequence values, not characters, in three steps:
+///
+/// 1. It looks up `current` before it reads the end of the range. A unit with no value is in no
+///    range, and glibc goes on from the unit after the one that follows the `-`. So a `[.c.]` end
+///    is not read as one: its `.`, `c` and `.` become members, and its `]` closes the expression.
+///    A `\` end escapes nothing either.
+/// 2. A range whose start has no value holds nothing.
+/// 3. A range whose end has no value holds its start only.
+///
+/// When the `-` is the last unit of the pattern and `current` has no value, glibc reads past the
+/// end of the pattern. This refuses the match instead, as glibc does for a unit that has one.
+fn range_tail<T: Text>(pattern: &[u32], cold: u32, c: u32, mut p: usize, current: u32) -> Member {
     if c != DASH || unit(pattern, p) == CLOSE {
         return Member::Next { c, p };
     }
     let mut cend = unit(pattern, p);
     p = p.saturating_add(1);
+    let Some(fcollseq) = T::collation_sequence(current) else {
+        if cend == NUL {
+            return Member::Fail;
+        }
+        return Member::Next { c: unit(pattern, p), p: p.saturating_add(1) };
+    };
     if cend == OPEN && unit(pattern, p) == DOT {
         let Some((symbol, after)) = collating_symbol(pattern, p) else { return Member::Fail };
         cend = symbol;
@@ -574,7 +609,12 @@ fn range_tail(pattern: &[u32], cold: u32, c: u32, mut p: usize, current: u32) ->
             return Member::Fail;
         }
     }
-    if cold <= current && current <= cend {
+    let matched = match (T::collation_sequence(cold), T::collation_sequence(cend)) {
+        (None, _) => false,
+        (Some(lcollseq), None) => lcollseq == fcollseq,
+        (Some(lcollseq), Some(hcollseq)) => lcollseq <= fcollseq && fcollseq <= hcollseq,
+    };
+    if matched {
         return Member::Matched(p);
     }
     Member::Next { c: unit(pattern, p), p: p.saturating_add(1) }

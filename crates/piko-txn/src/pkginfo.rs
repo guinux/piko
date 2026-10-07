@@ -19,6 +19,7 @@ use alpm_types::{
     Architecture, ExtraData, ExtraDataEntry, FullVersion, Group, InstalledSize, License, Name,
     OptionalDependency, PackageDescription, PackageRelation, RelationOrSoname,
 };
+use piko_db::comparable::Comparable;
 use piko_db::{desc_compat::UNKNOWN_PACKAGER, meta::kv::Pairs};
 
 /// Every key of the `PKGINFOv1` and `PKGINFOv2` specifications, and `basever`, which libalpm
@@ -279,7 +280,7 @@ pub fn parse(raw: &str) -> Result<PkgInfo, PkgInfoError> {
     }
     let read = Read { values };
 
-    Ok(PkgInfo {
+    let info = PkgInfo {
         name: read.required("pkgname")?,
         version: read.required("pkgver")?,
         architecture: read.required("arch")?,
@@ -300,7 +301,26 @@ pub fn parse(raw: &str) -> Result<PkgInfo, PkgInfoError> {
         xdata: read.xdata(),
         unknown,
         unknown_dropped,
-    })
+    };
+    check_comparable(&info)?;
+    Ok(info)
+}
+
+/// Refuses a `pkgver`, or a version in a relation that decides something, that `alpm-types`
+/// cannot compare: see [`piko_db::comparable`].
+fn check_comparable(info: &PkgInfo) -> Result<(), PkgInfoError> {
+    fn check<T: Comparable + Display>(key: &'static str, value: &T) -> Result<(), PkgInfoError> {
+        value.check_comparable().map_err(|reason| PkgInfoError::Invalid {
+            key,
+            value: value.to_string(),
+            reason: reason.to_string(),
+        })
+    }
+    check("pkgver", &info.version)?;
+    info.depends.iter().try_for_each(|value| check("depend", value))?;
+    info.provides.iter().try_for_each(|value| check("provides", value))?;
+    info.conflicts.iter().try_for_each(|value| check("conflict", value))?;
+    info.replaces.iter().try_for_each(|value| check("replaces", value))
 }
 
 /// The `pkgname` and `pkgver` of a `.PKGINFO`.
@@ -464,6 +484,22 @@ mod tests {
         assert!(info.xdata.values.is_empty());
         assert!(info.invalid_fields().is_empty());
         assert!(info.unknown.is_empty());
+    }
+
+    /// A version `alpm-types` cannot compare refuses the package, in `pkgver` or in a
+    /// relation: the plan check and the solver compare both.
+    #[test]
+    fn a_version_alpm_types_cannot_compare_is_refused() {
+        let base = pkginfo("Jane Doe <jane@example.org>");
+        let big = "99999999999999999999";
+        for (from, to) in [
+            ("pkgver = 1.0.0-1", format!("pkgver = {big}-1")),
+            ("depend = bar>=2", format!("depend = bar>={big}")),
+            ("depend = libbaz.so=1-64", format!("depend = libbaz.so={big}-64")),
+        ] {
+            let raw = base.replace(from, &to);
+            assert!(matches!(parse(&raw), Err(PkgInfoError::Invalid { .. })), "{to}");
+        }
     }
 
     /// Each `backup` value is kept as written, in text order, white space included: it is

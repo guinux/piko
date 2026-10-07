@@ -414,7 +414,8 @@ fn read_member(
         max: limits.repo_entry_bytes,
     };
 
-    if entry.header().size().map_err(classify)? > limits.repo_entry_bytes {
+    let declared = entry.header().size().map_err(classify)?;
+    if declared > limits.repo_entry_bytes {
         return Err(too_large());
     }
     let mut buf = Vec::new();
@@ -422,8 +423,18 @@ fn read_member(
         .take(limits.repo_entry_bytes.saturating_add(1))
         .read_to_end(&mut buf)
         .map_err(classify)?;
-    if u64::try_from(buf.len()).unwrap_or(u64::MAX) > limits.repo_entry_bytes {
+    let read = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+    if read > limits.repo_entry_bytes {
         return Err(too_large());
+    }
+    // `tar` reads a member through a `Take` over the stream, so an archive cut inside a member
+    // ends it early with no error. `walk` then fails on the next header, but `walk_matching`
+    // stops once it has every member it wants, and would return what is left of a cut one.
+    if read < declared {
+        return Err(classify(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the archive ends inside a member",
+        )));
     }
     String::from_utf8(buf)
         .map_err(|error| Error::NotUtf8 { path: path.to_path_buf(), source: error.utf8_error() })
@@ -821,6 +832,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(found, [("foo-1.0.0-1".to_owned(), "%FILES%\nusr/bin/foo\n".to_owned())]);
+    }
+
+    /// A wanted member cut by the end of the file is an error, not a shorter file list. The walk
+    /// stops after its last wanted member, so it never reads the header that would fail.
+    #[test]
+    fn walk_matching_refuses_a_wanted_member_cut_by_the_end_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = format!("%FILES%\n{}", "usr/bin/foo\n".repeat(200));
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(list.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, "foo-1.0.0-1/files", list.as_bytes()).unwrap();
+        let bytes = builder.into_inner().unwrap();
+        let path = write_archive(dir.path(), "core.files", bytes.get(..1500).unwrap());
+
+        let foo = name("foo");
+        let wanted: HashSet<&Name> = std::iter::once(&foo).collect();
+        let mut found = Vec::new();
+        let outcome = walk_matching(&path, &Limits::default(), &wanted, |entry, text| {
+            found.push((entry, text));
+            Ok(())
+        });
+
+        assert!(outcome.is_err(), "a cut member was read as {found:?}");
+        assert!(found.is_empty());
     }
 
     #[test]

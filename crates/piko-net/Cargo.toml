@@ -16,6 +16,10 @@ workspace = true
 name = "sandbox"
 harness = false
 
+[features]
+# Exposes the download helper's protocol to the fuzz targets in `fuzz/`. Not a stable API.
+fuzzing = []
+
 [dependencies]
 # `PackageFileName`, for naming a package download.
 alpm-types.workspace = true

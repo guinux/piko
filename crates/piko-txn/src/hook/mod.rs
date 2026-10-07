@@ -460,7 +460,8 @@ fn unsatisfied_dependency(local: &LocalDatabase, hook: &Hook) -> Option<String> 
     hook.depends
         .iter()
         .find(|entry| {
-            let Ok(relation) = entry.parse::<alpm_types::PackageRelation>() else {
+            let Ok(relation) = piko_db::comparable::parse::<alpm_types::PackageRelation>(entry)
+            else {
                 return true;
             };
             !matches!(piko_db::resolve::installed_satisfier(local, &relation), Ok(Some(_)))

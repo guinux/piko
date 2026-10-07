@@ -43,6 +43,9 @@
 //! the firewall through the netlink socket its resolver needs.
 
 mod confine;
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
 pub(crate) mod protocol;
 
 use std::{

@@ -116,7 +116,7 @@ pub fn resolve_and_print(
         return ExitCode::FAILURE;
     }
 
-    let Ok(dep) = target.parse::<alpm_types::RelationOrSoname>() else {
+    let Ok(dep) = piko_db::comparable::parse::<alpm_types::RelationOrSoname>(target) else {
         eprintln!("Error: {target} is not a valid dependency string");
         return ExitCode::FAILURE;
     };

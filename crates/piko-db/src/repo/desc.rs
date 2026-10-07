@@ -21,7 +21,7 @@ use crate::{
     desc_compat::UnknownSection,
     eager::DescFieldError,
     meta::{
-        desc::{Index, PackagerField, UrlField, number, typed},
+        desc::{Index, PackagerField, UrlField, number, typed, typed_comparable},
         section::Sections,
     },
 };
@@ -97,7 +97,7 @@ impl RepoDesc {
         let desc = Self {
             file_name: index.required("FILENAME", typed("FILENAME"))?,
             name: index.required("NAME", typed("NAME"))?,
-            version: index.required("VERSION", typed("VERSION"))?,
+            version: index.required("VERSION", typed_comparable("VERSION"))?,
             architecture: index.required("ARCH", typed("ARCH"))?,
             sha256: index.required("SHA256SUM", typed("SHA256SUM"))?,
             pgp_signature,
@@ -107,9 +107,9 @@ impl RepoDesc {
             packager: PackagerField::read(&index),
             build_date: index.required("BUILDDATE", number("BUILDDATE")),
             licenses: index.list("LICENSE", typed("LICENSE")),
-            optional_depends: index.list("OPTDEPENDS", typed("OPTDEPENDS")),
-            make_depends: index.list("MAKEDEPENDS", typed("MAKEDEPENDS")),
-            check_depends: index.list("CHECKDEPENDS", typed("CHECKDEPENDS")),
+            optional_depends: index.list("OPTDEPENDS", typed_comparable("OPTDEPENDS")),
+            make_depends: index.list("MAKEDEPENDS", typed_comparable("MAKEDEPENDS")),
+            check_depends: index.list("CHECKDEPENDS", typed_comparable("CHECKDEPENDS")),
             md5,
         };
         Ok((desc, index.unknown))

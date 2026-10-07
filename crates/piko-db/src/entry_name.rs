@@ -130,7 +130,7 @@ impl EntryName {
         let name = name_str
             .parse::<Name>()
             .map_err(|source| EntryNameError::InvalidName { name: name_str.to_owned(), source })?;
-        let version = version_str.parse::<FullVersion>().map_err(|source| {
+        let version = crate::comparable::parse::<FullVersion>(version_str).map_err(|source| {
             EntryNameError::InvalidVersion { version: version_str.to_owned(), source }
         })?;
 

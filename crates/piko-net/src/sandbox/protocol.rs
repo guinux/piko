@@ -127,6 +127,13 @@ impl Request {
         if text.len() as u64 > MAX_REQUEST {
             return Err("the request is too large".to_owned());
         }
+        // A line ends at a line feed alone, as `encode` writes it. A carriage return is refused
+        // rather than read as part of a line ending: the parent never sends one, and `lines`
+        // would remove it from a field, so the field would decode to a value the parent did not
+        // encode.
+        if text.contains('\r') {
+            return Err("the request contains a carriage return".to_owned());
+        }
 
         let mut lines = text.lines();
         let mut next =
@@ -405,6 +412,8 @@ mod tests {
             text.replace("piko-fetch 1", "piko-fetch 2"),
             text.replace("\n60\n", "\nsixty\n"),
             text.replace("53,443", "53,70000"),
+            text.replace('\n', "\r\n"),
+            text.replace("GMT", "GMT\r"),
             "piko-fetch 1\n".to_owned(),
             "x".repeat((MAX_REQUEST as usize).saturating_add(1)),
         ] {

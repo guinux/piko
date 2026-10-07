@@ -378,7 +378,8 @@ fn walk_members(
         };
         // A callback reads the member through the bounded reader, so its error can be a bound
         // that tripped. The budget says which, as it does for the walk's own reads.
-        match on_member(&member, &mut entry) {
+        let mut contents = Contents { entry: &mut entry, remaining: member.size };
+        match on_member(&member, &mut contents) {
             Ok(Flow::Continue) => {}
             Ok(Flow::Stop) => break,
             Err(error) => return Err(tripped_limit(path, &budget, limits).unwrap_or(error)),
@@ -386,6 +387,33 @@ fn walk_members(
     }
 
     Ok(())
+}
+
+/// A member's contents, which fail rather than end before the size its header declares.
+///
+/// `tar` reads a member through a `Take` over the stream, so an archive cut inside a member
+/// ends that member early, with no error. The walk then fails on the next header, but only if
+/// it reads one. A caller that stops at this member never does: `load_pkginfo` stops after
+/// `.PKGINFO`, and would parse what is left of a cut one. libarchive refuses a cut member
+/// when its data is read ("Truncated tar archive").
+struct Contents<'a, R: Read> {
+    entry: &'a mut R,
+    /// What the header declares and has not been read yet.
+    remaining: u64,
+}
+
+impl<R: Read> Read for Contents<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.entry.read(buffer)?;
+        if read == 0 && self.remaining > 0 && !buffer.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the archive ends inside this member",
+            ));
+        }
+        self.remaining = self.remaining.saturating_sub(to_u64(read));
+        Ok(read)
+    }
 }
 
 /// What a member type piko refuses is called, or `None` for the four types it extracts.
@@ -715,6 +743,28 @@ mod tests {
         })
         .unwrap();
         found
+    }
+
+    /// A member cut short by the end of the file fails when it is read, so a caller that
+    /// stops at that member does not take what is left of it for the whole.
+    #[test]
+    fn a_member_cut_by_the_end_of_the_file_fails_when_it_is_read() {
+        let path = tarball(|builder| {
+            file_entry(builder, ".PKGINFO", &[b'x'; 2000], 0o644);
+        });
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, bytes.get(..1500).unwrap()).unwrap();
+
+        let mut read = None;
+        let outcome = walk_until(&path, &PackageLimits::default(), |_, contents| {
+            let mut buffer = Vec::new();
+            read = Some(contents.read_to_end(&mut buffer).map(|_| buffer.len()));
+            Ok(Flow::Stop)
+        });
+
+        assert!(outcome.is_ok());
+        let error = read.unwrap().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     #[test]

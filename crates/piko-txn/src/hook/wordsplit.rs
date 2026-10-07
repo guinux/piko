@@ -6,6 +6,9 @@
 //! not in the `../libalpm` reference copy alongside `hook.c`. This module transcribes its
 //! algorithm, plus the rules that are not obvious from the one-line summary:
 //!
+//! - **Whitespace is ASCII whitespace.** `wordsplit` tests each byte with `isspace`, which in a
+//!   UTF-8 locale is true for space, `\t`, `\n`, `\v`, `\f` and `\r` only. A no-break space
+//!   or any other Unicode space is an ordinary character.
 //! - **Quotes are word-internal, not word-forming.** `a"b c"d` is the single word `ab cd`, not
 //!   three words. The scan looks for the next unquoted whitespace. A quoted run is stepped
 //!   over as part of whatever word it sits in.
@@ -13,8 +16,10 @@
 //!   shell-style "single quotes are literal, double quotes expand" distinction. No
 //!   variables, no globs, no tilde. A hook that wants any of those runs a shell. Every
 //!   `Exec = /bin/sh -c '…'` on a real system does exactly that.
-//! - **Inside a quoted run, `\` escapes only that run's quote character.** Everywhere else a
-//!   backslash is an ordinary character. `C:\path` needs no doubling.
+//! - **A `\` escapes a quote character, and nothing else.** Inside a quoted run, it escapes
+//!   only that run's quote. Outside one, it escapes either quote, which is then an ordinary
+//!   character: `a\'b` is the word `a'b`. Before any other character, a backslash is an
+//!   ordinary character. `C:\path` needs no doubling.
 //! - **An unbalanced quote is an error**, not a word running to the end of the line.
 //!
 //! This is validated against every `.hook` installed on a real Arch system — see
@@ -60,10 +65,22 @@ pub fn split(value: &str) -> Result<Vec<OsString>, SplitError> {
     Ok(words)
 }
 
+/// Whether `c` separates words: what glibc's `isspace` answers in a UTF-8 locale.
+///
+/// [`char::is_ascii_whitespace`] leaves out the vertical tab, which `isspace` includes.
+const fn is_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\u{b}' | '\u{c}' | '\r')
+}
+
+/// Whether `c` opens a quoted run, or is escaped by a `\` before it.
+const fn is_quote(c: char) -> bool {
+    matches!(c, '\'' | '"')
+}
+
 /// The index of the first non-whitespace character at or after `from`.
 fn skip_whitespace(characters: &[char], from: usize) -> usize {
     let mut index = from;
-    while characters.get(index).is_some_and(|c| c.is_whitespace()) {
+    while characters.get(index).is_some_and(|&c| is_space(c)) {
         index = index.saturating_add(1);
     }
     index
@@ -77,11 +94,17 @@ fn read_word(characters: &[char], from: usize) -> Result<(String, usize), SplitE
     let mut index = from;
 
     while let Some(&current) = characters.get(index) {
-        if current.is_whitespace() {
+        if is_space(current) {
             break;
         }
-        if current == '\'' || current == '"' {
+        if is_quote(current) {
             index = read_quoted(characters, index, current, &mut word)?;
+        } else if let Some(&quote) = characters
+            .get(index.saturating_add(1))
+            .filter(|&&next| current == '\\' && is_quote(next))
+        {
+            word.push(quote);
+            index = index.saturating_add(2);
         } else {
             word.push(current);
             index = index.saturating_add(1);
@@ -173,12 +196,33 @@ mod tests {
         assert_eq!(words(r#"/bin/echo "say \"hi\"""#), ["/bin/echo", r#"say "hi""#]);
     }
 
-    /// A backslash is an ordinary character outside a quoted run, and inside one before
-    /// anything but the closing quote. A Windows-style path needs no doubling.
+    /// A backslash is an ordinary character before anything but a quote. A Windows-style path
+    /// needs no doubling.
     #[test]
     fn a_backslash_is_otherwise_literal() {
         assert_eq!(words(r"/bin/echo a\b"), ["/bin/echo", r"a\b"]);
         assert_eq!(words(r#"/bin/echo "a\b""#), ["/bin/echo", r"a\b"]);
+        assert_eq!(words(r#"/bin/echo 'a\"b'"#), ["/bin/echo", r#"a\"b"#]);
+        assert_eq!(words(r"/bin/echo a\"), ["/bin/echo", r"a\"]);
+    }
+
+    /// Outside a quoted run, a backslash makes either quote an ordinary character, as
+    /// `wordsplit` does.
+    #[test]
+    fn a_backslash_escapes_a_quote_outside_a_quoted_run() {
+        assert_eq!(words(r"/bin/echo a\'b"), ["/bin/echo", "a'b"]);
+        assert_eq!(words(r#"/bin/echo \"a b"#), ["/bin/echo", "\"a", "b"]);
+        // A backslash does not escape a backslash, so the second one escapes the quote, and
+        // the last quote is left open.
+        assert_eq!(words(r"/bin/echo \\'a"), ["/bin/echo", r"\'a"]);
+        assert!(matches!(split(r#"/bin/echo \\"a b""#), Err(SplitError::UnbalancedQuote { .. })));
+    }
+
+    /// `wordsplit` tests each byte with `isspace`, so only ASCII whitespace separates words.
+    #[test]
+    fn only_ascii_whitespace_separates_words() {
+        assert_eq!(words("a\u{b}b\u{c}c\rd"), ["a", "b", "c", "d"]);
+        assert_eq!(words("a\u{a0}b c\u{2003}d"), ["a\u{a0}b", "c\u{2003}d"]);
     }
 
     /// This is refused rather than silently reinterpreted as a word running to end of line. A

@@ -246,6 +246,20 @@ fn a_character_past_ascii_matches_as_fnmatch_does() {
             pairs.push((range.to_owned(), character.to_owned()));
         }
     }
+    // A range compares collation sequence values, and `C.UTF-8` gives none to a character past
+    // U+00FF. Each start, end and text below is on one side of that bound or the other.
+    let starts = ["a", "é", "ÿ", "Ā", "ʒ", "[.a.]", "[.Ā.]"];
+    let ends = ["z", "ö", "ÿ", "Ā", "ʒ", "[.z.]", "[.ʒ.]", "\\]", "\\ʒ"];
+    let texts = ["b", "a", "é", "ö", "ÿ", "Ā", "ɐ", "ʒ", "z", "]", ".", "ɐ]", "ɐ.", "ɐz]", "é]"];
+    for start in starts {
+        for end in ends {
+            for negation in ["", "!"] {
+                for text in texts {
+                    pairs.push((format!("[{negation}{start}-{end}]"), text.to_owned()));
+                }
+            }
+        }
+    }
     assert_agrees(&pairs);
 }
 

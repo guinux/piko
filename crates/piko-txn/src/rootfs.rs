@@ -54,6 +54,11 @@ pub enum UnsafePath {
     CurrentDirectory,
     /// The path is empty.
     Empty,
+    /// The path is made of white space only.
+    ///
+    /// The local database's `files` reader refuses such a line, so a package that installed
+    /// one could not be read back, upgraded or removed.
+    Blank,
     /// A component contains a byte the kernel cannot accept in a file name.
     InvalidComponent,
 }
@@ -65,6 +70,7 @@ impl std::fmt::Display for UnsafePath {
             Self::ParentTraversal => "the path contains a '..' component",
             Self::CurrentDirectory => "the path contains a '.' component or a repeated separator",
             Self::Empty => "the path is empty",
+            Self::Blank => "the path is made of white space only",
             Self::InvalidComponent => "a component is not a usable file name",
         })
     }
@@ -87,8 +93,8 @@ impl std::fmt::Display for UnsafePath {
 ///
 /// # Errors
 ///
-/// [`Error::UnsafeArchivePath`] if the path is absolute or empty, holds a `.` or `..`
-/// component or a repeated separator, or holds a NUL byte.
+/// [`Error::UnsafeArchivePath`] if the path is absolute, empty or made of white space only,
+/// holds a `.` or `..` component or a repeated separator, or holds a NUL byte.
 pub fn components(relative: &Path) -> Result<Vec<&OsStr>> {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -100,6 +106,10 @@ pub fn components(relative: &Path) -> Result<Vec<&OsStr>> {
     }
     if bytes.first() == Some(&b'/') {
         return refuse(UnsafePath::Absolute);
+    }
+    // The same test as the `files` reader's, on the same text, so the rule cannot drift.
+    if std::str::from_utf8(bytes).is_ok_and(|text| text.trim().is_empty()) {
+        return refuse(UnsafePath::Blank);
     }
     let body = bytes.strip_suffix(b"/").unwrap_or(bytes);
 
@@ -477,6 +487,17 @@ mod tests {
     #[test]
     fn refuses_an_empty_path() {
         assert_eq!(refused(""), UnsafePath::Empty);
+    }
+
+    /// The `files` reader refuses such a line, so a package must not install one.
+    #[test]
+    fn refuses_a_path_of_white_space_only() {
+        for path in [" ", "  ", "\u{b}", "\t", "\u{3000}"] {
+            assert_eq!(refused(path), UnsafePath::Blank, "{path:?}");
+        }
+        for path in ["a b", "usr/ ", " a"] {
+            assert!(components(Path::new(path)).is_ok(), "{path:?}");
+        }
     }
 
     #[test]

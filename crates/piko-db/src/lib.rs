@@ -67,6 +67,7 @@ pub mod local;
 pub mod repo;
 
 // Vocabulary and machinery both of them share.
+pub mod comparable;
 pub mod compression;
 pub mod config;
 pub mod desc_compat;

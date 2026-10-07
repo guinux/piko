@@ -589,7 +589,7 @@ pub fn resolve_targets(
     let mut ignored: Vec<IgnoredTarget> = expanded.ignored;
     let mut groups: Vec<GroupTarget> = Vec::new();
     for target in &expanded.names {
-        let Ok(dep) = target.parse::<alpm_types::RelationOrSoname>() else {
+        let Ok(dep) = crate::comparable::parse::<alpm_types::RelationOrSoname>(target) else {
             return Err(TargetResolutionFailure::InvalidDependencyString(target.clone()));
         };
         if let Some(id) = resolve_target(universe, &dep) {

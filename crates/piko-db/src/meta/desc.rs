@@ -225,6 +225,27 @@ where
     }
 }
 
+/// [`typed`], for a value that holds a version: one `alpm-types` cannot compare is refused too.
+/// See [`crate::comparable`].
+///
+/// # Errors
+///
+/// [`DescFieldError::InvalidEntry`], naming `section` and the value.
+pub(crate) fn typed_comparable<T>(
+    section: &'static str,
+) -> impl Fn(&str) -> Result<T, DescFieldError>
+where
+    T: FromStr<Err = alpm_types::Error> + crate::comparable::Comparable,
+{
+    move |value| {
+        crate::comparable::parse::<T>(value).map_err(|source| DescFieldError::InvalidEntry {
+            section,
+            value: value.to_owned(),
+            source,
+        })
+    }
+}
+
 /// Converts `value` with a parser whose error is not an `alpm-types` one, such as a keyword
 /// list.
 ///

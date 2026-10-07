@@ -351,7 +351,8 @@ fn canonical_order(a: &str, b: &str) -> std::cmp::Ordering {
 /// Checks each `%FILES%` line, and sorts them by [`Path`]'s order.
 ///
 /// A path must be relative. A line of white space only is refused: no package ships a file
-/// with such a name, and a writer that emits one has lost the name.
+/// with such a name, and a writer that emits one has lost the name. Extraction refuses a member
+/// with such a path (`piko_txn::rootfs::components`), so piko never records one.
 fn sorted_paths(files: Option<Section<'_>>) -> Result<Sorted<'_>, FilesError> {
     let mut paths = Vec::new();
     let mut canonical = true;
@@ -687,6 +688,12 @@ mod tests {
         let cases = [
             ("%FILES%\n/etc/\n", "absolute"),
             ("%FILES%\n  \n", "white space"),
+            ("%FILES%\n\u{b}\n", "a vertical tab"),
+            ("%FILES%\n\u{3000}\n", "an ideographic space"),
+            (
+                "%FILES%\netc/\n\n%BACKUP%\n \td41d8cd98f00b204e9800998ecf8427e\n",
+                "a blank backup path",
+            ),
             ("%FILES%\netc/\n\nusr/\n", "stray"),
             ("%FILES%\netc/\n\n%FILES%\nusr/\n", "duplicate section"),
             ("%FILES%\netc/\n\n%OTHER%\nx\n", "unknown section"),
