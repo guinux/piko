@@ -11,6 +11,7 @@ members = [
 ]
 
 [workspace.package]
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0 OR MIT"
@@ -102,12 +103,12 @@ signal-hook = "0.4"
 # CLI-only ANSI styling for the transaction progress display.
 console = "0.16"
 
-piko-db = { path = "crates/piko-db", version = "0.1.0" }
-piko-db-write = { path = "crates/piko-db-write", version = "0.1.0" }
-piko-net = { path = "crates/piko-net", version = "0.1.0" }
-piko-sig = { path = "crates/piko-sig", version = "0.1.0" }
-piko-sig-write = { path = "crates/piko-sig-write", version = "0.1.0" }
-piko-txn = { path = "crates/piko-txn", version = "0.1.0" }
+piko-db = { path = "crates/piko-db", version = "0.9.0" }
+piko-db-write = { path = "crates/piko-db-write", version = "0.9.0" }
+piko-net = { path = "crates/piko-net", version = "0.9.0" }
+piko-sig = { path = "crates/piko-sig", version = "0.9.0" }
+piko-sig-write = { path = "crates/piko-sig-write", version = "0.9.0" }
+piko-txn = { path = "crates/piko-txn", version = "0.9.0" }
 
 [profile.release]
 # A package manager runs as root; keep overflow checks on in release builds.

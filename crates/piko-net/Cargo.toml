@@ -1,6 +1,6 @@
 [package]
 name = "piko-net"
-version = "0.1.0"
+version.workspace = true
 description = "Downloading and refreshing repository databases"
 edition.workspace = true
 rust-version.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "piko-db-write"
-version = "0.1.0"
+version.workspace = true
 description = "Writer for the alpm-db local package database: the db.lck lock and atomic entry writes"
 edition.workspace = true
 rust-version.workspace = true

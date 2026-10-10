@@ -1,6 +1,6 @@
 [package]
 name = "piko"
-version = "0.1.0"
+version.workspace = true
 description = "A simple, secure ALPM package manager"
 edition.workspace = true
 rust-version.workspace = true

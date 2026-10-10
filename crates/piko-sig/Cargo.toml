@@ -1,6 +1,6 @@
 [package]
 name = "piko-sig"
-version = "0.1.0"
+version.workspace = true
 description = "OpenPGP signature verification for piko, against a GnuPG keyring"
 edition.workspace = true
 rust-version.workspace = true

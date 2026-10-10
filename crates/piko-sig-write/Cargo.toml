@@ -1,6 +1,6 @@
 [package]
 name = "piko-sig-write"
-version = "0.1.0"
+version.workspace = true
 description = "Administers a GnuPG keyring for ALPM signature trust: init, import, local signing, ownertrust"
 edition.workspace = true
 rust-version.workspace = true
