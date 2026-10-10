@@ -561,12 +561,15 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
 /// This keeps at most two rows alive at once: one package-or-hook row, and one nested scriptlet
 /// row. Each finished item becomes an ordinary printed line instead, through
 /// [`StepList::suspend`]. See this module's doc comment for why no row is ever kept.
+///
+/// Consecutive installs are extracted first and finished together, after one flush. So a
+/// package row closes when the next package starts, or when the flush starts. The flush gets a
+/// row of its own, and each package's result is printed as its step finishes.
 pub(crate) struct CommitDriver<'a, W> {
     steplist: &'a StepList,
     out: &'a mut W,
-    /// The currently running package-or-hook row. At most one at a time:
-    /// `commit_with_progress` emits step and hook events strictly one after another, never
-    /// interleaved.
+    /// The currently running package, flush or hook row. At most one at a time: a new one
+    /// closes the one before it. Hooks run outside the steps, so no step row is open then.
     current: Option<OpenRow>,
     /// As `current`, for the nested "Running … script" row. Opens and closes at most twice
     /// within a package row's lifetime (once per scriptlet function), never overlapping
@@ -608,8 +611,20 @@ impl<'a, W: std::io::Write> CommitDriver<'a, W> {
             E::ScriptletOutputLine { line, .. } => self.print_line(line),
             E::ScriptletFinished { .. } => self.close(|driver| &mut driver.scriptlet),
             E::StepStarted { index, total, step, replaces } => {
+                // The package before it is extracted, and waits for the flush of its group.
+                self.close(|driver| &mut driver.current);
                 let text = describe_step(step, replaces);
                 self.current = Some(self.open_counted(&text, index, total));
+            }
+            E::FlushStarted { steps } => {
+                self.close(|driver| &mut driver.current);
+                let text = if steps == 1 {
+                    "Syncing 1 package to disk".to_owned()
+                } else {
+                    format!("Syncing {steps} packages to disk")
+                };
+                let row = self.steplist.spinner(&text);
+                self.current = Some(OpenRow { row, text, depth: 0, announced: false });
             }
             E::StepFinished { step, outcome } => {
                 self.close(|driver| &mut driver.current);

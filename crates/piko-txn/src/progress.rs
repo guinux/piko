@@ -32,8 +32,23 @@ pub enum Event<'a> {
         /// [`StepOutcome::Installed`]'s `replaced`.
         replaces: Option<&'a EntryName>,
     },
-    /// The step most recently started completed without error. Its journal entry is durably
-    /// recorded.
+    /// The files of the last `steps` install steps started are being written to disk.
+    ///
+    /// Consecutive install steps are extracted one after the other, and their files are
+    /// flushed together, with one `syncfs`. Each step's [`Event::StepFinished`] follows once
+    /// the flush is done, in the order the steps started. So several steps can be started and
+    /// not yet finished: those of one group.
+    ///
+    /// A group ends at a step that runs a scriptlet, at a removal, and at the end of the plan.
+    /// The flush waits for the disk, so it can take seconds after a large group.
+    FlushStarted {
+        /// How many install steps the flush covers.
+        steps: usize,
+    },
+    /// A started step completed without error. Its journal entry is durably recorded.
+    ///
+    /// Steps finish in the order they started. An install step finishes after the
+    /// [`Event::FlushStarted`] of its group.
     ///
     /// A step that fails surfaces through `commit_with_progress`'s `Result` instead. This
     /// event is never emitted for a step that did not finish. It is also never the only record

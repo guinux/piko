@@ -1367,11 +1367,11 @@ pub fn report(
     for command in recovery_commands(&recovery, &record.root, dbpath_flag, &journal_path) {
         emit!(out, "  {command}");
     }
-    if recovery.interrupted.is_some() {
+    if !recovery.interrupted.is_empty() {
         emit!(out, "");
-        emit!(out, "The interruption can have cut the first install part-way. Then some of its");
+        emit!(out, "The interruption can have cut the first installs part-way. Then some of their");
         emit!(out, "files are on disk with no package that owns them. `--overwrite '*'` applies");
-        emit!(out, "to that package only, and lets it replace them.");
+        emit!(out, "to those packages only, and lets them replace these files.");
     }
     if !recovery.unreadable.is_empty() {
         emit!(out, "");
@@ -1386,8 +1386,9 @@ pub fn report(
 /// Spells a [`journal::Recovery`] as the command lines that carry it out, in order.
 ///
 /// The journal goes first, because piko refuses every transaction while it is there. Then the
-/// cut install, on its own so that `--overwrite` covers nothing else. Then the removals, then
-/// the installs, one command per install reason.
+/// cut installs, apart from the others so that `--overwrite` covers nothing else. Then the
+/// removals, then the installs. The cut and the other installs each take one command per
+/// install reason.
 fn recovery_commands(
     recovery: &journal::Recovery,
     root: &Path,
@@ -1409,12 +1410,19 @@ fn recovery_commands(
     };
 
     let mut commands = vec![format!("rm {}", shell_word(&journal_path.to_string_lossy()))];
-    if let Some(target) = &recovery.interrupted {
-        commands.push(format!(
-            "{piko} install{root_flag}{} --overwrite '*' {}",
-            reason_flag(target.reason),
-            target.name
-        ));
+    for reason in [Some(PackageInstallReason::Depend), Some(PackageInstallReason::Explicit), None] {
+        let targets = recovery
+            .interrupted
+            .iter()
+            .filter(|target| target.reason == reason)
+            .collect::<Vec<_>>();
+        if !targets.is_empty() {
+            commands.push(format!(
+                "{piko} install{root_flag}{} --overwrite '*' {}",
+                reason_flag(reason),
+                names(&targets)
+            ));
+        }
     }
     if !recovery.remove.is_empty() {
         let names = recovery.remove.iter().map(ToString::to_string).collect::<Vec<_>>();
@@ -1494,12 +1502,16 @@ mod tests {
     }
 
     /// The journal goes first, since piko refuses every transaction while it is there. The cut
-    /// install is alone, so `--overwrite` covers nothing else. Dependencies install before
+    /// installs are apart, so `--overwrite` covers nothing else. Dependencies install before
     /// explicit packages.
     #[test]
     fn the_commands_run_in_the_order_that_finishes_the_transaction() {
         let recovery = Recovery {
-            interrupted: Some(reinstall("foo", Some(PackageInstallReason::Explicit))),
+            interrupted: vec![
+                reinstall("foo", Some(PackageInstallReason::Explicit)),
+                reinstall("libfoo", Some(PackageInstallReason::Depend)),
+                reinstall("qux", Some(PackageInstallReason::Explicit)),
+            ],
             remove: vec!["old".parse().unwrap(), "older".parse().unwrap()],
             install: vec![
                 reinstall("bar", Some(PackageInstallReason::Explicit)),
@@ -1514,7 +1526,8 @@ mod tests {
             commands,
             [
                 "rm /var/lib/pacman/piko-journal",
-                "piko install --asexplicit --overwrite '*' foo",
+                "piko install --asdeps --overwrite '*' libfoo",
+                "piko install --asexplicit --overwrite '*' foo qux",
                 "piko remove --nodeps old older",
                 "piko install --asdeps libbar",
                 "piko install --asexplicit bar",

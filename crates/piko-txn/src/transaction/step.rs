@@ -26,7 +26,7 @@ use crate::{
     extract::Ownership,
     hash::MAX_BACKUP_BYTES,
     history::now,
-    install::{Extraction, Filters},
+    install::{Extraction, Filesystems, Filters},
     progress::Event,
     record::{self, InstallFacts},
     remove::{RemovalContext, RemovalDisposition, decide_removal},
@@ -50,7 +50,12 @@ pub(super) struct InstallStep<'a> {
     pub(super) runner: Option<&'a Runner>,
 }
 
-/// Installs one package and records it in the database.
+/// Installs one package's files, the first half of an install step.
+///
+/// The step has two halves, so that a transaction can flush the files of several packages with
+/// one `syncfs`. This half runs `pre_install`/`pre_upgrade`, takes the old version apart, and
+/// extracts the new one. It flushes nothing. It returns the filesystems it wrote into, which the
+/// caller must flush before [`publish_step`] records the package.
 ///
 /// The scriptlet sequence follows `add.c`: `pre_install`/`pre_upgrade` before a byte is
 /// extracted, `post_install`/`post_upgrade` after the database entry is written. Which of each
@@ -58,11 +63,11 @@ pub(super) struct InstallStep<'a> {
 /// going up. That is what libalpm passes, and what `alpm-hooks(5)` means by "upgrade".
 ///
 /// An upgrade also takes the old version apart first. See the fake removal below.
-pub(super) fn install_step(
+pub(super) fn extract_step(
     step: &InstallStep<'_>,
     report: &mut Report,
     progress: &mut dyn FnMut(Event<'_>),
-) -> Result<Extraction> {
+) -> Result<(Extraction, Filesystems)> {
     let old_version = step.replaced_version();
     let is_upgrade = old_version.is_some();
 
@@ -116,7 +121,7 @@ pub(super) fn install_step(
         is_backup: &|path| step.package.backups.contains(path.to_string_lossy().as_ref()),
     };
 
-    let extraction = crate::install::install(
+    let (extraction, written) = crate::install::install_unflushed(
         &step.package.path,
         step.root,
         &filters,
@@ -127,6 +132,21 @@ pub(super) fn install_step(
     // The one place a `.pacnew` is collected. The recorder, the terminal and the transaction's
     // report all read this list rather than deriving it from the outcomes again.
     report.pacnews.extend(extraction.pacnews().map(Path::to_path_buf));
+    Ok((extraction, written))
+}
+
+/// Records one installed package in the database, the second half of an install step.
+///
+/// The files [`extract_step`] wrote must be on disk already: the entry written here says the
+/// package is installed. Then `post_install`/`post_upgrade` runs, as in `add.c`.
+pub(super) fn publish_step(
+    step: &InstallStep<'_>,
+    extraction: &Extraction,
+    report: &mut Report,
+    progress: &mut dyn FnMut(Event<'_>),
+) -> Result<()> {
+    let old_version = step.replaced_version();
+    let is_upgrade = old_version.is_some();
 
     // The `.PKGINFO` was parsed at verify time, so nothing here can refuse the package on its
     // own metadata. Refusing it here would happen after the payload above is already written.
@@ -163,7 +183,7 @@ pub(super) fn install_step(
     };
     let desc =
         record::desc(&step.package.info, &facts).map_err(|source| unwritable("desc", source))?;
-    let files = record::files(&extraction).map_err(|source| unwritable("files", source))?;
+    let files = record::files(extraction).map_err(|source| unwritable("files", source))?;
     staged.record(&desc)?;
     staged.record(&files)?;
 
@@ -198,7 +218,7 @@ pub(super) fn install_step(
         );
     }
 
-    Ok(extraction)
+    Ok(())
 }
 
 /// One `.INSTALL` scriptlet function to run, gathered for the same reason [`InstallStep`] is.
@@ -211,6 +231,12 @@ struct ScriptletCall<'a> {
 }
 
 impl InstallStep<'_> {
+    /// Whether this step runs a scriptlet. A transaction never flushes such a step in a group:
+    /// its `post_install` must run before the next step starts, as in libalpm.
+    pub(super) fn runs_scriptlet(&self) -> bool {
+        self.runner.is_some() && self.package.script.is_some()
+    }
+
     /// The version this install replaces, if any.
     fn replaced_version(&self) -> Option<String> {
         self.package.replaces.as_ref().map(|old| old.entry.version().to_string())

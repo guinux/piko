@@ -20,6 +20,9 @@
 //! journal then names the step as done, and nothing proposes to install it again. libalpm
 //! flushes nothing, and keeps no journal to be wrong.
 //!
+//! A transaction calls `install_unflushed` instead, and flushes the files of consecutive
+//! packages with one `syncfs`, before it records any of them.
+//!
 //! `syncfs` rather than one `fsync` per file: a package holds thousands of files, and one
 //! `syncfs` writes them in one pass. It also writes what other processes left on the same
 //! filesystem. Measured on an NVMe btrfs, it adds about 15 ms to a small package and 30 ms to a
@@ -208,6 +211,22 @@ pub fn install(
     ownership: Ownership,
     limits: &PackageLimits,
 ) -> Result<Extraction> {
+    let (extraction, written) = install_unflushed(package, root, filters, ownership, limits)?;
+    written.sync()?;
+    Ok(extraction)
+}
+
+/// As [`install`], without the flush: returns the filesystems the installation wrote into.
+///
+/// The caller must flush them with [`Filesystems::sync`] before anything records the package
+/// as installed. A transaction uses this to flush a group of packages with one `syncfs`.
+pub(crate) fn install_unflushed(
+    package: &Path,
+    root: &RootDir,
+    filters: &Filters<'_>,
+    ownership: Ownership,
+    limits: &PackageLimits,
+) -> Result<(Extraction, Filesystems)> {
     let mut result = Extraction::default();
     // Backup files need a second pass. The `.pacnew` can only be resolved once it exists,
     // which needs the archive stream to have moved on.
@@ -335,9 +354,9 @@ pub fn install(
         }
     }
 
-    // Last, after the `.pacnew` renames above, which are writes too.
-    written.sync()?;
-    Ok(result)
+    // `written` covers the `.pacnew` renames above too: each one is in a directory a member
+    // was written into.
+    Ok((result, written))
 }
 
 /// The filesystems an installation wrote into, one directory descriptor for each.
@@ -346,7 +365,7 @@ pub fn install(
 /// under a separate `/boot` gets that filesystem flushed too, and not only the root's. Each
 /// directory is resolved and asked once, whatever the number of files it holds.
 #[derive(Debug, Default)]
-struct Filesystems {
+pub(crate) struct Filesystems {
     /// The parent directories already asked, relative to the root.
     asked: BTreeSet<PathBuf>,
     /// A descriptor on each filesystem, with the directory it was opened as, for messages.
@@ -368,11 +387,19 @@ impl Filesystems {
         Ok(())
     }
 
+    /// Adds the filesystems `other` recorded, so that one [`Self::sync`] flushes both.
+    pub(crate) fn absorb(&mut self, other: Self) {
+        self.asked.extend(other.asked);
+        for (device, opened) in other.by_device {
+            self.by_device.entry(device).or_insert(opened);
+        }
+    }
+
     /// Writes every recorded filesystem's data to disk.
     ///
     /// A failure is an error: the kernel reports here the write-back errors of the files just
     /// written, and a package that did not reach the disk is not installed.
-    fn sync(&self) -> Result<()> {
+    pub(crate) fn sync(&self) -> Result<()> {
         for (directory, fd) in self.by_device.values() {
             rustix::fs::syncfs(fd)
                 .map_err(|source| Error::io(directory, IoAction::Sync, source.into()))?;

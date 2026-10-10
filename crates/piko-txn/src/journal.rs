@@ -30,11 +30,17 @@
 //! step 1 remove bar-2.0-1
 //! begin
 //! done 0
+//! group 1 3
 //! ```
 //!
 //! Everything up to `begin` is written and fsynced in one atomic step, before the first
 //! mutation. Each `done` line is appended and fsynced as that step completes. So the journal
 //! also records how far the transaction got.
+//!
+//! A `group` line names the first and the last step of a group of installs, and is appended
+//! and fsynced before the first of them starts. The steps of a group are extracted one after
+//! the other, flushed together, then each gets its `done` line. A reader that does not know the
+//! line skips it, as for `reason`.
 //!
 //! A `reason` line gives an install step's install reason. It is a line of its own, not a
 //! third field of the `step` line, so the format stays at version 1. A reader that does not
@@ -44,14 +50,16 @@
 //! # Recovery
 //!
 //! [`Record::recovery`] works out what finishes the transaction: the removals and installs
-//! that did not complete, checked against the local database. The steps run in order, so the
-//! first outstanding step is the only one that can be half-applied. An install step cut there
-//! can leave some of its files on disk with no entry that owns them. So that package is
-//! reinstalled on its own, with its files released from the conflict check.
+//! that did not complete, checked against the local database. The steps run in order, so only
+//! the first outstanding step, or the group it belongs to, can be half-applied. An install step
+//! cut there can leave some of its files on disk with no entry that owns them. So those
+//! packages are reinstalled apart from the others, with their files released from the conflict
+//! check.
 
 use std::{
     fmt::Write as _,
     io::Write as _,
+    ops::RangeInclusive,
     path::{Path, PathBuf},
 };
 
@@ -124,6 +132,9 @@ pub struct Record {
     pub begun: bool,
     /// Indices of the steps that completed.
     pub completed: Vec<usize>,
+    /// The groups of install steps the transaction started, each from its first step to its
+    /// last.
+    pub groups: Vec<RangeInclusive<usize>>,
 }
 
 impl Record {
@@ -148,6 +159,15 @@ impl Record {
     #[must_use]
     pub fn recovery(&self, local: &LocalDatabase) -> Recovery {
         let first = (0..self.steps.len()).find(|index| !self.completed.contains(index));
+        // The steps the interruption can have cut: the first outstanding one, or the whole
+        // group it belongs to. A group's steps are extracted before any of them is recorded.
+        let cut = first.map(|first| {
+            self.groups
+                .iter()
+                .rev()
+                .find(|group| group.contains(&first))
+                .map_or(first..=first, |group| first..=*group.end())
+        });
         let mut recovery = Recovery::default();
         for (index, intent) in self.steps.iter().enumerate() {
             if self.completed.contains(&index) {
@@ -172,8 +192,8 @@ impl Record {
                         continue;
                     };
                     let target = Reinstall { name: file.name().clone(), reason: *reason };
-                    if Some(index) == first {
-                        recovery.interrupted = Some(target);
+                    if cut.as_ref().is_some_and(|cut| cut.contains(&index)) {
+                        recovery.interrupted.push(target);
                     } else {
                         recovery.install.push(target);
                     }
@@ -191,12 +211,14 @@ impl Record {
 /// [`Recovery::remove`], then [`Recovery::install`].
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Recovery {
-    /// The package whose install step the interruption cut, if it cut one.
+    /// The packages whose install steps the interruption cut: the first outstanding step, or
+    /// every outstanding step of its group.
     ///
-    /// Its extraction can have stopped part-way. Some of its files can then be on disk with no
-    /// entry that owns them, and a plain install refuses them as file conflicts. Reinstall it
-    /// on its own, with its files released from that check.
-    pub interrupted: Option<Reinstall>,
+    /// Their extraction can have stopped part-way, or ended without its entry. Some of their
+    /// files can then be on disk with no entry that owns them, and a plain install refuses them
+    /// as file conflicts. Reinstall them apart from the others, with their files released from
+    /// that check.
+    pub interrupted: Vec<Reinstall>,
     /// Packages still to remove.
     ///
     /// The transaction checked its dependencies as a whole, and the installs that follow can
@@ -215,7 +237,7 @@ impl Recovery {
     /// Whether nothing is left to do but remove the journal.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.interrupted.is_none()
+        self.interrupted.is_empty()
             && self.remove.is_empty()
             && self.install.is_empty()
             && self.unreadable.is_empty()
@@ -292,6 +314,20 @@ impl Journal {
         // written through.
         let file = write_new(&path, text.as_bytes())?;
         Ok(Self { path, file })
+    }
+
+    /// Records that the steps `steps` are about to run as one group, and fsyncs.
+    ///
+    /// Written before the first of them starts, so a crash during the group leaves a journal
+    /// that says which steps can hold files with no entry.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if the append or the sync fails.
+    pub fn group(&mut self, steps: RangeInclusive<usize>) -> Result<()> {
+        writeln!(self.file, "group {} {}", steps.start(), steps.end())
+            .map_err(|source| Error::io(&self.path, IoAction::Write, source))?;
+        self.file.sync_data().map_err(|source| Error::io(&self.path, IoAction::Sync, source))
     }
 
     /// Records that step `index` completed, and fsyncs.
@@ -438,6 +474,7 @@ fn parse(text: &str) -> std::result::Result<Record, Unreadable> {
         steps: Vec::new(),
         begun: false,
         completed: Vec::new(),
+        groups: Vec::new(),
     };
 
     for line in lines {
@@ -457,6 +494,12 @@ fn parse(text: &str) -> std::result::Result<Record, Unreadable> {
                 && let Some(Intent::Install { reason, .. }) = record.steps.get_mut(index)
             {
                 *reason = parse_reason(word);
+            }
+        } else if let Some(value) = line.strip_prefix("group ") {
+            if let Some((first, last)) = value.split_once(' ')
+                && let (Ok(first), Ok(last)) = (first.parse::<usize>(), last.parse::<usize>())
+            {
+                record.groups.push(first..=last);
             }
         } else if line == "begin" {
             record.begun = true;
@@ -589,6 +632,7 @@ mod tests {
             steps,
             begun: true,
             completed,
+            groups: Vec::new(),
         }
     }
 
@@ -625,10 +669,54 @@ mod tests {
         let (_fixture, local) = local(&[]);
 
         let recovery = record.recovery(&local);
-        assert_eq!(recovery.interrupted, Some(reinstall("foo", PackageInstallReason::Explicit)));
+        assert_eq!(recovery.interrupted, [reinstall("foo", PackageInstallReason::Explicit)]);
         assert!(recovery.remove.is_empty());
         assert_eq!(recovery.install, [reinstall("bar", PackageInstallReason::Depend)]);
         assert!(recovery.unreadable.is_empty());
+    }
+
+    /// A group's steps are extracted before any of them is recorded. So every outstanding step
+    /// of the group the interruption cut can hold files with no entry, and none after it can.
+    #[test]
+    fn every_outstanding_step_of_the_cut_group_is_set_apart() {
+        let mut record = record(
+            vec![
+                install("aaa-1.0-1-any.pkg.tar.zst", PackageInstallReason::Explicit),
+                install("bbb-1.0-1-any.pkg.tar.zst", PackageInstallReason::Explicit),
+                install("ccc-1.0-1-any.pkg.tar.zst", PackageInstallReason::Depend),
+                install("ddd-1.0-1-any.pkg.tar.zst", PackageInstallReason::Explicit),
+                remove("old-1.0-1"),
+                install("eee-1.0-1-any.pkg.tar.zst", PackageInstallReason::Explicit),
+            ],
+            vec![0, 1],
+        );
+        record.groups = vec![0..=3];
+        let (_fixture, local) = local(&["old-1.0-1"]);
+
+        let recovery = record.recovery(&local);
+        assert_eq!(
+            recovery.interrupted,
+            [
+                reinstall("ccc", PackageInstallReason::Depend),
+                reinstall("ddd", PackageInstallReason::Explicit)
+            ]
+        );
+        assert_eq!(recovery.remove, [name("old")]);
+        assert_eq!(recovery.install, [reinstall("eee", PackageInstallReason::Explicit)]);
+    }
+
+    /// A `group` line is read back as written, after the `done` lines before it.
+    #[test]
+    fn a_group_line_is_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = Journal::begin(dir.path(), Path::new("/"), &steps()).unwrap();
+        journal.group(0..=1).unwrap();
+        journal.completed(0).unwrap();
+        drop(journal);
+
+        let record = read(dir.path()).unwrap().unwrap();
+        assert_eq!(record.groups, [0..=1]);
+        assert_eq!(record.completed, [0]);
     }
 
     /// A removal is still to do only while its entry is still recorded. The one the
@@ -640,7 +728,7 @@ mod tests {
 
         let recovery = record.recovery(&local);
         assert_eq!(recovery.remove, [name("kept")]);
-        assert!(recovery.interrupted.is_none());
+        assert!(recovery.interrupted.is_empty());
         assert!(recovery.install.is_empty());
     }
 
