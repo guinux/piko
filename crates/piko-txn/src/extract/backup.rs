@@ -4,7 +4,7 @@
 //! module decides what happens next. The user's file is replaced, kept, or left beside the new
 //! one for them to merge.
 //!
-//! The rule itself is [`super::decision::resolve_backup`], which is pure. This module only
+//! The rule itself is `resolve_backup`, which is pure. This module only
 //! supplies its three hashes and carries out its answer.
 
 use std::path::{Path, PathBuf};
@@ -23,6 +23,7 @@ use crate::{
 
 /// What happened to a backup file.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum BackupOutcome {
     /// The packaged version was moved into place.
     InstalledNew,
@@ -40,6 +41,7 @@ pub enum BackupOutcome {
 
 /// The result of resolving one backup file.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Resolution {
     /// What happened.
     pub outcome: BackupOutcome,
@@ -53,7 +55,7 @@ pub struct Resolution {
     /// Whether a hash could not be computed.
     ///
     /// This is reported rather than swallowed, per principle 7. An unreadable file is
-    /// *unknown*, and [`resolve_backup`] deliberately keeps the user's copy when a hash is
+    /// *unknown*, and `resolve_backup` deliberately keeps the user's copy when a hash is
     /// unknown. The caller should still be able to say so.
     pub unreadable: bool,
 }
@@ -147,9 +149,9 @@ pub fn resolve(
 /// system before gets recorded too. That covers the whole of a fresh install.
 ///
 /// `None` means the file could not be hashed. The caller reports that through
-/// [`crate::Extraction::unreadable`], exactly as [`resolve`] does.
+/// [`crate::install::Extraction::unreadable`], exactly as [`resolve`] does.
 #[must_use]
-pub fn hash_of(root: &RootDir, path: &Path) -> Option<Md5Checksum> {
+pub(crate) fn hash_of(root: &RootDir, path: &Path) -> Option<Md5Checksum> {
     let resolved = root.resolve_parent(path).ok()?;
     hash::file_md5_at(resolved.dir(), resolved.name(), MAX_BACKUP_BYTES).ok().flatten()
 }

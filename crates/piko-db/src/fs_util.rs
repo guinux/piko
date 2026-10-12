@@ -143,6 +143,7 @@ fn read_open(
 /// world-writable directory, anyone can still create a file under a name before it is written.
 /// libalpm checks none of this.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Distrust {
     /// Owned by a user that is neither root nor this process's effective user.
     ForeignOwner {
@@ -326,7 +327,7 @@ fn ensure_trusted(path: &Path, metadata: &std::fs::Metadata) -> Result<()> {
 ///
 /// As [`read_capped_utf8`], plus [`Error::Untrusted`] naming the file or the directory that
 /// failed [`distrust`].
-pub fn read_trusted_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
+pub(crate) fn read_trusted_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
     let file = open_no_follow(path)?;
     let metadata = ensure_regular_file(&file, path)?;
     ensure_trusted(path, &metadata)?;
@@ -370,7 +371,7 @@ pub fn read_trusted_file_utf8_following(path: &Path, limit: Limit, max: u64) -> 
 /// # Errors
 ///
 /// As `read_capped`, plus [`Error::NotUtf8`] if the contents are not valid UTF-8.
-pub fn read_capped_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
+pub(crate) fn read_capped_utf8(path: &Path, limit: Limit, max: u64) -> Result<String> {
     let bytes = read_capped(path, limit, max)?;
     decode(path, bytes)
 }
@@ -437,7 +438,7 @@ pub fn read_capped_utf8_in(dir: &Path, name: &str, limit: Limit, max: u64) -> Re
 
 /// Returns `true` if `name` exists inside the entry directory `dir`, following no symbolic link
 /// at either level. A symbolic link named `name` exists; one in place of `dir` does not.
-pub fn exists_in(dir: &Path, name: &str) -> bool {
+pub(crate) fn exists_in(dir: &Path, name: &str) -> bool {
     use rustix::fs::{AtFlags, CWD, Mode};
     let Some((parent, entry)) = split_dir(dir) else { return false };
     let Ok(parent) = rustix::fs::openat(CWD, parent, parent_flags(), Mode::empty()) else {

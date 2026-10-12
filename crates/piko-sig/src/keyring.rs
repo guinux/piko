@@ -2,25 +2,7 @@
 //!
 //! This is the only module in piko that talks to GPGME, and it does as little as possible.
 //! It turns a file and its `.sig` into a list of [`SignatureOutcome`]s. What those mean is
-//! [`crate::decision`]'s job, and it needs no keyring to be tested.
-//!
-//! # Why GPGME rather than a Rust OpenPGP library
-//!
-//! Trust. A signature being cryptographically good is the easy half. `SigLevel`'s
-//! `TrustedOnly` is defined in terms of GnuPG's web of trust. That trust lives in
-//! `trustdb.gpg`, alongside ownertrust. It turns "signed by some key in the keyring" into
-//! "signed by a key three Arch master keys vouch for". libalpm verifies through GPGME
-//! (`signing.c`) for the same reason, so piko inherits that model rather than reimplementing
-//! it.
-//!
-//! Two things were measured, not assumed:
-//!
-//! - A pure-Rust alternative (rpgp) verifies real Arch signatures correctly. But it silently
-//!   drops every subkey when reading `/etc/pacman.d/gnupg/pubring.gpg`. It parses 0 against
-//!   the 308 packet-level subkeys `gpg` reports there, because the keyring interleaves 3417
-//!   GnuPG ring-trust packets. Arch packagers sign with subkeys, so roughly 30% of a real
-//!   cache finds no signing key, and no error is raised.
-//! - GPGME, over the same corpus, returned `good` with `Full` validity for every package.
+//! [`decide`](crate::decide)'s job, and it needs no keyring to be tested.
 
 use std::{
     path::{Path, PathBuf},
@@ -43,6 +25,10 @@ use crate::{
 ///
 /// This is the only piece of GPGME setup shared across the read/write split. Everything past
 /// binding the context stays on its own side of it.
+///
+/// It is hidden from the documentation and not part of the crate's stable interface: it
+/// returns a `gpgme` type, so a `gpgme` upgrade can change it. It exists for `piko-sig-write`
+/// and for tests that build their own keyring.
 ///
 /// # Errors
 ///
@@ -185,7 +171,7 @@ impl Keyring {
     /// rather than read.
     ///
     /// An empty result means GnuPG found no signature at all. This is
-    /// [`crate::decision::decide`]'s "missing" case, not an error here. Whether that is fatal
+    /// [`decide`](crate::decide)'s "missing" case, not an error here. Whether that is fatal
     /// is the policy's decision, not this function's.
     ///
     /// # Errors
@@ -243,7 +229,7 @@ impl Keyring {
     /// to get subtly different between them.
     ///
     /// In particular, a missing `.sig` is not an error here. It produces no signatures, which
-    /// is [`crate::decision::decide`]'s "missing" case. So `Required` versus `Optional`
+    /// is [`decide`](crate::decide)'s "missing" case. So `Required` versus `Optional`
     /// decides whether it is fatal, not whichever caller happened to stat the file.
     ///
     /// # Errors
@@ -298,6 +284,7 @@ impl Keyring {
 
 /// A verdict, and when the signature behind it was made.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Checked {
     /// Whether the policy accepts the file.
     pub verdict: Verdict,

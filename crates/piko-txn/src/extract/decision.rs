@@ -42,6 +42,7 @@ pub enum Existing {
 
 /// Why an entry is being extracted next to the existing file instead of over it.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum PacnewReason {
     /// The path matches a `NoUpgrade` pattern, so the installed file is never replaced.
     ///
@@ -50,19 +51,20 @@ pub enum PacnewReason {
     NoUpgrade,
     /// The path is a backup file, so the user may have edited it.
     ///
-    /// Whether the `.pacnew` survives is decided afterwards by [`resolve_backup`].
+    /// Whether the `.pacnew` survives is decided afterwards by `resolve_backup`.
     Backup {
         /// The hash the *old* package recorded for this file, if it had one.
         ///
         /// `None` means the file became a backup file only in the new package, libalpm's
         /// "allow adding backup files retroactively" (`add.c:311`). There is then no original
-        /// to compare against, which changes what [`resolve_backup`] can conclude.
+        /// to compare against, which changes what `resolve_backup` can conclude.
         original_hash: Option<String>,
     },
 }
 
 /// Why an entry cannot be extracted at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum RefuseReason {
     /// A directory is in the way of a non-directory. Case 5 of the matrix.
     ///
@@ -73,6 +75,7 @@ pub enum RefuseReason {
 
 /// Why an entry is being skipped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SkipReason {
     /// The path matches a `NoExtract` pattern.
     NoExtract,

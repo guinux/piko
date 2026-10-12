@@ -35,6 +35,7 @@ pub enum Line<'a> {
 
 /// A tokenized line paired with its 1-based line number, matching `linenum` in `ini.c`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Token<'a> {
     /// The 1-based physical line this token came from.
     pub line: usize,

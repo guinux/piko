@@ -9,7 +9,7 @@ use crate::search::{MatchKind, Searchable, rank};
 /// One package that matched a search query, together with why it matched.
 ///
 /// See [`super::RepoDatabase::search`].
-pub type SearchHit<'a> = (&'a RepoPackage, MatchKind);
+pub(crate) type SearchHit<'a> = (&'a RepoPackage, MatchKind);
 
 /// Ranks `packages` against `terms`, as [`crate::search::rank`] documents.
 pub(crate) fn search<'a, 'q>(
@@ -44,7 +44,7 @@ fn searchable_from(package: &RepoPackage) -> Searchable {
 mod tests {
     use std::sync::Arc;
 
-    use crate::UnknownSectionPolicy;
+    use crate::desc_compat::UnknownSectionPolicy;
 
     use super::{
         super::{eager, package::FilesSource, repo_name::RepoName},

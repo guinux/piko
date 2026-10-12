@@ -25,10 +25,10 @@ use std::{
 };
 
 use alpm_types::{PackageFileName, PackageInstallReason, PackageValidation};
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 use piko_db_write::{Record, RecordKind};
 use piko_txn::{
-    extract::{MemberKind, PackageLimits, archive},
+    extract::{MemberKind, PackageLimits, walk},
     pkginfo::PkgInfo,
     record::{self, InstallFacts},
 };
@@ -71,7 +71,7 @@ fn installed_and_cached(limit: usize) -> Option<Vec<(PathBuf, String)>> {
 /// Reads and parses a package's `.PKGINFO`.
 fn pkginfo(archive_path: &Path) -> Option<PkgInfo> {
     let mut raw = None;
-    archive::walk(archive_path, &PackageLimits::default(), |member, contents| {
+    walk(archive_path, &PackageLimits::default(), |member, contents| {
         if member.kind == MemberKind::Metadata && member.path == Path::new(".PKGINFO") {
             let mut buffer = String::new();
             std::io::Read::read_to_string(contents, &mut buffer).ok();

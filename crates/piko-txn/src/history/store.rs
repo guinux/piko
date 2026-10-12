@@ -28,7 +28,7 @@
 //! # Growth
 //!
 //! Unbounded, exactly as `pacman.log` is. Rotating it is `logrotate`'s job, not piko's.
-//! Reading is bounded regardless: [`read_last`] works from the end of the file and never takes
+//! Reading is bounded regardless: `read_last` works from the end of the file and never takes
 //! in more than it was asked for.
 
 use std::{
@@ -39,7 +39,7 @@ use std::{
 use super::{Action, Entry, LocalZone, Outcome, time_fmt};
 
 /// The history's file name, inside the database path.
-pub const HISTORY_FILE: &str = "piko-history";
+pub(crate) const HISTORY_FILE: &str = "piko-history";
 
 /// The block format version this build writes.
 const VERSION: u32 = 1;
@@ -52,7 +52,7 @@ const FILE_MODE: u32 = 0o644;
 ///
 /// A block runs to a few hundred bytes. So this covers thousands of transactions, while keeping
 /// the read bounded the way every other read in piko is.
-pub const DEFAULT_TAIL_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const DEFAULT_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The history file inside `dbpath`.
 #[must_use]
@@ -137,7 +137,7 @@ pub fn render(entry: &Entry, zone: LocalZone) -> String {
 /// # Errors
 ///
 /// [`std::io::Error`] if the file exists but cannot be read.
-pub fn read_last(path: &Path, limit: usize, tail_bytes: u64) -> std::io::Result<Vec<Entry>> {
+pub(crate) fn read_last(path: &Path, limit: usize, tail_bytes: u64) -> std::io::Result<Vec<Entry>> {
     let mut file = match super::open_for_reading(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -196,7 +196,7 @@ fn after_first_line(text: &str) -> &str {
 ///
 /// Lines before the first `txn` belong to a block whose header `text` does not carry. They are
 /// dropped. A caller reading from part-way through a file trims the partial first *line* before
-/// calling this. [`read_last`] does that for its own tail read.
+/// calling this. `read_last` does that for its own tail read.
 #[must_use]
 pub fn parse(text: &str) -> Vec<Entry> {
     let mut entries = Vec::new();

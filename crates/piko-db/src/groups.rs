@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::{LocalDatabase, LocalPackage, SharedError, repo::RepoDatabase, repo::RepoPackage};
+use crate::{
+    SharedError, local::LocalDatabase, local::LocalPackage, repo::RepoDatabase, repo::RepoPackage,
+};
 
 /// Every group some package carries, with its members.
 ///

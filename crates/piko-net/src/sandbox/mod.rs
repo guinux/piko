@@ -1,46 +1,4 @@
 //! The download sandbox: every request to a mirror runs in a confined helper process.
-//!
-//! A mirror is untrusted until its signature is checked, and the code that reads what it sends
-//! — DNS, TLS, HTTP — runs before that check. A defect there would otherwise run the mirror's
-//! code as root. libalpm answers this with `DownloadUser` and the `sandbox*.c` files. piko answers
-//! it the same way, with one difference in shape.
-//!
-//! # The helper transfers bytes and writes no file
-//!
-//! libalpm's sandboxed child writes each download into a temporary directory that the download
-//! user owns. The parent then takes the file. A child that a mirror took over can leave a
-//! process behind that keeps the file open, and change it after the parent checked it.
-//!
-//! Here the helper makes one request and writes the answer to its stdout, in the frames that
-//! `protocol` defines. The parent keeps everything else: the size bound, the atomic write,
-//! the `Last-Modified` checks, and the signature check. So the helper needs no write access
-//! anywhere, and no file the parent checks was ever open for writing in the helper.
-//!
-//! # One helper per request
-//!
-//! A database, its `.sig`, and each package are separate requests, so separate processes. A
-//! mirror that took over one helper cannot touch another file's transfer.
-//!
-//! # Starting the helper without `unsafe`
-//!
-//! `fork` is `unsafe`, and the workspace forbids `unsafe_code`. So piko starts itself again, as
-//! `piko_txn::exec` does for scriptlets, through `/proc/self/exe` with [`HELPER_ARG`]. A program
-//! that uses this crate must call [`run_helper_if_requested`] first thing in `main`. The
-//! executable path is `/proc/self/exe` rather than [`std::env::current_exe`] for two reasons.
-//! The magic link still works after the binary is replaced on disk. And it needs no search
-//! permission on the directories above the binary, which the download user may not have.
-//!
-//! The user switch is `std`'s own `CommandExt::uid`/`gid`, which drop the supplementary groups
-//! first. The helper then confines itself before it reads anything: see `confine`.
-//!
-//! # Never root
-//!
-//! Under root, the helper always switches to another user: `DownloadUser` when it is set, and
-//! [`FALLBACK_USER`] otherwise. A `DownloadUser` whose user ID is 0 is refused, since switching
-//! to it keeps every capability. libalpm confines nothing without `DownloadUser`. A helper left
-//! as root would keep every capability, and the owner's access to every file, which no
-//! Landlock or system call rule takes back: it could read the keyring's secret keys, or change
-//! the firewall through the netlink socket its resolver needs.
 
 mod confine;
 #[cfg(feature = "fuzzing")]
@@ -77,7 +35,7 @@ const OVERFLOW_ID: u32 = 65_534;
 ///
 /// It is not a documented subcommand. Anyone can run it, and gains nothing: it fetches one URL
 /// with fewer rights than the caller already has.
-pub const HELPER_ARG: &str = "__fetch";
+pub(crate) const HELPER_ARG: &str = "__fetch";
 
 /// The executable the helper is started from.
 const SELF_EXE: &str = "/proc/self/exe";
@@ -121,6 +79,48 @@ const PROXY_VARIABLES: &[&str] =
 ///
 /// Build it with [`Sandbox::from_options`] and give it to
 /// [`Refresher::with_sandbox`](crate::Refresher::with_sandbox).
+///
+/// A mirror is untrusted until its signature is checked, and the code that reads what it sends
+/// — DNS, TLS, HTTP — runs before that check. A defect there would otherwise run the mirror's
+/// code as root. libalpm answers this with `DownloadUser` and the `sandbox*.c` files. piko answers
+/// it the same way, with one difference in shape.
+///
+/// # The helper transfers bytes and writes no file
+///
+/// libalpm's sandboxed child writes each download into a temporary directory that the download
+/// user owns. The parent then takes the file. A child that a mirror took over can leave a
+/// process behind that keeps the file open, and change it after the parent checked it.
+///
+/// Here the helper makes one request and writes the answer to its stdout, in the frames that
+/// `protocol` defines. The parent keeps everything else: the size bound, the atomic write,
+/// the `Last-Modified` checks, and the signature check. So the helper needs no write access
+/// anywhere, and no file the parent checks was ever open for writing in the helper.
+///
+/// # One helper per request
+///
+/// A database, its `.sig`, and each package are separate requests, so separate processes. A
+/// mirror that took over one helper cannot touch another file's transfer.
+///
+/// # Starting the helper without `unsafe`
+///
+/// `fork` is `unsafe`, and the workspace forbids `unsafe_code`. So piko starts itself again, as
+/// `piko_txn::exec` does for scriptlets, through `/proc/self/exe` with `HELPER_ARG`. A program
+/// that uses this crate must call [`run_helper_if_requested`] first thing in `main`. The
+/// executable path is `/proc/self/exe` rather than [`std::env::current_exe`] for two reasons.
+/// The magic link still works after the binary is replaced on disk. And it needs no search
+/// permission on the directories above the binary, which the download user may not have.
+///
+/// The user switch is `std`'s own `CommandExt::uid`/`gid`, which drop the supplementary groups
+/// first. The helper then confines itself before it reads anything: see `confine`.
+///
+/// # Never root
+///
+/// Under root, the helper always switches to another user: `DownloadUser` when it is set, and
+/// `FALLBACK_USER`, `nobody`, otherwise. A `DownloadUser` whose user ID is 0 is refused, since switching
+/// to it keeps every capability. libalpm confines nothing without `DownloadUser`. A helper left
+/// as root would keep every capability, and the owner's access to every file, which no
+/// Landlock or system call rule takes back: it could read the keyring's secret keys, or change
+/// the firewall through the netlink socket its resolver needs.
 #[derive(Clone, Debug)]
 pub struct Sandbox {
     enabled: Option<Enabled>,

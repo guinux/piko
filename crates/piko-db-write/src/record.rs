@@ -60,6 +60,10 @@ use std::fmt::Write as _;
 ///
 /// The only thing this decides is where [`Record::set`] inserts a section that is not
 /// already present — see [`RecordKind::order`].
+///
+/// This enum is exhaustive on purpose. `desc` and `files` are the only files of an entry
+/// written in the `%SECTION%` format: `mtree` is a gzip archive, and `install` and `changelog`
+/// are copied from the package as they are.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecordKind {
     /// An entry's `desc` file.

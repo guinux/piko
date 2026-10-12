@@ -34,8 +34,8 @@ use std::{
     process::Command,
 };
 
-use piko_db::LocalDatabase;
-use piko_txn::space::mounts::MountTable;
+use piko_db::local::LocalDatabase;
+use piko_txn::space::MountTable;
 
 /// This machine's local database.
 const LOCAL_DB: &str = "/var/lib/pacman/local";

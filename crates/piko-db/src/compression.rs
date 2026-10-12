@@ -14,12 +14,12 @@
 //! stream header declares, up to 4 GiB, before it decodes a byte.
 //!
 //! Neither kept format lets a header decide an allocation. gzip decodes in a fixed window.
-//! zstd's window is capped at [`ZSTD_WINDOW_LOG_MAX`], set here explicitly rather than left
+//! zstd's window is capped at `ZSTD_WINDOW_LOG_MAX`, set here explicitly rather than left
 //! to the library's default.
 //!
 //! # Content decides, the name refuses early
 //!
-//! [`sniff`] reads magic bytes. It is what decides how an archive is decoded, because a
+//! `sniff` reads magic bytes. It is what decides how an archive is decoded, because a
 //! repository database is named `core.db`, which says nothing about its compression.
 //! [`from_extension`] reads a package file name instead, for one purpose only: to refuse a
 //! package before it is downloaded, when its `%FILENAME%` already declares a format piko
@@ -37,10 +37,10 @@ use std::sync::{
 
 use alpm_types::CompressionAlgorithmFileExtension;
 
-/// How many leading bytes [`sniff`] needs to see every format it knows.
+/// How many leading bytes `sniff` needs to see every format it knows.
 ///
 /// The widest test is the `ustar` tag at offset 257 that marks an uncompressed tar.
-pub const HEADER_LEN: usize = 262;
+pub(crate) const HEADER_LEN: usize = 262;
 
 /// The largest zstd window the decoder accepts, as a base-2 logarithm: 128 MiB.
 ///
@@ -48,6 +48,7 @@ pub const HEADER_LEN: usize = 262;
 /// Every preset up to `--ultra -22`, and `--long` at its default of 27, fit. So the bound
 /// refuses no archive `makepkg` or `repo-add` writes unless told `--long=28` or more. A frame
 /// that declares a larger window is refused before the window is allocated.
+#[doc(hidden)]
 pub const ZSTD_WINDOW_LOG_MAX: u32 = 27;
 
 /// A compression format piko decodes.
@@ -68,6 +69,7 @@ pub enum Format {
 ///
 /// [alpm-repo-db]: https://alpm.archlinux.page/specifications/alpm-repo-db.7.html
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Unsupported {
     /// xz (`.xz`).
     Xz,
@@ -104,13 +106,13 @@ impl fmt::Display for Unsupported {
 
 /// Identifies a compression format from an archive's leading bytes.
 ///
-/// `header` is at most [`HEADER_LEN`] bytes; a shorter one is a short file, and matches only
+/// `header` is at most `HEADER_LEN` bytes; a shorter one is a short file, and matches only
 /// the formats whose magic fits in it.
 ///
 /// # Errors
 ///
 /// [`Unsupported`], naming the format when its magic is one piko knows and refuses.
-pub fn sniff(header: &[u8]) -> Result<Format, Unsupported> {
+pub(crate) fn sniff(header: &[u8]) -> Result<Format, Unsupported> {
     const REFUSED: [(&[u8], Unsupported); 7] = [
         (&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00], Unsupported::Xz),
         (&[0x42, 0x5a, 0x68], Unsupported::Bzip2),
@@ -135,12 +137,12 @@ pub fn sniff(header: &[u8]) -> Result<Format, Unsupported> {
     }
 }
 
-/// Reads the first [`HEADER_LEN`] bytes of `file`, identifies its format, and rewinds it.
+/// Reads the first `HEADER_LEN` bytes of `file`, identifies its format, and rewinds it.
 ///
 /// # Errors
 ///
 /// The outer [`std::io::Error`] if the read or the rewind fails. The inner [`Unsupported`] as
-/// [`sniff`].
+/// `sniff`.
 pub fn sniff_file(file: &mut File) -> std::io::Result<Result<Format, Unsupported>> {
     let mut header = [0_u8; HEADER_LEN];
     let mut read = 0;
@@ -158,7 +160,7 @@ pub fn sniff_file(file: &mut File) -> std::io::Result<Result<Format, Unsupported
 /// The format a package file name's compression suffix declares.
 ///
 /// `None` is a name with no suffix, a `.pkg.tar`. This reads a name, not the bytes, so it is
-/// only fit to refuse early: [`sniff`] still decides how the file is decoded.
+/// only fit to refuse early: `sniff` still decides how the file is decoded.
 ///
 /// # Errors
 ///
@@ -197,7 +199,7 @@ pub const fn from_extension(
 /// took about 0.4 s longer for 100 packages. A walk that stops at `.PKGINFO` would also decode
 /// several chunks that nobody reads.
 ///
-/// The thread stays at most [`AHEAD_CHUNKS`] chunks of [`CHUNK_BYTES`] ahead of the reader,
+/// The thread stays at most `AHEAD_CHUNKS` chunks of `CHUNK_BYTES` ahead of the reader,
 /// plus the chunk it fills. So the memory it holds is fixed. It can also decode that much past
 /// the bound of the caller's counting reader before the caller refuses the stream. That excess
 /// is a constant, whatever the archive declares. The thread stops at its next chunk when the
@@ -209,10 +211,10 @@ pub const fn from_extension(
 pub struct Decoder(Source);
 
 /// How many decoded chunks the thread keeps ready ahead of the reader.
-pub const AHEAD_CHUNKS: usize = 4;
+pub(crate) const AHEAD_CHUNKS: usize = 4;
 
 /// The size of one decoded chunk.
-pub const CHUNK_BYTES: usize = 1 << 20;
+pub(crate) const CHUNK_BYTES: usize = 1 << 20;
 
 /// Where [`Decoder`]'s bytes come from.
 enum Source {

@@ -61,6 +61,7 @@ pub struct Summary {
 
 /// What a trigger matched, if anything.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Matches {
     /// Names or paths appearing where there were none.
     pub install: BTreeSet<String>,

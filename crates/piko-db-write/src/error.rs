@@ -1,13 +1,4 @@
 //! Error types for the local database writer.
-//!
-//! This is a separate enum from [`piko_db::Error`], for the same reason `piko-txn` keeps its
-//! own. A reader fails to *understand* something. A writer fails to *change* something. A
-//! caller must be able to tell "the database is corrupt" from "another package manager holds
-//! the lock". Matching on variants of one type should not be what it takes.
-//!
-//! Some reads happen on the way to a write: validating `ALPM_DB_VERSION`, or loading a `desc`
-//! to rewrite one section of it. Those go through `piko-db` and arrive here as
-//! [`Error::Read`].
 
 use std::{fmt, path::PathBuf};
 
@@ -60,6 +51,15 @@ impl fmt::Display for IoAction {
 }
 
 /// An error produced while writing a local database.
+///
+/// This is a separate enum from [`piko_db::Error`], for the same reason `piko-txn` keeps its
+/// own. A reader fails to *understand* something. A writer fails to *change* something. A
+/// caller must be able to tell "the database is corrupt" from "another package manager holds
+/// the lock". Matching on variants of one type should not be what it takes.
+///
+/// Some reads happen on the way to a write: validating `ALPM_DB_VERSION`, or loading a `desc`
+/// to rewrite one section of it. Those go through `piko-db` and arrive here as
+/// [`Error::Read`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {

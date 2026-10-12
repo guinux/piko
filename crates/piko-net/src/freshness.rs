@@ -1,25 +1,4 @@
 //! What a refresh learned about how recent a repository database is.
-//!
-//! A signature proves who produced a database, not that it is current. A mirror can serve an
-//! old, correctly signed database, which rolls the client back. It can also keep serving the
-//! same one, which freezes the client. The refresh loop in [`mod@crate::refresh`] makes the
-//! decisions. This module holds the policy it follows and the notes it returns.
-//!
-//! # Two levels of protection
-//!
-//! A database with a verified signature is dated by that signature. Only the key holder can
-//! make one, so a malicious mirror cannot pass an old database off as new. A database with no
-//! verified signature is dated by its newest archive member, which the mirror chose. That
-//! catches a mirror that is merely behind, never one that lies. Arch does not sign its
-//! databases, so on Arch only the second level exists.
-//!
-//! # Why an older database moves on to the next server
-//!
-//! A signature that fails to verify stops the mirror loop. Trying more mirrors would be
-//! shopping for one that says yes, and one yes is all an attacker needs. A database that is
-//! older than the installed one is different. The next server is accepted only if it is at
-//! least as new as the installed database, so looking further can only improve what is
-//! installed. An attacker gains nothing from it.
 
 use std::{
     path::Path,
@@ -32,6 +11,28 @@ use piko_sig::{Checked, Keyring, Policy, signature_path};
 use crate::refresh::Outcome;
 
 /// How a refresh judges the age of what it downloads.
+///
+/// A signature proves who produced a database, not that it is current. A mirror can serve an
+/// old, correctly signed database, which rolls the client back. It can also keep serving the
+/// same one, which freezes the client. The refresh loop in [`Refresher`](crate::Refresher) makes the
+/// decisions. This type is the policy it follows, and [`FreshnessNote`] holds the notes it
+/// returns.
+///
+/// # Two levels of protection
+///
+/// A database with a verified signature is dated by that signature. Only the key holder can
+/// make one, so a malicious mirror cannot pass an old database off as new. A database with no
+/// verified signature is dated by its newest archive member, which the mirror chose. That
+/// catches a mirror that is merely behind, never one that lies. Arch does not sign its
+/// databases, so on Arch only the second level exists.
+///
+/// # Why an older database moves on to the next server
+///
+/// A signature that fails to verify stops the mirror loop. Trying more mirrors would be
+/// shopping for one that says yes, and one yes is all an attacker needs. A database that is
+/// older than the installed one is different. The next server is accepted only if it is at
+/// least as new as the installed database, so looking further can only improve what is
+/// installed. An attacker gains nothing from it.
 #[derive(Clone, Copy, Debug)]
 pub struct FreshnessPolicy {
     /// Install a database even when it is older than the installed one.
@@ -54,6 +55,20 @@ impl FreshnessPolicy {
     #[must_use]
     pub const fn new(now: SystemTime) -> Self {
         Self { accept_older: false, max_age: Some(DEFAULT_MAX_AGE), now }
+    }
+
+    /// The same policy, with [`Self::accept_older`] set to `accept_older`.
+    #[must_use]
+    pub const fn with_accept_older(mut self, accept_older: bool) -> Self {
+        self.accept_older = accept_older;
+        self
+    }
+
+    /// The same policy, with [`Self::max_age`] set to `max_age`.
+    #[must_use]
+    pub const fn with_max_age(mut self, max_age: Option<Duration>) -> Self {
+        self.max_age = max_age;
+        self
     }
 }
 
@@ -140,6 +155,7 @@ pub enum FreshnessNote {
 
 /// What a refresh did to one repository archive, and what it learned about its age.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Refreshed {
     /// What happened to the file.
     pub outcome: Outcome,

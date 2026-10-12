@@ -11,7 +11,7 @@
 use std::process::ExitCode;
 
 use piko_db::repo::{FileListEntry, RepoDatabase, RepoPackage};
-use piko_db::{LocalDatabase, LocalOrRepo, resolve_installed_or_repo};
+use piko_db::{local::LocalDatabase, search::LocalOrRepo, search::resolve_installed_or_repo};
 
 use crate::output::{emit, report};
 
@@ -42,7 +42,7 @@ fn file_line(name: impl std::fmt::Display, path: impl std::fmt::Display, quiet: 
 /// typo in one of several should not hide the rest.
 ///
 /// Unlike the repository case ([`files_repo`], [`files_installed_then_repos`]), there is no
-/// batching win to be had here. [`piko_db::LocalPackage::file_list`] is a plain, cheap,
+/// batching win to be had here. [`piko_db::local::LocalPackage::file_list`] is a plain, cheap,
 /// lazily-cached read of one package's own `files` file. It is not a shared archive walked
 /// once for many packages, the way a repository's `.files` archive is. A simple per-name loop
 /// is the right amount of machinery.
@@ -134,7 +134,7 @@ pub fn files_repo(
 /// repositories, in file (priority) order.
 ///
 /// `dbs` need not hold every configured repository. The caller only opens as many as are
-/// needed to resolve whichever names [`piko_db::resolve_installed_or_repo`] did not already
+/// needed to resolve whichever names [`piko_db::search::resolve_installed_or_repo`] did not already
 /// find locally, via [`crate::context::open_repos_for_packages`]. Names resolved against a
 /// repository are grouped by which one. So each repository's `.files` archive is still walked
 /// once for all of them, not once per package. This mirrors [`files_repo`]'s own batching.

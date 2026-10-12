@@ -28,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use piko_db::{LocalDatabase, LocalPackage};
+use piko_db::{local::LocalDatabase, local::LocalPackage};
 
 use crate::{
     conflict::filelist::FileList,
@@ -179,6 +179,7 @@ fn file_list_of(package: &LocalPackage) -> FileList {
 
 /// An owner query's target, resolved against the host filesystem and the installation root.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Query {
     /// The absolute path an answer names: canonicalized, with a directory's trailing `/`.
     pub resolved: String,
@@ -200,6 +201,7 @@ pub struct Query {
 
 /// A target, resolved, with every installed package that owns it.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Answer {
     /// What the target resolved to.
     pub query: Query,

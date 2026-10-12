@@ -14,7 +14,7 @@
 //! listed twice, and a path whose parent directory is not listed. Neither changes what a
 //! removal deletes, and libalpm reads both. A refusal would leave the package impossible to
 //! remove or upgrade. [`LocalFiles::defects`] names them. A repository member, read by
-//! [`parse_repo`], still refuses them: refusing it costs only that package's file listing.
+//! `parse_repo`, still refuses them: refusing it costs only that package's file listing.
 //!
 //! [`LocalFiles::backups`] names each path once. pacman can write a `(null)` entry twice, and
 //! every caller asks one question per path: which file to compare, keep or offer to merge.
@@ -38,6 +38,7 @@ const NULL_HASH: &str = "(null)";
 
 /// One `%BACKUP%` entry: a configuration file, and the hash of the version the package shipped.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Backup {
     /// The file, relative to the installation root.
     pub path: RelativeFilePath,
@@ -48,7 +49,7 @@ pub struct Backup {
 }
 
 /// The most defects one local `files` names in [`LocalFiles::defects`].
-pub const MAX_FILES_DEFECTS: usize = 32;
+pub(crate) const MAX_FILES_DEFECTS: usize = 32;
 
 /// A rule of the `alpm-db-files` specification a local `files` breaks, without being refused.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -90,14 +91,14 @@ impl LocalFiles {
         FilePaths { data: &self.data, ends: self.ends.iter(), start: 0 }
     }
 
-    /// The rules this file breaks without being refused, at most [`MAX_FILES_DEFECTS`], in
+    /// The rules this file breaks without being refused, at most `MAX_FILES_DEFECTS`, in
     /// path order.
     #[must_use]
     pub fn defects(&self) -> &[FilesDefect] {
         &self.defects
     }
 
-    /// The number of defects past [`MAX_FILES_DEFECTS`], which are not named.
+    /// The number of defects past `MAX_FILES_DEFECTS`, which are not named.
     #[must_use]
     pub const fn defects_dropped(&self) -> usize {
         self.defects_dropped
@@ -177,7 +178,7 @@ pub enum FilesError {
     },
 
     /// A rule a local `files` breaks without being refused, which refuses a repository member
-    /// ([`parse_repo`]).
+    /// (`parse_repo`).
     #[error(transparent)]
     Defect(#[from] FilesDefect),
 
@@ -259,7 +260,7 @@ pub fn parse(text: &str) -> Result<LocalFiles, FilesError> {
 /// # Errors
 ///
 /// [`FilesError`] for the first defect found.
-pub fn parse_repo(text: &str) -> Result<Vec<&str>, FilesError> {
+pub(crate) fn parse_repo(text: &str) -> Result<Vec<&str>, FilesError> {
     let [files] = read_sections(text, [FILES])?;
     let sorted = sorted_paths(files)?;
     if let Some(defect) = check_paths(&sorted, 1).defects.into_iter().next() {

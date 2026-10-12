@@ -177,13 +177,13 @@ fn refresh(
     now: SystemTime,
 ) -> Refreshed {
     let servers = [server];
-    let repos = [RepoRefresh {
-        name: "core",
-        kind: DatabaseKind::Db,
-        servers: &servers,
-        policy: Policy::for_database(level),
-        freshness: FreshnessPolicy::new(now),
-    }];
+    let repos = [RepoRefresh::new(
+        "core",
+        DatabaseKind::Db,
+        &servers,
+        Policy::for_database(level),
+        FreshnessPolicy::new(now),
+    )];
     Refresher::default()
         .refresh_all(
             sync,

@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use piko_db::{EntryName, LocalDatabase, LocalPackage};
+use piko_db::{EntryName, local::LocalDatabase, local::LocalPackage};
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";
 

@@ -20,7 +20,7 @@
 //! bad download replace a good database and be merely reported. That is the failure mode this
 //! feature exists to prevent.
 //!
-//! Package archives are downloaded the same way (see [`refresh::Refresher::fetch_package`]),
+//! Package archives are downloaded the same way (see [`Refresher::fetch_package`]),
 //! with one deliberate difference: there is nothing to verify at download time. A database's
 //! `SigLevel` is one value, but a package's applicable policy can differ per repository. The
 //! check that matters happens later, against whichever policy actually applies. This crate
@@ -37,9 +37,26 @@
 //!
 //! Cancellation is checked before a worker claims its next file, before each request is
 //! issued, and once per 64 KiB of body. A worker already inside a connect or a TLS handshake
-//! when the signal lands still waits that request out. [`refresh::Limits::timeout`] bounds it,
+//! when the signal lands still waits that request out. [`Limits::timeout`] bounds it,
 //! and `Refresher`'s connect timeout is deliberately much shorter than its overall one, so a
 //! cancellation is prompt rather than instant.
+//!
+//! # Stability
+//!
+//! Each public item has one path, from the crate root. An item hidden from this documentation
+//! is there for this workspace's tests and fuzz targets, and is not part of the stable
+//! interface. Three rules say which types a later release can extend without a breaking
+//! change:
+//!
+//! - **A result, a report, a diagnostic or a failure is `#[non_exhaustive]`.** A later release
+//!   can add a variant or a field. Match it with a wildcard arm, as the example below does
+//!   for [`Outcome`].
+//! - **A decision, and a closed set, are exhaustive.** A new variant changes what every caller
+//!   must do, so it must break the build of each caller. Example: [`DatabaseKind`].
+//! - **An input struct is exhaustive, with public fields:** [`Limits`], [`FreshnessPolicy`],
+//!   [`RepoRefresh`]. It has a `Default` when a default value means something, as for options
+//!   and limits. An input with optional fields is `#[non_exhaustive]` instead, with a
+//!   constructor and `with_` methods: [`PackageFetch`].
 //!
 //! # Example
 //!
@@ -50,8 +67,7 @@
 //! ```rust,no_run
 //! use std::path::Path;
 //!
-//! use piko_net::{Cancel, Refresher};
-//! use piko_net::refresh::Outcome;
+//! use piko_net::{Cancel, Outcome, Refresher};
 //! use piko_sig::{Keyring, Policy};
 //! use piko_db::config::SigLevel;
 //!
@@ -85,6 +101,8 @@
 //!     Outcome::UpToDate => println!("core already current"),
 //!     // Every server offered an older `core.db`. The installed one stays.
 //!     Outcome::Kept => println!("core kept"),
+//!     // `Outcome` is `#[non_exhaustive]`: a later release can add an outcome.
+//!     _ => println!("core refreshed"),
 //! }
 //! // Servers passed over, and a database older than the age limit, are reported here.
 //! for note in &refreshed.notes {
@@ -99,7 +117,7 @@
 //! So a refresh also compares the date of what it downloads with the date of what is
 //! installed, refuses an older database, and moves on to the next server. It warns about a
 //! database older than an age limit, after asking a few more servers for a newer one. See
-//! [`freshness`] for the two levels of protection this gives, and for why an older database
+//! [`FreshnessPolicy`] for the two levels of protection this gives, and for why an older database
 //! moves on to the next server while a bad signature does not.
 //!
 //! # Every request runs in a confined helper
@@ -108,7 +126,7 @@
 //! given a [`Sandbox`] makes each request in a helper process that cannot write a file, start a
 //! program, or reach an unexpected port, and runs as `DownloadUser`, or `nobody`, under root. The helper sends
 //! the body back on a pipe, and everything above happens in the caller's process. See
-//! [`sandbox`].
+//! [`Sandbox`].
 //!
 //! # What is deliberately not here
 //!
@@ -120,23 +138,28 @@
 //! - **`Include`d mirrorlists.** Already handled: `piko_db::config` resolves `Server` and
 //!   `CacheServer` with `$repo`/`$arch` substituted before this crate sees them.
 
-pub mod cancel;
-pub mod concurrency;
-pub mod error;
-pub mod freshness;
+mod cancel;
+mod concurrency;
+mod error;
+mod freshness;
 mod health;
 mod pool;
-pub mod progress;
-pub mod refresh;
-pub mod sandbox;
-pub mod targets;
+mod progress;
+mod refresh;
+mod sandbox;
+mod targets;
 mod transport;
 
 pub use cancel::Cancel;
 pub use concurrency::Concurrency;
-pub use error::{Error, Result};
+pub use error::{Error, Result, without_credentials};
 pub use freshness::{FreshnessNote, FreshnessPolicy, Refreshed};
 pub use progress::{Event, Kind};
-pub use refresh::{DatabaseKind, Outcome, PackageFetch, Refresher, RepoRefresh, refresh};
+pub use refresh::{DatabaseKind, Limits, Outcome, PackageFetch, Refresher, RepoRefresh, refresh};
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use sandbox::fuzzing;
+#[doc(hidden)]
+pub use sandbox::{FALLBACK_USER, confine_self};
 pub use sandbox::{Sandbox, run_helper_if_requested};
 pub use targets::RefreshTargets;

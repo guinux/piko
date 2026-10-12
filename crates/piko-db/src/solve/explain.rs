@@ -490,7 +490,7 @@ impl Derivation {
 
     /// Renders `unsat` against the universe its ids came from.
     #[must_use]
-    pub fn build(
+    pub(crate) fn build(
         universe: &Universe<'_>,
         problem: &Problem,
         unsat: &Unsatisfiable,
@@ -795,9 +795,6 @@ fn fact(universe: &Universe<'_>, kind: ClauseKind) -> Option<Fact> {
         ClauseKind::Excluded { excluded } => {
             Some(Fact::Excluded { package: describe_candidate(universe, excluded) })
         }
-        // A learned clause is a fact the solver derived, not one a user could act on. The core
-        // already replaces each one with the problem clauses that produced it.
-        ClauseKind::Learned => None,
     }
 }
 

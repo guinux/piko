@@ -2,7 +2,7 @@
 //!
 //! A transaction that meets an edited configuration file keeps both copies. The package's
 //! version lands beside the user's as `<path>.pacnew` ([`crate::extract`]), or the user's is
-//! kept as `<path>.pacsave` when the package goes away ([`crate::remove`]). Neither is the
+//! kept as `<path>.pacsave` when the package goes away (`crate::remove`). Neither is the
 //! final state. Someone has to look at the pair and decide.
 //!
 //! This module is the half of that job a front end must not re-derive. It finds the pending
@@ -26,26 +26,27 @@
 //! # Paths
 //!
 //! Every path in this module is root-relative, the way `%BACKUP%` spells it (`etc/foo.conf`),
-//! with no leading separator. That is the spelling [`crate::RootDir`] resolves, and the one a
+//! with no leading separator. That is the spelling [`crate::rootfs::RootDir`] resolves, and the one a
 //! package archive uses for the same file. A caller that displays one joins the root itself. A
-//! caller never *acts* on a joined path: every write goes through a [`crate::Resolved`], so the
+//! caller never *acts* on a joined path: every write goes through a [`crate::rootfs::Resolved`], so the
 //! directory acted in is the object that was checked.
 
 use std::path::PathBuf;
 
 use alpm_types::{FullVersion, Name};
 
-pub mod action;
-pub mod base;
-pub mod program;
-pub mod scan;
+pub(crate) mod action;
+pub(crate) mod base;
+pub(crate) mod program;
+pub(crate) mod scan;
 
+pub use self::base::RefusedBase;
+#[doc(hidden)]
+pub use self::base::extract_member;
+pub use self::base::{BaseCandidate, BaseLookup, BaseSearch};
 pub use self::{
     action::{Action, Outcome, apply, is_identical, remove_if_identical},
-    base::{
-        BaseCandidate, BaseCheck, BaseContents, BaseLimits, BaseLookup, BaseSearch, RefusedBase,
-        base_contents, extract_member, find_base,
-    },
+    base::{BaseCheck, BaseContents, BaseLimits, base_contents, find_base},
     program::{
         DEFAULT_DIFFPROG, DEFAULT_MERGEPROG, Invocation, parse_program, review_diff,
         three_way_diff, three_way_merge, two_way_diff,
@@ -54,12 +55,13 @@ pub use self::{
 };
 
 /// The suffix a package manager gives the version it kept.
-pub const PACNEW_SUFFIX: &str = ".pacnew";
+pub(crate) const PACNEW_SUFFIX: &str = ".pacnew";
 /// The suffix a package manager gives the version the user had.
-pub const PACSAVE_SUFFIX: &str = ".pacsave";
+pub(crate) const PACSAVE_SUFFIX: &str = ".pacsave";
 
 /// Which suffix a pending file carries.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
 pub enum PendingKind {
     /// `<path>.pacnew`: what the package ships, beside what the user has.
     Pacnew,
@@ -115,6 +117,7 @@ pub enum Verdict {
 
 /// One pending file, and what is known about it.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Pending {
     /// The pending file itself, root-relative.
     pub pacfile: PathBuf,

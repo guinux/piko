@@ -183,14 +183,7 @@ fn work_is_spread_so_no_mirror_sees_more_than_the_per_host_cap() {
     let names: Vec<PackageFileName> = (0..12).map(package_name).collect();
     let wanted: Vec<PackageFetch<'_>> = names
         .iter()
-        .map(|file_name| PackageFetch {
-            file_name,
-            repo_name: "core",
-            servers: &servers,
-            cache_servers: 0,
-            policy: unsigned_package(),
-            size: None,
-        })
+        .map(|file_name| PackageFetch::new(file_name, "core", &servers, unsigned_package()))
         .collect();
 
     let concurrency = Concurrency::new(5);
@@ -226,14 +219,7 @@ fn parallel_downloads_of_one_never_opens_a_second_connection() {
     let servers = vec![url];
     let wanted: Vec<PackageFetch<'_>> = names
         .iter()
-        .map(|file_name| PackageFetch {
-            file_name,
-            repo_name: "core",
-            servers: &servers,
-            cache_servers: 0,
-            policy: unsigned_package(),
-            size: None,
-        })
+        .map(|file_name| PackageFetch::new(file_name, "core", &servers, unsigned_package()))
         .collect();
 
     let results = Refresher::default().fetch_packages(
@@ -260,13 +246,9 @@ fn packages_are_fetched_largest_first_but_reported_in_input_order() {
     let wanted: Vec<PackageFetch<'_>> = names
         .iter()
         .enumerate()
-        .map(|(index, file_name)| PackageFetch {
-            file_name,
-            repo_name: "core",
-            servers: &servers,
-            cache_servers: 0,
-            policy: unsigned_package(),
-            size: Some(1024 * 1024 + index as u64),
+        .map(|(index, file_name)| {
+            PackageFetch::new(file_name, "core", &servers, unsigned_package())
+                .with_size(Some(1024 * 1024 + index as u64))
         })
         .collect();
 
@@ -307,12 +289,8 @@ fn repositories_refresh_concurrently_and_report_in_input_order() {
     let names = ["core", "extra", "multilib", "community"];
     let repos: Vec<RepoRefresh<'_>> = names
         .iter()
-        .map(|name| RepoRefresh {
-            name,
-            kind: DatabaseKind::Db,
-            servers: &servers,
-            policy: unsigned_database(),
-            freshness: freshness(),
+        .map(|name| {
+            RepoRefresh::new(name, DatabaseKind::Db, &servers, unsigned_database(), freshness())
         })
         .collect();
 
@@ -363,14 +341,7 @@ fn a_cancelled_batch_stops_and_reports_what_it_never_claimed() {
     let names: Vec<PackageFileName> = (0..24).map(package_name).collect();
     let wanted: Vec<PackageFetch<'_>> = names
         .iter()
-        .map(|file_name| PackageFetch {
-            file_name,
-            repo_name: "core",
-            servers: &servers,
-            cache_servers: 0,
-            policy: unsigned_package(),
-            size: None,
-        })
+        .map(|file_name| PackageFetch::new(file_name, "core", &servers, unsigned_package()))
         .collect();
 
     let cancel = Cancel::new();
@@ -413,16 +384,8 @@ fn a_batch_refuses_a_duplicate_rather_than_racing_for_one_temporary() {
     let servers = vec![url];
 
     let name = package_name(1);
-    let wanted: Vec<PackageFetch<'_>> = (0..2)
-        .map(|_| PackageFetch {
-            file_name: &name,
-            repo_name: "core",
-            servers: &servers,
-            cache_servers: 0,
-            policy: unsigned_package(),
-            size: None,
-        })
-        .collect();
+    let wanted: Vec<PackageFetch<'_>> =
+        (0..2).map(|_| PackageFetch::new(&name, "core", &servers, unsigned_package())).collect();
 
     let results = Refresher::default().fetch_packages(
         cache.path(),
@@ -448,12 +411,8 @@ fn a_repository_named_twice_is_refused_before_any_io() {
     let servers = vec![url];
     let repos: Vec<RepoRefresh<'_>> = ["core", "core"]
         .iter()
-        .map(|name| RepoRefresh {
-            name,
-            kind: DatabaseKind::Files,
-            servers: &servers,
-            policy: unsigned_database(),
-            freshness: freshness(),
+        .map(|name| {
+            RepoRefresh::new(name, DatabaseKind::Files, &servers, unsigned_database(), freshness())
         })
         .collect();
 
@@ -485,13 +444,7 @@ fn a_repositorys_db_and_files_are_fetched_side_by_side() {
 
     let repos: Vec<RepoRefresh<'_>> = [DatabaseKind::Db, DatabaseKind::Files]
         .into_iter()
-        .map(|kind| RepoRefresh {
-            name: "core",
-            kind,
-            servers: &servers,
-            policy: unsigned_database(),
-            freshness: freshness(),
-        })
+        .map(|kind| RepoRefresh::new("core", kind, &servers, unsigned_database(), freshness()))
         .collect();
 
     let results = Refresher::default().refresh_all(
@@ -530,14 +483,7 @@ fn progress_deltas_sum_to_the_bytes_actually_received() {
     let names: Vec<PackageFileName> = (0..6).map(package_name).collect();
     let wanted: Vec<PackageFetch<'_>> = names
         .iter()
-        .map(|file_name| PackageFetch {
-            file_name,
-            repo_name: "core",
-            servers: &servers,
-            cache_servers: 0,
-            policy: unsigned_package(),
-            size: None,
-        })
+        .map(|file_name| PackageFetch::new(file_name, "core", &servers, unsigned_package()))
         .collect();
 
     let counted = AtomicUsize::new(0);

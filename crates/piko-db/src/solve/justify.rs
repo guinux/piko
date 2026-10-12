@@ -78,6 +78,7 @@ pub enum Cause {
 /// never interned, so no [`SolvableId`] names it. [`crate::solve::Fact`] carries its packages
 /// the same way, for the same reason.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Alternative {
     /// How the candidate prints, including its origin.
     pub package: String,

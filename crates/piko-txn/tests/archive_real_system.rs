@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use piko_txn::extract::{MemberKind, PackageLimits, archive, decision::EntryKind};
+use piko_txn::{extract::EntryKind, extract::MemberKind, extract::PackageLimits, extract::walk};
 
 /// Packages larger than this are skipped unless `PIKO_FULL_CACHE` is set.
 const SIZE_LIMIT: u64 = 8 * 1024 * 1024;
@@ -75,7 +75,7 @@ fn every_cached_package_can_be_read() {
             continue;
         }
 
-        let result = archive::walk(path, &limits, |member, _contents| {
+        let result = walk(path, &limits, |member, _contents| {
             members += 1;
             match member.kind {
                 MemberKind::Metadata => metadata += 1,
@@ -133,7 +133,7 @@ fn member_contents_match_their_declared_size() {
     let mut mismatches = Vec::new();
 
     for (path, _) in sample {
-        archive::walk(path, &PackageLimits::default(), |member, contents| {
+        walk(path, &PackageLimits::default(), |member, contents| {
             let mut sink = Vec::new();
             std::io::Read::read_to_end(contents, &mut sink).unwrap();
             if sink.len() as u64 != member.size {

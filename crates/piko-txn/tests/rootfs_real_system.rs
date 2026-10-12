@@ -26,8 +26,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use piko_db::LocalDatabase;
-use piko_txn::{Error, RootDir, rootfs};
+use piko_db::local::LocalDatabase;
+use piko_txn::{Error, rootfs, rootfs::RootDir};
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";
 

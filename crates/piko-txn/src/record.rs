@@ -298,7 +298,7 @@ depend = bar
 
         let db = piko_db::fixture::DbFixture::new();
         db.package("foo-1.0.0-1").desc(&rendered).files(piko_db::fixture::MINIMAL_FILES).build();
-        let local = piko_db::LocalDatabase::open(db.path()).unwrap();
+        let local = piko_db::local::LocalDatabase::open(db.path()).unwrap();
         let package = local.get_str("foo").unwrap();
         let read = package.desc().unwrap();
         assert_eq!(read.description(), "");
@@ -330,7 +330,7 @@ depend = bar
                 .desc(&rendered)
                 .files(piko_db::fixture::MINIMAL_FILES)
                 .build();
-            let local = piko_db::LocalDatabase::open(db.path()).unwrap();
+            let local = piko_db::local::LocalDatabase::open(db.path()).unwrap();
             let package = local.get_str("foo").unwrap();
             let defects = package.desc().unwrap().invalid_fields();
 

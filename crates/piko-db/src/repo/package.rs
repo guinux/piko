@@ -223,7 +223,7 @@ fn collect_file_list(
 /// A single package described by a repository database.
 ///
 /// The name and version are known as soon as the database is opened. Both come from the entry
-/// directory name in the archive, exactly as [`crate::LocalPackage`] does.
+/// directory name in the archive, exactly as [`crate::local::LocalPackage`] does.
 ///
 /// # Two tiers of `desc`
 ///
@@ -238,7 +238,7 @@ fn collect_file_list(
 ///   reads these fields for *every* candidate, so deferring them would buy nothing. See
 ///   `repo::eager`.
 /// - **Deferred** — everything else, through [`Self::desc`]. That parses the retained text on
-///   first access, and caches the outcome exactly as [`crate::LocalPackage::desc`] does.
+///   first access, and caches the outcome exactly as [`crate::local::LocalPackage::desc`] does.
 ///
 /// The file list is a third tier; see `FilesSource`. It may require decompressing a *second*, much
 /// larger archive that has not been touched yet.
@@ -422,7 +422,7 @@ impl RepoPackage {
 
     /// Whether the deferred `desc` parse has already run.
     ///
-    /// Exists for the same reason [`crate::LocalPackage::is_desc_loaded`] does. It proves, from
+    /// Exists for the same reason [`crate::local::LocalPackage::is_desc_loaded`] does. It proves, from
     /// outside the crate, that opening a database does not parse what it should not.
     #[must_use]
     pub fn is_desc_loaded(&self) -> bool {
@@ -452,7 +452,7 @@ impl RepoPackage {
     ///
     /// The arena is shared across every package in the database; see `FilesSource`. So this
     /// reflects the database's state, not just this one package's. It exists for the same reason
-    /// [`crate::LocalPackage::is_desc_loaded`] does. It proves, from outside the crate, that
+    /// [`crate::local::LocalPackage::is_desc_loaded`] does. It proves, from outside the crate, that
     /// opening a database does not load what it should not.
     #[must_use]
     pub fn is_files_loaded(&self) -> bool {

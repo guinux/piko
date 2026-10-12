@@ -1,7 +1,7 @@
 //! Transaction hooks: `.hook` files that run a command before or after a transaction.
 //!
 //! This module splits `_alpm_hook_run` (`hook.c:528`) into three parts, matching the rest of
-//! the crate. [`parse`] turns a file into a value. [`trigger`] answers one question: does this
+//! the crate. [`parse`] turns a file into a value. `trigger` answers one question: does this
 //! transaction set the hook off. This module touches the disk and starts the process.
 //!
 //! # Hook files come from the host; the command runs inside the root
@@ -27,21 +27,26 @@
 //! Hooks run in order of their file name, **excluding the `.hook` suffix** (`_alpm_hook_cmp`,
 //! `hook.c:439`). Ordering applies across all directories at once, not per directory.
 
-pub mod parse;
-pub mod trigger;
-pub mod wordsplit;
+pub(crate) mod parse;
+pub(crate) mod trigger;
+pub(crate) mod wordsplit;
 
 use std::path::{Path, PathBuf};
 
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 
 use crate::{
     error::Result,
     exec::{Command, Outcome, Runner},
 };
 
-pub use parse::{Hook, ParseError, TriggerKind, When};
-pub use trigger::Summary;
+pub use parse::{Trigger, When, parse};
+
+pub use parse::{Hook, Operations, ParseError, TriggerKind};
+#[doc(hidden)]
+pub use trigger::triggered;
+pub use trigger::{Added, Matches, Removed, Summary};
+pub use wordsplit::{SplitError, split};
 
 /// The suffix a hook file must have.
 const HOOK_SUFFIX: &str = ".hook";
@@ -54,12 +59,12 @@ const HOOK_SUFFIX: &str = ".hook";
 /// real Arch system's actual hooks mostly live here. A caller that reads only `HookDir` would
 /// silently run none of them. This constant lives next to [`Hooks::collect`], not in a frontend.
 /// So every caller building a directory list gets it, not only this crate's own CLI.
-pub const SYSTEM_HOOK_DIR: &str = "/usr/share/libalpm/hooks";
+pub(crate) const SYSTEM_HOOK_DIR: &str = "/usr/share/libalpm/hooks";
 
 /// The directories hooks are read from, in increasing priority.
 ///
 /// `replacing` non-empty is pacman's `--hookdir`, and replaces the whole list as it is given.
-/// Otherwise the list is [`SYSTEM_HOOK_DIR`] followed by each `configured` `HookDir`. So a file
+/// Otherwise the list is `SYSTEM_HOOK_DIR` followed by each `configured` `HookDir`. So a file
 /// in `/etc/pacman.d/hooks` overrides the system copy of the same name.
 ///
 /// The system directory is resolved inside `root`; a configured `HookDir` is a host path.
@@ -100,6 +105,7 @@ fn max_hook_bytes() -> u64 {
 /// Reproducing that decision is the caller's job. This type carries the fact; it does not act
 /// on it.
 #[derive(Clone, Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Problem {
     /// A hook directory could not be read. A missing directory is not a problem; it is skipped.
     #[error("could not read the hook directory {}: {reason}", path.display())]

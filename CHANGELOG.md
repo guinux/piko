@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `piko-sig` and `piko-sig-write` export their items from the crate root only. Their modules
+  are private, so each item has one path.
+- No `gpgme` type is part of the stable interface of either crate. `piko_sig::open_context` is
+  hidden from the documentation, and `piko-sig-write` has no `From` impl for a `gpgme` type.
+- The result types of both crates are `#[non_exhaustive]`, so a later release can add a
+  variant or a field without a breaking change. `Verdict`, `Policy` and `OwnerTrust` stay
+  exhaustive on purpose: each is an input or a decision that every caller must handle in
+  full.
+- `piko_sig::newest_creation` and `piko_sig_write::VERIFY_POLICY` are no longer public.
+- `piko-db-write` and `piko-net` export their items from the crate root only, as the two
+  signature crates do. `piko_net::without_credentials` and `piko_net::Limits` are now exported
+  there, and the `fuzzing` module is `piko_net::fuzzing`.
+- `piko-net`'s `Outcome`, `Refreshed`, `RepoRefresh` and `PackageFetch` are
+  `#[non_exhaustive]`. `RepoRefresh::new`, and `PackageFetch::new` with `with_cache_servers`
+  and `with_size`, build the two inputs. `FreshnessPolicy` has `with_accept_older` and
+  `with_max_age`. `RecordKind` of `piko-db-write` is `#[non_exhaustive]` too.
+- `piko-db` gives each public item one path. Shared items are exported from the crate root
+  (`EntryName`, `Error`, `Lazy`, `Limits`, `DescFieldError`, the `printable` functions). The
+  items of a domain are exported from its module only: `local::LocalDatabase`,
+  `resolve::SyncRepos`, `search::MatchKind`, `updates::Updates`, `glob::Glob`.
+  `local::schema_version::check` is now `local::check_schema_version`.
+- `piko-db` no longer exports the internals of its CDCL solver (`Problem`, `Clause`, `Lit`,
+  `Solver`, `Solution`), nor the helpers no other crate uses.
+- `piko-db`'s results, reports and failures are `#[non_exhaustive]`, and so are
+  `config::Options`, `config::RepositoryConfig` (built with `RepositoryConfig::new`) and
+  `solve::GroupTarget`. The crate documentation states the rules under "Stability". The same
+  rules keep `piko_net::Limits`, `FreshnessPolicy` and `DatabaseKind` exhaustive.
+- `piko-txn` gives each public item one path. The commit engine's items are exported from
+  the crate root (`Transaction`, `TransactionPlan`, `Report`, `PackageSource`), and the
+  submodules of `conflict`, `extract`, `hook`, `merge` and `space` are private. Its results,
+  reports and failures are `#[non_exhaustive]`, and the helpers no other crate uses are no
+  longer public. The removal decision (`decide_removal`, `pacsave_rotation`) is one of them.
+- `piko_db_write::STAGING_DIR` and `piko_net`'s `HELPER_ARG` are no longer public.
+  `piko_net::confine_self` and `piko_net::FALLBACK_USER` stay public for the tests, but are
+  hidden from the documentation.
+
 ## [0.9.0] - 2026-10-10
 
 ### Added

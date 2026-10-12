@@ -2,7 +2,7 @@
 //!
 //! [`MatchKind`] is shared between the local and repository searches, so both rank hits the same
 //! way. The ordering a user sees does not depend on which database answered. The searches
-//! themselves differ, because the two package types do, and live in [`crate::local::search`] and
+//! themselves differ, because the two package types do, and live in `local::search` and
 //! `repo::search`. [`hide_installed`] combines the two.
 
 use alpm_types::{Name, RelationOrSoname};
@@ -14,7 +14,7 @@ use crate::repo::{RepoDatabase, RepoPackage, SearchHit};
 /// How a package matched a single search term.
 ///
 /// Variants are declared least-relevant first, so the derived [`Ord`] ranks
-/// [`MatchKind::ExactName`] highest. [`LocalDatabase::search`](crate::LocalDatabase::search)
+/// [`MatchKind::ExactName`] highest. [`LocalDatabase::search`](crate::local::LocalDatabase::search)
 /// and [`RepoDatabase::search`](crate::repo::RepoDatabase::search) both sort hits by this
 /// order, most relevant first. A package that matches a single term in more than one way is
 /// scored by its single best match. A search with several terms requires every term to match;

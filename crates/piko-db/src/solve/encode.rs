@@ -213,7 +213,7 @@ impl Request {
     /// prompts nobody. [`encode`] then compiles that requirement with the chosen candidate as
     /// its **only** satisfier.
     ///
-    /// Narrowing, not reordering. [`Solver::decide`](crate::solve::Solver) skips a clause
+    /// Narrowing, not reordering. `Solver::decide` skips a clause
     /// another clause has already satisfied. So a merely reordered list would leave the answer
     /// unapplied in exactly the case that motivates asking. That case: a provider selected for
     /// some unrelated requirement already answers this one.
@@ -278,7 +278,7 @@ impl Request {
 /// seeded with the whole installed set. So a text-keyed answer would also rewrite the same
 /// dependency of an installed package this transaction never touches. It would pull a new
 /// provider in for that package too. The pair is what [`Divergence`] and
-/// [`ClauseKind::Requires`] already use.
+/// `ClauseKind::Requires` already use.
 ///
 /// A [`SolvableId`] is meaningful only for the [`Universe`] it came from, which is built once
 /// per run. An answer that outlives a run has to be keyed by name and relation text instead.
@@ -306,6 +306,7 @@ pub struct ProviderChoice {
 /// *candidate* and keeps the repository one, so the names it yields are
 /// `alpm_find_group_pkgs`' names.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct GroupTarget {
     /// The group name, as the user spelled it or as a pattern selected it.
     pub name: String,
@@ -333,13 +334,13 @@ pub struct GroupChoice {
 /// A requirement clause, kept so the plan can tell whether the solver took the candidate
 /// libalpm would have taken.
 #[derive(Clone, Copy, Debug)]
-pub struct Requirement {
+pub(crate) struct Requirement {
     /// The clause encoding this requirement.
     pub clause: ClauseId,
     /// The package that declared the dependency.
     pub dependent: SolvableId,
     /// Which of `dependent`'s `%DEPENDS%` entries this was, so a report can quote the exact
-    /// relation instead of guessing at it. [`ClauseKind::Requires`] carries the same index.
+    /// relation instead of guessing at it. `ClauseKind::Requires` carries the same index.
     /// It is kept here too, so naming a requirement costs no clause lookup.
     pub dependency: usize,
     /// The candidate libalpm's greedy descent would have chosen. That is the first satisfier
@@ -353,6 +354,7 @@ pub struct Requirement {
 /// for. Named by index rather than by rendered text, like [`Divergence`] and [`Ambiguity`].
 /// So a report quotes the relation by indexing `dependent`'s `%DEPENDS%`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct BrokenDependency {
     /// The installed package whose `%DEPENDS%` declared it.
     pub dependent: SolvableId,
@@ -371,13 +373,13 @@ pub struct Encoded {
 impl Encoded {
     /// The compiled problem.
     #[must_use]
-    pub const fn problem(&self) -> &Problem {
+    pub(crate) const fn problem(&self) -> &Problem {
         &self.problem
     }
 
     /// Every requirement clause emitted, in emission order.
     #[must_use]
-    pub fn requirements(&self) -> &[Requirement] {
+    pub(crate) fn requirements(&self) -> &[Requirement] {
         &self.requirements
     }
 
@@ -396,7 +398,7 @@ impl Encoded {
     /// Diagnoses why this compiled problem has no solution.
     ///
     /// Re-solves rather than requiring the caller to have kept the
-    /// [`Unsatisfiable`](crate::solve::Unsatisfiable) certificate around. This is fast, since
+    /// `Unsatisfiable` certificate around. This is fast, since
     /// the problem is already compiled. So a caller holding an `Encoded` from
     /// [`solve_with_removals`]'s `Err` arm can diagnose it without a second encode step.
     ///
@@ -437,15 +439,16 @@ pub fn resolve_target(universe: &Universe<'_>, dep: &RelationOrSoname) -> Option
 /// [`Universe::group_members`] found them, one per package name, whatever the number of
 /// repositories carrying it. Returns an empty vector if `name` is not a group.
 ///
-/// Checked only *after* [`resolve_target`] fails. This matches pacman, which prefers a
+/// Checked only *after* `resolve_target` fails. This matches pacman, which prefers a
 /// package to a group of the same name rather than installing both.
 #[must_use]
-pub fn resolve_group(universe: &Universe<'_>, name: &str) -> Vec<SolvableId> {
+pub(crate) fn resolve_group(universe: &Universe<'_>, name: &str) -> Vec<SolvableId> {
     universe.group_members(name)
 }
 
 /// Why [`resolve_targets`] could not resolve one of its targets.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TargetResolutionFailure {
     /// A target did not parse as a dependency string (`name`, `name>=1.0`, or a soname).
     InvalidDependencyString(String),
@@ -484,6 +487,7 @@ pub enum TargetResolutionFailure {
 
 /// A named target, or a member of a named group, that `IgnorePkg`/`IgnoreGroup` covered.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct IgnoredTarget {
     /// The package's name.
     pub name: Name,
@@ -505,6 +509,7 @@ impl IgnoredTarget {
 
 /// What [`resolve_targets`] produced.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Resolution {
     /// The request, with one target added per resolved name.
     pub request: Request,
@@ -526,7 +531,7 @@ pub struct Resolution {
 
 /// Resolves `targets` against `universe`, adding each one to `request`.
 ///
-/// A target is tried as a literal dependency string first ([`resolve_target`], matching a
+/// A target is tried as a literal dependency string first (`resolve_target`, matching a
 /// package name or a soname). A target that resolves to nothing may still name a `%GROUPS%`
 /// group, which pacman expands to its members. This group check runs second, so a package
 /// always wins over a group of the same name.
@@ -537,7 +542,7 @@ pub struct Resolution {
 ///
 /// # A glob target is rewritten before any of that
 ///
-/// A target carrying `*`, `?` or `[` is a pattern. [`expand_installable_targets`] expands it
+/// A target carrying `*`, `?` or `[` is a pattern. `expand_installable_targets` expands it
 /// into the names it selects, ahead of the loop below. So the loop sees only names the user
 /// could have typed. A pattern then plans exactly what naming its expansion would plan. This
 /// expansion belongs here rather than in a frontend, so that `piko install`, `piko plan` and
@@ -915,6 +920,7 @@ fn check_clause_budget(problem: &Problem, limits: &Limits) -> Result<()> {
 
 /// How closely a solution tracked libalpm's greedy descent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Fidelity {
     /// Every requirement was satisfied by the candidate `resolvedep` would have returned.
     ///
@@ -945,8 +951,9 @@ pub enum Fidelity {
 /// Candidates are identified rather than rendered. Naming them needs a [`Universe`], which
 /// the caller already has. Formatting here would also allocate for a report that may never be
 /// shown. To quote the relation, index `dependent`'s `%DEPENDS%` with `dependency`. That is the
-/// same resolution `solve::explain` performs for [`ClauseKind::Requires`].
+/// same resolution `solve::explain` performs for `ClauseKind::Requires`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Divergence {
     /// The package whose `%DEPENDS%` declared the requirement.
     pub dependent: SolvableId,
@@ -1183,6 +1190,7 @@ pub fn fidelity(
 /// [`Request::choose_provider`]. Nothing here prompts: a library returns its questions the
 /// same way it returns its diagnostics.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Ambiguity {
     /// The package whose `%DEPENDS%` declared the dependency.
     pub dependent: SolvableId,
@@ -1304,6 +1312,7 @@ pub fn ambiguities(
 
 /// A solved request, together with the installed packages that had to go.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Planned {
     /// The compiled problem the solution belongs to.
     pub encoded: Encoded,
@@ -1559,7 +1568,7 @@ pub fn solve_with_removals(
 /// `pacman -Rs amberol` removes one package where a whole-system sweep removes eighty-one.
 /// `-Rs` is scoped to the targets' own dependencies, not to tidiness.
 #[must_use]
-pub fn recurse_unneeded(
+pub(crate) fn recurse_unneeded(
     universe: &Universe<'_>,
     removing: &[SolvableId],
     surviving: &[SolvableId],
@@ -1623,6 +1632,7 @@ pub fn recurse_unneeded(
 
 /// What a full system upgrade would target.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Sysupgrade {
     /// Repository candidates to install, in installed-set order.
     pub upgrades: Vec<SolvableId>,
@@ -1653,6 +1663,7 @@ pub enum IgnoredChange {
 /// repository candidate is never interned, so no id names it. `installed` still is one. The
 /// installed set is interned unconditionally.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct IgnoredUpgrade {
     /// The installed package that stays as it is.
     pub installed: SolvableId,
@@ -2631,7 +2642,7 @@ mod tests {
 
     /// The reason the answer narrows the clause instead of reordering it.
     ///
-    /// `Solver::decide` skips a clause another clause has already satisfied, so its literal
+    /// `Solver`::decide` skips a clause another clause has already satisfied, so its literal
     /// order is never consulted there. Here `impl-b` is selected for `helper`'s `asdf`, which
     /// also satisfies `app`'s `virtual`. Real data shows the same shape as
     /// `cl-hu-dwim-stefil requires common-lisp`, answered by the `ecl` that `cl-alexandria`

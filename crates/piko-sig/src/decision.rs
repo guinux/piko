@@ -8,24 +8,6 @@
 //! Transcribed from `_alpm_check_pgp_helper` (`signing.c:803`). libalpm spreads the same rule
 //! across two functions. `_alpm_check_pgp_helper` decides, and `_alpm_process_siglist`
 //! explains. The outcome travels as an `int` that is `-1` for every kind of failure.
-//!
-//! # Two things a first reading of `signing.c` gets wrong
-//!
-//! - **An expired key is not a rejection by itself.** `ALPM_SIGSTATUS_KEY_EXPIRED` falls
-//!   through into the same branch as `ALPM_SIGSTATUS_VALID` (`signing.c:830`), so it is judged
-//!   on trust alone. Only an expired signature (`SIG_EXPIRED`) is fatal whatever the trust.
-//!
-//!   In practice the trust decides, and it is not full. GnuPG 2.4 reports no trust status for
-//!   a signature from an expired key or an expired signing subkey, so GPGME reads its validity
-//!   as unknown. `TrustedOnly` refuses it, and `TrustAll` accepts it. Nothing compares the
-//!   signature's creation time with the key's expiry: GnuPG tests the expiry against the
-//!   current time, and the signer chooses the creation time. So "the signature was made while
-//!   the key was valid" is not a property this rule can rely on. A key that must stop signing
-//!   has to be revoked or disabled.
-//! - **Every signature must pass, not just one of them.** libalpm's loop is
-//!   `for(num = 0; !ret && num < count; num++)`. It stops at the first failure and returns it.
-//!   A file carrying two signatures, one good and one invalid, is rejected. "Any valid
-//!   signature is enough" is the intuitive reading, and the insecure one.
 
 use std::time::SystemTime;
 
@@ -35,6 +17,7 @@ use piko_db::config::SigLevel;
 ///
 /// Mirrors `alpm_sigstatus_t`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Status {
     /// The signature is cryptographically good.
     Valid,
@@ -86,6 +69,7 @@ pub enum Status {
 /// Mirrors `alpm_sigvalidity_t`, which GnuPG computes from the web of trust in `trustdb.gpg`.
 /// piko does not compute this itself. That is the whole reason it verifies through GPGME.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Trust {
     /// Fully trusted. Every correctly-configured Arch keyring reaches this for packager keys.
     Full,
@@ -99,6 +83,7 @@ pub enum Trust {
 
 /// One signature over a file, as the keyring reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct SignatureOutcome {
     /// Whether it verified.
     pub status: Status,
@@ -120,7 +105,7 @@ pub struct SignatureOutcome {
 /// is counted. A bad signature proves nothing, so its time proves nothing either. Call this on
 /// signatures that [`decide`] accepted.
 #[must_use]
-pub fn newest_creation(signatures: &[SignatureOutcome]) -> Option<SystemTime> {
+pub(crate) fn newest_creation(signatures: &[SignatureOutcome]) -> Option<SystemTime> {
     signatures
         .iter()
         .filter(|signature| matches!(signature.status, Status::Valid | Status::KeyExpired))
@@ -132,6 +117,9 @@ pub fn newest_creation(signatures: &[SignatureOutcome]) -> Option<SystemTime> {
 ///
 /// `SigLevel` carries the package and database policies in one bitmask. This is one of them,
 /// already selected, so the decision below cannot read the wrong half.
+///
+/// The fields are public and the struct is exhaustive on purpose. They are the four bits that
+/// libalpm's `SigLevel` defines for one scope, and a caller builds a policy from them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Policy {
     /// Whether signatures are checked at all. `false` is `SigLevel = Never`.
@@ -170,6 +158,7 @@ impl Policy {
 
 /// Why a file was refused.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Rejection {
     /// The policy requires a signature and there was none.
     MissingRequired,
@@ -272,6 +261,9 @@ impl std::fmt::Display for Rejection {
 }
 
 /// Whether a file may be used.
+///
+/// This enum is exhaustive on purpose. A third answer would change what every caller must do
+/// with a file. It must break the build of each caller, not fall into a wildcard arm.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Verdict {
     /// It may. Carries whether anything was actually checked, which is what
@@ -286,8 +278,25 @@ pub enum Verdict {
 
 /// Decides whether `signatures` satisfy `policy`.
 ///
-/// Every signature must pass. The first that does not decides the verdict. See the module
-/// docs for why that is not "any valid signature is enough".
+/// Every signature must pass. The first that does not decides the verdict.
+///
+/// # Two things a first reading of `signing.c` gets wrong
+///
+/// - **An expired key is not a rejection by itself.** `ALPM_SIGSTATUS_KEY_EXPIRED` falls
+///   through into the same branch as `ALPM_SIGSTATUS_VALID` (`signing.c:830`), so it is judged
+///   on trust alone. Only an expired signature (`SIG_EXPIRED`) is fatal whatever the trust.
+///
+///   In practice the trust decides, and it is not full. GnuPG 2.4 reports no trust status for
+///   a signature from an expired key or an expired signing subkey, so GPGME reads its validity
+///   as unknown. `TrustedOnly` refuses it, and `TrustAll` accepts it. Nothing compares the
+///   signature's creation time with the key's expiry: GnuPG tests the expiry against the
+///   current time, and the signer chooses the creation time. So "the signature was made while
+///   the key was valid" is not a property this rule can rely on. A key that must stop signing
+///   has to be revoked or disabled.
+/// - **Every signature must pass, not just one of them.** libalpm's loop is
+///   `for(num = 0; !ret && num < count; num++)`. It stops at the first failure and returns it.
+///   A file carrying two signatures, one good and one invalid, is rejected. "Any valid
+///   signature is enough" is the intuitive reading, and the insecure one.
 #[must_use]
 pub fn decide(signatures: &[SignatureOutcome], policy: Policy) -> Verdict {
     if !policy.check {

@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use alpm_types::{Name, RelationOrSoname};
 
-use crate::LocalDatabase;
+use crate::local::LocalDatabase;
 use crate::solve::{Solvable, SolvableId, Universe, UniverseOptions};
 
 /// Why an installed package is present, in increasing order of "nobody meant to keep this".
@@ -128,7 +128,7 @@ pub fn explain_why_installed(universe: &Universe<'_>, target: &str) -> Option<Wh
 /// someone's `%OPTDEPENDS%` still counts as an orphan here, the same as
 /// [`explain_why_installed`] would report.
 ///
-/// Sorted by name, the same order [`crate::LocalDatabase`] iterates in.
+/// Sorted by name, the same order [`crate::local::LocalDatabase`] iterates in.
 #[must_use]
 pub fn orphans(universe: &Universe<'_>) -> Vec<SolvableId> {
     let required_by = required_by_index(universe);
@@ -152,6 +152,7 @@ pub fn orphans(universe: &Universe<'_>) -> Vec<SolvableId> {
 ///
 /// Both are empty, not an error, for a target that is not installed.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Dependents {
     /// Installed packages whose `%DEPENDS%` requires the target.
     pub required_by: Vec<Name>,

@@ -39,7 +39,7 @@ pub struct FileList {
 /// spell a doubled slash, so this detail only matters for staying honest about what is
 /// transcribed.
 #[must_use]
-pub fn strip_dir(path: &str) -> &str {
+pub(crate) fn strip_dir(path: &str) -> &str {
     path.strip_suffix('/').unwrap_or(path)
 }
 

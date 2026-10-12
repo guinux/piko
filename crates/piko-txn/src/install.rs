@@ -2,10 +2,10 @@
 //!
 //! This module composes the other modules. It adds no rules of its own:
 //!
-//! 1. [`crate::extract::archive::walk_decoded_ahead`] reads the members.
+//! 1. `crate::extract::archive::walk_decoded_ahead` reads the members.
 //! 2. [`crate::extract::decision::decide`] decides what to do with each member.
 //! 3. [`fn@crate::extract::apply`] applies the decision, through [`crate::rootfs`].
-//! 4. [`crate::extract::backup`] resolves the `.pacnew` of any backup file.
+//! 4. `crate::extract::backup` resolves the `.pacnew` of any backup file.
 //!
 //! The result is an [`Extraction`]: a record of what actually landed. The local database
 //! entry is written from this record. Nothing here writes to the database. That is
@@ -97,6 +97,7 @@ impl Default for Filters<'_> {
 
 /// What happened to one payload member.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Outcome {
     /// Written to its intended path.
     Written,
@@ -114,6 +115,7 @@ pub enum Outcome {
 /// genuinely not there. A directory that already existed is kept, because it is there. And
 /// `alpm-db` refuses to re-read a file list missing a parent directory.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Extraction {
     /// Every payload path, in archive order, with what happened to it.
     ///
@@ -173,6 +175,7 @@ impl Extraction {
 /// libalpm carries the time through the same way. It extracts these members with
 /// `ARCHIVE_EXTRACT_TIME` (`add.c:194`).
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct MetadataMember {
     /// The member's bytes, verbatim.
     pub contents: Vec<u8>,
@@ -470,7 +473,7 @@ fn capture_metadata(
 /// What is at `path` inside `root`, from an `lstat` that follows nothing.
 ///
 /// Public because removal asks the same question of the same paths.
-pub fn probe_existing(root: &RootDir, path: &Path) -> Existing {
+pub(crate) fn probe_existing(root: &RootDir, path: &Path) -> Existing {
     let Ok(resolved) = root.resolve_parent(path) else {
         // The parent does not exist yet, so nothing can be at the path.
         return Existing::Absent;

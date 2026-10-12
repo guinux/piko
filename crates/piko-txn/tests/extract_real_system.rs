@@ -25,14 +25,11 @@ use std::{
 };
 
 use alpm_types::PackageFileName;
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 use piko_txn::{
-    Filters, RootDir,
-    extract::{
-        MemberKind, Ownership, PackageLimits, apply, archive,
-        decision::{Disposition, EntryKind},
-    },
-    install::install,
+    extract::Disposition, extract::EntryKind, extract::MemberKind, extract::Ownership,
+    extract::PackageLimits, extract::apply, extract::walk, install::Filters, install::install,
+    rootfs::RootDir,
 };
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";
@@ -97,7 +94,7 @@ fn extracted_paths_match_what_pacman_recorded() {
         let root = RootDir::open(target.path()).unwrap();
         let mut extracted: BTreeSet<PathBuf> = BTreeSet::new();
 
-        let result = archive::walk(package, &PackageLimits::default(), |member, contents| {
+        let result = walk(package, &PackageLimits::default(), |member, contents| {
             if member.kind == MemberKind::Metadata {
                 return Ok(());
             }
@@ -179,7 +176,7 @@ fn extracted_files_have_the_right_contents_and_modes() {
     let mut symlinks = 0_usize;
     let mut mismatches = Vec::new();
 
-    archive::walk(package, &PackageLimits::default(), |member, contents| {
+    walk(package, &PackageLimits::default(), |member, contents| {
         if member.kind == MemberKind::Metadata {
             return Ok(());
         }
@@ -324,7 +321,7 @@ fn capability_of(path: &Path) -> Option<Vec<u8>> {
 fn archive_capabilities(package: &Path) -> (BTreeMap<PathBuf, Vec<u8>>, bool) {
     let mut found = BTreeMap::new();
     let mut runs_setcap = false;
-    archive::walk(package, &PackageLimits::default(), |member, contents| {
+    walk(package, &PackageLimits::default(), |member, contents| {
         if member.path == Path::new(".INSTALL") {
             let mut script = String::new();
             std::io::Read::read_to_string(contents, &mut script).unwrap();
@@ -491,7 +488,7 @@ fn every_cached_package_fits_its_declared_size() {
             continue;
         };
         let limits = PackageLimits::default().with_declared_size(info.size);
-        if let Err(error) = archive::walk(package, &limits, |_, _| Ok(())) {
+        if let Err(error) = walk(package, &limits, |_, _| Ok(())) {
             refused.push(format!("{}: {error}", package.display()));
         }
     }

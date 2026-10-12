@@ -29,7 +29,7 @@ pub fn max_age(days: u64) -> Option<Duration> {
 }
 
 /// The line to print for one note about `file`, prefix included.
-pub fn render_note(file: &str, note: &FreshnessNote, zone: piko_txn::LocalZone) -> String {
+pub fn render_note(file: &str, note: &FreshnessNote, zone: piko_txn::history::LocalZone) -> String {
     match note {
         FreshnessNote::Behind { server, last_modified } => format!(
             "Note: {server} is older than the installed {file} (last modified {}). Piko tried \
@@ -100,7 +100,7 @@ pub fn render_note(file: &str, note: &FreshnessNote, zone: piko_txn::LocalZone) 
 pub fn render_kept(
     file: &str,
     installed: Option<Publication>,
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
 ) -> String {
     format!(
         "Warning: No server has a {file} as new as the installed one ({}). Piko keeps the \
@@ -118,7 +118,7 @@ pub fn report_stale<'a>(
     databases: impl IntoIterator<Item = (&'a RepoName, Option<Publication>)>,
     now: SystemTime,
     max_age: Option<Duration>,
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
 ) {
     for (repo, publication) in databases {
         let Some(publication) = publication else { continue };
@@ -143,7 +143,7 @@ fn future(
     file: &str,
     publication: Publication,
     ahead: Duration,
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
 ) -> String {
     format!(
         "Warning: {file} is dated {} in the future ({}). Check the system clock.",
@@ -153,7 +153,7 @@ fn future(
 }
 
 /// Says when a database was published, and whether a signature vouches for the date.
-fn describe(publication: Option<Publication>, zone: piko_txn::LocalZone) -> String {
+fn describe(publication: Option<Publication>, zone: piko_txn::history::LocalZone) -> String {
     match publication {
         Some(Publication { at, tier: Tier::Authenticated }) => {
             format!("signed {}", date(at, zone))
@@ -165,7 +165,7 @@ fn describe(publication: Option<Publication>, zone: piko_txn::LocalZone) -> Stri
     }
 }
 
-fn date(seconds: u64, zone: piko_txn::LocalZone) -> String {
+fn date(seconds: u64, zone: piko_txn::history::LocalZone) -> String {
     crate::output::human_date(i64::try_from(seconds).unwrap_or(i64::MAX), zone)
 }
 
@@ -186,8 +186,8 @@ fn human_age(age: Duration) -> String {
 mod tests {
     use super::*;
 
-    fn utc() -> piko_txn::LocalZone {
-        piko_txn::LocalZone::UTC
+    fn utc() -> piko_txn::history::LocalZone {
+        piko_txn::history::LocalZone::UTC
     }
 
     #[test]

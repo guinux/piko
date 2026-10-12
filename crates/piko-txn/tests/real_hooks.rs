@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use piko_txn::hook::{Hooks, When, parse, trigger::Summary};
+use piko_txn::{hook::Hooks, hook::Summary, hook::When, hook::parse};
 
 const SYSTEM_HOOKS: &str = "/usr/share/libalpm/hooks";
 const CUSTOM_HOOKS: &str = "/etc/pacman.d/hooks";
@@ -184,7 +184,7 @@ fn inverted_targets_in_real_hooks_exclude_what_they_name() {
         let excluded = format!("{included}deeper/");
 
         let summary = Summary {
-            added: vec![piko_txn::hook::trigger::Added {
+            added: vec![piko_txn::hook::Added {
                 name: "probe".to_owned(),
                 files: vec![included.clone(), excluded.clone()],
                 old_files: Vec::new(),
@@ -229,7 +229,7 @@ fn every_hook_matches_what_its_file_says() {
         let path =
             dirs.iter().rev().map(|dir| dir.join(&hook.name)).find(|path| path.exists()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        let reparsed = parse::parse(&hook.name, &text).unwrap();
+        let reparsed = parse(&hook.name, &text).unwrap();
 
         assert_eq!(reparsed.when, hook.when, "{}", hook.name);
         assert_eq!(reparsed.exec, hook.exec, "{}", hook.name);

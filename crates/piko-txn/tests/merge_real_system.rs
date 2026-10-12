@@ -34,11 +34,8 @@ use std::{
     process::Command,
 };
 
-use piko_db::LocalDatabase;
-use piko_txn::{
-    RootDir,
-    merge::{self, BaseLimits, ScanLimits, Verdict},
-};
+use piko_db::local::LocalDatabase;
+use piko_txn::{merge, merge::BaseLimits, merge::ScanLimits, merge::Verdict, rootfs::RootDir};
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";
 const ROOT: &str = "/";

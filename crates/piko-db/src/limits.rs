@@ -199,7 +199,7 @@ pub struct Limits {
     ///
     /// This is the bound that makes a compression bomb in the database harmless. The
     /// `alpm-mtree` crate inflates gzip internally with no bound of its own. So
-    /// [`crate::LocalPackage`] performs the decompression itself against this limit and
+    /// [`crate::local::LocalPackage`] performs the decompression itself against this limit and
     /// never hands a compressed stream to the parser.
     pub mtree_inflated_bytes: u64,
     /// Maximum size in bytes of the `ALPM_DB_VERSION` file.

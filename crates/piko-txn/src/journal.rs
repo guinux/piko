@@ -64,7 +64,7 @@ use std::{
 };
 
 use alpm_types::{Name, PackageFileName, PackageInstallReason};
-use piko_db::{EntryName, LocalDatabase};
+use piko_db::{EntryName, local::LocalDatabase};
 
 use crate::error::{Error, IoAction, Result};
 
@@ -118,6 +118,7 @@ impl Intent {
 
 /// A transaction's recorded intent, as found on disk.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Record {
     /// The installation root the transaction targeted.
     pub root: PathBuf,
@@ -589,7 +590,7 @@ fn write_new(path: &Path, contents: &[u8]) -> Result<std::fs::File> {
 ///
 /// [`Error::UnfinishedTransaction`] if a readable journal is there, [`Error::JournalUnreadable`]
 /// if one is there that this build cannot read, and [`Error::Io`] if the check itself fails.
-pub fn refuse_if_present(dbpath: &Path) -> Result<()> {
+pub(crate) fn refuse_if_present(dbpath: &Path) -> Result<()> {
     match read(dbpath)? {
         Some(_) => Err(Error::UnfinishedTransaction { path: dbpath.join(JOURNAL_FILE) }),
         None => Ok(()),

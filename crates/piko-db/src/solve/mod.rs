@@ -25,30 +25,38 @@ mod universe;
 mod why;
 
 pub use cache::{NoCache, PackageCache};
-pub use clause::{Clause, ClauseId, ClauseKind, Lit, Problem};
+pub(crate) use clause::ClauseId;
+pub(crate) use clause::Problem;
+#[doc(hidden)]
+pub use encode::resolve_target;
 pub use encode::{
-    Ambiguity, AmbiguityReport, BrokenDependency, Divergence, Encoded, Fidelity, FidelityReport,
-    GroupChoice, GroupTarget, IgnoredChange, IgnoredTarget, IgnoredUpgrade, Planned,
-    ProviderChoice, RemovalCause, Request, Requirement, Resolution, Sysupgrade,
-    TargetResolutionFailure, ambiguities, encode, fidelity, recurse_unneeded, resolve_group,
-    resolve_target, resolve_targets, solve_with_removals, sysupgrade,
+    Ambiguity, AmbiguityReport, Fidelity, GroupChoice, GroupTarget, IgnoredChange, IgnoredTarget,
+    IgnoredUpgrade, Planned, ProviderChoice, Request, Resolution, TargetResolutionFailure,
+    ambiguities, encode, fidelity, resolve_targets, solve_with_removals, sysupgrade,
 };
-pub use explain::{Derivation, Diagnosis, Fact, Remedy, Shape, describe_candidate};
+pub use encode::{BrokenDependency, Divergence, Encoded, FidelityReport, RemovalCause, Sysupgrade};
+pub use explain::Derivation;
+pub use explain::Fact;
+pub use explain::{Diagnosis, Remedy, Shape, describe_candidate};
 pub use file::FilePackage;
-pub use glob::{
-    Expansion, ExpansionFailure, InstallableTargets, Side, expand_installable_targets,
-    expand_installed_names, expand_installed_targets,
-};
+pub use glob::{Expansion, ExpansionFailure, Side};
+#[doc(hidden)]
+pub use glob::{InstallableTargets, expand_installable_targets};
 pub use install::{
     Defaults, InstallFailure, InstallOptions, InstallPlan, InstallQuestions, ResolutionNotes,
     plan_install,
 };
-pub use justify::{Alternative, Cause, PlanExplanation, Verdict, describe_cause, explain_plan};
+pub use justify::Alternative;
+pub use justify::{Cause, PlanExplanation, Verdict, describe_cause, explain_plan};
 pub use plan::{Change, Plan, PlanDiagnostic, Step};
+pub use removal::NamedRemoval;
 pub use removal::{
-    NamedRemoval, NamedRemovalFailure, Removal, RemovalFailure, RemovalOptions, named_removal,
-    plan_removal, removal_names,
+    NamedRemovalFailure, Removal, RemovalFailure, RemovalOptions, named_removal, plan_removal,
+    removal_names,
 };
-pub use solver::{Outcome, Solution, Solver, Unsatisfiable, core_kinds};
-pub use universe::{IgnoredCandidate, Origin, Solvable, SolvableId, Universe, UniverseOptions};
-pub use why::{Dependents, DependentsIndex, WhyResult, dependents, explain_why_installed, orphans};
+pub(crate) use solver::Solver;
+pub(crate) use solver::{Outcome, Unsatisfiable};
+pub use universe::IgnoredCandidate;
+pub use universe::{Origin, Solvable, SolvableId, Universe, UniverseOptions};
+pub use why::Dependents;
+pub use why::{DependentsIndex, WhyResult, dependents, explain_why_installed, orphans};

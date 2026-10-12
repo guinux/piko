@@ -2,7 +2,7 @@
 //!
 //! This module splits deliberately into a part that decides and a part that acts:
 //!
-//! - [`decision`] is pure. Every rule libalpm applies per entry is a function from values to
+//! - `decision` is pure. Every rule libalpm applies per entry is a function from values to
 //!   values. That covers the six-case filesystem/package matrix, `NoExtract`, `NoUpgrade`,
 //!   and the three-way backup comparison. All of it can be enumerated in tests without a
 //!   filesystem, an archive, or a package.
@@ -12,15 +12,23 @@
 //! libalpm interleaves the two in `extract_single_file` (`add.c:191`). That is why its
 //! carefully written matrix comment is hard to check against its implementation.
 
-pub mod apply;
-pub mod archive;
-pub mod backup;
-pub mod decision;
+pub(crate) mod apply;
+pub(crate) mod archive;
+pub(crate) mod backup;
+pub(crate) mod decision;
 
-pub use apply::{Applied, Ownership, XattrProblem, XattrRefusal, apply};
-pub use archive::{Member, MemberKind, PackageLimits, Xattr, walk};
-pub use backup::{BackupOutcome, Resolution};
-pub use decision::{
-    BackupAction, Disposition, EntryContext, EntryKind, Existing, PacnewReason, RefuseReason,
-    SkipReason, decide, resolve_backup,
-};
+pub use apply::{Ownership, apply};
+
+pub use apply::{Applied, XattrProblem};
+
+pub use apply::XattrRefusal;
+
+pub use archive::{Link, Member, MemberKind, PackageLimits, walk};
+pub use archive::{LinkKind, Xattr};
+pub use backup::Resolution;
+pub use backup::{BackupOutcome, resolve};
+pub use decision::Existing;
+#[doc(hidden)]
+pub use decision::resolve_backup;
+pub use decision::{BackupAction, EntryContext, PacnewReason, RefuseReason, SkipReason};
+pub use decision::{Disposition, EntryKind, decide};

@@ -38,13 +38,14 @@
 //! stays reproducible.
 
 use crate::solve::SolvableId;
-use crate::solve::clause::{ClauseId, ClauseKind, Lit, Problem};
+use crate::solve::clause::{ClauseId, Lit, Problem};
 use crate::{Error, Limits, Result};
 
 /// What a solved [`Problem`] selected.
 #[derive(Clone, Debug)]
-pub struct Solution {
+pub(crate) struct Solution {
     selected: Vec<SolvableId>,
+    #[cfg(test)]
     conflicts: usize,
 }
 
@@ -67,6 +68,7 @@ impl Solution {
     /// This bounds *work*, not fidelity: it is the quantity
     /// [`crate::Limits::solve_max_conflicts`] caps, so a hostile clause set cannot make the
     /// search run away.
+    #[cfg(test)]
     #[must_use]
     pub const fn conflicts(&self) -> usize {
         self.conflicts
@@ -78,7 +80,7 @@ impl Solution {
 /// This is the raw material for an explanation. Rendering it into a sentence needs the
 /// [`crate::solve::Universe`] the ids came from. It is deliberately left as data here.
 #[derive(Clone, Debug)]
-pub struct Unsatisfiable {
+pub(crate) struct Unsatisfiable {
     core: Vec<ClauseId>,
 }
 
@@ -92,7 +94,7 @@ impl Unsatisfiable {
 
 /// The outcome of a solve.
 #[derive(Clone, Debug)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// A selection satisfying every clause.
     Satisfied(Solution),
     /// No selection can satisfy every clause.
@@ -109,7 +111,7 @@ enum Value {
 
 /// A conflict-driven clause-learning solver.
 #[derive(Debug)]
-pub struct Solver<'p> {
+pub(crate) struct Solver<'p> {
     problem: &'p Problem,
     /// Clauses learned during search, appended after the problem's own.
     learned: Vec<Vec<Lit>>,
@@ -623,7 +625,11 @@ impl<'p> Solver<'p> {
             .filter_map(|(index, _)| u32::try_from(index).ok().map(SolvableId::from_raw))
             .collect();
         selected.sort_unstable();
-        Ok(Solution { selected, conflicts: self.conflicts })
+        Ok(Solution {
+            selected,
+            #[cfg(test)]
+            conflicts: self.conflicts,
+        })
     }
 }
 
@@ -638,9 +644,13 @@ enum Visit {
     Conflict,
 }
 
-/// Kinds of clause a core is made of, for a caller rendering an explanation.
+/// Kinds of clause a core is made of.
+#[cfg(test)]
 #[must_use]
-pub fn core_kinds(problem: &Problem, core: &[ClauseId]) -> Vec<ClauseKind> {
+pub(crate) fn core_kinds(
+    problem: &Problem,
+    core: &[ClauseId],
+) -> Vec<crate::solve::clause::ClauseKind> {
     core.iter().filter_map(|id| problem.get(*id).map(|clause| clause.kind())).collect()
 }
 
@@ -652,6 +662,7 @@ pub fn core_kinds(problem: &Problem, core: &[ClauseId]) -> Vec<ClauseKind> {
 )]
 mod tests {
     use super::*;
+    use crate::solve::clause::ClauseKind;
 
     fn id(raw: u32) -> SolvableId {
         SolvableId::from_raw(raw)

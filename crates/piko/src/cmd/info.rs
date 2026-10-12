@@ -1,7 +1,7 @@
 //! `piko info`: one or more packages' metadata, from the installed database, a single named
 //! repository, or the installed database with a repository fallback.
 //!
-//! [`installed_then_repos`] resolves each name via [`piko_db::resolve_installed_or_repo`], the
+//! [`installed_then_repos`] resolves each name via [`piko_db::search::resolve_installed_or_repo`], the
 //! same "installed first, then the configured repositories in file (priority) order" rule
 //! [`crate::cmd::files::files_installed_then_repos`] uses. It skips that function's
 //! per-repository batching, since an `info` lookup has no shared archive walk to batch, unlike
@@ -15,7 +15,7 @@
 use std::process::ExitCode;
 
 use piko_db::repo::RepoDatabase;
-use piko_db::{LocalDatabase, LocalOrRepo, resolve_installed_or_repo};
+use piko_db::{local::LocalDatabase, search::LocalOrRepo, search::resolve_installed_or_repo};
 
 use crate::cmd::local;
 use crate::output::emit;
@@ -25,7 +25,7 @@ use crate::output::emit;
 pub fn installed(
     db: &LocalDatabase,
     names: &[String],
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let installed = local::Installed::new(db);
@@ -53,7 +53,7 @@ pub fn installed(
 pub fn repo(
     db: &RepoDatabase,
     names: &[String],
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let mut ok = true;
@@ -82,14 +82,14 @@ pub fn repo(
 /// repositories, in file (priority) order.
 ///
 /// `dbs` need not hold every configured repository. The caller opens only as many as are
-/// needed to resolve whichever names [`piko_db::LocalDatabase::get_str`] did not already find.
+/// needed to resolve whichever names [`piko_db::local::LocalDatabase::get_str`] did not already find.
 /// That goes through [`crate::context::open_repos_for_packages`], the same as
 /// [`crate::cmd::files::files_installed_then_repos`].
 pub fn installed_then_repos(
     local: &LocalDatabase,
     dbs: &[RepoDatabase],
     names: &[String],
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let installed = local::Installed::new(local);

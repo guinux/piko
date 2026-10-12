@@ -1,9 +1,4 @@
 //! What one refresh downloads, decided from `pacman.conf` alone.
-//!
-//! A frontend that refreshes repository databases makes the same four decisions `piko refresh`
-//! makes: which repositories, which of their archives, which signature policy each one is held
-//! to, and whether a keyring is needed at all. [`RefreshTargets`] makes them, so a second
-//! frontend refreshes what `piko refresh` refreshes and checks what it checks.
 
 use piko_db::config::{DbUsage, PacmanConfig, RepositoryConfig};
 use piko_sig::{Keyring, Policy};
@@ -12,6 +7,11 @@ use crate::{DatabaseKind, Error, FreshnessPolicy, RepoRefresh, Result};
 
 /// The archives one refresh fetches, the keyring that checks them, and the names it could not
 /// find.
+///
+/// A frontend that refreshes repository databases makes the same four decisions `piko refresh`
+/// makes: which repositories, which of their archives, which signature policy each one is held
+/// to, and whether a keyring is needed at all. This type makes them, so a second
+/// frontend refreshes what `piko refresh` refreshes and checks what it checks.
 #[derive(Debug)]
 pub struct RefreshTargets<'a> {
     requests: Vec<RepoRefresh<'a>>,
@@ -61,12 +61,14 @@ impl<'a> RefreshTargets<'a> {
         let requests = selected
             .into_iter()
             .flat_map(|repo| {
-                kinds.iter().map(move |kind| RepoRefresh {
-                    name: repo.name.as_str(),
-                    kind: *kind,
-                    servers: &repo.servers,
-                    policy: database_policy(repo, global),
-                    freshness,
+                kinds.iter().map(move |kind| {
+                    RepoRefresh::new(
+                        repo.name.as_str(),
+                        *kind,
+                        &repo.servers,
+                        database_policy(repo, global),
+                        freshness,
+                    )
                 })
             })
             .collect::<Vec<RepoRefresh<'a>>>();

@@ -37,6 +37,10 @@ pub(crate) const MASTER_KEY_USERID: &str = "piko Local Keyring Master Key <piko@
 ///
 /// Mirrors [`gpgme::Validity`]'s six levels; kept as piko's own type so no `gpgme` type crosses
 /// this crate's public API.
+///
+/// This enum is exhaustive on purpose. A caller passes a level to
+/// [`KeyringAdmin::set_owner_trust`], and GnuPG's ownertrust model has had these six levels
+/// since its start.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OwnerTrust {
     /// No ownertrust has been assigned.
@@ -98,8 +102,10 @@ impl OwnerTrust {
     }
 }
 
-impl From<gpgme::Validity> for OwnerTrust {
-    fn from(validity: gpgme::Validity) -> Self {
+impl OwnerTrust {
+    /// The level GPGME reports for a key. It is not a `From` impl, so no `gpgme` type is part
+    /// of this crate's interface.
+    pub(crate) fn from_gpgme(validity: gpgme::Validity) -> Self {
         match validity {
             gpgme::Validity::Undefined => Self::Undefined,
             gpgme::Validity::Never => Self::Never,
@@ -113,6 +119,7 @@ impl From<gpgme::Validity> for OwnerTrust {
 
 /// One key in the keyring, as reported by [`KeyringAdmin::list_keys`].
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct KeyInfo {
     /// The key's full fingerprint.
     pub fingerprint: String,
@@ -130,6 +137,7 @@ pub struct KeyInfo {
 
 /// A summary of one [`KeyringAdmin::import`] or [`KeyringAdmin::populate`] call.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct ImportSummary {
     /// Keys found in the imported material.
     pub considered: u32,
@@ -143,8 +151,10 @@ pub struct ImportSummary {
     pub new_revocations: u32,
 }
 
-impl From<gpgme::ImportResult> for ImportSummary {
-    fn from(result: gpgme::ImportResult) -> Self {
+impl ImportSummary {
+    /// The counts GPGME reports for an import. It is not a `From` impl, so no `gpgme` type is
+    /// part of this crate's interface.
+    pub(crate) fn from_gpgme(result: &gpgme::ImportResult) -> Self {
         Self {
             considered: result.considered(),
             imported: result.imported(),
@@ -157,6 +167,7 @@ impl From<gpgme::ImportResult> for ImportSummary {
 
 /// What [`KeyringAdmin::init`] did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct InitOutcome {
     /// Whether a new master signing key was generated. `false` means an existing one (from an
     /// earlier `init`) was kept.
@@ -388,7 +399,7 @@ impl KeyringAdmin {
         let data = gpgme::Data::from_seekable_reader(file)
             .map_err(|wrapped| describe(wrapped.error().to_string()))?;
         let result = context.import(data).map_err(|source| Error::gpgme(path, "import", source))?;
-        Ok(result.into())
+        Ok(ImportSummary::from_gpgme(&result))
     }
 
     /// Locally (non-exportably) certifies `fingerprint`'s primary user ID with piko's master key.
@@ -466,7 +477,7 @@ impl KeyringAdmin {
         let digit = level.interactive_digit()?;
         let mut context = self.context()?;
         let target = self.get_key(&mut context, fingerprint)?;
-        if OwnerTrust::from(target.owner_trust()) == level {
+        if OwnerTrust::from_gpgme(target.owner_trust()) == level {
             return Ok(false);
         }
         context
@@ -619,7 +630,7 @@ impl KeyringAdmin {
         Ok(KeyInfo {
             fingerprint: fingerprint.to_owned(),
             user_ids: key.user_ids().filter_map(|uid| uid.id().ok().map(str::to_owned)).collect(),
-            owner_trust: key.owner_trust().into(),
+            owner_trust: OwnerTrust::from_gpgme(key.owner_trust()),
             is_disabled: key.is_disabled(),
             is_revoked: key.is_revoked(),
             is_expired: key.is_expired(),

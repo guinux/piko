@@ -33,7 +33,7 @@ use std::{
 
 use crate::pkginfo::PkgInfo;
 use alpm_types::{PackageFileName, PackageInstallReason, PackageValidation};
-use piko_db::{EntryName, LocalDatabase, LocalPackage, resolve::PatternList};
+use piko_db::{EntryName, local::LocalDatabase, local::LocalPackage, resolve::PatternList};
 use piko_db_write::DbLock;
 use piko_sig::{Keyring, Policy, Verdict};
 
@@ -94,6 +94,7 @@ impl Step {
 
 /// What a committed transaction did.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Report {
     /// Packages installed, with what their extraction did.
     pub installed: Vec<(String, Extraction)>,
@@ -154,6 +155,7 @@ pub enum BackupProblem {
 
 /// One scriptlet function that piko ran.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct ScriptletRun {
     /// The package whose scriptlet it was.
     pub package: String,
@@ -202,6 +204,7 @@ pub enum Verification {
 /// for nothing" is not cosmetic. It is exactly what `%VALIDATION%` records. Conflating them
 /// would write `pgp` into the database for a package nobody checked.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Validation {
     /// The file's SHA-256 matched the one its repository database publishes.
     pub sha256: bool,
@@ -412,7 +415,7 @@ struct Superseded {
 /// hook is told changed. Those two answers have to come from one matcher, or they will
 /// eventually disagree about a `!` inversion.
 ///
-/// This holds patterns rather than the predicates [`crate::Filters`] takes. This is the
+/// This holds patterns rather than the predicates [`crate::install::Filters`] takes. This is the
 /// *configured* policy, and it has to be handed on to [`hook::Summary`] as data. `Filters` stays
 /// a predicate, so a test can supply an exact answer instead of a pattern that has to be right
 /// twice.
@@ -723,7 +726,7 @@ impl Transaction<Planned> {
     /// cache file name.
     ///
     /// `verify` checks every file with an entry here against its `%SHA256SUM%`, and against its
-    /// `%PGPSIG%` in place of the `.sig` beside it. See [`validate_package`] for which check
+    /// `%PGPSIG%` in place of the `.sig` beside it. See `validate_package` for which check
     /// runs when. A file with no entry gets the `.sig` check alone, as a named file does.
     /// [`Transaction::from_plan`] sets it; the default is empty.
     #[must_use]
@@ -3235,7 +3238,7 @@ mod tests {
         let db = tempfile::tempdir().unwrap();
         // A `local` subdirectory that already holds something, but not `ALPM_DB_VERSION`.
         // A missing marker is tolerated on an empty or absent directory. See
-        // `piko_db::local::schema_version::root_is_unpopulated`. So this needs an entry besides
+        // `piko_db::local::root_is_unpopulated`. So this needs an entry besides
         // the marker, to count as unreadable rather than as a fresh database.
         let local = db.path().join("local");
         std::fs::create_dir_all(&local).unwrap();

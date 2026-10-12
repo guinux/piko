@@ -83,7 +83,7 @@ fn wanted<'a>(
     policy: Policy,
     size: Option<u64>,
 ) -> PackageFetch<'a> {
-    PackageFetch { file_name, repo_name: "core", servers, cache_servers: 0, policy, size }
+    PackageFetch::new(file_name, "core", servers, policy).with_size(size)
 }
 
 fn fetch(cache: &Path, url: &str, policy: Policy) -> piko_net::Result<std::path::PathBuf> {
@@ -222,7 +222,7 @@ fn an_oversized_body_is_refused() {
     let big = vec![0_u8; 200];
     let (url, server) = serve(vec![ok_response(&big)]);
 
-    let limits = piko_net::refresh::Limits { max_package_bytes: 100, ..Default::default() };
+    let limits = piko_net::Limits { max_package_bytes: 100, ..Default::default() };
     let (file_name, servers) = (file_name(), [url]);
     // A declared size above the ceiling does not lift it.
     let error = Refresher::new(limits)
@@ -399,7 +399,7 @@ fn a_cache_server_is_asked_again_after_any_number_of_misses() {
     for _ in 0..5 {
         let fetched = refresher.fetch_package(
             dir.path(),
-            PackageFetch { cache_servers: 1, ..wanted(&file_name, &servers, unsigned(), None) },
+            wanted(&file_name, &servers, unsigned(), None).with_cache_servers(1),
             &Cancel::new(),
         );
         assert!(fetched.is_ok(), "{fetched:?}");

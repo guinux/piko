@@ -97,6 +97,8 @@ pub fn report(failure: &RemovalFailure) {
             eprintln!("Note: pass -c to remove the dependents too");
         }
         RemovalFailure::Planner(error) => crate::output::report(error.as_ref()),
+        // A failure this frontend does not know yet.
+        other => eprintln!("Error: {other:?}"),
     }
 }
 

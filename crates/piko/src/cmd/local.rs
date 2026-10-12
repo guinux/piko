@@ -7,7 +7,7 @@
 use std::{cell::OnceCell, process::ExitCode};
 
 use alpm_types::{PackageInstallReason, PackageValidation};
-use piko_db::{LocalDatabase, LocalPackage, solve::DependentsIndex};
+use piko_db::{local::LocalDatabase, local::LocalPackage, solve::DependentsIndex};
 
 use crate::output::{emit, escaped, join, report};
 use crate::style::{
@@ -112,7 +112,7 @@ impl<'a> Installed<'a> {
 pub fn info(
     installed: &Installed<'_>,
     package: &LocalPackage,
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     let local = installed.local();
@@ -216,7 +216,7 @@ mod tests {
         let mut out = Vec::new();
         let installed = Installed::new(local);
         assert_eq!(
-            info(&installed, package, piko_txn::LocalZone::UTC, &mut out),
+            info(&installed, package, piko_txn::history::LocalZone::UTC, &mut out),
             ExitCode::SUCCESS
         );
         let text = String::from_utf8(out).unwrap();

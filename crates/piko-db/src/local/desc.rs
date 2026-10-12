@@ -139,7 +139,7 @@ fn xdata(index: &Index<'_>) -> Result<Option<ExtraData>, DescFieldError> {
 
 /// Read-only access to a local `desc` file.
 ///
-/// Obtained from [`LocalPackage::desc`](crate::LocalPackage::desc).
+/// Obtained from [`LocalPackage::desc`](crate::local::LocalPackage::desc).
 #[derive(Clone, Copy, Debug)]
 pub struct DescView<'a> {
     desc: &'a LocalDesc,
@@ -161,7 +161,7 @@ impl<'a> DescView<'a> {
     /// `%NAME%`.
     ///
     /// Advisory only. The authoritative package name comes from the entry directory name —
-    /// see [`LocalPackage::name`](crate::LocalPackage::name).
+    /// see [`LocalPackage::name`](crate::local::LocalPackage::name).
     #[must_use]
     pub const fn name(&self) -> &'a Name {
         &self.desc.name

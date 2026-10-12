@@ -17,7 +17,7 @@ use crate::{
 
 /// An installed package for which a newer version is available in a repository.
 ///
-/// See [`crate::LocalDatabase::check_updates`].
+/// See [`crate::local::LocalDatabase::check_updates`].
 #[derive(Clone, Copy, Debug)]
 pub struct Update<'a> {
     installed: &'a LocalPackage,
@@ -56,7 +56,7 @@ impl<'a> Update<'a> {
 /// [`LocalPackage`], read from the entry directory name with no `desc` read. Both are already
 /// eager on [`RepoPackage`]. So this touches no local `desc` file at all.
 ///
-/// Results are sorted by name (the same order [`crate::LocalDatabase`] iterates in).
+/// Results are sorted by name (the same order [`crate::local::LocalDatabase`] iterates in).
 pub(crate) fn check_updates<'a>(
     local: &'a LocalDatabase,
     repos: impl IntoIterator<Item = &'a RepoDatabase>,
@@ -72,9 +72,10 @@ pub(crate) fn check_updates<'a>(
         .collect()
 }
 
-/// The updates [`crate::LocalDatabase::check_updates_ignoring`] found, split by
+/// The updates [`crate::local::LocalDatabase::check_updates_ignoring`] found, split by
 /// `IgnorePkg`/`IgnoreGroup`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Updates<'a> {
     /// The updates a system upgrade would make, sorted by name.
     pub available: Vec<Update<'a>>,
@@ -133,7 +134,7 @@ pub(crate) fn check_updates_ignoring<'a>(
 /// there is no version to prefer between repositories when a name is present in more than
 /// one. Only "known to at least one" versus "known to none" matters here.
 ///
-/// Results are sorted by name (the same order [`crate::LocalDatabase`] iterates in).
+/// Results are sorted by name (the same order [`crate::local::LocalDatabase`] iterates in).
 pub(crate) fn foreign<'a>(
     local: &'a LocalDatabase,
     repos: impl IntoIterator<Item = &'a RepoDatabase>,
@@ -154,10 +155,7 @@ pub(crate) fn foreign<'a>(
 )]
 mod tests {
     use super::*;
-    use crate::{
-        LocalDatabase,
-        fixture::{DbFixture, RepoFixture},
-    };
+    use crate::{fixture::DbFixture, fixture::RepoFixture, local::LocalDatabase};
 
     fn local_db(fixture: &DbFixture, packages: &[(&str, &str)]) -> LocalDatabase {
         for (name, version) in packages {

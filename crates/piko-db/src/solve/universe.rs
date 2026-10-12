@@ -19,7 +19,7 @@
 //!
 //! # Why the installed set is read eagerly
 //!
-//! [`crate::LocalPackage::desc`] is lazy, so building this index forces every installed
+//! [`crate::local::LocalPackage::desc`] is lazy, so building this index forces every installed
 //! package's `desc`. That is 1157 file reads on the machine this was developed against, which
 //! `piko list` never performs. The cost was measured before being accepted: about **85 ms**. The
 //! same run already spends **671 ms** opening `core` and `extra`. Expanding the
@@ -40,12 +40,9 @@ use std::collections::{HashMap, HashSet};
 use alpm_types::{FullVersion, Name, PackageRelation, RelationOrSoname};
 
 use crate::{
-    EagerView, EntryName, Error, Limits, LocalDatabase, LocalPackage, Result,
-    config::DbUsage,
-    depcmp,
-    repo::{RepoDatabase, RepoName, RepoPackage},
-    resolve::{IgnoreList, IgnoreReason},
-    solve::FilePackage,
+    EntryName, Error, Limits, Result, config::DbUsage, depcmp, local::EagerView,
+    local::LocalDatabase, local::LocalPackage, repo::RepoDatabase, repo::RepoName,
+    repo::RepoPackage, resolve::IgnoreList, resolve::IgnoreReason, solve::FilePackage,
 };
 
 /// A dense identifier for one candidate package within a [`Universe`].
@@ -193,7 +190,7 @@ impl<'a> Solvable<'a> {
     /// This exists so a walk that only ever visits installed packages says so in its types. It
     /// then handles no error it cannot produce. Three walks do this: `solve::why`'s
     /// dependent index, and both dependency walks in
-    /// [`recurse_unneeded`](crate::solve::recurse_unneeded). Their inputs are a removal plan,
+    /// `recurse_unneeded`. Their inputs are a removal plan,
     /// so they are installed by construction.
     #[must_use]
     pub const fn installed_depends(&self) -> Option<&'a [RelationOrSoname]> {
@@ -315,7 +312,7 @@ impl<'a> Solvable<'a> {
 /// A local package carries its resolved [`EagerView`]. `LocalPackage::eager` is fallible, and
 /// forcing it once at build removes every subsequent fallible lookup.
 ///
-/// It is deliberately the **eager** view rather than [`crate::DescView`]. Every field this
+/// It is deliberately the **eager** view rather than [`crate::local::DescView`]. Every field this
 /// module reads — the relation sections, `%GROUPS%`, `%REASON%`, `%SIZE%` — is in that tier.
 /// A plan never pays for `alpm-db`'s typed conversion of `%LICENSE%`, `%URL%`, `%PACKAGER%`
 /// and the checksum fields. Measured across this machine's 1206 installed packages:
@@ -933,7 +930,7 @@ impl<'a> Universe<'a> {
     /// Every package name an install target could resolve to.
     ///
     /// A name with no candidate beyond the installed copy is left out.
-    /// [`crate::solve::resolve_target`] skips that copy, and would find nothing for it. So this
+    /// `resolve_target` skips that copy, and would find nothing for it. So this
     /// is exactly the domain a `piko install` target is answered from.
     ///
     /// Unordered: these are a `HashMap`'s keys. A caller that shows them sorts them.

@@ -11,7 +11,7 @@
 //!
 //! The `LogFile` directive is parsed, and `piko conf` reports it. Without a consumer, a
 //! system driven by both tools has a hole in `/var/log/pacman.log` exactly where piko acts.
-//! [`PacmanLog`] fills it. It reproduces `_alpm_log_leader`'s format (`log.c`), so one file
+//! `PacmanLog` fills it. It reproduces `_alpm_log_leader`'s format (`log.c`), so one file
 //! holds both tools' lines and existing readers keep working.
 //!
 //! piko's lines are spelled `[PIKO]` where libalpm spells `[ALPM]`. Reading the file then
@@ -46,11 +46,8 @@ use std::path::{Path, PathBuf};
 
 use piko_db::EntryName;
 
-pub use self::{
-    pacman_log::{CALLER, PacmanLog, SCRIPTLET_CALLER},
-    store::HISTORY_FILE,
-    time_fmt::{LocalZone, now, parse as parse_timestamp, render as render_timestamp},
-};
+use self::pacman_log::{CALLER, PacmanLog, SCRIPTLET_CALLER};
+pub use self::time_fmt::{LocalZone, now, parse as parse_timestamp, render as render_timestamp};
 use crate::progress::{Event, StepOutcome};
 
 /// What one finished step did, in libalpm's own vocabulary.
@@ -278,6 +275,7 @@ pub enum Problem {
 
 /// One transaction, as the history store records it.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Entry {
     /// Identifies this transaction, and joins its store block to its `pacman.log` lines.
     pub id: String,

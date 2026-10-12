@@ -17,7 +17,7 @@
 use std::process::ExitCode;
 
 use piko_db::repo::RepoDatabase;
-use piko_db::{LocalDatabase, search::hide_installed};
+use piko_db::{local::LocalDatabase, search::hide_installed};
 
 use crate::output::{emit, escaped};
 use crate::style::checkmark;

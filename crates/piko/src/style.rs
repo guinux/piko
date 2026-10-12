@@ -180,7 +180,7 @@ pub(crate) use field_list;
 pub(crate) fn info_date<E>(
     typed: Result<i64, E>,
     raw: &[&str],
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
 ) -> String {
     match typed {
         Ok(timestamp) => crate::output::human_date(timestamp, zone),

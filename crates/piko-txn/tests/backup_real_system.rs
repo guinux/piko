@@ -41,7 +41,7 @@ use std::{
 };
 
 use alpm_types::{PackageFileName, PackageInstallReason};
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 use piko_db_write::DbLock;
 use piko_txn::{CacheDirSource, Step, Transaction, Verification, extract::Ownership};
 
@@ -50,7 +50,7 @@ const CACHE: &str = "/var/cache/pacman/pkg";
 
 /// The `%BACKUP%` section of a `files` record.
 ///
-/// This reads the raw text rather than [`piko_db::LocalPackage::backups`] on purpose. That
+/// This reads the raw text rather than [`piko_db::local::LocalPackage::backups`] on purpose. That
 /// accessor silently normalizes the two shapes this test needs to see. libalpm writes the
 /// section as a **list**, so it can hold the same path twice. It can also hold a hash that is
 /// the literal string `(null)`. That string is what C prints for the NULL

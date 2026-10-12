@@ -8,7 +8,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// Something went wrong while verifying, as opposed to a file simply failing verification.
 ///
 /// The distinction is the point of this type. "This package's signature is untrusted" is not
-/// an error. It is [`crate::decision::Verdict::Rejected`], an answer the caller asked for. An
+/// an error. It is [`crate::Verdict::Rejected`], an answer the caller asked for. An
 /// error here means piko could not get an answer. The two must never be conflated. Treating a
 /// broken keyring as a failed signature would refuse valid packages. Treating it as a pass
 /// would install unverified ones.
@@ -28,7 +28,7 @@ pub enum Error {
     ///
     /// Carries GPGME's message as text rather than its error type. The type is not `Send`,
     /// and a caller that wants to react to a specific code should read a
-    /// [`crate::decision::Verdict`] instead.
+    /// [`crate::Verdict`] instead.
     #[error("failed to {action} {}: {message}", path.display())]
     Gpgme {
         /// The file involved.
@@ -38,7 +38,7 @@ pub enum Error {
         /// What GnuPG said.
         ///
         /// Text, not GPGME's error type. That type is not `Send`, and a caller wanting to
-        /// react to a specific code should read a [`crate::decision::Verdict`].
+        /// react to a specific code should read a [`crate::Verdict`].
         message: String,
     },
 }

@@ -59,7 +59,7 @@ pub struct PackageOrigins<'a> {
     pub sig_level: piko_db::config::SigLevel,
     /// The package files named on the command line, each with the `LocalFileSigLevel` or
     /// `RemoteFileSigLevel` policy its spelling selected.
-    pub files: &'a [crate::FileTarget],
+    pub files: &'a [crate::file_target::FileTarget],
     /// `GPGDir`: the GnuPG keyring signatures are checked against, pacman's
     /// `/etc/pacman.d/gnupg`. Opened only when a policy asks for a check.
     pub gpg_dir: &'a Path,
@@ -647,6 +647,7 @@ struct Sources {
 
 /// One package [`download_only`] located, with everything it learned about it.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct DownloadOnlyOutcome {
     /// The package's cache file name.
     pub package: PackageFileName,
@@ -667,7 +668,7 @@ pub struct DownloadOnlyOutcome {
 /// about a hit. So this is the same lookup a transaction's `verify` step would make. It skips
 /// the journal, the lock, and the `Transaction` that would follow it.
 ///
-/// The package is validated here too, through the same [`crate::transaction::validate_package`]
+/// The package is validated here too, through the same `validate_package`
 /// `Transaction::verify` uses, under the same per-repository policy and against the same
 /// `published` map. A file whose SHA-256 is not the published one, or whose signature is refused,
 /// is removed from the cache, as `Transaction::verify` removes it. libalpm does this:
@@ -758,13 +759,10 @@ mod tests {
 
     /// `core` configured with `sig_level`, and nothing else.
     fn core_config(sig_level: piko_db::config::SigLevel) -> RepositoryConfig {
-        RepositoryConfig {
-            name: RepoName::parse("core").unwrap(),
-            servers: vec!["https://example.invalid/core".to_owned()],
-            cache_servers: Vec::new(),
-            usage: DbUsage::ALL,
-            sig_level,
-        }
+        let mut config = RepositoryConfig::new(RepoName::parse("core").unwrap());
+        config.servers = vec!["https://example.invalid/core".to_owned()];
+        config.sig_level = sig_level;
+        config
     }
 
     /// Solves `app`, which needs `lib`, both in `core`, and builds the transaction plan with

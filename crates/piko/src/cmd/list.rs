@@ -10,9 +10,9 @@
 use std::process::ExitCode;
 
 use alpm_types::PackageInstallReason;
-use piko_db::LocalDatabase;
 use piko_db::config::PacmanConfig;
 use piko_db::groups::GroupIndex;
+use piko_db::local::LocalDatabase;
 use piko_db::repo::RepoDatabase;
 use piko_db::solve::{Universe, UniverseOptions};
 
@@ -117,7 +117,7 @@ pub fn repo_names(config: &PacmanConfig, quiet: bool, out: &mut impl std::io::Wr
 ///
 /// Unlike [`installed`], this reads each installed package's `desc` to check `%REASON%`, so it
 /// does not keep `list`'s directory-name-only laziness. It reads the eager tier
-/// ([`piko_db::LocalPackage::eager`]), not the typed parse, so a `%LICENSE%` or `%PACKAGER%`
+/// ([`piko_db::local::LocalPackage::eager`]), not the typed parse, so a `%LICENSE%` or `%PACKAGER%`
 /// that does not convert cannot drop a package from the list. A package whose `desc` cannot be
 /// read is reported to stderr and excluded. This is the same continue-past-a-miss convention
 /// [`crate::cmd::files::files_installed`] uses. The exit code is a failure only once something
@@ -171,7 +171,7 @@ pub fn orphans(local: &LocalDatabase, quiet: bool, out: &mut impl std::io::Write
 /// `piko list -m`/`--foreign`: every installed package whose name is not found in any of `repos`,
 /// `pacman -Qm`.
 ///
-/// See [`piko_db::LocalDatabase::foreign`] for the exact rule.
+/// See [`piko_db::local::LocalDatabase::foreign`] for the exact rule.
 pub fn foreign<'a>(
     local: &'a LocalDatabase,
     repos: impl IntoIterator<Item = &'a RepoDatabase>,
@@ -267,7 +267,7 @@ pub fn groups(
     for (_, error) in &unreadable {
         report(&**error);
     }
-    let describe = |package: &piko_db::LocalPackage| {
+    let describe = |package: &piko_db::local::LocalPackage| {
         (package.name().to_string(), package.version().to_string())
     };
     let code = print_groups(&index, names, with_members, true, quiet, describe, out);

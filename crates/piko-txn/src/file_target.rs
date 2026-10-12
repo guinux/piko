@@ -46,7 +46,7 @@ impl FileTarget {
     /// Built from the `.PKGINFO`, not from the file's own name. The two usually agree. When
     /// they do not, the metadata is what describes the archive. A file renamed on disk is
     /// still the package it was built as. Nothing downloads this name. It is the key
-    /// [`crate::source::FileSource`] maps back to [`FileTarget::path`].
+    /// `crate::source::FileSource` maps back to [`FileTarget::path`].
     #[must_use]
     pub const fn file_name(&self) -> &PackageFileName {
         self.candidate.file_name()
@@ -208,7 +208,7 @@ pub(crate) fn is_admitted(configured: &[Architecture], architecture: &Architectu
 /// # Errors
 ///
 /// [`Error::DuplicateTarget`] naming the two paths.
-pub fn check_duplicates(targets: &[FileTarget]) -> Result<()> {
+pub(crate) fn check_duplicates(targets: &[FileTarget]) -> Result<()> {
     let mut seen: HashMap<String, &Path> = HashMap::new();
     for target in targets {
         let key = target.file_name().to_string();
@@ -258,7 +258,7 @@ impl std::fmt::Debug for Urls<'_> {
 
 /// The targets of an install, split into what the solver resolves and what was read from a
 /// file.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Targets {
     /// Targets to resolve through the repositories, in the order they were given.
     pub names: Vec<String>,
@@ -282,7 +282,7 @@ impl Targets {
 /// `kinds` is each target as [`crate::classify`] read it, in the order given. A path is loaded
 /// under `policies.local`. A URL is refused or fetched, as `urls` says, and the file it
 /// fetched is loaded under `policies.remote`. The files are then checked together:
-/// [`check_duplicates`] first, [`check_architecture`] second.
+/// `check_duplicates` first, [`check_architecture`] second.
 ///
 /// `piko plan` and `piko install` both read their targets through this function. So a preview
 /// refuses what the install refuses, in the same order. A preview that plans what the install
@@ -291,7 +291,7 @@ impl Targets {
 /// # Errors
 ///
 /// [`Error::UrlNotLoaded`] for a URL under [`Urls::Refuse`]. Whatever [`load`], the fetch
-/// callback, [`check_duplicates`] or [`check_architecture`] return, from the first target that
+/// callback, `check_duplicates` or [`check_architecture`] return, from the first target that
 /// fails.
 pub fn load_targets(
     kinds: &[crate::TargetKind],
@@ -310,7 +310,7 @@ pub fn load_targets(
             crate::TargetKind::Url(url) => {
                 let Urls::Fetch(fetch) = &mut urls else {
                     return Err(Error::UrlNotLoaded {
-                        url: piko_net::error::without_credentials(url).into_owned(),
+                        url: piko_net::without_credentials(url).into_owned(),
                     });
                 };
                 let path = fetch(url)?;
@@ -365,7 +365,7 @@ pub fn fetch_url(
     cancel: &piko_net::Cancel,
     progress: &(dyn Fn(piko_net::Event) + Sync),
 ) -> Result<PathBuf> {
-    let shown = || piko_net::error::without_credentials(url).into_owned();
+    let shown = || piko_net::without_credentials(url).into_owned();
     let (server, last) = url.rsplit_once('/').ok_or_else(|| Error::InvalidPackageUrl {
         url: shown(),
         reason: "it has no path component".to_owned(),
@@ -393,14 +393,12 @@ pub fn fetch_url(
         .fetch_package_with_progress(
             download_dir.path(),
             // No repository describes a URL target, so `max_package_bytes` alone bounds it.
-            piko_net::PackageFetch {
-                file_name: &file_name,
-                repo_name: url,
-                servers: std::slice::from_ref(&server.to_owned()),
-                cache_servers: 0,
+            piko_net::PackageFetch::new(
+                &file_name,
+                url,
+                std::slice::from_ref(&server.to_owned()),
                 policy,
-                size: None,
-            },
+            ),
             cancel,
             progress,
         )

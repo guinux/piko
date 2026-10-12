@@ -91,7 +91,7 @@
 //! This module remains the single-query API neither concept belongs in.
 //!
 //! Other libalpm call sites gate on a different `Usage` mask entirely.
-//! `alpm_sync_get_new_version` (`-Qu`, [`crate::LocalDatabase::check_updates`] here) applies no
+//! `alpm_sync_get_new_version` (`-Qu`, [`crate::local::LocalDatabase::check_updates`] here) applies no
 //! gate at all, and sync.c's `-Su` target collection gates on `Upgrade` alone. So this module
 //! intentionally does not become a shared primitive for those. Each caller's gate is a distinct
 //! policy, not a variation to parameterize away.
@@ -118,10 +118,10 @@ use crate::{
 /// half of `_alpm_depcmp` can always be evaluated. `%PROVIDES%` cannot, since it needs `desc`.
 /// The failure is returned rather than treated as an entry with no `%PROVIDES%`. That treatment
 /// would silently answer "not satisfied" for a dependency that is in fact met. This is the
-/// crate's lazy-loading rule (see [`crate::lazy`]), applied to a question with a sharp cost.
+/// crate's lazy-loading rule (see [`Lazy`](crate::Lazy)), applied to a question with a sharp cost.
 /// Getting it wrong means skipping a hook the system needed.
 ///
-/// The read is the **eager** tier, [`crate::LocalPackage::eager`], never the full typed parse.
+/// The read is the **eager** tier, [`crate::local::LocalPackage::eager`], never the full typed parse.
 /// `%PROVIDES%` is the only field this needs. The eager tier is the tier that holds it.
 ///
 /// The typed parse converts `%LICENSE%`, `%PACKAGER%`, `%VALIDATION%` and the checksum fields
@@ -134,9 +134,9 @@ use crate::{
 /// [`crate::SharedError`] if an entry's relation sections cannot be read, and no earlier package
 /// satisfied `dep` literally.
 pub fn installed_satisfier<'a>(
-    local: &'a crate::LocalDatabase,
+    local: &'a crate::local::LocalDatabase,
     dep: &PackageRelation,
-) -> std::result::Result<Option<&'a crate::LocalPackage>, crate::SharedError> {
+) -> std::result::Result<Option<&'a crate::local::LocalPackage>, crate::SharedError> {
     for package in local.iter() {
         if depcmp::literal_satisfies(package.name(), package.version(), dep) {
             return Ok(Some(package));
@@ -269,6 +269,7 @@ impl IgnoreList {
 /// Naming the pattern matters when the entry is a glob. `IgnorePkg = linux*` covering
 /// `linux-firmware` is otherwise a surprise with no visible cause.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum IgnoreReason {
     /// The package's own name matched an `IgnorePkg` pattern.
     Package {
@@ -1406,7 +1407,7 @@ Foobar McFooface <foobar@mcfooface.org>
         db.package("aaa-1.0.0-1").desc(&refused).files(crate::fixture::MINIMAL_FILES).build();
         db.package("timeshift-1.0.0-1").with_defaults().build();
 
-        let local = crate::LocalDatabase::open(db.path()).unwrap();
+        let local = crate::local::LocalDatabase::open(db.path()).unwrap();
         let broken = local.iter().find(|package| package.name().as_ref() == "aaa").unwrap();
         assert!(broken.desc().is_err(), "the fixture must carry a typed parse the parser refuses");
         assert!(broken.eager().is_ok(), "the relation sections are readable");

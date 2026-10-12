@@ -44,13 +44,13 @@ fn main() -> ExitCode {
     if let Some(code) = exec_helper() {
         return code;
     }
-    // The download helper, for the same reason. See `piko_net::sandbox`.
+    // The download helper, for the same reason. See `piko_net::Sandbox`.
     if let Some(code) = piko_net::run_helper_if_requested() {
         return code;
     }
 
     // Read once, so every timestamp piko writes or shows uses one zone.
-    let zone = piko_txn::LocalZone::capture();
+    let zone = piko_txn::history::LocalZone::capture();
     let cli = Cli::parse();
 
     match run(&cli, zone) {
@@ -82,7 +82,7 @@ fn exec_helper() -> Option<ExitCode> {
     Some(ExitCode::FAILURE)
 }
 
-fn run(cli: &Cli, zone: piko_txn::LocalZone) -> Result<ExitCode, Error> {
+fn run(cli: &Cli, zone: piko_txn::history::LocalZone) -> Result<ExitCode, Error> {
     // stdout is locked once and buffered here, because `piko list` writes over a thousand
     // lines.
     let stdout = io::stdout();
@@ -635,24 +635,22 @@ struct SyncArgs<'a> {
     /// `-w`/`--downloadonly`.
     download_only: bool,
     /// The time zone every timestamp is rendered in, read in `main`.
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
 }
 
 /// The freshness policy for a refresh, from `--accept-older` and `--max-age`, at the current
 /// time.
 fn freshness_policy(accept_older: bool, max_age_days: u64) -> piko_net::FreshnessPolicy {
-    piko_net::FreshnessPolicy {
-        accept_older,
-        max_age: cmd::freshness::max_age(max_age_days),
-        now: std::time::SystemTime::now(),
-    }
+    piko_net::FreshnessPolicy::new(std::time::SystemTime::now())
+        .with_accept_older(accept_older)
+        .with_max_age(cmd::freshness::max_age(max_age_days))
 }
 
 /// Warns about each database in `repos` that is older than `--max-age`, or dated in the future.
 fn report_stale_repos<'a>(
     repos: impl IntoIterator<Item = &'a piko_db::repo::RepoDatabase>,
     max_age_days: u64,
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
 ) {
     let dated: Vec<_> = repos.into_iter().map(|db| (db.name(), db.publication())).collect();
     cmd::freshness::report_stale(

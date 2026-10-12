@@ -14,7 +14,7 @@
 //!
 //! - **Directory names are the source of truth** for the local database, matching pacman. A
 //!   single `read_dir` call yields every installed package's name and version; no file needs
-//!   to open for that alone. See [`entry_name`].
+//!   to open for that alone. See [`EntryName`].
 //! - **Metadata files are lazy-loaded and their failures are cached**, never silently emptied.
 //!   `desc`, `files`, and `mtree` load on first access. A package with a corrupt `desc` keeps
 //!   reporting that error on every later access, rather than looking like a package with no
@@ -36,12 +36,36 @@
 //! - **`fixture`** *(off by default)* — exposes the `fixture` module, a builder for throwaway
 //!   database trees in a `tempfile::TempDir`. Integration tests and downstream crates turn it
 //!   on; nothing in a normal build needs it, and it pulls in `tempfile`. The module is absent
-//!   from a default build, so this names it rather than linking it.
+//!   from a default build, so this names it rather than linking it. It is a helper for this
+//!   workspace's tests, and is not part of the stable interface.
+//!
+//! # Stability
+//!
+//! Each public item has one path. A domain module holds its items, and its submodules are
+//! private. A submodule stays public when it is a domain of its own: one grammar
+//! ([`meta::section`], [`meta::kv`], [`config::ini`]), one file ([`meta::files`]), or one
+//! question ([`repo::freshness`]).
+//!
+//! An item hidden from this documentation is there for this workspace's tests. It is one step
+//! of a pipeline that a public function already runs, and it is not part of the stable
+//! interface.
+//!
+//! Three rules say which types a later release can extend without a breaking change:
+//!
+//! - **A result, a report, a diagnostic or a failure is `#[non_exhaustive]`.** A later release
+//!   can add a variant or a field. Match it with a wildcard arm.
+//! - **A decision, and a closed set, are exhaustive.** A new variant changes what every caller
+//!   must do, so it must break the build of each caller. Examples: [`solve::Step`],
+//!   [`repo::freshness::Comparison`], [`repo::Variant`].
+//! - **An input struct is exhaustive, with public fields.** It has a `Default` when a default
+//!   value means something, as for options and limits. Change one field with the struct
+//!   update syntax, as in `Limits { max_entries: 8, ..Limits::default() }`. An added field
+//!   keeps that expression valid.
 //!
 //! # Example
 //!
 //! ```rust,no_run
-//! use piko_db::LocalDatabase;
+//! use piko_db::local::LocalDatabase;
 //!
 //! let db = LocalDatabase::open("/var/lib/pacman/local")?;
 //!
@@ -71,16 +95,16 @@ pub mod comparable;
 pub mod compression;
 pub mod config;
 pub mod desc_compat;
-pub mod eager;
-pub mod entry_name;
-pub mod error;
+mod eager;
+mod entry_name;
+mod error;
 pub mod fs_util;
 pub mod glob;
 pub mod groups;
-pub mod lazy;
-pub mod limits;
+mod lazy;
+mod limits;
 pub mod meta;
-pub mod printable;
+mod printable;
 pub mod search;
 
 // Answers that need both databases at once.
@@ -91,21 +115,15 @@ pub mod updates;
 mod depcmp;
 mod diagnostics;
 
+// A test helper for this workspace's own tests. It is not part of the stable interface.
 #[cfg(any(test, feature = "fixture"))]
+#[doc(hidden)]
 pub mod fixture;
 
-pub use crate::glob::{Glob, is_pattern};
-pub use desc_compat::{UnknownSection, UnknownSectionPolicy};
 pub use eager::DescFieldError;
 pub use entry_name::{EntryName, EntryNameError};
-pub use error::{Error, IoAction, Result, SharedError};
+pub use error::SharedError;
+pub use error::{Error, IoAction, Result};
 pub use lazy::Lazy;
 pub use limits::{Limit, Limits};
-pub use local::{
-    ALPM_DB_VERSION, DescView, Diagnostic, EagerView, FileCheckReport, FileProblem, Inconsistency,
-    LocalDatabase, LocalPackage, LocalSearchHit, OpenOptions,
-};
 pub use printable::{excerpt, printable, printable_lines, printable_path};
-pub use resolve::{IgnoreList, Resolved, SyncRepo, SyncRepos};
-pub use search::{LocalOrRepo, MatchKind, resolve_installed_or_repo};
-pub use updates::{Update, Updates};

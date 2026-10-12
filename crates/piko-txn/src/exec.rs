@@ -29,7 +29,7 @@
 //!
 //! A chroot confines paths and nothing else. A scriptlet or hook runs with piko's own
 //! privileges and can do anything they permit. That is what these files are *for*, and pacman
-//! works the same way. The download sandbox, `piko_net::sandbox`, is a separate mechanism for a
+//! works the same way. The download sandbox, `piko_net::Sandbox`, is a separate mechanism for a
 //! separate purpose, not something this module provides.
 
 use std::{

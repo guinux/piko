@@ -12,7 +12,7 @@ use std::{
     process::ExitCode,
 };
 
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 use piko_txn::owner::Owners;
 
 use crate::output::{emit, report};

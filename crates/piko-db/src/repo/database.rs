@@ -48,7 +48,7 @@ pub enum Variant {
 
 /// Something suspicious found while reading a repository archive, which did not stop the open.
 ///
-/// Mirrors [`crate::Diagnostic`] for the same reason. It is returned, never logged, so the caller
+/// Mirrors [`crate::local::Diagnostic`] for the same reason. It is returned, never logged, so the caller
 /// decides how to present it, and whether to.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -118,7 +118,7 @@ pub enum RepoDiagnostic {
     /// Two entry directories in this archive claim the same package name.
     ///
     /// Only the first, in scan order, is kept. This mirrors
-    /// [`crate::Diagnostic::DuplicateEntry`], with one difference. The order here is the archive's
+    /// [`crate::local::Diagnostic::DuplicateEntry`], with one difference. The order here is the archive's
     /// own member order, because a tar stream cannot be sorted before it is fully read.
     DuplicatePackage {
         /// The package name claimed twice.
@@ -168,7 +168,7 @@ impl std::fmt::Display for RepoDiagnostic {
 /// How to open a [`RepoDatabase`].
 ///
 /// ```
-/// use piko_db::{Limits, UnknownSectionPolicy, repo::RepoOpenOptions};
+/// use piko_db::{Limits, desc_compat::UnknownSectionPolicy, repo::RepoOpenOptions};
 ///
 /// let options = RepoOpenOptions::new()
 ///     .limits(Limits::default())
@@ -638,12 +638,12 @@ impl RepoDatabase {
     ///
     /// A package must match **all** of `terms` (AND, not OR) to be included at all. Searching
     /// `["firefox", "browser"]` only returns packages that independently satisfy both. See
-    /// [`crate::MatchKind`] for the six ways a single term can match, and their relative ranking.
+    /// [`crate::search::MatchKind`] for the six ways a single term can match, and their relative ranking.
     /// Highest first: an exact name match, then an exact match against one of its `%PROVIDES%`.
     /// Then a name prefix, a name substring, a description substring, and an exact group match.
     /// Comparisons are
     /// case-insensitive. Blank terms are dropped; if nothing is left after that, nothing matches.
-    /// Each package appears at most once, scored by the single highest [`crate::MatchKind`] any one
+    /// Each package appears at most once, scored by the single highest [`crate::search::MatchKind`] any one
     /// of its terms achieved. Results are sorted most-relevant-first, then by name to break ties
     /// deterministically.
     #[must_use]

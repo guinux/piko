@@ -46,8 +46,7 @@ use std::{
 use alpm_types::PackageInstallReason;
 
 use piko_db::{
-    EntryName, Limit, Limits, fs_util,
-    local::schema_version::{ALPM_DB_VERSION, ALPM_DB_VERSION_FILE},
+    EntryName, Limit, Limits, fs_util, local::ALPM_DB_VERSION, local::ALPM_DB_VERSION_FILE,
 };
 
 use crate::{
@@ -61,7 +60,7 @@ const LOCAL_DIR: &str = "local";
 
 /// The directory inside a dbpath where an entry is built before it is published, and where a
 /// replaced or removed entry is deleted. See the module's note on atomicity.
-pub const STAGING_DIR: &str = "piko-staging";
+pub(crate) const STAGING_DIR: &str = "piko-staging";
 
 /// Inside [`STAGING_DIR`]: entries being built.
 const STAGING_NEW: &str = "new";
@@ -126,7 +125,7 @@ impl<'lock> LocalDbWriter<'lock> {
     /// dbpath, as only one lock can.
     ///
     /// Creating `ALPM_DB_VERSION` is the writer's job precisely because
-    /// [`piko_db::local::schema_version::check`] refuses to. Fabricating a version marker for a
+    /// [`piko_db::local::check_schema_version`] refuses to. Fabricating a version marker for a
     /// database whose layout is unknown papers over corruption. Writing one for a database this
     /// code just created states a fact instead. libalpm does the same, in `checkdbdir`
     /// (`be_local.c:370`) plus `_alpm_db_version` handling.
@@ -154,7 +153,7 @@ impl<'lock> LocalDbWriter<'lock> {
             // An existing database must already be a version this build understands.
             // Silently overwriting the marker would be exactly the corruption-papering the
             // reader refuses to do.
-            piko_db::local::schema_version::check(&root, &limits)?;
+            piko_db::local::check_schema_version(&root, &limits)?;
         } else {
             atomic_write(&version, format!("{ALPM_DB_VERSION}\n").as_bytes())?;
         }
@@ -838,7 +837,7 @@ pub(crate) fn sync_directory(directory: &Path) -> Result<()> {
 #[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
     use super::*;
-    use piko_db::LocalDatabase;
+    use piko_db::local::LocalDatabase;
 
     /// A dbpath with its lock held, plus the entry name used throughout.
     struct Harness {

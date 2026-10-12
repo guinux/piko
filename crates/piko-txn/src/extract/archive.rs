@@ -153,6 +153,7 @@ pub enum LinkKind {
 
 /// A link member's kind and target.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Link {
     /// Symbolic or hard.
     pub kind: LinkKind,
@@ -164,6 +165,7 @@ pub struct Link {
 ///
 /// The value is raw bytes. `security.capability` is a binary structure, not text.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Xattr {
     /// The full name, namespace included: `security.capability`, `user.foo`.
     pub name: OsString,
@@ -173,6 +175,7 @@ pub struct Xattr {
 
 /// One member of a package archive, without its contents.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Member {
     /// The member's path as the archive spells it.
     pub path: PathBuf,
@@ -244,7 +247,7 @@ pub fn walk(
 
 /// Whether [`walk_until`] should read the next member or stop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Flow {
+pub(crate) enum Flow {
     /// Read the next member.
     Continue,
     /// Stop, without an error.
@@ -261,7 +264,7 @@ pub enum Flow {
 /// # Errors
 ///
 /// As [`walk`].
-pub fn walk_until(
+pub(crate) fn walk_until(
     path: &Path,
     limits: &PackageLimits,
     on_member: impl FnMut(&Member, &mut dyn Read) -> Result<Flow>,
@@ -277,7 +280,7 @@ pub fn walk_until(
 /// # Errors
 ///
 /// As [`walk`].
-pub fn walk_decoded_ahead(
+pub(crate) fn walk_decoded_ahead(
     path: &Path,
     limits: &PackageLimits,
     mut on_member: impl FnMut(&Member, &mut dyn Read) -> Result<()>,

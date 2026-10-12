@@ -8,8 +8,8 @@ use crate::search::{MatchKind, Searchable, rank};
 
 /// One installed package that matched a search query, together with why it matched.
 ///
-/// See [`LocalDatabase::search`](crate::LocalDatabase::search).
-pub type LocalSearchHit<'a> = (&'a LocalPackage, MatchKind);
+/// See [`LocalDatabase::search`](crate::local::LocalDatabase::search).
+pub(crate) type LocalSearchHit<'a> = (&'a LocalPackage, MatchKind);
 
 /// Ranks `packages` against `terms`, as [`crate::search::rank`] documents.
 ///

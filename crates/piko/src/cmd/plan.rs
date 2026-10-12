@@ -3,17 +3,15 @@
 use std::process::ExitCode;
 
 use piko_db::{
-    Limits, LocalDatabase,
-    config::DbUsage,
-    repo::RepoDatabase,
-    resolve::IgnoreList,
-    solve::{
-        Ambiguity, Change, Diagnosis, Expansion, ExpansionFailure, Fidelity, GroupChoice,
-        GroupTarget, IgnoredChange, IgnoredTarget, IgnoredUpgrade, InstallFailure, InstallOptions,
-        InstallQuestions, PackageCache, Plan, PlanDiagnostic, PlanExplanation, RemovalOptions,
-        ResolutionNotes, Side, SolvableId, Step, TargetResolutionFailure, Universe,
-        UniverseOptions, describe_cause, plan_install, plan_removal, removal_names,
-    },
+    Limits, config::DbUsage, local::LocalDatabase, repo::RepoDatabase, resolve::IgnoreList,
+    solve::Ambiguity, solve::Change, solve::Diagnosis, solve::Expansion, solve::ExpansionFailure,
+    solve::Fidelity, solve::GroupChoice, solve::GroupTarget, solve::IgnoredChange,
+    solve::IgnoredTarget, solve::IgnoredUpgrade, solve::InstallFailure, solve::InstallOptions,
+    solve::InstallQuestions, solve::PackageCache, solve::Plan, solve::PlanDiagnostic,
+    solve::PlanExplanation, solve::RemovalOptions, solve::ResolutionNotes, solve::Side,
+    solve::SolvableId, solve::Step, solve::TargetResolutionFailure, solve::Universe,
+    solve::UniverseOptions, solve::describe_cause, solve::plan_install, solve::plan_removal,
+    solve::removal_names,
 };
 
 use crate::output::{emit, report};
@@ -77,7 +75,7 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
         TargetResolutionFailure::Ignored { target, candidates } => {
             // A pattern names a set, a literal names one thing. "satisfying" reads as the
             // dependency relation, which is the wrong relation for a glob.
-            if piko_db::is_pattern(target) {
+            if piko_db::glob::is_pattern(target) {
                 eprintln!("Error: every package matching {target} is ignored");
             } else {
                 eprintln!("Error: every package satisfying {target} is ignored");
@@ -90,6 +88,8 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
                  IgnoreGroup in pacman.conf to allow it"
             );
         }
+        // A failure this frontend does not know yet.
+        other => eprintln!("Error: {other:?}"),
     }
 }
 
@@ -181,6 +181,8 @@ pub(crate) fn report_expansion_failure(failure: &ExpansionFailure) {
         ExpansionFailure::AllIgnored { pattern, .. } => {
             eprintln!("Error: every package matching {pattern} is ignored");
         }
+        // A failure this frontend does not know yet.
+        other => eprintln!("Error: {other:?}"),
     }
 }
 
@@ -260,6 +262,8 @@ pub(crate) fn report_install_failure(failure: &InstallFailure) {
             eprintln!("Internal error: the universe lost a package file candidate");
         }
         InstallFailure::Planner(error) => report(error.as_ref()),
+        // A failure this frontend does not know yet.
+        other => eprintln!("Error: {other:?}"),
     }
 }
 
@@ -527,7 +531,10 @@ pub fn plan(
     // Not in `-R` mode. A removal names installed packages, so every target there is a name.
     // A path-shaped one is a mistake to report as "not installed" rather than to open.
     let loaded = if matches!(mode, Mode::Remove { .. }) {
-        piko_txn::file_target::Targets { names: targets.to_vec(), files: Vec::new() }
+        piko_txn::file_target::Targets {
+            names: targets.to_vec(),
+            ..piko_txn::file_target::Targets::default()
+        }
     } else {
         match read_file_targets(targets, architecture) {
             Ok(loaded) => loaded,
@@ -614,8 +621,8 @@ pub fn plan(
 
     let built = planned.plan;
     // `piko install` refuses these in `TransactionPlan::new`, before it downloads anything.
-    if let Err(error) = piko_txn::plan::check_compression(&universe, &built)
-        .and_then(|()| piko_txn::plan::check_architecture(&universe, &built, architecture))
+    if let Err(error) = piko_txn::check_compression(&universe, &built)
+        .and_then(|()| piko_txn::check_architecture(&universe, &built, architecture))
     {
         report(&error);
         return ExitCode::FAILURE;

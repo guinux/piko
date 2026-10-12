@@ -54,7 +54,7 @@ pub fn refresh(
     only: &[String],
     options: Options,
     cancel: &Cancel,
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
 ) -> ExitCode {
     let lock = match piko_db_write::DbLock::acquire(dbpath) {
         Ok(lock) => lock,
@@ -76,7 +76,7 @@ fn refresh_locked(
     only: &[String],
     options: Options,
     cancel: &Cancel,
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
 ) -> ExitCode {
     let Options { force, files, freshness } = options;
     let sync_dir = dbpath.join("sync");
@@ -148,6 +148,8 @@ fn refresh_locked(
                             label(name, *kind)
                         ));
                     }
+                    // An outcome this frontend does not know yet: show the target, no detail.
+                    _ => row.finish_plain(label(name, *kind)),
                 }
                 notes.extend(
                     refreshed.notes.iter().map(|note| freshness::render_note(&file, note, zone)),

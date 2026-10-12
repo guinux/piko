@@ -19,12 +19,8 @@ use std::path::Path;
 
 use alpm_types::RelationOrSoname;
 use piko_db::{
-    LocalDatabase,
-    config::DbUsage,
-    fixture::DbFixture,
-    repo::{RepoDatabase, RepoName},
-    resolve::{SyncRepo, SyncRepos},
-    solve::{Request, Universe, UniverseOptions},
+    config::DbUsage, fixture::DbFixture, local::LocalDatabase, repo::RepoDatabase, repo::RepoName,
+    resolve::SyncRepo, resolve::SyncRepos, solve::Request, solve::Universe, solve::UniverseOptions,
 };
 
 const SYNC_DIR: &str = "/var/lib/pacman/sync";

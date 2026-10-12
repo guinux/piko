@@ -65,7 +65,7 @@ pub enum SchemaVersionError {
 /// - [`Error::SchemaVersion`] if the file is missing, malformed, or holds a version other
 ///   than [`ALPM_DB_VERSION`].
 /// - [`Error::Io`] or [`Error::LimitExceeded`] if the file cannot be read.
-pub fn check(root: &Path, limits: &Limits) -> Result<u32> {
+pub fn check_schema_version(root: &Path, limits: &Limits) -> Result<u32> {
     let path = fs_util::join(root, ALPM_DB_VERSION_FILE);
 
     if !fs_util::exists_no_follow(&path) {
@@ -100,7 +100,7 @@ fn parse(contents: &str) -> std::result::Result<u32, SchemaVersionError> {
 /// Whether `root` is a database nobody has written into yet: it does not exist, or it exists
 /// and is completely empty.
 ///
-/// [`check`] cannot decide this on its own. Telling "not yet created" from "corrupted" needs
+/// [`check_schema_version`] cannot decide this on its own. Telling "not yet created" from "corrupted" needs
 /// a directory listing, which the success path has no reason to do.
 ///
 /// This mirrors libalpm's own `local_db_validate` (`be_local.c:466`). Its `readdir` loop
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn check_reports_a_missing_file() {
         let dir = tempfile::tempdir().unwrap();
-        let err = check(dir.path(), &Limits::default()).unwrap_err();
+        let err = check_schema_version(dir.path(), &Limits::default()).unwrap_err();
         assert!(
             matches!(err, Error::SchemaVersion(SchemaVersionError::Missing { .. })),
             "got {err:?}"
@@ -184,6 +184,6 @@ mod tests {
     fn check_reads_a_real_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(ALPM_DB_VERSION_FILE), "9\n").unwrap();
-        assert_eq!(check(dir.path(), &Limits::default()).unwrap(), ALPM_DB_VERSION);
+        assert_eq!(check_schema_version(dir.path(), &Limits::default()).unwrap(), ALPM_DB_VERSION);
     }
 }

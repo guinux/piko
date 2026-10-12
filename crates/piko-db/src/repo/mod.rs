@@ -23,14 +23,13 @@ mod package;
 mod repo_name;
 mod search;
 
-pub mod database;
+pub(crate) mod database;
 
-pub use crate::eager::DescFieldError;
-pub use crate::search::MatchKind;
-pub use database::{
-    ArchiveCheck, FileListEntry, RepoDatabase, RepoDiagnostic, RepoOpenOptions, Variant,
-};
+pub use database::{ArchiveCheck, FileListEntry, RepoDatabase, RepoOpenOptions, Variant};
+
+pub use database::RepoDiagnostic;
 pub use desc::RepoDescView;
 pub use package::RepoPackage;
-pub use repo_name::{RepoName, RepoNameError};
-pub use search::SearchHit;
+pub use repo_name::RepoName;
+pub use repo_name::RepoNameError;
+pub(crate) use search::SearchHit;

@@ -7,8 +7,8 @@
 //! 2. **target against the filesystem** — something is already at a path a package will
 //!    write, and no rule explains it.
 //!
-//! Check 1 is pure set arithmetic and lives in [`filelist`]. Check 2's rules are pure and
-//! live in [`decision`]. What is left here is the part that has to touch a disk. It `lstat`s
+//! Check 1 is pure set arithmetic and lives in `filelist`. Check 2's rules are pure and
+//! live in `decision`. What is left here is the part that has to touch a disk. It `lstat`s
 //! each path inside the root, and asks the local database who owns what.
 //!
 //! # Why this is not optional
@@ -65,25 +65,26 @@
 //! the targets' installed file lists. Every row above produces byte-identical output,
 //! `skip_remove` included (115 256 entries in the last one), checked by digest.
 
-pub mod decision;
-pub mod filelist;
+pub(crate) mod decision;
+pub(crate) mod filelist;
+
+pub use decision::{Verdict, decide};
+
+pub use decision::{FilesystemContext, Resolution};
+pub use filelist::FileList;
+#[doc(hidden)]
+pub use filelist::is_directory;
+pub(crate) use filelist::strip_dir;
 
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
 };
 
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 
 use crate::{
-    conflict::{
-        decision::{FilesystemContext, Resolution, Verdict, decide},
-        filelist::{FileList, is_directory, strip_dir},
-    },
-    error::Result,
-    extract::decision::Existing,
-    owner::Owners,
-    rootfs::RootDir,
+    error::Result, extract::decision::Existing, owner::Owners, rootfs::RootDir,
     scriptlet::MAX_SCRIPTLET_BYTES,
 };
 
@@ -116,6 +117,7 @@ pub struct Target {
 
 /// What is in the way, and who put it there.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Blocker {
     /// Another package in this same transaction ships the path.
     Target {
@@ -159,6 +161,7 @@ impl std::fmt::Display for Blocker {
 
 /// One path this transaction cannot write.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct FileConflict {
     /// The package that wanted to write it.
     pub package: String,
@@ -176,6 +179,7 @@ impl std::fmt::Display for FileConflict {
 
 /// The result of checking a transaction.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct Check {
     /// Every conflict found, in target order then path order.
     pub conflicts: Vec<FileConflict>,
@@ -221,7 +225,7 @@ impl Default for WalkLimits {
 
 /// Which paths the user has released piko from protecting — pacman's `--overwrite`.
 ///
-/// This is a predicate rather than a pattern list, for the same reason [`crate::Filters`]
+/// This is a predicate rather than a pattern list, for the same reason [`crate::install::Filters`]
 /// holds predicates. This crate does not need an opinion about glob syntax. A test can supply
 /// an exact answer instead of a pattern that has to be right twice.
 pub struct Overwrite(Box<dyn Fn(&Path) -> bool + Send + Sync>);
@@ -273,7 +277,7 @@ impl std::fmt::Debug for Overwrite {
 ///
 /// `removals` names the packages this transaction removes. This is what lets a path being
 /// vacated stop being a conflict. `overwrite` answers the `--overwrite` patterns. It is a
-/// predicate rather than a pattern list for the same reason [`crate::Filters`] is.
+/// predicate rather than a pattern list for the same reason [`crate::install::Filters`] is.
 ///
 /// Nothing here fails. A path that does not exist, a path the root cannot reach, and a
 /// directory that cannot be read are each an answer, not a failure.
@@ -818,6 +822,8 @@ fn read_directory(root: &RootDir, dir: &str) -> Option<Vec<(String, bool)>> {
 /// rejects is a package piko cannot record. Discovering that after extraction has run would
 /// leave a mutated root behind, which is exactly what `Verified` promises it will not.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
+#[doc(hidden)]
 pub struct LoadedPackage {
     /// Everything file-conflict detection asks about the package.
     pub target: Target,
@@ -847,6 +853,7 @@ pub struct LoadedPackage {
 ///
 /// [`crate::Error::UnusableSource`] if the archive has no readable `.PKGINFO`, or one that
 /// `alpm-pkginfo` refuses; otherwise [`crate::Error`] if the archive cannot be read.
+#[doc(hidden)]
 pub fn load_package(
     package: &Path,
     limits: &crate::extract::PackageLimits,
@@ -904,12 +911,12 @@ pub fn load_package(
 
 /// Reads only a package archive's `.PKGINFO`, stopping as soon as it has it.
 ///
-/// [`load_package`] answers what a *transaction* needs: the member list, the scriptlet, the
+/// `load_package` answers what a *transaction* needs: the member list, the scriptlet, the
 /// `%BACKUP%` lines. Planning needs none of that. It needs the name, version and relations of a
 /// package file named on the command line. The solver then treats that file as a candidate. And
 /// planning needs them before the user has confirmed anything.
 ///
-/// The archive is read a second time later, by [`load_package`] inside
+/// The archive is read a second time later, by `load_package` inside
 /// [`crate::Transaction::verify`]. That second read is deliberate. Verification must read the
 /// bytes it is about to install. It must not trust a view taken earlier, from a file that may
 /// since have changed. This one stops at `.PKGINFO`, so the duplicated cost is a few kilobytes

@@ -30,6 +30,17 @@
 //! (`flock`, `fcntl`) is invisible to pacman, and both tools then write the database at once.
 //! That is worse than the stale `db.lck` a crash leaves behind.
 //!
+//! # Stability
+//!
+//! Each public item has one path, from the crate root. Two rules say which types a later
+//! release can extend without a breaking change:
+//!
+//! - **A result, a report, a diagnostic or a failure is `#[non_exhaustive]`:** [`Error`],
+//!   [`RecordError`]. A later release can add a variant or a field. Match it with a wildcard
+//!   arm.
+//! - **A decision, and a closed set, are exhaustive.** A new variant changes what every caller
+//!   must do, so it must break the build of each caller: [`RecordKind`].
+//!
 //! # Example
 //!
 //! Flipping one installed package from a dependency to an explicit install — `pacman -D
@@ -56,14 +67,14 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-pub mod atomic;
-pub mod error;
+mod atomic;
+mod error;
 mod local;
 mod lock;
 mod record;
 
 pub use atomic::AtomicFile;
 pub use error::{Error, IoAction, Result};
-pub use local::{EntryWrite, LocalDbWriter, STAGING_DIR};
+pub use local::{EntryWrite, LocalDbWriter};
 pub use lock::{DbLock, LOCK_FILE};
 pub use record::{Record, RecordError, RecordKind, Section};

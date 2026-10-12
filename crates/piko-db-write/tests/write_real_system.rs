@@ -24,7 +24,7 @@
 
 use std::path::{Path, PathBuf};
 
-use piko_db::{EntryName, Limits, LocalDatabase};
+use piko_db::{EntryName, Limits, local::LocalDatabase};
 use piko_db_write::{DbLock, LocalDbWriter, Record, RecordKind};
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";

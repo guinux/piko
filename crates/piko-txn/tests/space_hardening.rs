@@ -19,8 +19,8 @@
 use std::path::{Path, PathBuf};
 
 use piko_txn::{
-    Error, RootDir,
-    space::{Install, MemberFootprint, Problem, check_install, mounts::MountTable},
+    Error, rootfs::RootDir, space::Install, space::MemberFootprint, space::MountTable,
+    space::Problem, space::check_install,
 };
 
 /// Nothing is `NoExtract` unless a test says so.

@@ -8,7 +8,7 @@
 //!
 //! A missing or unreadable `Include` target is a **fatal** error, not a soft diagnostic.
 //! This matches the `GLOB_NOCHECK` flag `conf.c` passes to `glob`, which
-//! [`crate::glob::expand`] transcribes: a pattern that matches nothing is not silently
+//! `glob::expand` transcribes: a pattern that matches nothing is not silently
 //! skipped. It is retried as a literal path, which then fails to open and
 //! aborts the whole parse. A syntactically valid but unrecognized directive name is
 //! non-fatal instead, mirroring `pm_printf(ALPM_LOG_WARNING, ...)`. It is reported via
@@ -122,6 +122,7 @@ impl fmt::Display for ConfigDiagnostic {
 
 /// The `[options]` section of a parsed `pacman.conf`, after defaults are applied.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Options {
     /// `RootDir`. Default `/`.
     pub root_dir: PathBuf,
@@ -181,6 +182,7 @@ pub struct Options {
 
 /// Why pacman does not register a repository section (`alpm_register_syncdb`, `db.c:47`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Unregistered {
     /// The section is named `local`, the name of the installed-package database.
     Reserved,
@@ -199,6 +201,7 @@ impl fmt::Display for Unregistered {
 
 /// A `[reponame]` section of a parsed `pacman.conf`, after defaults are applied.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct RepositoryConfig {
     /// The repository name.
     pub name: RepoName,
@@ -213,6 +216,19 @@ pub struct RepositoryConfig {
 }
 
 impl RepositoryConfig {
+    /// A section named `name` with no directive: no server, `Usage = All`, and no `SigLevel`
+    /// of its own, so [`Self::effective_sig_level`] falls back to the global one.
+    #[must_use]
+    pub fn new(name: RepoName) -> Self {
+        Self {
+            name,
+            servers: Vec::new(),
+            cache_servers: Vec::new(),
+            usage: DbUsage::ALL,
+            sig_level: SigLevel::USE_DEFAULT,
+        }
+    }
+
     /// This repository's effective `SigLevel`, falling back to `global` (`[options]`'s own
     /// `SigLevel`) when this repository never set one at all.
     ///
@@ -240,7 +256,7 @@ pub struct PacmanConfig {
     /// The `[options]` section.
     pub options: Options,
     /// Every `[reponame]` section, in file order, as written. File order **is** repository
-    /// priority order — the same convention [`crate::LocalDatabase::check_updates`] uses for
+    /// priority order — the same convention [`crate::local::LocalDatabase::check_updates`] uses for
     /// its caller-supplied repository list. A duplicate section and one named `local` are kept
     /// here, as `pacman-conf` prints them. A consumer that uses the repositories reads
     /// [`Self::registered_repositories`] instead.

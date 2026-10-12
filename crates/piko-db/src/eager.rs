@@ -11,7 +11,7 @@
 //! relation sections and `%GROUPS%` for every candidate in the universe, so deferring *those*
 //! buys nothing. This module parses exactly that subset, cheaply. Every other section stays
 //! behind the lazy full parse — [`crate::repo::RepoPackage::desc`] and
-//! [`crate::LocalPackage::desc`].
+//! [`crate::local::LocalPackage::desc`].
 //!
 //! Every *value* goes through `alpm-types`' own parser. The sections come from
 //! [`crate::meta::section`], the one reader of the `%KEYWORD%` grammar.
@@ -78,7 +78,7 @@ pub(crate) enum Depends {
 /// Why a `desc` could not yield the fields every package must have.
 ///
 /// Carried by [`crate::repo::RepoDiagnostic::InvalidDesc`], whose package is dropped, and by
-/// [`crate::LocalPackage`]'s cached load failure, and by the full `desc` of either database
+/// [`crate::local::LocalPackage`]'s cached load failure, and by the full `desc` of either database
 /// for a section that decides something. A section that is shown only keeps its error to
 /// itself.
 #[derive(Debug)]
@@ -123,7 +123,7 @@ pub enum DescFieldError {
         section: &'static str,
     },
     /// A section this build does not recognise, refused under
-    /// [`UnknownSectionPolicy::Reject`](crate::UnknownSectionPolicy::Reject).
+    /// [`UnknownSectionPolicy::Reject`](crate::desc_compat::UnknownSectionPolicy::Reject).
     UnknownSection {
         /// The `%KEYWORD%` name, without the percent signs.
         keyword: String,

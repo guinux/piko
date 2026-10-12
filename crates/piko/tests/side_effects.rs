@@ -1897,7 +1897,7 @@ fn download_only_fetches_and_verifies_every_package_in_parallel() {
 }
 
 /// A package that is not in the cache is downloaded from the repository's `Server` before it
-/// is installed. This is the whole point of [`piko_txn::source::DownloadingSource`].
+/// is installed. This is the whole point of [`piko_txn::DownloadingSource`].
 #[test]
 fn installing_a_package_not_in_the_cache_downloads_it() {
     let bytes = package_tar("foo", "1.0.0-1", None, &[]);

@@ -133,7 +133,7 @@ pub fn is_identical(root: &RootDir, pending: &Pending, max: u64) -> Result<bool>
 ///
 /// # Errors
 ///
-/// As [`apply`], plus whatever [`hash::same_contents_at`] refuses.
+/// As [`apply`], plus whatever `hash::same_contents_at` refuses.
 pub fn remove_if_identical(root: &RootDir, pending: &Pending, max: u64) -> Result<Outcome> {
     let resolved = root.resolve_parent(&pending.target)?;
     let pacname = self::pacname(pending)?;

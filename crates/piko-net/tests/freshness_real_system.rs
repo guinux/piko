@@ -32,15 +32,11 @@ fn core_servers() -> Option<Vec<String>> {
 }
 
 fn refresh(sync: &Path, servers: &[String], accept_older: bool) -> Refreshed {
-    let repos = [RepoRefresh {
-        name: "core",
-        kind: DatabaseKind::Db,
-        servers,
-        // Arch signs no database, so there is nothing to verify and no keyring is needed. The
-        // archive date decides.
-        policy: Policy { check: false, optional: true, marginal_ok: false, unknown_ok: false },
-        freshness: FreshnessPolicy { accept_older, ..FreshnessPolicy::default() },
-    }];
+    // Arch signs no database, so there is nothing to verify and no keyring is needed. The
+    // archive date decides.
+    let policy = Policy { check: false, optional: true, marginal_ok: false, unknown_ok: false };
+    let freshness = FreshnessPolicy::default().with_accept_older(accept_older);
+    let repos = [RepoRefresh::new("core", DatabaseKind::Db, servers, policy, freshness)];
     Refresher::default()
         .refresh_all(
             sync,

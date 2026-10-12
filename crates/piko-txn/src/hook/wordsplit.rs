@@ -29,6 +29,7 @@ use std::ffi::OsString;
 
 /// An `Exec` value that could not be split.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SplitError {
     /// A quoted run was never closed.
     #[error("the quote opened at character {position} is never closed")]

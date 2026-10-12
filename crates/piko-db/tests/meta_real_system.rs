@@ -20,7 +20,7 @@ use std::{path::Path, str::FromStr as _};
 
 use alpm_common::MetadataFile as _;
 use alpm_db::{desc::DbDescFile, files::DbFiles};
-use piko_db::{LocalDatabase, meta::files};
+use piko_db::{local::LocalDatabase, meta::files};
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";
 

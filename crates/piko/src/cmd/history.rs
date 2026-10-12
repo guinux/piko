@@ -25,7 +25,7 @@ pub struct Options {
     /// `--quiet`: one line per transaction, no per-package detail.
     pub quiet: bool,
     /// The time zone timestamps are rendered in, read in `main`.
-    pub zone: piko_txn::LocalZone,
+    pub zone: piko_txn::history::LocalZone,
 }
 
 /// Prints the transactions the two records describe, oldest first.
@@ -338,7 +338,7 @@ const DAY: i64 = 24 * 60 * 60;
 fn parse_when(
     text: Option<&str>,
     bound: Bound,
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
 ) -> Result<Option<i64>, String> {
     let Some(text) = text else {
         return Ok(None);
@@ -363,7 +363,7 @@ fn parse_when(
 mod tests {
     use super::*;
 
-    const UTC: piko_txn::LocalZone = piko_txn::LocalZone::UTC;
+    const UTC: piko_txn::history::LocalZone = piko_txn::history::LocalZone::UTC;
 
     #[test]
     fn a_bare_date_starts_a_range_at_its_midnight() {
@@ -374,7 +374,7 @@ mod tests {
     /// and a transaction at 01:00 local time belongs to the day the listing shows it on.
     #[test]
     fn a_bare_date_is_the_day_in_the_offset_the_listing_uses() {
-        let paris = piko_txn::LocalZone::from_seconds(2 * 3600);
+        let paris = piko_txn::history::LocalZone::from_seconds(2 * 3600);
         let start = parse_when(Some("2026-09-27"), Bound::Start, paris).unwrap().unwrap();
         let end = parse_when(Some("2026-09-27"), Bound::End, paris).unwrap().unwrap();
 
@@ -519,7 +519,7 @@ mod tests {
             since: None,
             until: None,
             quiet: false,
-            zone: piko_txn::LocalZone::UTC,
+            zone: piko_txn::history::LocalZone::UTC,
         };
         assert!(Widths::over(&records, &listing).name > 0);
         assert_eq!(Widths::over(&records, &Options { quiet: true, ..listing }).name, 0);
@@ -537,7 +537,7 @@ mod tests {
             since: None,
             until: None,
             quiet: false,
-            zone: piko_txn::LocalZone::UTC,
+            zone: piko_txn::history::LocalZone::UTC,
         };
         assert_eq!(Widths::over(&records, &options).name, "foo".len());
     }

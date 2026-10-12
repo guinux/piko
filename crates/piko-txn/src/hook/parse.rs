@@ -75,6 +75,7 @@ impl std::ops::BitOr for Operations {
 
 /// One `[Trigger]` section.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Trigger {
     /// The `Operation` lines, combined.
     pub operations: Operations,
@@ -87,6 +88,7 @@ pub struct Trigger {
 
 /// A parsed hook file.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Hook {
     /// The file name, including the `.hook` suffix. This is its identity for overriding.
     pub name: String,
@@ -123,6 +125,7 @@ impl Hook {
 /// Why a `.hook` file was rejected.
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("{file}: {reason}")]
+#[non_exhaustive]
 pub struct ParseError {
     /// The hook file's name.
     pub file: String,

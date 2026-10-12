@@ -62,7 +62,7 @@ const SCRIPTLET_FILE: &str = ".INSTALL";
 /// it back out of the database entry at removal. The two must agree. A scriptlet that verified
 /// and then could not be read back would leave a package whose `pre_remove` silently never
 /// runs.
-pub const MAX_SCRIPTLET_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_SCRIPTLET_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Which of the six functions to call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -34,7 +34,7 @@ use crate::solve::{
     AmbiguityReport, Diagnosis, Plan, PlanExplanation, Request, Step, Universe, explain_plan,
     solve_with_removals,
 };
-use crate::{EntryName, Error, Limits, LocalDatabase};
+use crate::{EntryName, Error, Limits, local::LocalDatabase};
 
 /// Which flavour of removal to plan.
 #[derive(Clone, Copy, Debug, Default)]
@@ -52,6 +52,7 @@ pub struct RemovalOptions {
 
 /// Why a removal could not be planned.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RemovalFailure {
     /// A target names neither an installed package nor a group any installed package
     /// belongs to.
@@ -75,6 +76,7 @@ pub enum RemovalFailure {
 /// on both branches. A refusal names packages the user may never have typed. The pattern that
 /// pulled them in is the one thing the refusal itself cannot show.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Removal {
     /// One entry per glob target, in the order the targets were given. Empty when the caller
     /// named no pattern.
@@ -172,6 +174,7 @@ pub fn plan_removal(
 
 /// Why a `--nodeps` removal could not name its entries.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum NamedRemovalFailure {
     /// A target names no installed package.
     NotInstalled(String),
@@ -182,6 +185,7 @@ pub enum NamedRemovalFailure {
 /// The expansions sit beside the outcome, as on [`Removal`]: a caller needs them on both
 /// branches.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct NamedRemoval {
     /// One entry per glob target, in the order the targets were given.
     pub expansions: Vec<Expansion>,
@@ -196,7 +200,7 @@ pub struct NamedRemoval {
 /// which is the stated intent of the flag.
 ///
 /// A glob target expands against installed package names only
-/// ([`expand_installed_names`]). A target resolves through [`LocalDatabase::get_str`] and
+/// (`expand_installed_names`). A target resolves through [`LocalDatabase::get_str`] and
 /// nothing else, so no group name is accepted. A pattern must not become the one spelling that
 /// does.
 ///

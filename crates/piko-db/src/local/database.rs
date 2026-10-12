@@ -85,7 +85,7 @@ impl std::fmt::Display for Diagnostic {
 /// How to open a [`LocalDatabase`].
 ///
 /// ```
-/// use piko_db::{Limits, OpenOptions, UnknownSectionPolicy};
+/// use piko_db::{Limits, desc_compat::UnknownSectionPolicy, local::OpenOptions};
 ///
 /// let options = OpenOptions::new()
 ///     .limits(Limits::default())
@@ -211,7 +211,7 @@ impl LocalDatabase {
         let mut bootstrapping = false;
 
         if options.require_schema_version.0
-            && let Err(error) = schema_version::check(root, &options.limits)
+            && let Err(error) = schema_version::check_schema_version(root, &options.limits)
         {
             let missing = matches!(
                 &error,

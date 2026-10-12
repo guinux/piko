@@ -10,12 +10,10 @@ use std::{
 };
 
 use piko_db::{
-    LocalDatabase, OpenOptions,
-    config::{
-        DEFAULT_DB_PATH, DEFAULT_GPG_DIR, DEFAULT_LOG_FILE, DEFAULT_ROOT_DIR, DbUsage,
-        PacmanConfig, SigLevel,
-    },
-    repo::{ArchiveCheck, RepoDatabase, RepoName, RepoOpenOptions},
+    config::DEFAULT_DB_PATH, config::DEFAULT_GPG_DIR, config::DEFAULT_LOG_FILE,
+    config::DEFAULT_ROOT_DIR, config::DbUsage, config::PacmanConfig, config::SigLevel,
+    local::LocalDatabase, local::OpenOptions, repo::ArchiveCheck, repo::RepoDatabase,
+    repo::RepoName, repo::RepoOpenOptions,
 };
 
 use crate::cli::Cli;
@@ -280,9 +278,9 @@ pub fn recording(
     cli: &Cli,
     config: &ConfigCache,
     dbpath: &Path,
-    zone: piko_txn::LocalZone,
-) -> piko_txn::Recording {
-    piko_txn::Recording::new(dbpath, Some(resolve_log_file(cli, config)), zone)
+    zone: piko_txn::history::LocalZone,
+) -> piko_txn::history::Recording {
+    piko_txn::history::Recording::new(dbpath, Some(resolve_log_file(cli, config)), zone)
         .command(self::command_line())
 }
 

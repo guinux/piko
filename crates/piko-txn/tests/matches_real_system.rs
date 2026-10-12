@@ -22,16 +22,11 @@
 use std::path::Path;
 
 use piko_db::{
-    LocalDatabase,
-    config::DbUsage,
-    fixture::DbFixture,
-    repo::{RepoDatabase, RepoName},
-    solve::{Universe, UniverseOptions},
+    config::DbUsage, fixture::DbFixture, local::LocalDatabase, repo::RepoDatabase, repo::RepoName,
+    solve::Universe, solve::UniverseOptions,
 };
 use piko_txn::{
-    Expected, Published, Validation,
-    extract::PackageLimits,
-    transaction::{Verification, validate_package},
+    Expected, Published, Validation, Verification, extract::PackageLimits, validate_package,
 };
 
 const SYNC_DIR: &str = "/var/lib/pacman/sync";
@@ -131,7 +126,7 @@ fn every_cached_package_passes_its_repository_validation() {
                 validate_package(verification, &no_overrides, Some(&published), file_name, &path);
             match validation {
                 Ok(Validation { signature: true, .. }) => signed += 1,
-                Ok(Validation { sha256: true, signature: false }) if label == "Never" => {}
+                Ok(Validation { sha256: true, signature: false, .. }) if label == "Never" => {}
                 other => refused.push(format!("{} under {label}: {other:?}", path.display())),
             }
         }

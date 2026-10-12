@@ -10,8 +10,8 @@
 //!
 //! An ISO-8601 timestamp in the machine's own time zone, the writing tool in brackets, then
 //! the message. libalpm writes `ALPM` there, and pacman's frontend writes `PACMAN`; piko
-//! writes [`CALLER`] so a line always says which tool acted. A scriptlet's own output is
-//! copied through under [`SCRIPTLET_CALLER`], one line at a time, as `util.c:527` does.
+//! writes `CALLER` so a line always says which tool acted. A scriptlet's own output is
+//! copied through under `SCRIPTLET_CALLER`, one line at a time, as `util.c:527` does.
 //!
 //! # Reading
 //!
@@ -21,16 +21,16 @@
 
 use std::{
     io::{BufRead as _, Read as _, Write as _},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use super::{Action, LocalZone, Outcome, time_fmt};
 
 /// The bracketed name piko writes its own lines under, where libalpm writes `ALPM`.
-pub const CALLER: &str = "PIKO";
+pub(crate) const CALLER: &str = "PIKO";
 
 /// The bracketed name a scriptlet's copied output is written under.
-pub const SCRIPTLET_CALLER: &str = "PIKO-SCRIPTLET";
+pub(crate) const SCRIPTLET_CALLER: &str = "PIKO-SCRIPTLET";
 
 /// Mode a log file is created with, matching `log.c`.
 const LOG_MODE: u32 = 0o644;
@@ -40,12 +40,11 @@ const LOG_MODE: u32 = 0o644;
 /// A `pacman.log` on a long-lived system runs to a few megabytes. This bound is generous
 /// without being unbounded. Every read in piko is bounded, and a log is as attacker-influenced
 /// as any other file on disk. It holds the output of every scriptlet that ever ran.
-pub const MAX_LOG_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_LOG_BYTES: u64 = 64 * 1024 * 1024;
 
 /// An open log file, appended to for the duration of a transaction.
 #[derive(Debug)]
-pub struct PacmanLog {
-    path: PathBuf,
+pub(crate) struct PacmanLog {
     file: std::fs::File,
     zone: LocalZone,
 }
@@ -65,13 +64,7 @@ impl PacmanLog {
     /// [`std::io::Error`] if the file cannot be opened.
     pub fn open(path: &Path, zone: LocalZone) -> std::io::Result<Self> {
         let file = super::open_for_append(path, LOG_MODE)?;
-        Ok(Self { path: path.to_path_buf(), file, zone })
-    }
-
-    /// The file being written.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+        Ok(Self { file, zone })
     }
 
     /// Appends one line, stamped with the current time.
@@ -109,6 +102,7 @@ impl PacmanLog {
 
 /// One parsed line.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Line {
     /// When it was written, when the leader could be dated.
     pub timestamp: Option<i64>,
@@ -170,6 +164,7 @@ impl Line {
 /// dbpath and no `.pacnew` list. It is more than the store holds, because it covers pacman's
 /// transactions too.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Session {
     /// The id piko stamped on the `transaction started` line, when piko wrote it.
     pub id: Option<String>,
@@ -189,7 +184,7 @@ pub struct Session {
     pub outcome: Outcome,
 }
 
-/// Reads and parses a log file, bounded by [`MAX_LOG_BYTES`].
+/// Reads and parses a log file, bounded by `MAX_LOG_BYTES`.
 ///
 /// Unparseable lines are skipped rather than failing the read. A log file outlives the tools
 /// that wrote it. A reader that refuses the whole file over one odd line fails on exactly the

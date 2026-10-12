@@ -35,7 +35,7 @@ fn styled_validation(has_signature: bool) -> console::StyledObject<String> {
 pub fn repo_info(
     db: &RepoDatabase,
     package: &RepoPackage,
-    zone: piko_txn::LocalZone,
+    zone: piko_txn::history::LocalZone,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     // `info`'s repository-side rendering prints every field, so it needs the deferred parse.

@@ -1,5 +1,5 @@
 //! `piko check`: directory-name/`desc` consistency plus the `pacman -Qkk`-equivalent
-//! file-vs-`ALPM-MTREE` comparison ([`piko_db::LocalPackage::verify_files`]).
+//! file-vs-`ALPM-MTREE` comparison ([`piko_db::local::LocalPackage::verify_files`]).
 //!
 //! # Several packages at a time
 //!
@@ -24,7 +24,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use piko_db::{LocalDatabase, LocalPackage, resolve::PatternList};
+use piko_db::{local::LocalDatabase, local::LocalPackage, resolve::PatternList};
 
 use crate::{
     output::{emit, write_report},
@@ -279,7 +279,7 @@ mod tests {
             .desc(piko_db::fixture::MINIMAL_DESC_V1)
             .files("%FILES%\nusr/bin/foo\n\n")
             .build();
-        let local = piko_db::LocalDatabase::open(db.path()).unwrap();
+        let local = piko_db::local::LocalDatabase::open(db.path()).unwrap();
         let package = local.get_str("foo").unwrap();
         let root = tempfile::tempdir().unwrap();
         let (mut out, mut err) = (Vec::new(), Vec::new());

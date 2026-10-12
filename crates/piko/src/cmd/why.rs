@@ -8,8 +8,8 @@
 use std::process::ExitCode;
 
 use piko_db::{
-    LocalDatabase,
-    solve::{SolvableId, Universe, UniverseOptions, WhyResult, explain_why_installed},
+    local::LocalDatabase, solve::SolvableId, solve::Universe, solve::UniverseOptions,
+    solve::WhyResult, solve::explain_why_installed,
 };
 
 use crate::output::{emit, report};

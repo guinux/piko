@@ -21,6 +21,7 @@ use crate::{
 /// A line number alone does not locate a line, because `populate` reads two files. Line 4 of
 /// `<name>-trusted` and line 4 of `<name>-revoked` need to stay apart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SideFile {
     /// `<name>-trusted`.
     Trusted,
@@ -44,6 +45,7 @@ impl SideFile {
 
 /// One line of a side file that [`KeyringAdmin::populate`] could not act on.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct SkippedLine {
     /// Which side file holds the line.
     pub file: SideFile,
@@ -55,6 +57,7 @@ pub struct SkippedLine {
 
 /// A summary of one [`KeyringAdmin::populate`] call.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct PopulateSummary {
     /// The `<name>.gpg` import's own summary.
     pub imported: ImportSummary,

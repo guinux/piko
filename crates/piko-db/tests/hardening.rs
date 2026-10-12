@@ -14,8 +14,8 @@
 use std::{path::Path, time::Duration};
 
 use piko_db::{
-    Error, Limit, Limits, LocalDatabase, OpenOptions,
-    fixture::{DbFixture, MINIMAL_DESC_V1, MINIMAL_FILES, gzip_bomb},
+    Error, Limit, Limits, fixture::DbFixture, fixture::MINIMAL_DESC_V1, fixture::MINIMAL_FILES,
+    fixture::gzip_bomb, local::LocalDatabase, local::OpenOptions,
 };
 
 /// Creates a FIFO, or returns `false` if the system provides no `mkfifo`.

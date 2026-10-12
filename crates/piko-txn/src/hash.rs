@@ -44,8 +44,8 @@ const COMPARE_BLOCK_BYTES: usize = 64 * 1024;
 /// # Treat a failure as *unknown*, never as *unchanged*
 ///
 /// Both an `Err` and an `Ok(None)` mean piko does not know what the file contains. A caller
-/// must map both to `None` when feeding [`crate::extract::decision::resolve_backup`] or
-/// [`crate::remove::decide_removal`]. Never map either to a hash that happens to be convenient.
+/// must map both to `None` when feeding `resolve_backup` or
+/// `crate::remove::decide_removal`. Never map either to a hash that happens to be convenient.
 /// Those functions rely on an unknown hash keeping the user's file, and that safety depends on
 /// the unknown actually arriving as unknown. libalpm gets this wrong in `remove.c:536`: there,
 /// an uncomputable hash compares equal to the recorded one, and the file gets deleted.
@@ -94,7 +94,7 @@ pub fn file_md5_at(dir: &impl AsFd, name: &OsStr, max: u64) -> Result<Option<Md5
 /// trade an exact comparison for an MD5 one, on this branch. MD5 has constructible
 /// chosen-prefix collisions, and a package author picks one side of this pair. Comparing in
 /// blocks also costs no allocation, where two digests cost two buffers of up to `max` bytes.
-pub fn same_contents_at(
+pub(crate) fn same_contents_at(
     dir: &impl AsFd,
     left: &OsStr,
     right: &OsStr,
@@ -220,7 +220,7 @@ fn too_large(name: &OsStr, max: u64) -> Error {
 }
 
 /// Reports whether `name` exists inside `dir`, without following a symlink.
-pub fn exists_at(dir: &impl AsFd, name: &OsStr) -> bool {
+pub(crate) fn exists_at(dir: &impl AsFd, name: &OsStr) -> bool {
     rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).is_ok()
 }
 

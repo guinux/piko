@@ -14,22 +14,23 @@ use piko_sig::{Keyring, Policy, SignatureOutcome, Verdict};
 /// That is pacman's own default for a package file: `SigLevel = Required` sets `check`, and
 /// `TrustedOnly` clears `marginal_ok` and `unknown_ok`. `TrustedOnly` applies whenever
 /// `pacman.conf` names no `TrustAll`.
-pub const VERIFY_POLICY: Policy =
+pub(crate) const VERIFY_POLICY: Policy =
     Policy { check: true, optional: false, marginal_ok: false, unknown_ok: false };
 
 /// What [`verify`] found.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Verification {
     /// The file the signature was checked over.
     pub file: PathBuf,
     /// Each signature, as the keyring reports it.
     pub outcomes: Vec<SignatureOutcome>,
-    /// Whether [`VERIFY_POLICY`] accepts them, through [`piko_sig::decide`], the function a
+    /// Whether `VERIFY_POLICY` accepts them, through [`piko_sig::decide`], the function a
     /// transaction's check reaches too.
     pub verdict: Verdict,
 }
 
-/// Checks `signature` over `file` against the keyring at `gpg_dir`, under [`VERIFY_POLICY`].
+/// Checks `signature` over `file` against the keyring at `gpg_dir`, under `VERIFY_POLICY`.
 ///
 /// `file` defaults to `signature` without its last extension, so `foo.pkg.tar.zst.sig` checks
 /// `foo.pkg.tar.zst`, the file `gpg --verify` finds beside a detached signature.

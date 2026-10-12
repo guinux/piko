@@ -21,6 +21,17 @@
 //! `piko-sig` already links, so administering a keyring adds no new binary dependency and no
 //! subprocess/argv attack surface.
 //!
+//! # Stability
+//!
+//! Each public item has one path, from the crate root. Two rules say which types a later
+//! release can extend without a breaking change:
+//!
+//! - **A result, a report, a diagnostic or a failure is `#[non_exhaustive]`:**
+//!   [`ImportSummary`], [`InitOutcome`], [`KeyInfo`], [`PopulateSummary`], [`Verification`],
+//!   [`Error`]. A later release can add a variant or a field. Match it with a wildcard arm.
+//! - **A decision, and a closed set, are exhaustive.** A new variant changes what every caller
+//!   must do, so it must break the build of each caller: [`OwnerTrust`].
+//!
 //! # Example
 //!
 //! Bootstrapping a keyring the way `pacman-key --init` plus `--populate` does: create the
@@ -57,13 +68,13 @@
 //! editing (`gpg --edit-key`'s REPL). Both need a human or a network in the loop that this
 //! crate deliberately does not assume, and `piko key` offers neither.
 
-pub mod admin;
+mod admin;
 mod edit;
-pub mod error;
-pub mod populate;
-pub mod verify;
+mod error;
+mod populate;
+mod verify;
 
 pub use admin::{ImportSummary, InitOutcome, KeyInfo, KeyringAdmin, OwnerTrust};
 pub use error::{Error, Result};
 pub use populate::{PopulateSummary, SideFile, SkippedLine, discover_keyrings};
-pub use verify::{VERIFY_POLICY, Verification, verify};
+pub use verify::{Verification, verify};

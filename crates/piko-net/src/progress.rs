@@ -1,21 +1,21 @@
 //! Progress events for a download, reported through an optional, caller-supplied callback.
-//!
-//! An event duplicates no information the returned `Result<Outcome>` does not already carry,
-//! with one exception: [`Event::HostSkipped`], a notice for a person, which has no place in a
-//! result that can succeed through another server. [`crate::Refresher::refresh`] takes no
-//! callback, and produces the same effect without one. Nothing here may be used to decide
-//! anything. See [`crate::Refresher::refresh_with_progress`].
-//!
-//! # Events are per-file, and several files can be in flight
-//!
-//! A sink is called from whichever worker owns the transfer, so with `ParallelDownloads > 1`
-//! events for different files interleave. So every event does one of two things. It names its
-//! file, as [`Event::Started`] and [`Event::Downloaded`] do. Or it is safe to add up across
-//! files, as [`Event::Progress`] is. That one reports a delta rather than a running total, for
-//! exactly this reason. A sink that needs to know which transfers are live pairs `Started`
-//! with `Downloaded` by file name.
 
 /// One thing happening while a database or a package is fetched.
+///
+/// An event duplicates no information the returned `Result<Outcome>` does not already carry,
+/// with one exception: [`Event::HostSkipped`], a notice for a person, which has no place in a
+/// result that can succeed through another server. [`crate::Refresher::refresh`] takes no
+/// callback, and produces the same effect without one. Nothing here may be used to decide
+/// anything. See [`crate::Refresher::refresh_with_progress`].
+///
+/// # Events are per-file, and several files can be in flight
+///
+/// A sink is called from whichever worker owns the transfer, so with `ParallelDownloads > 1`
+/// events for different files interleave. So every event does one of two things. It names its
+/// file, as [`Event::Started`] and [`Event::Downloaded`] do. Or it is safe to add up across
+/// files, as [`Event::Progress`] is. That one reports a delta rather than a running total, for
+/// exactly this reason. A sink that needs to know which transfers are live pairs `Started`
+/// with `Downloaded` by file name.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Event {

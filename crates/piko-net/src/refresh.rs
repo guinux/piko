@@ -25,6 +25,7 @@ use crate::{
 
 /// What a refresh did to one repository.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Outcome {
     /// A new database was downloaded, verified and installed.
     Updated,
@@ -307,6 +308,7 @@ pub struct RepoRefresh<'a> {
 
 /// One package in a batch fetch.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct PackageFetch<'a> {
     /// The package file to download.
     pub file_name: &'a PackageFileName,
@@ -335,6 +337,50 @@ pub struct PackageFetch<'a> {
     /// `None` for a file no repository describes, such as a package URL named on the command
     /// line. [`Limits::max_package_bytes`] alone bounds it.
     pub size: Option<u64>,
+}
+
+impl<'a> RepoRefresh<'a> {
+    /// The archive `kind` of the repository `name`, fetched from `servers` and checked against
+    /// `policy` and `freshness`.
+    #[must_use]
+    pub const fn new(
+        name: &'a str,
+        kind: DatabaseKind,
+        servers: &'a [String],
+        policy: Policy,
+        freshness: FreshnessPolicy,
+    ) -> Self {
+        Self { name, kind, servers, policy, freshness }
+    }
+}
+
+impl<'a> PackageFetch<'a> {
+    /// The package `file_name` of the repository `repo_name`, fetched from `servers` under
+    /// `policy`. No server is a `CacheServer`, and no size is declared: set
+    /// [`Self::cache_servers`] and [`Self::size`] when the repository gives them.
+    #[must_use]
+    pub const fn new(
+        file_name: &'a PackageFileName,
+        repo_name: &'a str,
+        servers: &'a [String],
+        policy: Policy,
+    ) -> Self {
+        Self { file_name, repo_name, servers, cache_servers: 0, policy, size: None }
+    }
+
+    /// The same fetch, with the first `count` entries of [`Self::servers`] as `CacheServer`s.
+    #[must_use]
+    pub const fn with_cache_servers(mut self, count: usize) -> Self {
+        self.cache_servers = count;
+        self
+    }
+
+    /// The same fetch, bounded by the size the repository declares.
+    #[must_use]
+    pub const fn with_size(mut self, size: Option<u64>) -> Self {
+        self.size = size;
+        self
+    }
 }
 
 /// The first name that appears twice, if any.
@@ -374,7 +420,7 @@ impl Refresher {
 
     /// Runs every request in a helper process confined by `sandbox`.
     ///
-    /// A disabled sandbox keeps requests in this process. See [`crate::sandbox`].
+    /// A disabled sandbox keeps requests in this process. See [`Sandbox`](crate::Sandbox).
     #[must_use]
     pub fn with_sandbox(mut self, sandbox: Sandbox) -> Self {
         if sandbox.is_enabled() {
@@ -403,7 +449,7 @@ impl Refresher {
     /// `servers` are tried in order, as pacman tries mirrors. The first that answers wins, and
     /// a failure moves to the next rather than aborting. Every failure is collected so that
     /// [`Error::AllServersFailed`] can name them all. A server whose database is older than the
-    /// installed one also moves to the next; see [`crate::freshness`].
+    /// installed one also moves to the next; see [`FreshnessPolicy`](crate::FreshnessPolicy).
     ///
     /// `keyring` and `policy` decide what the download must satisfy. When `policy.check` is
     /// false, nothing is verified — the same `SigLevel = Never` escape the rest of piko honors.
@@ -451,7 +497,7 @@ impl Refresher {
     /// As [`Refresher::refresh`], reporting progress through `progress` as it happens.
     ///
     /// `progress` is a narrow, deliberate exception to the rule that diagnostics are returned,
-    /// not logged. See [`crate::progress`]'s documentation before treating this as license to
+    /// not logged. See [`Event`](crate::Event)'s documentation before treating this as license to
     /// add another one. It is called synchronously and may be called many times per file. It
     /// duplicates no information the returned `Result<Refreshed>` does not already carry.
     ///
@@ -1215,7 +1261,7 @@ impl Refresher {
     /// error into another's.
     ///
     /// `progress` is called with the repository's index into `repos`, from whichever worker
-    /// owns that transfer. See [`crate::progress`] for what an event may and may not be used
+    /// owns that transfer. See [`Event`](crate::Event) for what an event may and may not be used
     /// for.
     ///
     /// # Errors

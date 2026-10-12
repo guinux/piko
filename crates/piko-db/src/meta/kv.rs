@@ -15,6 +15,7 @@ use std::str::Lines;
 
 /// One `key = value` line, borrowed from the text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Pair<'a> {
     /// The key, before the first space.
     pub key: &'a str,

@@ -5,7 +5,7 @@
 //!
 //! Unlike a repository archive, the local database supports random access. Each entry is a
 //! directory, so [`LocalDatabase::open`] learns the whole package set from `readdir` alone
-//! and reads no file at all. This is what makes the lazy loading in [`package`] worthwhile.
+//! and reads no file at all. This is what makes the lazy loading in [`LocalPackage`] worthwhile.
 //! `piko list` never opens a `desc`. `piko files` opens only the `files` of the packages it
 //! is asked about.
 //!
@@ -26,16 +26,22 @@
 //!
 //! [alpm-db]: https://alpm.archlinux.page/specifications/alpm-db.7.html
 
-pub mod database;
-pub mod desc;
-pub mod package;
-pub mod schema_version;
-pub mod search;
-pub mod verify;
+pub(crate) mod database;
+pub(crate) mod desc;
+pub(crate) mod package;
+pub(crate) mod schema_version;
+pub(crate) mod search;
+pub(crate) mod verify;
 
-pub use database::{Diagnostic, LocalDatabase, OpenOptions};
+pub use database::{LocalDatabase, OpenOptions};
+
+pub use database::Diagnostic;
 pub use desc::DescView;
-pub use package::{EagerView, Inconsistency, LocalPackage};
-pub use schema_version::{ALPM_DB_VERSION, ALPM_DB_VERSION_FILE, SchemaVersionError};
-pub use search::LocalSearchHit;
-pub use verify::{FileCheckReport, FileProblem};
+pub use package::LocalPackage;
+pub use package::{EagerView, Inconsistency};
+pub use schema_version::SchemaVersionError;
+pub use schema_version::{
+    ALPM_DB_VERSION, ALPM_DB_VERSION_FILE, check_schema_version, root_is_unpopulated,
+};
+pub use verify::FileCheckReport;
+pub use verify::FileProblem;

@@ -748,7 +748,7 @@ impl Scenario {
             );
         }
 
-        let local = crate::LocalDatabase::open(local_fixture.path())
+        let local = crate::local::LocalDatabase::open(local_fixture.path())
             .expect("failed to open the scenario local database");
 
         BuiltScenario { _local_fixture: local_fixture, _repo_fixture: repo_fixture, local, repos }
@@ -764,14 +764,14 @@ impl Scenario {
 pub struct BuiltScenario {
     _local_fixture: DbFixture,
     _repo_fixture: RepoFixture,
-    local: crate::LocalDatabase,
+    local: crate::local::LocalDatabase,
     repos: Vec<crate::repo::RepoDatabase>,
 }
 
 impl BuiltScenario {
     /// The installed set.
     #[must_use]
-    pub const fn local(&self) -> &crate::LocalDatabase {
+    pub const fn local(&self) -> &crate::local::LocalDatabase {
         &self.local
     }
 

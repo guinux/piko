@@ -1,22 +1,22 @@
 //! How many transfers run at once, and how they are spread across mirrors.
-//!
-//! # The numbers are measured, not inherited
-//!
-//! Against this repository's own mirror list and a sample drawn from a real installed set,
-//! the optimum is flat. Any value in `4..=8` is indistinguishable. Below 4 loses. Above 8 buys
-//! nothing but connections on volunteer-run mirrors. `ParallelDownloads = 5`, what Arch's
-//! shipped `pacman.conf` sets, sits in the middle of that plateau.
-//!
-//! [`Concurrency::MAX_DOWNLOADS`] is therefore a safety ceiling, not a tuning knob. Past it
-//! there is measurably nothing to gain. So a `pacman.conf` asking for 4000 is answered with 16
-//! rather than obeyed.
-//!
-//! Two connections per mirror host measure free: 1.853 s-1.866 s at five concurrent transfers,
-//! whether spread over one, three, or five mirrors. The cap is kept for what it buys elsewhere.
-//! It is netiquette towards mirrors nobody is paying for. And it is failover, where a slow
-//! mirror costs one worker rather than the whole run.
 
 /// How many transfers run at once, and how many may share one mirror host.
+///
+/// # The numbers are measured, not inherited
+///
+/// Against this repository's own mirror list and a sample drawn from a real installed set,
+/// the optimum is flat. Any value in `4..=8` is indistinguishable. Below 4 loses. Above 8 buys
+/// nothing but connections on volunteer-run mirrors. `ParallelDownloads = 5`, what Arch's
+/// shipped `pacman.conf` sets, sits in the middle of that plateau.
+///
+/// [`Concurrency::MAX_DOWNLOADS`] is therefore a safety ceiling, not a tuning knob. Past it
+/// there is measurably nothing to gain. So a `pacman.conf` asking for 4000 is answered with 16
+/// rather than obeyed.
+///
+/// Two connections per mirror host measure free: 1.853 s-1.866 s at five concurrent transfers,
+/// whether spread over one, three, or five mirrors. The cap is kept for what it buys elsewhere.
+/// It is netiquette towards mirrors nobody is paying for. And it is failover, where a slow
+/// mirror costs one worker rather than the whole run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Concurrency {
     downloads: usize,

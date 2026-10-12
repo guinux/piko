@@ -45,6 +45,7 @@ use crate::{
 
 /// A cached package file a three-way ancestor can be read from.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct BaseCandidate {
     /// Where the file sits.
     pub path: PathBuf,
@@ -54,6 +55,7 @@ pub struct BaseCandidate {
 
 /// A cached build that was not used as the ancestor, and why.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct RefusedBase {
     /// The package file.
     pub path: PathBuf,
@@ -63,6 +65,7 @@ pub struct RefusedBase {
 
 /// What [`find_base`] found.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct BaseSearch {
     /// The ancestor to merge against. `None` means a two-way view.
     pub base: Option<BaseCandidate>,
@@ -72,6 +75,7 @@ pub struct BaseSearch {
 
 /// The ancestor a three-way merge of one pending file can use.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum BaseContents {
     /// No accepted cached build is older than the installed version: a two-way view.
     NoBase,
@@ -98,6 +102,7 @@ pub enum BaseContents {
 
 /// What [`base_contents`] found, and the builds it passed over on the way.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct BaseLookup {
     /// Newer builds passed over on the way to the base, newest first, as [`BaseSearch`] lists
     /// them. Reported on every outcome.
@@ -106,7 +111,7 @@ pub struct BaseLookup {
     pub contents: BaseContents,
 }
 
-/// The ancestor of `pending`, read out of the cache: [`find_base`], then [`extract_member`].
+/// The ancestor of `pending`, read out of the cache: [`find_base`], then `extract_member`.
 ///
 /// The build is the newest one strictly below the installed version whose signature `check`
 /// accepts, and the member is `pending.target`. A failure to read the chosen build is
@@ -318,7 +323,7 @@ pub fn find_base(
 ///
 /// # Errors
 ///
-/// As [`walk_until`], plus [`Error::PackageLimitExceeded`] if the member is larger than
+/// As `walk_until`, plus [`Error::PackageLimitExceeded`] if the member is larger than
 /// `limits.max_member_bytes`.
 pub fn extract_member(
     package: &Path,

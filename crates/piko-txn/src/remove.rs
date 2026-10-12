@@ -12,7 +12,7 @@ use crate::extract::decision::Existing;
 /// Why a file is left alone during removal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum RemovalSkipReason {
+pub(crate) enum RemovalSkipReason {
     /// The path matches a `NoUpgrade` pattern.
     NoUpgrade,
     /// The transaction's `skip_remove` list names it.
@@ -36,7 +36,7 @@ pub enum RemovalSkipReason {
 
 /// What to do with one of a removed package's files.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RemovalDisposition {
+pub(crate) enum RemovalDisposition {
     /// Delete it.
     Unlink,
     /// Rename it to `<path>.pacsave`, rotating any existing ones first.
@@ -54,7 +54,7 @@ pub enum RemovalDisposition {
 
 /// Everything a removal decision depends on.
 #[derive(Clone, Debug)]
-pub struct RemovalContext<'a> {
+pub(crate) struct RemovalContext<'a> {
     /// What is at the path, from an `lstat`.
     pub existing: Existing,
     /// Whether the path matches a `NoUpgrade` pattern.
@@ -88,7 +88,7 @@ pub struct RemovalContext<'a> {
 /// The order follows libalpm: the skip checks of `should_skip_file` (`remove.c:591`) come
 /// first, then existence, then the directory case, then the backup case.
 #[must_use]
-pub fn decide_removal(context: &RemovalContext<'_>) -> RemovalDisposition {
+pub(crate) fn decide_removal(context: &RemovalContext<'_>) -> RemovalDisposition {
     if context.no_upgrade {
         return RemovalDisposition::Skip(RemovalSkipReason::NoUpgrade);
     }
@@ -154,7 +154,10 @@ pub fn decide_removal(context: &RemovalContext<'_>) -> RemovalDisposition {
 /// filename, so it is attacker-influenced. A single `foo.pacsave.4000000000` sitting in `/etc`
 /// costs libalpm four billion `rename` syscalls.
 #[must_use]
-pub fn pacsave_rotation(existing_numbers: &[u32], plain_exists: bool) -> Vec<(String, String)> {
+pub(crate) fn pacsave_rotation(
+    existing_numbers: &[u32],
+    plain_exists: bool,
+) -> Vec<(String, String)> {
     let mut numbers: Vec<u32> = existing_numbers.to_vec();
     numbers.sort_unstable();
     numbers.dedup();

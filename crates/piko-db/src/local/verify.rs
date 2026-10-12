@@ -39,6 +39,7 @@ const CHANGELOG_MTREE_NAME: &str = ".CHANGELOG";
 
 /// One file that disagreed with the package's `ALPM-MTREE` data.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct FileProblem {
     /// The path relative to the installation root (or, for `.INSTALL`/`.CHANGELOG`, relative
     /// to the database entry) that disagreed.
@@ -81,6 +82,7 @@ impl FileProblem {
 
 /// The result of [`LocalPackage::verify_files`] for one package with an `mtree` file.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct FileCheckReport {
     /// How many files the package's `mtree` data records, mirroring `pacman -Qkk`'s "N total
     /// files". Counts every entry it walks, whether or not a problem was found on it.
@@ -302,10 +304,8 @@ mod tests {
     use super::*;
     use crate::resolve::PatternList;
     use crate::{
-        UnknownSectionPolicy,
-        entry_name::EntryName,
-        fixture::{DbFixture, MINIMAL_DESC_V1, MINIMAL_FILES},
-        limits::Limits,
+        desc_compat::UnknownSectionPolicy, entry_name::EntryName, fixture::DbFixture,
+        fixture::MINIMAL_DESC_V1, fixture::MINIMAL_FILES, limits::Limits,
     };
 
     /// Four bytes used as every test file's body. Their SHA-256 digest is [`CONTENT_SHA256`].

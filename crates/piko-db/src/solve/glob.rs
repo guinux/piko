@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use crate::glob::{Glob, is_pattern};
 use crate::solve::Universe;
 use crate::solve::encode::IgnoredTarget;
-use crate::{Limits, LocalDatabase};
+use crate::{Limits, local::LocalDatabase};
 
 /// Characters that turn a pattern into a version comparison, and so into a refusal.
 ///
@@ -25,6 +25,7 @@ const VERSION_CHARACTERS: [char; 3] = ['<', '>', '='];
 
 /// What one glob target selected.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Expansion {
     /// The pattern as the user spelled it.
     pub pattern: String,
@@ -46,6 +47,7 @@ impl Expansion {
 
 /// Everything an install-side rewrite produced.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct InstallableTargets {
     /// The rewritten target list: literals in place, each pattern replaced by its names.
     pub names: Vec<String>,
@@ -69,6 +71,7 @@ pub enum Side {
 
 /// Why a glob target could not be expanded.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum ExpansionFailure {
     /// The pattern selected no package name and no group name.
     NoMatch {
@@ -291,7 +294,7 @@ fn ignored_for(universe: &Universe<'_>, expansion: &Expansion) -> Vec<IgnoredTar
         .collect()
 }
 
-/// [`expand_installable_targets`]' removal counterpart: installed names, and the `%GROUPS%`
+/// `expand_installable_targets`' removal counterpart: installed names, and the `%GROUPS%`
 /// groups installed packages carry.
 ///
 /// `IgnorePkg` does not apply to a removal. It means "do not upgrade it", not "pretend it is
@@ -300,7 +303,7 @@ fn ignored_for(universe: &Universe<'_>, expansion: &Expansion) -> Vec<IgnoredTar
 /// # Errors
 ///
 /// [`ExpansionFailure`], naming the first pattern that could not be expanded.
-pub fn expand_installed_targets(
+pub(crate) fn expand_installed_targets(
     universe: &Universe<'_>,
     targets: &[String],
     limits: &Limits,
@@ -339,7 +342,7 @@ pub fn expand_installed_targets(
 /// # Errors
 ///
 /// [`ExpansionFailure`], naming the first pattern that could not be expanded.
-pub fn expand_installed_names(
+pub(crate) fn expand_installed_names(
     local: &LocalDatabase,
     targets: &[String],
     limits: &Limits,

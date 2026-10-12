@@ -53,7 +53,7 @@ const KNOWN_KEYS: &[&str] = &[
 /// A real package has none. The bound keeps the list small, and keeps the test for a repeated
 /// key to a fixed number of comparisons per line. Without it, a file of distinct unknown keys
 /// costs a time quadratic in its length.
-pub const MAX_UNKNOWN_KEYS: usize = 32;
+pub(crate) const MAX_UNKNOWN_KEYS: usize = 32;
 
 /// Why a `.PKGINFO` key could not be read.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -116,7 +116,7 @@ pub enum Problem {
         /// The 1-based line of its first use.
         line: usize,
     },
-    /// Unknown key lines past [`MAX_UNKNOWN_KEYS`], which are not named.
+    /// Unknown key lines past `MAX_UNKNOWN_KEYS`, which are not named.
     #[error("{count} further unknown key line(s)")]
     UnknownKeysDropped {
         /// The number of lines.
@@ -126,6 +126,7 @@ pub enum Problem {
 
 /// A key that is shown only.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Shown {
     /// The values, in their typed rendering when every one converts, as written otherwise.
     ///
@@ -147,6 +148,7 @@ impl Shown {
 ///
 /// The fields are public, as the fields of a record: nothing here depends on another field.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct PkgInfo {
     /// `pkgname`.
     pub name: Name,
@@ -191,7 +193,7 @@ pub struct PkgInfo {
     /// The keys this build does not know, with the line of their first use. libalpm warns
     /// about each one and reads on.
     ///
-    /// At most [`MAX_UNKNOWN_KEYS`] keys, the first ones in text order.
+    /// At most `MAX_UNKNOWN_KEYS` keys, the first ones in text order.
     pub unknown: Vec<(String, usize)>,
     /// The number of unknown key lines not named in [`Self::unknown`], because the list was
     /// full.
@@ -220,7 +222,7 @@ impl PkgInfo {
     /// Every [`Problem`] this `.PKGINFO` holds: the invalid shown keys, the missing ones, then
     /// the unknown keys.
     ///
-    /// At most one entry for each shown key, [`MAX_UNKNOWN_KEYS`] unknown keys, and one count of
+    /// At most one entry for each shown key, `MAX_UNKNOWN_KEYS` unknown keys, and one count of
     /// the unknown keys past that bound. Empty for an ordinary package.
     #[must_use]
     pub fn problems(&self) -> Vec<Problem> {
@@ -325,7 +327,7 @@ fn check_comparable(info: &PkgInfo) -> Result<(), PkgInfoError> {
 
 /// The `pkgname` and `pkgver` of a `.PKGINFO`.
 #[must_use]
-pub const fn name_and_version(info: &PkgInfo) -> (&Name, &FullVersion) {
+pub(crate) const fn name_and_version(info: &PkgInfo) -> (&Name, &FullVersion) {
     (&info.name, &info.version)
 }
 

@@ -5,12 +5,13 @@
 //! of. A package manager that refuses to read its own database after a partial upgrade is not
 //! robust. piko follows libalpm by default — see [`UnknownSectionPolicy`].
 //!
-//! The local `desc` is read in [`crate::local::desc`], and the repository one in
+//! The local `desc` is read in `local::desc`, and the repository one in
 //! `repo::desc`. This module holds what both share: the policy, and makepkg's default
 //! `%PACKAGER%`.
 
 /// What to do about a `%SECTION%` this build does not recognise.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum UnknownSectionPolicy {
     /// Skip the section and record a diagnostic, as libalpm does.
     ///
@@ -28,6 +29,7 @@ pub enum UnknownSectionPolicy {
 
 /// A `%SECTION%` that was skipped because this build does not recognise it.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct UnknownSection {
     /// The section keyword, without the surrounding `%`.
     pub keyword: String,

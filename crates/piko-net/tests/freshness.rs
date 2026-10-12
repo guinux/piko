@@ -140,14 +140,9 @@ fn refresh_kind(
     freshness: FreshnessPolicy,
     force: bool,
 ) -> piko_net::Result<Refreshed> {
-    let repos = [RepoRefresh {
-        name: "core",
-        kind,
-        servers,
-        // Unsigned: nothing is verified, and the archive's own date is what gets compared.
-        policy: Policy::for_database(piko_db::config::SigLevel::default()),
-        freshness,
-    }];
+    // Unsigned: nothing is verified, and the archive's own date is what gets compared.
+    let policy = Policy::for_database(piko_db::config::SigLevel::default());
+    let repos = [RepoRefresh::new("core", kind, servers, policy, freshness)];
     Refresher::default()
         .refresh_all(
             sync,
@@ -301,7 +296,7 @@ fn accept_older_installs_an_older_database_and_says_so() {
     let snapshot = database("an archive snapshot", T1);
     let (archive, _) = serve(vec![ok(&snapshot, T1)]);
 
-    let freshness = FreshnessPolicy { accept_older: true, ..policy_at(T2 + 3_600) };
+    let freshness = policy_at(T2 + 3_600).with_accept_older(true);
     let refreshed = refresh(sync.path(), &[archive], freshness, false).unwrap();
 
     assert_eq!(refreshed.outcome, Outcome::Updated);

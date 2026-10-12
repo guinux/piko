@@ -14,7 +14,7 @@
 use std::{path::PathBuf, str::FromStr as _};
 
 use alpm_types::PackageFileName;
-use piko_db::{LocalDatabase, config::PacmanConfig};
+use piko_db::{config::PacmanConfig, local::LocalDatabase};
 use piko_txn::{CacheDirSource, PackageSource};
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";

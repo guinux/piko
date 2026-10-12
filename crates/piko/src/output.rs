@@ -433,7 +433,7 @@ pub fn human_size(bytes: u64) -> String {
 /// The zone is spelled as a numeric offset rather than an abbreviation. An abbreviation needs
 /// a time-zone database piko does not carry. It is ambiguous on top of that, since `CST`
 /// names three different zones. A numeric offset never is.
-pub fn human_date(timestamp: i64, zone: piko_txn::LocalZone) -> String {
+pub fn human_date(timestamp: i64, zone: piko_txn::history::LocalZone) -> String {
     let offset = zone.offset_at(timestamp);
     let Ok(instant) = time::OffsetDateTime::from_unix_timestamp(timestamp) else {
         return format!("{timestamp} (timestamp out of range)");
@@ -505,7 +505,7 @@ fn short_month(month: time::Month) -> &'static str {
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
 mod tests {
-    use piko_txn::LocalZone;
+    use piko_txn::history::LocalZone;
 
     use super::*;
 

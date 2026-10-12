@@ -20,7 +20,7 @@ use std::{
     process::{Command, ExitCode, Stdio},
 };
 
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 use piko_txn::{
     merge::{
         self, Action, BaseContents, BaseLimits, DEFAULT_DIFFPROG, DEFAULT_MERGEPROG, Invocation,
@@ -462,6 +462,11 @@ fn write_base(
         }
         BaseContents::Unreadable { error, .. } => {
             report(&error);
+            return None;
+        }
+        // An answer this frontend does not know yet: no base it can use.
+        _ => {
+            let _ = writeln!(out, "There is no base to merge against.");
             return None;
         }
     };

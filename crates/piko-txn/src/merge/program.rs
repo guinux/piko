@@ -40,6 +40,7 @@ pub const DEFAULT_MERGEPROG: &str = "diff3 -m";
 ///
 /// The configured arguments come first, then the file paths.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Invocation {
     /// The program to start.
     pub program: OsString,

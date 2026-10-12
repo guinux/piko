@@ -23,6 +23,7 @@ use crate::extract::decision::Existing;
 
 /// Why an existing path turns out not to block the installation.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Resolution {
     /// Nothing is at the path after all.
     NotPresent,

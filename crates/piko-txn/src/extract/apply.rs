@@ -61,10 +61,11 @@ use crate::{
 };
 
 /// The suffix an entry diverted by [`Disposition::ExtractAsPacnew`] is written under.
-pub const PACNEW_SUFFIX: &str = ".pacnew";
+pub(crate) const PACNEW_SUFFIX: &str = ".pacnew";
 
 /// What happened to a member.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum Applied {
     /// Written to its intended path.
     Written,
@@ -75,7 +76,7 @@ pub enum Applied {
         /// Whether this extraction created the `.pacnew`, as opposed to replacing one that
         /// was already there.
         ///
-        /// [`super::decision::resolve_backup`] uses this to decide whether removing the
+        /// `resolve_backup` uses this to decide whether removing the
         /// `.pacnew` is safe. A `.pacnew` the user is already merging from must not be
         /// deleted.
         is_new: bool,
@@ -86,6 +87,7 @@ pub enum Applied {
 
 /// An extended attribute the archive recorded and the disk does not have.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct XattrProblem {
     /// The member's path, as the archive spells it.
     pub path: PathBuf,

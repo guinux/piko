@@ -35,11 +35,10 @@ use std::{
 };
 
 use alpm_types::PackageFileName;
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 use piko_txn::{
-    RootDir,
-    conflict::{self, Blocker, Overwrite, Target, WalkLimits},
-    extract::PackageLimits,
+    conflict, conflict::Blocker, conflict::Overwrite, conflict::Target, conflict::WalkLimits,
+    extract::PackageLimits, rootfs::RootDir,
 };
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";
@@ -176,7 +175,7 @@ fn a_file_offered_under_the_wrong_name_is_caught_and_the_owner_matches_pacman() 
         let target = Target {
             name: "piko-not-a-real-package".to_owned(),
             version: "1.0.0-1".to_owned(),
-            files: piko_txn::FileList::new([path.clone()]),
+            files: piko_txn::conflict::FileList::new([path.clone()]),
             backups: BTreeSet::new(),
             install_script: None,
         };

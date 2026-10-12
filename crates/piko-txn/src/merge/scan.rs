@@ -28,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 
 use crate::{
     hash::{self, MAX_BACKUP_BYTES},

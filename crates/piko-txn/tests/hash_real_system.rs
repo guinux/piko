@@ -24,11 +24,8 @@
 
 use std::path::Path;
 
-use piko_db::LocalDatabase;
-use piko_txn::{
-    RootDir,
-    hash::{MAX_BACKUP_BYTES, file_md5_at},
-};
+use piko_db::local::LocalDatabase;
+use piko_txn::{hash::MAX_BACKUP_BYTES, hash::file_md5_at, rootfs::RootDir};
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";
 

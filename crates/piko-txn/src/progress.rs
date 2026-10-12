@@ -10,7 +10,7 @@ use crate::{exec, hook, install::Extraction, scriptlet, transaction::Step};
 /// One thing happening while [`crate::transaction::Transaction::commit_with_progress`] applies a
 /// plan.
 ///
-/// This is `#[non_exhaustive]`. Unlike `piko_net::progress::Event`, it carries a borrowed
+/// This is `#[non_exhaustive]`. Unlike `piko_net::Event`, it carries a borrowed
 /// [`Step`] rather than duplicating its fields, because the plan already has everything worth
 /// displaying.
 #[derive(Clone, Copy, Debug)]

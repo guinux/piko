@@ -39,7 +39,7 @@ use std::{
 };
 
 use alpm_types::PackageFileName;
-use piko_net::{Cancel, Error, PackageFetch, Refresher, Sandbox, refresh::Limits};
+use piko_net::{Cancel, Error, Limits, PackageFetch, Refresher, Sandbox};
 use piko_sig::Policy;
 
 mod connection;
@@ -101,7 +101,7 @@ fn probe(arguments: &[String]) -> ExitCode {
     // Landlock alone also refuses a program, because it grants no execute right. This action
     // leaves it out, so only the system call filter can refuse.
     let filesystem = action != "spawn-without-landlock";
-    if let Err(message) = piko_net::sandbox::confine_self(filesystem, true, &ports) {
+    if let Err(message) = piko_net::confine_self(filesystem, true, &ports) {
         eprintln!("confinement failed: {message}");
         return ExitCode::from(4);
     }
@@ -298,14 +298,7 @@ fn fetch(
     cancel: &Cancel,
 ) -> piko_net::Result<std::path::PathBuf> {
     let file_name = PackageFileName::from_str(NAME).unwrap();
-    let wanted = PackageFetch {
-        file_name: &file_name,
-        repo_name: "core",
-        servers,
-        cache_servers: 0,
-        policy,
-        size: None,
-    };
+    let wanted = PackageFetch::new(&file_name, "core", servers, policy);
     refresher.fetch_package(cache, wanted, cancel)
 }
 
@@ -412,7 +405,7 @@ fn runs_as_nobody() {
         println!("  skipped: needs root");
         return;
     }
-    assert_helper_runs_as(None, piko_net::sandbox::FALLBACK_USER);
+    assert_helper_runs_as(None, piko_net::FALLBACK_USER);
 }
 
 /// Starts a helper with `download_user`, and asserts it runs as `expected`, with no

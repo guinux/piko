@@ -32,7 +32,7 @@ use crate::solve::SolvableId;
 /// fall outside what `clippy::arithmetic_side_effects` checks. This was verified against the
 /// lint before choosing this representation, the same way `SigLevel`'s bitmask was.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Lit(u32);
+pub(crate) struct Lit(u32);
 
 impl Lit {
     /// "`id` is selected".
@@ -87,7 +87,7 @@ impl Lit {
 /// explanation comes from the same structure the solver used, not from something
 /// reconstructed afterward.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ClauseKind {
+pub(crate) enum ClauseKind {
     /// `dependent` lists a `%DEPENDS%` entry, and the clause's literals are its satisfiers.
     Requires {
         /// The package whose `%DEPENDS%` produced this clause.
@@ -149,13 +149,11 @@ pub enum ClauseKind {
         /// The package that cannot be selected.
         excluded: SolvableId,
     },
-    /// Derived by the solver during conflict analysis rather than stated by the problem.
-    Learned,
 }
 
 /// One clause's literals plus its provenance.
 #[derive(Clone, Copy, Debug)]
-pub struct Clause<'a> {
+pub(crate) struct Clause<'a> {
     literals: &'a [Lit],
     kind: ClauseKind,
 }
@@ -176,7 +174,7 @@ impl<'a> Clause<'a> {
 
 /// Identifies a clause within a [`Problem`].
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ClauseId(u32);
+pub(crate) struct ClauseId(u32);
 
 impl ClauseId {
     /// This id as an index.
@@ -201,7 +199,7 @@ impl ClauseId {
 /// same shape `repo::files_arena` uses. This gives one allocation instead of one per clause.
 /// Slicing through `get(..).unwrap_or(&[])` keeps it inside `clippy::indexing_slicing`.
 #[derive(Clone, Debug)]
-pub struct Problem {
+pub(crate) struct Problem {
     literals: Vec<Lit>,
     starts: Vec<u32>,
     kinds: Vec<ClauseKind>,
@@ -225,12 +223,6 @@ impl Problem {
     #[must_use]
     pub const fn len(&self) -> usize {
         self.kinds.len()
-    }
-
-    /// Whether there are no clauses.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.kinds.is_empty()
     }
 
     /// Appends a clause, returning its id.
@@ -446,6 +438,6 @@ mod tests {
     fn at_most_one_over_a_single_candidate_constrains_nothing() {
         let mut problem = Problem::new(1);
         problem.add_at_most_one(&[id(0)]);
-        assert!(problem.is_empty());
+        assert_eq!(problem.len(), 0);
     }
 }

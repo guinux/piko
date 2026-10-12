@@ -31,7 +31,7 @@ use std::{
     process::Command,
 };
 
-use piko_db::LocalDatabase;
+use piko_db::local::LocalDatabase;
 use piko_txn::owner::Owners;
 
 const LOCAL_DB: &str = "/var/lib/pacman/local";

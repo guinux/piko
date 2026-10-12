@@ -1,20 +1,4 @@
 //! Writes a file atomically, in a form that can be inspected before it lands.
-//!
-//! [`crate::LocalDbWriter`] already writes database entries atomically, but only from a `&[u8]`
-//! held in memory. That fits a `desc`. It does not fit a downloaded repository database:
-//! `extra.files` is about 50 MB on this machine. A downloaded file must also be **verified before
-//! it replaces the live one**. This requires the file to exist on disk, under a name the verifier
-//! can check, while the destination stays untouched.
-//!
-//! [`AtomicFile`] provides this. It streams into a temporary beside the destination, and
-//! exposes that path through [`AtomicFile::path`] for inspection. It renames the temporary
-//! over the target only when [`AtomicFile::commit`] runs. Dropping it without committing
-//! removes the temporary, so
-//! a failed or rejected download leaves nothing behind.
-//!
-//! The durability sequence matches [`crate::LocalDbWriter`]'s, for the same reason. It fsyncs
-//! the data before the rename. Otherwise a crash can make the rename durable while the
-//! contents are not, leaving an empty file where a good one belongs.
 
 use std::{io::Write, path::Path, time::SystemTime};
 
@@ -38,6 +22,22 @@ use crate::{
 /// `remove_file`, which removes a symlink rather than resolving it. A planted temporary is
 /// discarded rather than followed, and a leftover from a crashed write does not wedge the path
 /// permanently.
+///
+/// [`crate::LocalDbWriter`] already writes database entries atomically, but only from a `&[u8]`
+/// held in memory. That fits a `desc`. It does not fit a downloaded repository database:
+/// `extra.files` is about 50 MB on this machine. A downloaded file must also be **verified before
+/// it replaces the live one**. This requires the file to exist on disk, under a name the verifier
+/// can check, while the destination stays untouched.
+///
+/// [`AtomicFile`] provides this. It streams into a temporary beside the destination, and
+/// exposes that path through [`AtomicFile::path`] for inspection. It renames the temporary
+/// over the target only when [`AtomicFile::commit`] runs. Dropping it without committing
+/// removes the temporary, so
+/// a failed or rejected download leaves nothing behind.
+///
+/// The durability sequence matches [`crate::LocalDbWriter`]'s, for the same reason. It fsyncs
+/// the data before the rename. Otherwise a crash can make the rename durable while the
+/// contents are not, leaving an empty file where a good one belongs.
 #[derive(Debug)]
 pub struct AtomicFile {
     temporary: Temporary,

@@ -20,7 +20,7 @@ use piko_db::solve::{
     Ambiguity, GroupChoice, GroupTarget, InstallPlan, InstallQuestions, NamedRemovalFailure,
     ResolutionNotes, SolvableId, Universe, UniverseOptions, plan_install,
 };
-use piko_db::{Limits, LocalDatabase};
+use piko_db::{Limits, local::LocalDatabase};
 use piko_sig::Policy;
 use piko_txn::{
     CacheDirSource, PackageOrigins, PackageSource, Step, TargetKind, Transaction, TransactionPlan,
@@ -38,7 +38,7 @@ use crate::output::{emit, report as report_error};
 /// that
 /// cannot be written is a warning here, for the same reason it is one inside a transaction. The
 /// command the user asked for still runs. See [`piko_txn::history`].
-pub fn note(recording: &piko_txn::Recording, message: &str) {
+pub fn note(recording: &piko_txn::history::Recording, message: &str) {
     if let Err(problem) = piko_txn::history::note(recording, message) {
         crate::output::warn(problem);
     }
@@ -120,7 +120,7 @@ pub struct SideEffects {
     pub hook_dirs: Vec<PathBuf>,
     /// Where the transaction is recorded: the `LogFile` pacman shares, and the history store
     /// beside the database. The default records nothing.
-    pub recording: piko_txn::Recording,
+    pub recording: piko_txn::history::Recording,
 }
 
 /// What `install` resolves targets against, gathered so the entry point keeps a readable
@@ -517,7 +517,7 @@ fn prepare_file_targets(
     // stops the load. Nothing has been fetched yet, so the run ends quietly.
     let mut stopped = false;
     let mut fetch = |url: &str| {
-        if writeln!(out, "Fetching {}", piko_net::error::without_credentials(url)).is_err() {
+        if writeln!(out, "Fetching {}", piko_net::without_credentials(url)).is_err() {
             stopped = true;
             return Err(piko_txn::Error::Cancelled { completed: 0, total: 0 });
         }
@@ -788,7 +788,7 @@ pub fn remove(
         }
     };
 
-    let local = match piko_db::LocalDatabase::open(dbpath.join("local")) {
+    let local = match piko_db::local::LocalDatabase::open(dbpath.join("local")) {
         Ok(local) => local,
         Err(error) => {
             report_error(&error);
@@ -839,7 +839,7 @@ pub fn remove(
 /// was checked. So this prints the plain list of names instead of a full
 /// [`crate::cmd::plan::print_steps`] rendering.
 fn named_only(
-    local: &piko_db::LocalDatabase,
+    local: &piko_db::local::LocalDatabase,
     entries: &[String],
     options: &RemoveOptions,
     out: &mut impl std::io::Write,
@@ -856,6 +856,11 @@ fn named_only(
         Ok(found) => found,
         Err(NamedRemovalFailure::NotInstalled(name)) => {
             eprintln!("Error: package {name} is not installed");
+            return Err(ExitCode::FAILURE);
+        }
+        // A failure this frontend does not know yet.
+        Err(other) => {
+            eprintln!("Error: {other:?}");
             return Err(ExitCode::FAILURE);
         }
     };
@@ -888,7 +893,7 @@ fn named_only(
 /// [`crate::cmd::removal`].
 fn planned(
     steplist: &crate::progress::StepList,
-    local: &piko_db::LocalDatabase,
+    local: &piko_db::local::LocalDatabase,
     entries: &[String],
     options: &RemoveOptions,
     out: &mut impl std::io::Write,
@@ -999,7 +1004,7 @@ struct Settings {
     /// `NoExtract`/`NoUpgrade`, obeyed by extraction, by removal, and by the hook triggers.
     patterns: piko_txn::Patterns,
     /// Where the transaction records what it does.
-    recording: piko_txn::Recording,
+    recording: piko_txn::history::Recording,
     /// `pacman.conf`'s `CheckSpace`. Always `false` for a removal: a removal only frees space,
     /// and libalpm runs no check for one either.
     check_space: bool,

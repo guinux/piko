@@ -79,6 +79,7 @@ pub use piko_db::fs_util::{Distrust, distrust};
 
 /// A candidate package file that existed but could not be used.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Skipped {
     /// The candidate's path.
     pub path: PathBuf,
@@ -260,6 +261,7 @@ impl fmt::Display for RejectionReason {
 
 /// A configured cache directory a download cannot be written into.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct RejectedCacheDir {
     /// The directory as it was configured.
     pub path: PathBuf,
@@ -584,7 +586,7 @@ impl piko_db::solve::PackageCache for CacheDirSource {
 /// dropped. A process that is killed leaves it behind, under a name starting with
 /// `piko-staging.`, and nothing reads it again.
 #[derive(Debug)]
-pub struct FileSource {
+pub(crate) struct FileSource {
     named: Option<Named>,
     inner: Box<dyn PackageSource>,
 }
@@ -646,7 +648,7 @@ impl PackageSource for PlanSource {
 }
 
 /// The prefix of the staging directory a [`FileSource`] creates under a cache directory.
-pub const STAGING_PREFIX: &str = "piko-staging.";
+pub(crate) const STAGING_PREFIX: &str = "piko-staging.";
 
 impl FileSource {
     /// Wraps `inner`, serving `files` — keyed by the name each one is addressed by — ahead of
@@ -807,6 +809,7 @@ impl piko_db::solve::PackageCache for FileSource {
 
 /// Where one package file can be downloaded from, and under what policy.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct DownloadTarget {
     /// The repository this file belongs to, for naming it in an error.
     pub repo_name: String,
@@ -838,7 +841,7 @@ pub struct DownloadTarget {
 /// *usable* configured cache directory. That is [`select_download_dir`], pacman's own convention
 /// for a download's destination. It comes back as an ordinary [`Location`].
 /// **Nothing is verified here** — see
-/// `piko_net::refresh::Refresher::fetch_package_with_progress`'s documentation for why that
+/// `piko_net::Refresher::fetch_package_with_progress`'s documentation for why that
 /// responsibility stays with whoever calls `Keyring::check` afterward.
 pub struct DownloadingSource {
     cache: CacheDirSource,
@@ -871,7 +874,7 @@ impl DownloadingSource {
     /// may create is created here rather than in [`CacheDirSource::new`]. So a command that only
     /// reads the cache never writes to disk.
     ///
-    /// Every download runs in a helper confined by `sandbox`: see [`piko_net::sandbox`].
+    /// Every download runs in a helper confined by `sandbox`: see [`piko_net::Sandbox`].
     ///
     /// `progress` is called synchronously for every download event. This is the same narrow
     /// exception `piko-net` documents on [`piko_net::Event`].
@@ -946,14 +949,14 @@ impl PackageSource for DownloadingSource {
             .refresher
             .fetch_package_with_progress(
                 self.download_dir.path(),
-                piko_net::PackageFetch {
+                piko_net::PackageFetch::new(
                     file_name,
-                    repo_name: &target.repo_name,
-                    servers: &target.servers,
-                    cache_servers: target.cache_servers,
-                    policy: target.policy,
-                    size: Some(target.size),
-                },
+                    &target.repo_name,
+                    &target.servers,
+                    target.policy,
+                )
+                .with_cache_servers(target.cache_servers)
+                .with_size(Some(target.size)),
                 &self.cancel,
                 self.progress.as_ref(),
             )
@@ -990,14 +993,16 @@ impl PackageSource for DownloadingSource {
             .filter_map(|file_name| {
                 let name = file_name.to_string();
                 let target = self.targets.get(&name)?;
-                seen.insert(name).then_some(piko_net::PackageFetch {
-                    file_name,
-                    repo_name: &target.repo_name,
-                    servers: &target.servers,
-                    cache_servers: target.cache_servers,
-                    policy: target.policy,
-                    size: Some(target.size),
-                })
+                seen.insert(name).then_some(
+                    piko_net::PackageFetch::new(
+                        file_name,
+                        &target.repo_name,
+                        &target.servers,
+                        target.policy,
+                    )
+                    .with_cache_servers(target.cache_servers)
+                    .with_size(Some(target.size)),
+                )
             })
             .collect();
         if wanted.is_empty() {

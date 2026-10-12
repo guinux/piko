@@ -8,7 +8,7 @@
 //!
 //! # The order is the safety property
 //!
-//! [`transaction`] is a typestate. Each step consumes the previous value, so the sequence is
+//! `transaction` is a typestate. Each step consumes the previous value, so the sequence is
 //! not something a caller can get wrong at run time:
 //!
 //! ```text
@@ -33,8 +33,8 @@
 //!
 //! # Design
 //!
-//! - **A pure decision, separately from the write that applies it.** [`extract::decision`],
-//!   [`conflict::decision`] and [`hook::trigger`] are functions over values. That is what makes
+//! - **A pure decision, separately from the write that applies it.** `extract::decision`,
+//!   `conflict::decision` and `hook::trigger` are functions over values. That is what makes
 //!   libalpm's per-entry rules reviewable and testable without a root to write into.
 //! - **Nothing verifies twice, and nothing verifies in two places.** Signature checking lives
 //!   in [`Transaction::verify`], reached through a [`PackageSource`] — a package named on the
@@ -42,7 +42,7 @@
 //!   `alpm_pkg_load` and then skips `check_validity` four times over.
 //! - **A path is resolved inside the root, never against the host.** [`rootfs`] opens each
 //!   component with `openat`, so a symlink planted in the root cannot redirect a write outside
-//!   it. [`UnsafePath`] is what a refusal looks like.
+//!   it. `UnsafePath` is what a refusal looks like.
 //! - **Destructive behavior is opt-in.** Scriptlets, hooks and history recording are all off in
 //!   [`Transaction::new`], because running vendor shell code with piko's privileges is the
 //!   CLI's decision to make, not a library default.
@@ -56,6 +56,32 @@
 //!
 //! Every test writes into a `tempfile::TempDir`. The real cache and the real database stay
 //! read-only inputs.
+//!
+//! # Stability
+//!
+//! Each public item has one path. A domain module holds its items, and its submodules are
+//! private. [`history::store`] and [`history::pacman_log`] stay public, because their items
+//! share names with the items of [`history`].
+//!
+//! An item hidden from this documentation is there for this workspace's tests. It is one step
+//! of a pipeline that a public function already runs, and it is not part of the stable
+//! interface.
+//!
+//! Three rules say which types a later release can extend without a breaking change:
+//!
+//! - **A result, a report, a diagnostic or a failure is `#[non_exhaustive]`.** A later release
+//!   can add a variant or a field. Match it with a wildcard arm.
+//! - **A decision, and a closed set, are exhaustive.** A new variant changes what every caller
+//!   must do, so it must break the build of each caller. Examples: [`Step`], [`Verification`],
+//!   [`merge::Verdict`].
+//! - **An input struct is exhaustive, with public fields.** It has a `Default` when a default
+//!   value means something, as for options and limits. Change one field with the struct
+//!   update syntax, as in
+//!   `PackageLimits { inflated_bytes: 1 << 30, ..PackageLimits::default() }`. An added field
+//!   keeps that expression valid.
+//!
+//! A value a frontend also builds, to test what it prints, stays exhaustive:
+//! [`history::Record`], [`journal::Recovery`], [`exec::Outcome`], [`hook::Run`].
 //!
 //! # Example
 //!
@@ -104,7 +130,7 @@
 //! ```
 
 pub mod conflict;
-pub mod error;
+mod error;
 pub mod exec;
 pub mod extract;
 pub mod file_target;
@@ -117,32 +143,33 @@ pub mod merge;
 pub mod owner;
 mod parallel;
 pub mod pkginfo;
-pub mod plan;
+mod plan;
 pub mod progress;
 pub mod record;
-pub mod remove;
+mod remove;
 pub mod rootfs;
 pub mod scriptlet;
-pub mod source;
+mod source;
 pub mod space;
-pub mod target;
-pub mod transaction;
+mod target;
+mod transaction;
 
-pub use conflict::{Blocker, Check, FileConflict, filelist::FileList};
 pub use error::{Error, Result};
-pub use extract::{BackupAction, Disposition, EntryContext};
-pub use file_target::FileTarget;
-pub use history::{Action, LocalZone, Recording};
-pub use install::{Extraction, Filters, install};
-pub use plan::{DownloadOnlyOutcome, PackageOrigins, ReasonPolicy, TransactionPlan, download_only};
-pub use remove::{RemovalContext, RemovalDisposition, decide_removal, pacsave_rotation};
-pub use rootfs::{Resolved, RootDir, UnsafePath};
+
+pub use error::IoAction;
+pub use plan::DownloadOnlyOutcome;
+pub use plan::{
+    PackageOrigins, ReasonPolicy, TransactionPlan, check_architecture, check_compression,
+    download_only,
+};
+pub use source::RejectionReason;
 pub use source::{
-    CacheDirSource, DownloadDir, DownloadTarget, DownloadingSource, FileSource, Location,
-    PackageSource, PlanSource, RejectedCacheDir, RejectionReason, Skipped, select_download_dir,
+    CacheDirSource, DownloadDir, DownloadingSource, PackageSource, Skipped, select_download_dir,
 };
-pub use space::{MemberFootprint, PartitionSpace};
+pub use source::{DownloadTarget, Location, PlanSource, RejectedCacheDir, SkipReason};
 pub use target::{TargetKind, classify};
-pub use transaction::{
-    Expected, Patterns, Published, Report, Step, Transaction, Validation, Verification,
-};
+pub use transaction::{BackupProblem, ScriptletRun};
+#[doc(hidden)]
+pub use transaction::{Expected, Published, validate_package};
+pub use transaction::{Patterns, Report, Staged, Step, Transaction, Validation, Verification};
+pub use transaction::{Planned, Verified};

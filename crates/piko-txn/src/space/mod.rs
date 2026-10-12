@@ -32,7 +32,9 @@
 //! describes the build rather than this filesystem. Directories and symbolic links
 //! count as zero on both sides, matching what libarchive reports for them.
 
-pub mod mounts;
+pub(crate) mod mounts;
+
+pub use mounts::MountTable;
 
 use std::{
     num::NonZeroU64,
@@ -44,7 +46,6 @@ use rustix::fs::{AtFlags, StatVfsMountFlags};
 use crate::{
     error::{Error, Result},
     rootfs::RootDir,
-    space::mounts::MountTable,
 };
 
 /// The cushion's flat ceiling: libalpm's `20 * 1024 * 1024`.
@@ -74,6 +75,7 @@ pub struct Install<'a> {
 
 /// A filesystem that cannot hold what this transaction would write.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct PartitionSpace {
     /// Its mount directory.
     pub mount_point: PathBuf,

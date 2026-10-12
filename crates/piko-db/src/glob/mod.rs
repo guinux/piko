@@ -26,6 +26,7 @@
 mod expand;
 mod fnmatch;
 
+#[doc(hidden)]
 pub use expand::expand;
 
 /// The three characters that make a string a glob pattern rather than a name.

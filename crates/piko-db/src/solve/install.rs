@@ -89,6 +89,7 @@ impl InstallQuestions for Defaults {
 
 /// What the targets resolved to, for [`InstallQuestions::resolved`].
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct ResolutionNotes<'a> {
     /// What each glob target selected, in the order the targets were given.
     pub expansions: &'a [Expansion],
@@ -114,6 +115,7 @@ pub struct InstallOptions {
 
 /// A planned install.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct InstallPlan {
     /// The steps, their order, their sizes, and what the planner noticed.
     pub plan: Plan,
@@ -131,6 +133,7 @@ pub struct InstallPlan {
 
 /// Why an install could not be planned.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum InstallFailure {
     /// A target resolved to nothing installable.
     Target(TargetResolutionFailure),

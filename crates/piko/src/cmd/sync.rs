@@ -4,11 +4,8 @@
 use std::process::ExitCode;
 
 use piko_db::{
-    LocalDatabase,
-    config::DbUsage,
-    repo::RepoDatabase,
-    resolve::{IgnoreList, SyncRepo, SyncRepos},
-    solve::IgnoredChange,
+    config::DbUsage, local::LocalDatabase, repo::RepoDatabase, resolve::IgnoreList,
+    resolve::SyncRepo, resolve::SyncRepos, solve::IgnoredChange,
 };
 
 use crate::output::{emit, report};
@@ -55,7 +52,7 @@ pub fn check_updates(
     quiet: bool,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
-    let piko_db::Updates { available: updates, ignored } =
+    let piko_db::updates::Updates { available: updates, ignored, .. } =
         match local.check_updates_ignoring(repos, ignores) {
             Ok(updates) => updates,
             Err(error) => {
