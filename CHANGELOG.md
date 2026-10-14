@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `--max-age` defaults to 40 days, up from 14. A database older than that is reported as
+  stale. `--max-age 0` still turns the check off.
 - `piko-sig` and `piko-sig-write` export their items from the crate root only. Their modules
   are private, so each item has one path.
 - No `gpgme` type is part of the stable interface of either crate. `piko_sig::open_context` is
@@ -20,10 +22,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `piko-db-write` and `piko-net` export their items from the crate root only, as the two
   signature crates do. `piko_net::without_credentials` and `piko_net::Limits` are now exported
   there, and the `fuzzing` module is `piko_net::fuzzing`.
-- `piko-net`'s `Outcome`, `Refreshed`, `RepoRefresh` and `PackageFetch` are
-  `#[non_exhaustive]`. `RepoRefresh::new`, and `PackageFetch::new` with `with_cache_servers`
-  and `with_size`, build the two inputs. `FreshnessPolicy` has `with_accept_older` and
-  `with_max_age`. `RecordKind` of `piko-db-write` is `#[non_exhaustive]` too.
+- `piko-net`'s `Outcome`, `Refreshed` and `PackageFetch` are `#[non_exhaustive]`.
+  `PackageFetch::new`, with `with_cache_servers` and `with_size`, builds a download request.
+  `RepoRefresh` stays exhaustive with public fields, because each of its fields is required.
+  `RepoRefresh::new` builds it too. `FreshnessPolicy` has `with_accept_older` and
+  `with_max_age`. `RecordKind` of `piko-db-write` stays exhaustive, because it is a closed
+  set.
 - `piko-db` gives each public item one path. Shared items are exported from the crate root
   (`EntryName`, `Error`, `Lazy`, `Limits`, `DescFieldError`, the `printable` functions). The
   items of a domain are exported from its module only: `local::LocalDatabase`,
@@ -43,6 +47,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `piko_db_write::STAGING_DIR` and `piko_net`'s `HELPER_ARG` are no longer public.
   `piko_net::confine_self` and `piko_net::FALLBACK_USER` stay public for the tests, but are
   hidden from the documentation.
+
+### Fixed
+
+- `piko report` tells the user to remove `db.lck` first when a killed run left it, and only if
+  no piko or pacman is running. Before, the first recovery command failed on the lock.
+- A download works when piko runs in a PID namespace that kept the host's `/proc`, as
+  `pikostrap` starts it (`unshare --fork --pid`). Before, every download failed with "the
+  download helper inherited open descriptors", which named the helper's own listing of
+  `/proc/self/fd`.
 
 ## [0.9.0] - 2026-10-10
 
@@ -86,17 +99,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   upgrade can answer with zero while still needing a gigabyte half-way through — and a
   filesystem it merely touches must not be mounted read only. Downloads are weighed separately,
   against the cache directory, before the first byte is fetched. Off unless `pacman.conf` sets
-  the directive, and there is no flag for it, exactly as in pacman. See
-  `docs/libalpm-compat.md` §133.
+  the directive, and there is no flag for it, exactly as in pacman.
 - Group member selection: `piko install <group>` and `piko update <group>` list the group's
   members numbered and ask which ones to install, reading pacman's own selection grammar
   (numbers, `N-M` ranges, `^` to exclude, empty line for all). `--noconfirm` takes every
   member, and `piko plan` states on stderr that it did the same. pacman's `-S <group>`
-  question. See `docs/libalpm-compat.md` §130.
+  question.
 - `piko report` prints the commands that finish an interrupted transaction: remove the journal,
   reinstall the package whose install was cut with `--overwrite '*'`, then remove and install
   what is left, with each package's install reason. The journal now records install reasons.
-  See `docs/libalpm-compat.md` §158.
 - A transaction journal that exists but cannot be read (no header, an unknown format version, or
   not text) refuses every transaction, as a readable one does. `piko report` and `piko history`
-  report it as there and unreadable, not as absent. See `docs/libalpm-compat.md` §159.
+  report it as there and unreadable, not as absent.

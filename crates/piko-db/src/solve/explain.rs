@@ -21,6 +21,17 @@
 //! Rendering lives here rather than in the CLI because it needs the [`Universe`] the ids came
 //! from. Every future frontend — a commit engine's error path, a TUI — needs the same thing.
 //! The CLI adds only the indentation.
+//!
+//! The facts are ordered as an argument, in four parts: what was asked for, what the installed
+//! set holds in place, the requirements at issue, then what rules the rest out. Requirements
+//! group by the package name that frustrates them, not by the relation text, so `leaf>=100` and
+//! `leaf>=101` list together. The sort is stable, so the search's own order breaks a tie, and
+//! two runs over one core print one listing.
+//!
+//! [`Shape`] is read off the facts, most specific first, because several shapes hold at once on
+//! a real core: an ignored candidate (it names a `pacman.conf` line), then an answered provider
+//! question, a conflict, a version dead-end, and a removal last. The facts of a removal,
+//! something excluded and something held in place, also appear under every shape above it.
 
 use std::fmt;
 

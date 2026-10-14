@@ -62,6 +62,7 @@ fn main() -> ExitCode {
         ("a_package_arrives_byte_for_byte_through_the_helper", arrives_byte_for_byte),
         ("a_failing_server_falls_through_to_the_next", failing_server_falls_through),
         ("the_helper_refuses_an_inherited_descriptor", refuses_an_inherited_descriptor),
+        ("the_helper_runs_in_a_pid_namespace_under_the_hosts_proc", runs_in_a_pid_namespace),
         ("a_missing_signature_is_absent_through_the_helper", missing_signature_is_absent),
         ("a_cancellation_stops_a_helper_waiting_on_a_silent_server", cancellation_stops_helper),
         ("the_helper_cannot_write_a_file", cannot_write),
@@ -335,6 +336,35 @@ fn refuses_an_inherited_descriptor() {
     assert!(reason.contains("inherited open descriptors"), "{reason}");
     assert!(reason.contains("inherited)"), "the descriptor is not named: {reason}");
     assert!(!dir.path().join(NAME).exists());
+}
+
+/// `unshare --fork --pid` without `--mount-proc`, as `pacstrap` and `pikostrap` start pacman and
+/// piko, leaves `/proc` the host's. There `/proc/self` names the host's process id, while
+/// `getpid` returns the namespace's. The descriptor that lists `/proc/self/fd` is the helper's
+/// own, and not one it inherited. The helper must still recognize it as its own.
+///
+/// This runs the byte-for-byte test again inside such a namespace. A user namespace makes it
+/// work without root, and maps no user, so the helper does not see itself as root.
+fn runs_in_a_pid_namespace() {
+    let unshare = ["--user", "--fork", "--pid"];
+    let available = Command::new("unshare").args(unshare).arg("true").output();
+    if !available.is_ok_and(|output| output.status.success()) {
+        println!("  skipped: unshare cannot create a user and a PID namespace");
+        return;
+    }
+    let output = Command::new("unshare")
+        .args(unshare)
+        .arg(std::env::current_exe().unwrap())
+        .arg("a_package_arrives_byte_for_byte_through_the_helper")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{:?}: {}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn failing_server_falls_through() {

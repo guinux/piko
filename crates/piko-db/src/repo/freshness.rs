@@ -14,11 +14,12 @@ use std::{
 
 use crate::{error::Result, limits::Limits, repo::archive};
 
-/// How old a database may be before [`staleness`] reports it: 14 days.
+/// How old a database may be before [`staleness`] reports it: 40 days.
 ///
 /// Measured over the last 90 days of Arch's own publishing, `core` once went 7.8 days without a
-/// new package, and `extra` never went a full day. A week would report a quiet `core` as frozen.
-pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(1_209_600);
+/// new package, and `extra` never went a full day. 40 days is far above that gap, so only a
+/// frozen mirror, or a machine that stayed off for weeks, is reported.
+pub const DEFAULT_MAX_AGE: Duration = Duration::from_secs(3_456_000);
 
 /// How far in the future a publication may be before [`staleness`] reports it: one day.
 ///

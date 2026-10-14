@@ -548,8 +548,13 @@ fn helper_main() -> ExitCode {
 /// that needs `unsafe`. So the helper refuses to run, and names it.
 fn no_inherited_descriptors() -> Result<(), String> {
     let fail = |error: std::io::Error| format!("could not list the open descriptors: {error}");
-    // The listing's own descriptor appears in it, pointing at this directory.
-    let own = format!("/proc/{}/fd", std::process::id());
+    // The listing's own descriptor appears in it, pointing at this directory. `/proc/self`
+    // names this process as the mounted `/proc` sees it, which is not `getpid`'s answer in a
+    // PID namespace that kept the host's `/proc`: `unshare --fork --pid` without `--mount-proc`,
+    // as `pacstrap` starts pacman.
+    let own = std::path::Path::new("/proc")
+        .join(std::fs::read_link("/proc/self").map_err(fail)?)
+        .join("fd");
     let mut inherited = Vec::new();
     for entry in std::fs::read_dir("/proc/self/fd").map_err(fail)? {
         let entry = entry.map_err(fail)?;
@@ -561,7 +566,7 @@ fn no_inherited_descriptors() -> Result<(), String> {
             continue;
         }
         let target = std::fs::read_link(entry.path()).unwrap_or_default();
-        if target.as_os_str() == own.as_str() {
+        if target == own {
             continue;
         }
         inherited.push(format!("{number} ({})", target.display()));

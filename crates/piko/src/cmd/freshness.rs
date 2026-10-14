@@ -233,14 +233,14 @@ mod tests {
     fn a_stale_note_names_the_age_and_the_limit() {
         let note = FreshnessNote::Stale {
             publication: Publication { at: 0, tier: Tier::Unauthenticated },
-            age: Duration::from_secs(16 * DAY),
+            age: Duration::from_secs(46 * DAY),
             max_age: DEFAULT_MAX_AGE,
             probed: 3,
         };
         let line = render_note("core.db", &note, utc());
-        assert!(line.contains("16 days old"), "{line}");
+        assert!(line.contains("46 days old"), "{line}");
         assert!(line.contains("3 other servers"), "{line}");
-        assert!(line.contains("The limit is 14 days"), "{line}");
+        assert!(line.contains("The limit is 40 days"), "{line}");
     }
 
     /// An ignored baseline changes what the rollback check did, so it is a warning, and it

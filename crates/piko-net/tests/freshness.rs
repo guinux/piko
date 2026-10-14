@@ -322,9 +322,9 @@ fn a_stale_database_is_replaced_by_a_newer_one_from_another_mirror() {
     let (frozen, _) = serve(vec![not_modified()]);
     let (current, _) = serve(vec![ok(&newer, T3)]);
 
-    // Twenty days after T1, which is past the 14-day limit. T3 is then 12.4 days old.
+    // 46 days after T1, which is past the 40-day limit. T3 is then 38.4 days old.
     let refreshed =
-        refresh(sync.path(), &[frozen, current], policy_at(T1 + 20 * 86_400), false).unwrap();
+        refresh(sync.path(), &[frozen, current], policy_at(T1 + 46 * 86_400), false).unwrap();
 
     assert_eq!(refreshed.outcome, Outcome::Updated);
     assert_eq!(installed(sync.path()), newer);
@@ -341,7 +341,7 @@ fn a_stale_database_is_reported_after_a_bounded_number_of_probes() {
     let mirrors: Vec<_> = (0..5).map(|_| serve(vec![not_modified()])).collect();
     let servers: Vec<String> = mirrors.iter().map(|(url, _)| url.clone()).collect();
 
-    let now = T1 + 20 * 86_400;
+    let now = T1 + 46 * 86_400;
     let refreshed = refresh(sync.path(), &servers, policy_at(now), false).unwrap();
 
     assert_eq!(refreshed.outcome, Outcome::UpToDate);
@@ -350,7 +350,7 @@ fn a_stale_database_is_reported_after_a_bounded_number_of_probes() {
         refreshed.notes,
         [FreshnessNote::Stale {
             publication: refreshed.publication.unwrap(),
-            age: Duration::from_secs(20 * 86_400),
+            age: Duration::from_secs(46 * 86_400),
             max_age: piko_db::repo::freshness::DEFAULT_MAX_AGE,
             probed: 3,
         }]

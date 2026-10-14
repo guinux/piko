@@ -1302,6 +1302,7 @@ pub fn report(
     // `join` normalizes a `dbpath` the caller spelled with a trailing separator, which a
     // formatted "{dbpath}/piko-journal" would print as a doubled slash.
     let journal_path = dbpath.join(journal::JOURNAL_FILE);
+    let leftovers = Leftovers::find(dbpath, &journal_path);
     let record = match journal::read(dbpath) {
         Ok(Some(record)) => record,
         Ok(None) => {
@@ -1318,8 +1319,13 @@ pub fn report(
             emit!(out, "");
             emit!(out, "piko refuses every transaction while the journal is there. The system");
             emit!(out, "can be partly changed. Read the journal, and check the packages it names.");
-            emit!(out, "Then remove it:");
-            emit!(out, "  rm {}", shell_word(&journal_path.to_string_lossy()));
+            for line in leftovers.lock_note() {
+                emit!(out, "{line}");
+            }
+            emit!(out, "Then remove {}:", leftovers.pronoun());
+            for command in leftovers.commands() {
+                emit!(out, "  {command}");
+            }
             return ExitCode::FAILURE;
         }
         Err(error) => {
@@ -1330,8 +1336,13 @@ pub fn report(
 
     if !record.begun {
         emit!(out, "A transaction was recorded but never started; the system is unchanged");
+        for line in leftovers.lock_note() {
+            emit!(out, "{line}");
+        }
         emit!(out, "Remove the journal to clear it:");
-        emit!(out, "  rm {}", shell_word(&journal_path.to_string_lossy()));
+        for command in leftovers.commands() {
+            emit!(out, "  {command}");
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -1360,16 +1371,24 @@ pub fn report(
             // Without the database, piko cannot tell which removals are still to do. The
             // journal can still go, and the operation can be run again by hand.
             report_error(&error);
+            for line in leftovers.lock_note() {
+                emit!(out, "{line}");
+            }
             emit!(out, "The applied steps cannot be undone. Remove the journal:");
-            emit!(out, "  rm {}", shell_word(&journal_path.to_string_lossy()));
+            for command in leftovers.commands() {
+                emit!(out, "  {command}");
+            }
             emit!(out, "Then run the operation again");
             return ExitCode::FAILURE;
         }
     };
     let recovery = record.recovery(&local);
 
+    for line in leftovers.lock_note() {
+        emit!(out, "{line}");
+    }
     emit!(out, "The applied steps cannot be undone. To finish the transaction, run in order:");
-    for command in recovery_commands(&recovery, &record.root, dbpath_flag, &journal_path) {
+    for command in recovery_commands(&recovery, &record.root, dbpath_flag, &leftovers) {
         emit!(out, "  {command}");
     }
     if !recovery.interrupted.is_empty() {
@@ -1388,9 +1407,54 @@ pub fn report(
     ExitCode::SUCCESS
 }
 
+/// The files that must go before piko can run a transaction again: `db.lck`, when it is there,
+/// and the journal.
+///
+/// A killed run leaves `db.lck`, as a killed pacman does, and every piko command that writes
+/// then fails. A running piko or pacman holds it too, so it is removed only when neither runs.
+/// The lock is tested by name only, and nothing reads it.
+struct Leftovers {
+    lock: Option<PathBuf>,
+    journal: PathBuf,
+}
+
+impl Leftovers {
+    fn find(dbpath: &Path, journal: &Path) -> Self {
+        let lock = dbpath.join(piko_db_write::LOCK_FILE);
+        let lock = std::fs::symlink_metadata(&lock).is_ok().then_some(lock);
+        Self { lock, journal: journal.to_path_buf() }
+    }
+
+    /// The `rm` commands, the lock first.
+    fn commands(&self) -> Vec<String> {
+        self.lock
+            .iter()
+            .chain([&self.journal])
+            .map(|path| format!("rm {}", shell_word(&path.to_string_lossy())))
+            .collect()
+    }
+
+    /// The lines that say when the lock can go. None when there is no lock.
+    fn lock_note(&self) -> Vec<String> {
+        self.lock.as_ref().map_or_else(Vec::new, |lock| {
+            vec![
+                format!("The database lock {} is still there.", lock.display()),
+                "A running piko or pacman also holds it: remove it only if neither runs."
+                    .to_owned(),
+            ]
+        })
+    }
+
+    /// What "remove" names: the journal alone, or the lock with it.
+    const fn pronoun(&self) -> &'static str {
+        if self.lock.is_some() { "them" } else { "it" }
+    }
+}
+
 /// Spells a [`journal::Recovery`] as the command lines that carry it out, in order.
 ///
-/// The journal goes first, because piko refuses every transaction while it is there. Then the
+/// The lock and the journal go first, because piko refuses every transaction while either is
+/// there. Then the
 /// cut installs, apart from the others so that `--overwrite` covers nothing else. Then the
 /// removals, then the installs. The cut and the other installs each take one command per
 /// install reason.
@@ -1398,7 +1462,7 @@ fn recovery_commands(
     recovery: &journal::Recovery,
     root: &Path,
     dbpath_flag: Option<&Path>,
-    journal_path: &Path,
+    leftovers: &Leftovers,
 ) -> Vec<String> {
     let mut piko = String::from("piko");
     if let Some(dbpath) = dbpath_flag {
@@ -1414,7 +1478,7 @@ fn recovery_commands(
         targets.iter().map(|target| target.name.to_string()).collect::<Vec<_>>().join(" ")
     };
 
-    let mut commands = vec![format!("rm {}", shell_word(&journal_path.to_string_lossy()))];
+    let mut commands = leftovers.commands();
     for reason in [Some(PackageInstallReason::Depend), Some(PackageInstallReason::Explicit), None] {
         let targets = recovery
             .interrupted
@@ -1526,7 +1590,7 @@ mod tests {
             unreadable: Vec::new(),
         };
 
-        let commands = recovery_commands(&recovery, Path::new("/"), None, Path::new(JOURNAL));
+        let commands = recovery_commands(&recovery, Path::new("/"), None, &journal_only(JOURNAL));
         assert_eq!(
             commands,
             [
@@ -1550,7 +1614,7 @@ mod tests {
             &recovery,
             Path::new("/mnt/new root"),
             Some(Path::new("/mnt/db")),
-            Path::new("/mnt/db/piko-journal"),
+            &journal_only("/mnt/db/piko-journal"),
         );
         assert_eq!(
             commands,
@@ -1565,8 +1629,37 @@ mod tests {
     #[test]
     fn an_empty_recovery_only_removes_the_journal() {
         let commands =
-            recovery_commands(&Recovery::default(), Path::new("/"), None, Path::new(JOURNAL));
+            recovery_commands(&Recovery::default(), Path::new("/"), None, &journal_only(JOURNAL));
         assert_eq!(commands, ["rm /var/lib/pacman/piko-journal"]);
+    }
+
+    /// The journal alone, with no lock left.
+    fn journal_only(path: &str) -> Leftovers {
+        Leftovers { lock: None, journal: PathBuf::from(path) }
+    }
+
+    /// A killed run leaves `db.lck`. Every command that writes fails while it is there, so it
+    /// goes first, and the note says when it can go.
+    #[test]
+    fn a_lock_a_killed_run_left_is_removed_first() {
+        let db = tempfile::tempdir().unwrap();
+        let journal = db.path().join(journal::JOURNAL_FILE);
+        assert!(Leftovers::find(db.path(), &journal).lock_note().is_empty());
+
+        let lock = db.path().join(piko_db_write::LOCK_FILE);
+        std::fs::write(&lock, b"").unwrap();
+        let leftovers = Leftovers::find(db.path(), &journal);
+        let recovery = Recovery { remove: vec!["old".parse().unwrap()], ..Recovery::default() };
+        let commands = recovery_commands(&recovery, Path::new("/"), None, &leftovers);
+        assert_eq!(
+            commands,
+            [
+                format!("rm {}", lock.display()),
+                format!("rm {}", journal.display()),
+                "piko remove --nodeps old".to_owned(),
+            ]
+        );
+        assert!(leftovers.lock_note().concat().contains("only if neither runs"));
     }
 
     #[test]
