@@ -2079,6 +2079,10 @@ fn read_entry_scriptlet(entry_path: &Path) -> Option<Vec<u8>> {
     clippy::panic,
     reason = "a failing assertion in a test should abort it loudly"
 )]
+#[expect(
+    clippy::single_range_in_vec_init,
+    reason = "a journal's groups are a list of step ranges, and one group is a list of one range"
+)]
 mod tests {
     use super::*;
     use crate::source::CacheDirSource;

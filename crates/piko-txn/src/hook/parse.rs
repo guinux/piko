@@ -191,7 +191,7 @@ pub fn parse(name: &str, text: &str) -> Result<Hook, ParseError> {
                         let Some(trigger) = hook.triggers.last_mut() else {
                             return Err(fail("a trigger directive with no [Trigger]".to_owned()));
                         };
-                        let overwritten = trigger_directive(trigger, key, text).map_err(&fail)?;
+                        let overwritten = trigger_directive(trigger, key, text).map_err(fail)?;
                         overwritten_warning(&mut hook.warnings, token.line, overwritten);
                     }
                     Section::Action => {
