@@ -167,13 +167,20 @@ pub(crate) fn agent(timeouts: Timeouts) -> ureq::Agent {
         .root_certs(ureq::tls::RootCerts::PlatformVerifier)
         .build();
     let config = ureq::Agent::config_builder()
-        .timeout_global(Some(timeouts.whole))
-        // Much shorter than the global one, and separate from it on purpose. Cancellation is
-        // only observable between requests and between chunks. So a worker parked in
-        // DNS/connect/TLS ignores a Ctrl+C for as long as this allows, once per worker. That is
-        // why it is worth bounding tightly, while the transfer itself keeps the generous
-        // `timeout_global`.
+        // No timeout covers the whole request. A total would refuse every transfer that takes
+        // longer than it, however steadily the bytes arrive: at 1 MiB/s, a bound of 60 s refuses
+        // every package above 60 MiB, on every server. Each wait is bounded instead.
+        //
+        // Cancellation is only observable between requests and between chunks. So a worker
+        // parked in DNS/connect/TLS ignores a Ctrl+C for as long as this allows, once per
+        // worker. That is why it is bounded tightly.
+        // A local name lookup is not part of ureq's connect phase, so it gets the same bound.
+        .timeout_resolve(Some(timeouts.connect))
         .timeout_connect(Some(timeouts.connect))
+        .timeout_recv_response(Some(timeouts.response))
+        // The bound restarts at each read, so it refuses a transfer that stopped and never one
+        // that is slow. libcurl's low-speed limit does the same for pacman.
+        .timeout_per_read(timeouts.stall)
         // A mirror that redirects forever is a mirror that hangs the update.
         .max_redirects(5)
         // Every status is returned as a response, and `refresh` reads each one itself. A `304`

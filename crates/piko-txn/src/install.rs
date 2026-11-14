@@ -49,7 +49,7 @@ use crate::{
     extract::{
         Ownership,
         apply::{Applied, XattrProblem, apply},
-        archive::{self, Member, MemberKind, PackageLimits},
+        archive::{self, Link, LinkKind, Member, MemberKind, PackageLimits},
         backup::{self, BackupOutcome},
         decision::{Disposition, EntryContext, Existing, PacnewReason, SkipReason, decide},
     },
@@ -240,6 +240,8 @@ pub(crate) fn install_unflushed(
     // The two differ only under `NoUpgrade`, where what the package shipped is the `.pacnew`.
     let mut pending_hashes: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut written = Filesystems::default();
+    // The members written at their own path, which a later hard link can name.
+    let mut in_place: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
     archive::walk_decoded_ahead(package, limits, |member, contents| {
         if member.kind == MemberKind::Metadata {
@@ -261,7 +263,16 @@ pub(crate) fn install_unflushed(
             new_is_backup: (filters.is_backup)(&member.path),
         };
 
-        let disposition = decide(&context);
+        let disposition = match (&member.link, decide(&context)) {
+            // The archive walk refuses a target the package does not ship. A target it ships
+            // and this extraction did not write is another file: the one that was there.
+            (Some(Link { kind: LinkKind::Hard, target }), decided)
+                if !matches!(decided, Disposition::Skip(_)) && !in_place.contains(target) =>
+            {
+                Disposition::Skip(SkipReason::LinkTargetNotExtracted)
+            }
+            (_, decided) => decided,
+        };
         // Parent directories a package did not list must still exist for the write to land.
         if !matches!(disposition, Disposition::Skip(_)) {
             create_parents(root, &member.path)?;
@@ -274,6 +285,7 @@ pub(crate) fn install_unflushed(
         }
         match applied {
             Applied::Written => {
+                in_place.insert(member.path.clone());
                 result.outcomes.push((member.path.clone(), Outcome::Written));
                 claim(&mut result, &mut claimed, &member.path);
                 // `add.c:333`'s `if(backup)` sits *outside* the `notouch || needbackup`

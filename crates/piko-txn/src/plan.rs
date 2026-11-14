@@ -212,8 +212,8 @@ impl TransactionPlan {
     /// one from the servers this plan recorded, `concurrency` at a time.
     ///
     /// `check_space` is `pacman.conf`'s `CheckSpace` on the download side: see
-    /// [`DownloadingSource::check_space`]. Every download runs in a helper confined by
-    /// `sandbox`. `progress` is called for every download event, and `cancel` stops the
+    /// [`DownloadingSource::check_space`]. Every download is confined and bounded by
+    /// `downloads`. `progress` is called for every download event, and `cancel` stops the
     /// downloads.
     ///
     /// The source must outlive the commit. The staged copies are removed when it is dropped.
@@ -228,7 +228,7 @@ impl TransactionPlan {
         cancel: piko_net::Cancel,
         concurrency: piko_net::Concurrency,
         check_space: bool,
-        sandbox: piko_net::Sandbox,
+        downloads: piko_net::DownloadSettings,
         progress: impl Fn(piko_net::Event) + Send + Sync + 'static,
     ) -> Result<PlanSource> {
         let downloading = DownloadingSource::new(
@@ -236,7 +236,7 @@ impl TransactionPlan {
             self.downloads.clone(),
             cancel,
             concurrency,
-            sandbox,
+            downloads,
             progress,
         )?
         .check_space(check_space);
@@ -1082,7 +1082,7 @@ mod tests {
             piko_net::Cancel::new(),
             piko_net::Concurrency::new(1),
             false,
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap()

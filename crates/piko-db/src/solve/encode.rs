@@ -41,6 +41,7 @@ use crate::diagnostics::Sink;
 use crate::resolve::IgnoreReason;
 use crate::solve::clause::{ClauseId, ClauseKind, Lit, Problem};
 use crate::solve::glob::{Expansion, ExpansionFailure, expand_installable_targets};
+use crate::solve::solver::Solution;
 use crate::solve::{Origin, Solvable, SolvableId, Universe};
 use crate::{Error, Limits, Result};
 
@@ -789,22 +790,20 @@ pub fn encode(
         }
 
         for conflict in solvable.conflicts() {
-            for other in &cone {
-                if other == id {
+            // `check_conflict` (`conflict.c`) uses `_alpm_depcmp`, so this matches through
+            // `%PROVIDES%` as well as by name. Both directions are covered without a second
+            // pass. Every installed package is in the cone, so its own conflicts are iterated
+            // here too. The matches come from the name index in identifier order, which is
+            // the order of the cone.
+            for other in in_cone(&cone, &universe.matching(conflict)) {
+                if other == *id {
                     continue;
                 }
-                let Some(candidate) = universe.get(*other) else { continue };
-                // `check_conflict` (`conflict.c`) uses `_alpm_depcmp`, so this matches
-                // through `%PROVIDES%` as well as by name. Both directions are covered
-                // without a second pass. Every installed package is in the cone, so its own
-                // conflicts are iterated here too.
-                if candidate.satisfies(conflict) {
-                    problem.add(
-                        [Lit::negative(*id), Lit::negative(*other)],
-                        ClauseKind::Conflicts { declarer: *id, other: *other },
-                    );
-                    check_clause_budget(&problem, limits)?;
-                }
+                problem.add(
+                    [Lit::negative(*id), Lit::negative(other)],
+                    ClauseKind::Conflicts { declarer: *id, other },
+                );
+                check_clause_budget(&problem, limits)?;
             }
         }
 
@@ -1416,6 +1415,70 @@ fn relaxed_cause(
     RemovalCause::Blocking
 }
 
+/// Puts back each relaxed pin that the request can hold, and returns the solution that holds
+/// them.
+///
+/// The unsatisfiable core names every pin that takes part in one proof. It does not say that
+/// each of them must go. When two providers answer a dependency and each conflicts with a
+/// different installed package, the core names both packages and one removal is enough. The
+/// solver also leaves a package without a pin unselected when no clause asks for it, so a
+/// relaxed pin that stays relaxed is a removal.
+///
+/// The packages `solution` keeps get their pins back first, all at once, so the first answer
+/// of the solver stays as it is where it already keeps a package. Each other pin is then put
+/// back alone, in identifier order, and it stays only if a solution still exists. The set
+/// that remains in `relaxed` is irreducible: no single package of it can stay.
+///
+/// A pin is appended to a copy of the clause set, so a trial costs one solve and no second
+/// encoding. An upgrade satisfies a pin, as it does in [`encode`]: the clause is on the name.
+fn restore_pins(
+    universe: &Universe<'_>,
+    request: &Request,
+    limits: &Limits,
+    relaxed: &mut HashSet<SolvableId>,
+    encoded: Encoded,
+    solution: Solution,
+) -> Result<(Encoded, Solution)> {
+    if relaxed.is_empty() {
+        return Ok((encoded, solution));
+    }
+    let cone = reachable_cone(universe, request, limits)?;
+    let pin = |id: SolvableId| {
+        let name = universe.get(id)?.name().as_ref();
+        let group = in_cone(&cone, universe.candidates_named(name));
+        (!group.is_empty()).then_some(group)
+    };
+
+    let chosen: HashSet<SolvableId> = solution.selected().iter().copied().collect();
+    let mut order: Vec<SolvableId> = relaxed.iter().copied().collect();
+    order.sort_unstable();
+    let (kept, dropped): (Vec<SolvableId>, Vec<SolvableId>) = order
+        .into_iter()
+        .partition(|id| pin(*id).is_some_and(|group| group.iter().any(|c| chosen.contains(c))));
+
+    let mut current = (encoded, solution);
+    let trials = std::iter::once(kept).chain(dropped.into_iter().map(|id| vec![id]));
+    for trial in trials.filter(|trial| !trial.is_empty()) {
+        let mut candidate = current.0.clone();
+        for id in &trial {
+            let Some(group) = pin(*id) else { continue };
+            candidate.problem.add(
+                group.into_iter().map(Lit::positive),
+                ClauseKind::Installed { installed: *id },
+            );
+        }
+        check_clause_budget(&candidate.problem, limits)?;
+        let outcome = crate::solve::Solver::new(candidate.problem(), *limits).solve()?;
+        if let crate::solve::Outcome::Satisfied(solution) = outcome {
+            for id in &trial {
+                relaxed.remove(id);
+            }
+            current = (candidate, solution);
+        }
+    }
+    Ok(current)
+}
+
 /// Solves `request`, removing installed packages that stand in the way when policy allows.
 ///
 /// This is `_alpm_sync_prepare`'s conflict step (`sync.c:367`) expressed as a loop rather
@@ -1427,8 +1490,9 @@ fn relaxed_cause(
 /// piko cannot prompt from a library. Diagnostics are returned to the caller, never printed
 /// or logged. So the question becomes a policy on the [`Request`], and the retry becomes
 /// explicit. Solve with every installed package pinned. If that is unsatisfiable, relax exactly
-/// the pins the unsatisfiable core blames, then solve again. A package is only ever a candidate
-/// for removal once the solver has proved the request impossible while it stays.
+/// the pins the unsatisfiable core blames, then solve again. Once a solution exists, put back
+/// each relaxed pin that the request can hold. A package is removed only when the solver has
+/// proved the request impossible while it stays with the packages that do stay.
 ///
 /// # Errors
 ///
@@ -1449,6 +1513,8 @@ pub fn solve_with_removals(
 
         let unsat = match outcome {
             crate::solve::Outcome::Satisfied(solution) => {
+                let (encoded, solution) =
+                    restore_pins(universe, request, limits, &mut relaxed, encoded, solution)?;
                 let mut selected: Vec<SolvableId> = solution.selected().to_vec();
                 let chosen: HashSet<SolvableId> = selected.iter().copied().collect();
 
@@ -2758,6 +2824,94 @@ mod tests {
         let installing = named(&universe, &planned.selected);
         assert!(installing.contains(&"impl-a"), "the list stands: {installing:?}");
         assert!(!installing.contains(&"stranger"), "{installing:?}");
+    }
+
+    /// Two providers answer the dependency of the target, and each conflicts with a different
+    /// installed package. The unsatisfiable core names both installed packages, and one
+    /// removal is enough.
+    #[test]
+    fn a_conflict_one_removal_settles_removes_one_package() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("a", "1.0.0-1"))
+            .installed(PackageSpec::new("b", "1.0.0-1"))
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("t", "1.0.0-1").depends(["x"]),
+                    PackageSpec::new("p1", "1.0.0-1").provides(["x"]).conflicts(["a"]),
+                    PackageSpec::new("p2", "1.0.0-1").provides(["x"]).conflicts(["b"]),
+                ],
+            )
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let target = from_repository(&universe, "t");
+
+        let planned =
+            solve_with_removals(&universe, &Request::new().target(target), &Limits::default())
+                .unwrap()
+                .unwrap();
+
+        let removed = named(&universe, &planned.removed);
+        assert_eq!(removed.len(), 1, "{removed:?}");
+        let provider = if removed == ["a"] { "p1" } else { "p2" };
+        let selected = named(&universe, &planned.selected);
+        assert!(selected.contains(&provider), "{selected:?} with {removed:?} removed");
+        assert!(
+            matches!(
+                planned.removal_causes.get(&planned.removed[0]),
+                Some(RemovalCause::Conflicts { .. })
+            ),
+            "{:?}",
+            planned.removal_causes
+        );
+    }
+
+    /// The target conflicts with the installed `foo`, whose upgrade conflicts with `baz`. The
+    /// core names `x` too, because `x` requires `foo`. The upgrade of `foo` still satisfies
+    /// `x`, so `x` stays.
+    #[test]
+    fn a_dependent_of_an_upgraded_package_is_not_removed() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("foo", "1-1").conflicts(["t"]))
+            .installed(PackageSpec::new("baz", "1-1"))
+            .installed(PackageSpec::new("x", "1-1").depends(["foo"]))
+            .repo(
+                "core",
+                [PackageSpec::new("t", "1-1"), PackageSpec::new("foo", "2-1").conflicts(["baz"])],
+            )
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let target = from_repository(&universe, "t");
+
+        let planned =
+            solve_with_removals(&universe, &Request::new().target(target), &Limits::default())
+                .unwrap()
+                .unwrap();
+
+        let removed = named(&universe, &planned.removed);
+        assert!(!removed.contains(&"x"), "{removed:?}");
+        let selected = named(&universe, &planned.selected);
+        assert!(selected.contains(&"x"), "{selected:?}");
+    }
+
+    /// A package that conflicts with the target has no solution that keeps it, so its pin
+    /// stays relaxed and the package is removed.
+    #[test]
+    fn a_package_the_request_cannot_hold_is_still_removed() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("old", "1-1"))
+            .installed(PackageSpec::new("bystander", "1-1"))
+            .repo("core", [PackageSpec::new("new", "1-1").conflicts(["old"])])
+            .build();
+        let universe = universe_of(&scenario, DbUsage::ALL);
+        let target = from_repository(&universe, "new");
+
+        let planned =
+            solve_with_removals(&universe, &Request::new().target(target), &Limits::default())
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(named(&universe, &planned.removed), ["old"]);
     }
 
     /// A scenario with `broken` installed and depending on `absent`, which nothing installed

@@ -874,7 +874,7 @@ impl DownloadingSource {
     /// may create is created here rather than in [`CacheDirSource::new`]. So a command that only
     /// reads the cache never writes to disk.
     ///
-    /// Every download runs in a helper confined by `sandbox`: see [`piko_net::Sandbox`].
+    /// Every download is confined and bounded by `downloads`: see [`piko_net::DownloadSettings`].
     ///
     /// `progress` is called synchronously for every download event. This is the same narrow
     /// exception `piko-net` documents on [`piko_net::Event`].
@@ -889,7 +889,7 @@ impl DownloadingSource {
         targets: HashMap<String, DownloadTarget>,
         cancel: piko_net::Cancel,
         concurrency: piko_net::Concurrency,
-        sandbox: piko_net::Sandbox,
+        downloads: piko_net::DownloadSettings,
         progress: impl Fn(piko_net::Event) + Send + Sync + 'static,
     ) -> Result<Self> {
         // `CacheDirSource::new` refuses an empty list, so the selection never sees one.
@@ -898,7 +898,7 @@ impl DownloadingSource {
         Ok(Self {
             cache,
             download_dir,
-            refresher: piko_net::Refresher::default().with_sandbox(sandbox),
+            refresher: piko_net::Refresher::from_settings(downloads),
             check_space: false,
             targets,
             cancel,
@@ -1440,7 +1440,7 @@ mod tests {
             HashMap::new(),
             piko_net::Cancel::default(),
             piko_net::Concurrency::new(1),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1776,7 +1776,7 @@ mod tests {
             HashMap::new(),
             piko_net::Cancel::new(),
             piko_net::Concurrency::default(),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1798,7 +1798,7 @@ mod tests {
             targets,
             piko_net::Cancel::new(),
             piko_net::Concurrency::default(),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1823,7 +1823,7 @@ mod tests {
             targets,
             piko_net::Cancel::new(),
             piko_net::Concurrency::default(),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1846,7 +1846,7 @@ mod tests {
             targets,
             piko_net::Cancel::new(),
             piko_net::Concurrency::new(4),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1873,7 +1873,7 @@ mod tests {
             targets,
             piko_net::Cancel::new(),
             piko_net::Concurrency::new(4),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1899,7 +1899,7 @@ mod tests {
             targets,
             cancel,
             piko_net::Concurrency::new(4),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1918,7 +1918,7 @@ mod tests {
             HashMap::new(),
             piko_net::Cancel::new(),
             piko_net::Concurrency::new(4),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1939,7 +1939,7 @@ mod tests {
             targets,
             piko_net::Cancel::new(),
             piko_net::Concurrency::new(4),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1958,7 +1958,7 @@ mod tests {
             HashMap::new(),
             piko_net::Cancel::new(),
             piko_net::Concurrency::default(),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -1984,7 +1984,7 @@ mod tests {
             targets,
             piko_net::Cancel::new(),
             piko_net::Concurrency::default(),
-            piko_net::Sandbox::disabled(),
+            piko_net::DownloadSettings::unconfined(),
             |_| {},
         )
         .unwrap();
@@ -2008,7 +2008,7 @@ mod tests {
                 HashMap::new(),
                 piko_net::Cancel::new(),
                 piko_net::Concurrency::default(),
-                piko_net::Sandbox::disabled(),
+                piko_net::DownloadSettings::unconfined(),
                 |_| {},
             )
             .unwrap(),

@@ -122,10 +122,11 @@ pub struct Report {
     pub hooks: Vec<hook::Run>,
     /// Every hook file that could not be read or parsed, in the order they were met.
     ///
-    /// Collected per phase rather than once up front. A file broken for the whole transaction is
-    /// reported twice, once for each phase that read the directory. libalpm does the same:
-    /// `_alpm_hook_run` re-runs `_alpm_hook_validate` on every call, so pacman prints such a
-    /// warning twice too.
+    /// Collected per phase rather than once up front, so a warning about a file is reported
+    /// twice, once for each phase that read the directory. libalpm does the same:
+    /// `_alpm_hook_run` re-runs `_alpm_hook_validate` on every call. A file that cannot be used
+    /// when the `PreTransaction` hooks are read refuses the transaction with
+    /// [`Error::HooksUnusable`], so only the `PostTransaction` read reports one here.
     pub hook_problems: Vec<hook::Problem>,
     /// Everything that went wrong recording the transaction.
     ///
@@ -686,8 +687,8 @@ impl Transaction<Planned> {
 
     /// Releases the paths `overwrite` accepts from file-conflict detection.
     ///
-    /// pacman's `--overwrite`. It excuses a *file* whose owner disagrees. It never excuses a
-    /// directory, and never a path a package would replace with a directory. See
+    /// pacman's `--overwrite`. It excuses a *file* whose owner disagrees, including one the
+    /// package replaces with a directory. It never excuses a directory on disk. See
     /// [`conflict::decision::Resolution::Overwritten`].
     #[must_use]
     pub fn overwrite(mut self, overwrite: Overwrite) -> Self {
@@ -1052,7 +1053,7 @@ impl Transaction<Planned> {
                     replaces.as_mut().map(|old| (old, Some(replacement)))
                 }))
                 .collect();
-            self::mark_shared_directories(&local, &mut taken_apart, &removed);
+            self::mark_shared_directories(&local, &targets, &mut taken_apart, &removed);
         }
 
         // The last read before the conflict check. That check walks the filesystem once for
@@ -1395,6 +1396,11 @@ fn installed_state(entry: &EntryName, package: &LocalPackage) -> Result<Supersed
 /// database per directory. This reads every file list once, for the whole transaction, and
 /// only when some step takes an entry apart, so no step opens a database.
 ///
+/// A package this transaction installs is counted as an owner, from the file list of its
+/// archive. libalpm finds such a package in its database when a later step asks, because it
+/// records each package as it goes. The answer here does not depend on the step order: a
+/// directory kept for a package that a later step installs is the one that step would create.
+///
 /// A package this transaction removes is not counted as an owner. libalpm takes a removed
 /// package out of its database as it goes, so the last of several owners being removed sees
 /// the directory unowned. The entry itself is not counted either, removed or upgraded.
@@ -1414,6 +1420,7 @@ fn installed_state(entry: &EntryName, package: &LocalPackage) -> Result<Supersed
 ///   only rules out a package, and the parse still decides which directories a package owns.
 fn mark_shared_directories(
     local: &LocalDatabase,
+    incoming: &[conflict::Target],
     entries: &mut [(&mut Superseded, Option<Replacement<'_>>)],
     removed: &BTreeSet<&str>,
 ) {
@@ -1446,6 +1453,21 @@ fn mark_shared_directories(
             let Some(indices) = wanted.get(spelled) else { continue };
             for &index in indices {
                 if names.get(index).is_some_and(|name| *name != owner) {
+                    let directory = spelled.strip_suffix('/').unwrap_or(spelled);
+                    shared.push((index, PathBuf::from(directory)));
+                }
+            }
+        }
+    }
+    // A package this transaction installs owns its directories too, under another name than
+    // the entry. The local database read above does not hold it yet.
+    for target in incoming {
+        for (spelled, indices) in &wanted {
+            if !target.files.contains(spelled) {
+                continue;
+            }
+            for &index in indices {
+                if names.get(index).is_some_and(|name| *name != target.name) {
                     let directory = spelled.strip_suffix('/').unwrap_or(spelled);
                     shared.push((index, PathBuf::from(directory)));
                 }
@@ -2015,7 +2037,18 @@ fn run_hooks(
     };
 
     let (hooks, problems) = Hooks::collect(hook_dirs);
+    // A file that cannot be read can hold a hook that must run first, or one that sets
+    // `AbortOnFail`. Before the transaction, that refuses it, as `hook.c:625` does. After it,
+    // every step is applied, and the problem is reported.
+    let unusable: Vec<String> = problems
+        .iter()
+        .filter(|problem| problem.leaves_a_hook_unread())
+        .map(ToString::to_string)
+        .collect();
     report.hook_problems.extend(problems);
+    if when == When::PreTransaction && !unusable.is_empty() {
+        return Ok(Some(Error::HooksUnusable { problems: unusable }));
+    }
 
     let triggered = hooks.triggered(when, summary);
     if triggered.is_empty() {
@@ -3157,6 +3190,225 @@ mod tests {
         let new = write_raw_package(cache.path(), "bbb", "2.0.0-1", &[("srv/", Directory)]);
         run_steps(cache.path(), db.path(), root.path(), vec![install_step(new)]).unwrap();
         assert!(root.path().join("srv/shared").is_dir(), "a directory aaa owns was removed");
+    }
+
+    /// A directory the old version drops stays when a package the same transaction installs
+    /// ships it. That package is not in the local database when `verify` reads it.
+    #[test]
+    fn an_upgrade_keeps_an_empty_directory_a_package_of_the_same_transaction_ships() {
+        use tar::EntryType::Directory;
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let members = [("srv/", Directory), ("srv/shared/", Directory)];
+        let old = write_raw_package(cache.path(), "aaa", "1.0.0-1", &members);
+        run_steps(cache.path(), db.path(), root.path(), vec![install_step(old)]).unwrap();
+
+        let incoming = write_raw_package(cache.path(), "bbb", "1.0.0-1", &members);
+        let new = write_raw_package(cache.path(), "aaa", "2.0.0-1", &[("srv/", Directory)]);
+        run_steps(
+            cache.path(),
+            db.path(),
+            root.path(),
+            vec![install_step(incoming), install_step(new)],
+        )
+        .unwrap();
+        assert!(root.path().join("srv/shared").is_dir(), "a directory bbb owns was removed");
+    }
+
+    /// The same rule for a removal: the package installed in the same transaction keeps the
+    /// directory the removed package also listed.
+    #[test]
+    fn a_removal_keeps_an_empty_directory_a_package_of_the_same_transaction_ships() {
+        use tar::EntryType::Directory;
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let members = [("srv/", Directory), ("srv/shared/", Directory)];
+        let old = write_raw_package(cache.path(), "aaa", "1.0.0-1", &members);
+        run_steps(cache.path(), db.path(), root.path(), vec![install_step(old)]).unwrap();
+
+        let incoming = write_raw_package(cache.path(), "bbb", "1.0.0-1", &members);
+        run_steps(
+            cache.path(),
+            db.path(),
+            root.path(),
+            vec![install_step(incoming), remove_step("aaa-1.0.0-1")],
+        )
+        .unwrap();
+        assert!(root.path().join("srv/shared").is_dir(), "a directory bbb owns was removed");
+    }
+
+    /// A member path that is not UTF-8 refuses the package. Conflict detection and `%FILES%`
+    /// hold a path as text, so they would test and record another path than the one written:
+    /// the file already at that name would be replaced with no conflict, and never removed.
+    #[test]
+    fn a_member_path_that_is_not_utf8_is_refused_before_the_root_is_touched() {
+        use crate::extract::archive::fixture::raw_bytes;
+        use std::os::unix::ffi::OsStrExt as _;
+        use tar::EntryType::{Directory, Regular};
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        let existing = root.path().join("opt").join(std::ffi::OsStr::from_bytes(b"a\xff"));
+        std::fs::create_dir(root.path().join("opt")).unwrap();
+        std::fs::write(&existing, b"not the package's").unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        raw_bytes(&mut builder, b".PKGINFO", Regular, None, pkginfo("1.0.0-1", &[]).as_bytes());
+        raw_bytes(&mut builder, b"opt/", Directory, None, b"");
+        raw_bytes(&mut builder, b"opt/a\xff", Regular, None, b"from the package");
+        let file = "foo-1.0.0-1-x86_64.pkg.tar";
+        std::fs::write(cache.path().join(file), builder.into_inner().unwrap()).unwrap();
+
+        let error = run_steps(
+            cache.path(),
+            db.path(),
+            root.path(),
+            vec![install_step(file.parse().unwrap())],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::UnsafeArchivePath { reason: crate::rootfs::UnsafePath::NotUtf8, .. }
+            ),
+            "got {error:?}"
+        );
+        assert_eq!(std::fs::read(&existing).unwrap(), b"not the package's");
+    }
+
+    /// A file that `--overwrite` released, where the package ships a directory, is replaced by
+    /// that directory. Left in place, the entry would list a directory that is a file.
+    #[test]
+    fn a_directory_replaces_the_file_that_overwrite_released() {
+        use tar::EntryType::Directory;
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("opt")).unwrap();
+        std::fs::write(root.path().join("opt/thing"), b"in the way").unwrap();
+        let package = write_raw_package(
+            cache.path(),
+            "aaa",
+            "1.0.0-1",
+            &[("opt/", Directory), ("opt/thing/", Directory)],
+        );
+
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let conflicts = Transaction::new(
+            root.path(),
+            db.path(),
+            vec![install_step(package.clone())],
+            Verification::Disabled,
+        )
+        .verify(&lock, &source)
+        .unwrap_err();
+        assert!(matches!(conflicts, Error::FileConflicts { .. }), "got {conflicts:?}");
+
+        Transaction::new(
+            root.path(),
+            db.path(),
+            vec![install_step(package)],
+            Verification::Disabled,
+        )
+        .ownership(Ownership::Inherit)
+        .overwrite(Overwrite::new(|path| path == Path::new("opt/thing")))
+        .verify(&lock, &source)
+        .unwrap()
+        .stage()
+        .unwrap()
+        .commit()
+        .unwrap();
+        assert!(root.path().join("opt/thing").is_dir(), "the file was left in place");
+    }
+
+    /// A hard link to a file the package does not ship refuses the package. Extracted, it
+    /// would give a second name to a file that is already on the system.
+    #[test]
+    fn a_hard_link_to_a_file_outside_the_package_is_refused_before_the_root_is_touched() {
+        use crate::extract::archive::fixture::raw;
+        use std::os::unix::fs::MetadataExt as _;
+        use tar::EntryType::{Directory, Link, Regular};
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("etc")).unwrap();
+        std::fs::write(root.path().join("etc/secret"), b"secret").unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        raw(&mut builder, ".PKGINFO", Regular, None, pkginfo("1.0.0-1", &[]).as_bytes());
+        raw(&mut builder, "opt/", Directory, None, b"");
+        raw(&mut builder, "opt/link", Link, Some("etc/secret"), b"");
+        let file = "foo-1.0.0-1-x86_64.pkg.tar";
+        std::fs::write(cache.path().join(file), builder.into_inner().unwrap()).unwrap();
+
+        let error = run_steps(
+            cache.path(),
+            db.path(),
+            root.path(),
+            vec![install_step(file.parse().unwrap())],
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::HardLinkOutsidePackage { .. }), "got {error:?}");
+        assert!(!root.path().join("opt").exists(), "the root was touched");
+        assert_eq!(std::fs::metadata(root.path().join("etc/secret")).unwrap().nlink(), 1);
+    }
+
+    /// A hard link whose target `NoExtract` skipped is skipped too, and the package does not
+    /// own it. Made anyway, it would name the file that was at the target's path before.
+    #[test]
+    fn a_hard_link_whose_target_was_not_extracted_is_skipped() {
+        use crate::extract::archive::fixture::raw;
+        use tar::EntryType::{Directory, Link, Regular};
+
+        let cache = tempfile::tempdir().unwrap();
+        let db = dbpath();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("opt")).unwrap();
+        std::fs::write(root.path().join("opt/real"), b"not the package's").unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        raw(&mut builder, ".PKGINFO", Regular, None, pkginfo("1.0.0-1", &[]).as_bytes());
+        raw(&mut builder, "opt/", Directory, None, b"");
+        raw(&mut builder, "opt/real", Regular, None, b"from the package");
+        raw(&mut builder, "opt/link", Link, Some("opt/real"), b"");
+        let file = "foo-1.0.0-1-x86_64.pkg.tar";
+        std::fs::write(cache.path().join(file), builder.into_inner().unwrap()).unwrap();
+
+        let source = CacheDirSource::new([cache.path().to_path_buf()]).unwrap();
+        let lock = DbLock::acquire(db.path()).unwrap();
+        let patterns = Patterns {
+            no_extract: PatternList::new(vec!["opt/real".to_owned()]),
+            ..Patterns::default()
+        };
+        Transaction::new(
+            root.path(),
+            db.path(),
+            vec![install_step(file.parse().unwrap())],
+            Verification::Disabled,
+        )
+        .ownership(Ownership::Inherit)
+        .overwrite(Overwrite::new(|_| true))
+        .patterns(patterns)
+        .verify(&lock, &source)
+        .unwrap()
+        .stage()
+        .unwrap()
+        .commit()
+        .unwrap();
+
+        assert!(!root.path().join("opt/link").exists(), "the link names a file not extracted");
+        assert_eq!(std::fs::read(root.path().join("opt/real")).unwrap(), b"not the package's");
+        let local = LocalDatabase::open(db.path().join("local")).unwrap();
+        let owned: Vec<&str> = local.get_str("foo").unwrap().file_list().unwrap().collect();
+        assert_eq!(owned, ["opt/"]);
     }
 
     /// One bad `%BACKUP%` hash makes the whole entry unreadable, file list included.

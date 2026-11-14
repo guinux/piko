@@ -193,7 +193,7 @@ pub struct Member {
     pub gid: u64,
     /// The modification time recorded in the archive.
     pub mtime: u64,
-    /// The member's size in bytes.
+    /// The member's size in bytes: its PAX `size` record, or the size field of its header.
     pub size: u64,
     /// The extended attributes the archive records, in archive order.
     ///
@@ -232,6 +232,7 @@ impl Member {
 ///   link.
 /// - [`Error::UnsafeArchivePath`] if a member's path, or a hard link's target, is not a
 ///   canonical relative path.
+/// - [`Error::HardLinkOutsidePackage`] if a hard link's target is not an earlier member.
 /// - [`Error::UnusableMemberOwner`] if a member's uid or gid is not one the kernel can set.
 /// - Whatever `on_member` returns.
 pub fn walk(
@@ -341,6 +342,8 @@ fn walk_members(
     let entries = archive.entries().map_err(classify)?;
 
     let mut seen = 0_usize;
+    // The payload members a hard link can name: every one read so far that is not a directory.
+    let mut linkable: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for entry in entries {
         let mut entry = entry.map_err(classify)?;
 
@@ -369,6 +372,18 @@ fn walk_members(
         crate::rootfs::components(&member.path)?;
         if let Some(Link { kind: LinkKind::Hard, target }) = &member.link {
             crate::rootfs::components(target)?;
+            // A target the package does not ship is a file already on the system. tar puts a
+            // link after its target, so an earlier member is the only valid one.
+            if member.kind == MemberKind::Payload && !linkable.contains(target) {
+                return Err(Error::HardLinkOutsidePackage {
+                    path: path.to_path_buf(),
+                    member: member.path,
+                    target: target.clone(),
+                });
+            }
+        }
+        if member.kind == MemberKind::Payload && member.entry == EntryKind::Other {
+            linkable.insert(member.path.clone());
         }
         // Refused here rather than narrowed at extraction, so the package is refused before
         // anything of it is written.
@@ -483,7 +498,9 @@ fn describe<R: Read>(entry: &tar::Entry<'_, R>) -> std::io::Result<Member> {
         uid: header.uid()?,
         gid: header.gid()?,
         mtime: header.mtime()?,
-        size: header.size()?,
+        // The size `tar` reads the contents by: a PAX `size` record replaces the header's
+        // field. The header's field alone would differ from the bytes that are extracted.
+        size: entry.size(),
         xattrs: Vec::new(),
     })
 }
@@ -678,11 +695,22 @@ pub(crate) mod fixture {
         link: Option<&str>,
         contents: &[u8],
     ) {
+        raw_bytes(builder, name.as_bytes(), entry_type, link.map(str::as_bytes), contents);
+    }
+
+    /// [`raw`], for a name or a link target that is not text.
+    pub(crate) fn raw_bytes(
+        builder: &mut tar::Builder<Vec<u8>>,
+        name: &[u8],
+        entry_type: tar::EntryType,
+        link: Option<&[u8]>,
+        contents: &[u8],
+    ) {
         let mut header = tar::Header::new_gnu();
         let gnu = header.as_gnu_mut().unwrap();
-        gnu.name.get_mut(..name.len()).unwrap().copy_from_slice(name.as_bytes());
+        gnu.name.get_mut(..name.len()).unwrap().copy_from_slice(name);
         if let Some(link) = link {
-            gnu.linkname.get_mut(..link.len()).unwrap().copy_from_slice(link.as_bytes());
+            gnu.linkname.get_mut(..link.len()).unwrap().copy_from_slice(link);
         }
         header.set_entry_type(entry_type);
         header.set_mode(if entry_type.is_dir() { 0o755 } else { 0o644 });
@@ -954,6 +982,55 @@ mod tests {
                 "{name:?}: got {err:?}"
             );
         }
+    }
+
+    /// A PAX `size` record replaces the size field of the header, and `tar` reads the contents
+    /// by it. `Member::size` must be the same number: the disk-space estimate sums it, and the
+    /// test for a member cut short counts down from it.
+    #[test]
+    fn a_member_takes_its_size_from_its_pax_record() {
+        fn sized(header_size: u64, pax: &[u8], data: &[u8]) -> PathBuf {
+            tarball(|builder| {
+                builder.append_pax_extensions([("size", pax)]).unwrap();
+                let mut header = tar::Header::new_ustar();
+                header.set_path("usr/big").unwrap();
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_mode(0o644);
+                header.set_uid(0);
+                header.set_gid(0);
+                header.set_mtime(0);
+                header.set_size(header_size);
+                header.set_cksum();
+                builder.append(&header, data).unwrap();
+            })
+        }
+        let read = |path: &Path| {
+            let mut seen = None;
+            walk_until(path, &PackageLimits::default(), |member, contents| {
+                let mut bytes = Vec::new();
+                let read = contents.read_to_end(&mut bytes).map(|_| bytes);
+                seen = Some((member.size, read.map_err(|error| error.kind())));
+                Ok(Flow::Stop)
+            })
+            .unwrap();
+            seen.unwrap()
+        };
+
+        // A header that declares less, then more, than the record.
+        for header_size in [0, 100] {
+            let (size, contents) = read(&sized(header_size, b"5", b"hello"));
+            assert_eq!(size, 5, "header size {header_size}");
+            assert_eq!(contents.unwrap(), b"hello", "header size {header_size}");
+        }
+
+        // The file ends 3 bytes into a member of 5000: the two blocks of the PAX member, the
+        // header block, then the 3 bytes.
+        let path = sized(0, b"5000", b"hel");
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, bytes.get(..1539).unwrap()).unwrap();
+        let (size, contents) = read(&path);
+        assert_eq!(size, 5000);
+        assert_eq!(contents.unwrap_err(), std::io::ErrorKind::UnexpectedEof);
     }
 
     /// An owner the kernel cannot set refuses the package. Narrowed, a uid past 32 bits would

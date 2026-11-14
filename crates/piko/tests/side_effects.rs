@@ -844,6 +844,29 @@ fn a_named_package_file_is_installed_from_a_private_copy() {
     assert!(!staging_left, "the staging directory was left in the cache");
 }
 
+/// A package file named by path is held to the global `SigLevel` when the configuration sets
+/// no `LocalFileSigLevel`, as libalpm holds it (`alpm_option_get_local_file_siglevel`). Under
+/// `SigLevel = Required`, an unsigned file is refused and nothing is installed.
+#[test]
+fn an_unsigned_named_file_is_refused_under_the_inherited_sig_level() {
+    let sandbox = Sandbox::new();
+    sandbox.write_repo(&[]);
+    sandbox.require_signatures();
+    let conf = std::fs::read_to_string(sandbox.path("pacman.conf")).unwrap();
+    assert!(!conf.contains("FileSigLevel"), "this test needs a configuration with no file level");
+    let downloads = tempfile::tempdir().unwrap();
+    let named = downloads.path().join("foo-1.0.0-1-x86_64.pkg.tar");
+    std::fs::write(&named, package_tar("foo", "1.0.0-1", None, &[])).unwrap();
+
+    let output = sandbox.run_install(&[named.to_str().unwrap()], &[]);
+    let seen = text(&output);
+
+    assert!(!output.status.success(), "an unsigned named file was accepted:\n{seen}");
+    assert!(seen.contains("it is not signed"), "the refusal did not name the cause:\n{seen}");
+    assert!(!sandbox.path("root/usr/bin/foo").exists(), "the file was installed:\n{seen}");
+    assert!(!sandbox.path("db/local/foo-1.0.0-1").exists(), "an entry was written:\n{seen}");
+}
+
 /// A journal left by an unfinished transaction refuses the next one, names `piko report`, and
 /// is left as it was. The refusal comes from the library, which a second frontend shares.
 #[test]
@@ -957,6 +980,53 @@ fn a_transaction_refuses_a_config_it_cannot_read() {
     }
 }
 
+/// A lookup the local database answers opens no repository, so it needs no configuration.
+#[test]
+fn an_installed_package_is_shown_without_a_readable_config() {
+    let sandbox = Sandbox::new();
+    write_package(&sandbox.path("cache"), "1.0.0-1", None);
+    let installed = sandbox.install("1.0.0-1", &[]);
+    assert!(installed.status.success(), "{}", text(&installed));
+
+    for command in ["info", "files"] {
+        let output = Command::new(PIKO)
+            .arg(command)
+            .arg("--config")
+            .arg(sandbox.path("missing.conf"))
+            .arg("--dbpath")
+            .arg(sandbox.path("db"))
+            .arg("foo")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{command}: {}", text(&output));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("foo"), "{command}");
+    }
+}
+
+/// A refresh that cannot read its configuration synchronizes nothing, and records nothing.
+#[test]
+fn a_refresh_without_a_readable_config_writes_no_log_line() {
+    let sandbox = Sandbox::new();
+    let log = sandbox.path("refresh.log");
+
+    let output = Command::new(PIKO)
+        .arg("refresh")
+        .arg("--config")
+        .arg(sandbox.path("missing.conf"))
+        .arg("--dbpath")
+        .arg(sandbox.path("db"))
+        .arg("--logfile")
+        .arg(&log)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("failed to read"), "{}", text(&output));
+    assert!(!log.exists(), "{}", std::fs::read_to_string(&log).unwrap_or_default());
+}
+
 /// Without `AbortOnFail`, the same failing hook must not stop anything.
 #[test]
 fn a_failing_hook_without_abort_on_fail_is_only_a_warning() {
@@ -1042,9 +1112,10 @@ fn a_hook_for_another_package_does_not_run() {
     assert!(!seen.contains("Should not appear"), "an unmatched hook ran:\n{seen}");
 }
 
-/// An unparseable hook file is reported and does not stop the transaction.
+/// An unparseable hook file refuses the transaction before anything changes. The file can
+/// hold a hook that must run first, and libalpm refuses for the same reason (`hook.c:625`).
 #[test]
-fn a_broken_hook_file_is_reported_and_skipped() {
+fn a_broken_hook_file_refuses_the_transaction() {
     let sandbox = Sandbox::new();
     write_package(&sandbox.path("cache"), "1.0.0-1", None);
     sandbox.write_hook("10-broken.hook", "[Nonsense]\nWhat = ever\n");
@@ -1052,9 +1123,10 @@ fn a_broken_hook_file_is_reported_and_skipped() {
     let output = sandbox.install("1.0.0-1", &[]);
     let seen = text(&output);
 
-    assert!(output.status.success(), "{seen}");
+    assert!(!output.status.success(), "{seen}");
     assert!(seen.contains("10-broken.hook"), "{seen}");
-    assert!(sandbox.path("root/usr/bin/foo").exists());
+    assert!(seen.contains("nothing was changed"), "{seen}");
+    assert!(!sandbox.path("root/usr/bin/foo").exists(), "the package was installed anyway");
 }
 
 /// A hook file the transaction itself deletes must not run afterwards.
@@ -2804,6 +2876,28 @@ fn a_glob_remove_target_works_on_the_nodeps_path() {
     assert!(!sandbox.path("db/local/app-b-1.0.0-1").exists(), "{seen}");
 }
 
+/// A package named twice on the `--nodeps` path is removed once, and the transaction ends
+/// clean: a later transaction is not refused for a journal left behind.
+#[test]
+fn a_nodeps_target_named_twice_is_removed_once() {
+    let sandbox = Sandbox::new();
+    for name in ["app-a", "app-b"] {
+        write_package_with(&sandbox.path("cache"), name, "1.0.0-1", None, &[]);
+    }
+    sandbox.write_repo(&[("app-a", "1.0.0-1", &[][..]), ("app-b", "1.0.0-1", &[][..])]);
+    assert!(sandbox.run_install(&["app-a", "app-b"], &[]).status.success());
+
+    let output =
+        sandbox.run_remove(&["app-a", "app-*", "app-a"], &["--noconfirm", "--nodeps"], None);
+    let seen = text(&output);
+
+    assert!(output.status.success(), "{seen}");
+    assert!(!sandbox.path("db/local/app-a-1.0.0-1").exists(), "{seen}");
+    assert!(!sandbox.path("db/local/app-b-1.0.0-1").exists(), "{seen}");
+    let again = sandbox.run_install(&["app-a"], &[]);
+    assert!(again.status.success(), "{}", text(&again));
+}
+
 /// `piko owns` names a package piko itself installed, through the real binary.
 ///
 /// The library tests cover the resolution rules. This covers the wiring: the argument parsing,
@@ -2923,6 +3017,34 @@ fn merge_output_lists_a_pacnew_and_changes_nothing() {
     assert!(text(&output).contains("etc/foo.conf.pacnew"), "{}", text(&output));
     assert!(sandbox.path("root/etc/foo.conf.pacnew").exists());
     assert_eq!(std::fs::read(sandbox.path("root/etc/foo.conf")).unwrap(), b"edited by the user");
+}
+
+/// A path `--output` prints selects its pair again, under a root that is not `/`. A path that
+/// names no pending file is an error, not a silent success.
+#[test]
+fn merge_takes_the_path_output_prints_and_refuses_one_that_names_nothing() {
+    let sandbox = Sandbox::new();
+    sandbox.install_with_backup("1.0.0-1", "shipped by version one");
+    std::fs::write(sandbox.path("root/etc/foo.conf"), b"edited by the user").unwrap();
+    sandbox.install_with_backup("2.0.0-1", "shipped by version two");
+
+    let listed = sandbox.run_merge(&["--output"], None);
+    let printed = String::from_utf8(listed.stdout).unwrap();
+    let printed = printed.trim();
+    assert!(printed.ends_with("/root/etc/foo.conf.pacnew"), "{printed}");
+
+    for spelling in [printed, "/etc/foo.conf.pacnew", "etc/foo.conf"] {
+        let output = sandbox.run_merge(&[spelling], Some("r\n"));
+        assert!(output.status.success(), "{spelling}: {}", text(&output));
+        assert!(!sandbox.path("root/etc/foo.conf.pacnew").exists(), "{spelling}");
+        std::fs::write(sandbox.path("root/etc/foo.conf.pacnew"), b"shipped by version two")
+            .unwrap();
+    }
+
+    let output = sandbox.run_merge(&["/etc/absent.conf"], Some("r\n"));
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("/etc/absent.conf names no pending file"), "{}", text(&output));
+    assert!(sandbox.path("root/etc/foo.conf.pacnew").exists());
 }
 
 /// A pending file holding the target's bytes carries nothing, so it goes without a question.

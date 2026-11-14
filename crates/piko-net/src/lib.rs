@@ -155,11 +155,13 @@ pub use concurrency::Concurrency;
 pub use error::{Error, Result, without_credentials};
 pub use freshness::{FreshnessNote, FreshnessPolicy, Refreshed};
 pub use progress::{Event, Kind};
-pub use refresh::{DatabaseKind, Limits, Outcome, PackageFetch, Refresher, RepoRefresh, refresh};
+pub use refresh::{
+    DatabaseKind, DownloadSettings, Limits, Outcome, PackageFetch, Refresher, RepoRefresh, refresh,
+};
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use sandbox::fuzzing;
 #[doc(hidden)]
-pub use sandbox::{FALLBACK_USER, confine_self};
+pub use sandbox::{Confined, FALLBACK_USER, confine_self};
 pub use sandbox::{Sandbox, run_helper_if_requested};
 pub use targets::RefreshTargets;

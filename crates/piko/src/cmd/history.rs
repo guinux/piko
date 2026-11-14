@@ -114,7 +114,7 @@ impl Widths {
         }
         for action in records.iter().flat_map(|record| shown_actions(record, options)) {
             widths.verb = widths.verb.max(verb(action).len());
-            widths.name = widths.name.max(action.name().len());
+            widths.name = widths.name.max(piko_db::printable(action.name()).len());
         }
         widths
     }
@@ -138,8 +138,8 @@ fn shown_actions<'a>(record: &'a Record, options: &'a Options) -> impl Iterator<
 /// write failure, so a helper that writes hands that decision back to its caller.
 ///
 /// Every free-text field is escaped by `piko_db::printable`: the command line, the caller, the
-/// failure reason, and the `.pacnew`/`.pacsave` paths. A package chose those paths, and any tool
-/// that writes `pacman.log` chose the rest.
+/// failure reason, each action's package name and versions, and the `.pacnew`/`.pacsave` paths.
+/// A package chose those paths, and any tool that writes `pacman.log` chose the rest.
 fn print_record(
     record: &Record,
     options: &Options,
@@ -173,7 +173,7 @@ fn print_record(
     let inline = if options.quiet {
         match (&record.command, record.actions.as_slice()) {
             (Some(command), _) => format!("  {}", piko_db::printable(command)),
-            (None, [action]) => format!("  {}", action.log_message()),
+            (None, [action]) => format!("  {}", piko_db::printable(&action.log_message())),
             (None, _) => String::new(),
         }
     } else {
@@ -207,7 +207,7 @@ fn print_record(
         // straight through `write!` rather than `Formatter::pad`. So an outer `{:width$}`
         // around a styled value pads the escapes. Same reason as `plan.rs`.
         let prefix = kind.prefix(&format!("{:<verb_width$}", verb(action)));
-        let name = action.name();
+        let name = piko_db::printable(action.name());
         emit!(out, "  {prefix} {name:name_width$} {}", versions(action, kind));
     }
 
@@ -249,9 +249,12 @@ fn verb(action: &Action) -> &'static str {
 /// This is the same two-tone shape `cmd::plan` gives a `Step::Change`. So a line reads the
 /// same whether piko is proposing the change or reporting it.
 fn versions(action: &Action, kind: ChangeKind) -> String {
-    let to = kind.style().apply_to(action.version());
+    let to = kind.style().apply_to(piko_db::printable(action.version()));
     match action.previous() {
-        Some(from) => format!("{} -> {to}", console::Style::new().dim().apply_to(from)),
+        Some(from) => {
+            let from = piko_db::printable(from);
+            format!("{} -> {to}", console::Style::new().dim().apply_to(from))
+        }
         None => to.to_string(),
     }
 }
@@ -560,7 +563,12 @@ mod tests {
     /// absence shows the payload did not reach the output as it was.
     #[test]
     fn a_record_escapes_what_could_drive_a_terminal() {
-        let mut record = record_with(Some(&format!("piko install {CLIPBOARD}")), Vec::new());
+        let action = Action::Upgraded {
+            name: format!("foo{CLIPBOARD}"),
+            from: format!("1.0{CLIPBOARD}-1"),
+            to: format!("1.1{CLIPBOARD}-1"),
+        };
+        let mut record = record_with(Some(&format!("piko install {CLIPBOARD}")), vec![action]);
         record.tool = format!("X{CLIPBOARD}");
         record.pacnew = vec![std::path::PathBuf::from(format!("etc/{CLIPBOARD}.pacnew"))];
         record.pacsave = vec![std::path::PathBuf::from(format!("etc/{CLIPBOARD}.pacsave"))];
@@ -583,6 +591,15 @@ mod tests {
             assert!(!text.contains('\u{7}'), "{text}");
             assert!(text.contains("\\u{1b}]52;c;cHduZWQ=\\u{7}"), "{text}");
         }
+
+        // With no command line, `--quiet` names the single action instead.
+        record.command = None;
+        let options = Options { quiet: true, ..options };
+        let mut out = Vec::new();
+        assert_eq!(print_record(&record, &options, Widths::default(), &mut out), ExitCode::SUCCESS);
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains('\u{7}'), "{text}");
+        assert!(text.contains("upgraded foo\\u{1b}]52"), "{text}");
     }
 
     /// Both sides of a version change are shown.

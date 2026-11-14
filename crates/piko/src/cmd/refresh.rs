@@ -81,7 +81,7 @@ fn refresh_locked(
     let Options { force, files, freshness } = options;
     let sync_dir = dbpath.join("sync");
     let refresher =
-        Refresher::default().with_sandbox(piko_net::Sandbox::from_options(&config.options));
+        Refresher::from_settings(piko_net::DownloadSettings::from_options(&config.options));
 
     // Which archives, under which policy, checked by which keyring: `RefreshTargets`
     // decides all three from the configuration.

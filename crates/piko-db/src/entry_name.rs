@@ -303,6 +303,14 @@ mod tests {
         }
     }
 
+    /// An entry name gives the version a frontend prints for a package. One that holds an
+    /// escape sequence is refused, so the package is never listed.
+    #[test]
+    fn rejects_a_version_holding_a_control_character() {
+        let parsed = EntryName::parse("foo-1\u{1b}]0;PWNED\u{7}-1");
+        assert!(matches!(parsed, Err(EntryNameError::InvalidVersion { .. })), "got {parsed:?}");
+    }
+
     /// Two directories must never denote the same package. A zero-padded pkgrel parses to the
     /// same `FullVersion` as the unpadded one, so piko must refuse it.
     #[test]

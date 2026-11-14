@@ -189,9 +189,11 @@ pub(crate) use piko_db::printable;
 /// bug report. So every URL piko-net puts in an error, a note or a reason goes through this
 /// first, and so does every message ureq or the download helper returns.
 ///
-/// An authority ends at the first `/`, `?`, `#`, quote, angle bracket or white space after
-/// `://`. The user information is everything up to its last `@`, the same split the `http`
-/// loopback test and the per-host failure count make.
+/// An authority ends at the first `/`, `?`, `#` or white space after `://`, and at nothing else:
+/// a password may hold a quote or a bracket, and `user:pa'ss@host` is a valid authority. The
+/// user information is everything up to its last `@`, the same split the `http` loopback test
+/// and the per-host failure count make. A quote that closes a URL with no path stays, because it
+/// follows the host.
 #[must_use]
 pub fn without_credentials(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains("://") {
@@ -203,9 +205,7 @@ pub fn without_credentials(text: &str) -> std::borrow::Cow<'_, str> {
         let Some((before, after)) = rest.split_at_checked(index.saturating_add(3)) else { break };
         shown.push_str(before);
         let end = after
-            .find(|c: char| {
-                matches!(c, '/' | '?' | '#' | '"' | '\'' | '<' | '>' | '`') || c.is_whitespace()
-            })
+            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
             .unwrap_or(after.len());
         let Some((authority, tail)) = after.split_at_checked(end) else {
             rest = after;
@@ -339,6 +339,23 @@ mod tests {
              redirected to 'https://b.example/core.db'"
         );
         assert_eq!(without_credentials("connection reset by peer"), "connection reset by peer");
+    }
+
+    /// A password may hold any character an authority allows, a quote included. The authority
+    /// does not end there.
+    #[test]
+    fn a_password_with_a_quote_or_a_bracket_is_removed_whole() {
+        for password in ["pa'ss", "pa\"ss", "pa`ss", "pa<ss>", "(pa)ss", "p@'ss"] {
+            let url = format!("https://user:{password}@mirror.example/core.db");
+            assert_eq!(without_credentials(&url), "https://mirror.example/core.db", "{url}");
+            let bare = format!("https://user:{password}@mirror.example");
+            assert_eq!(without_credentials(&bare), "https://mirror.example", "{bare}");
+        }
+        // A quoted URL with no path keeps the quote that closes it.
+        assert_eq!(
+            without_credentials("redirected to 'https://v:q@b.example' twice"),
+            "redirected to 'https://b.example' twice"
+        );
     }
 
     /// An attempt about its own URL keeps only the causes once the path lost its credentials.

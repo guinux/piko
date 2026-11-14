@@ -268,7 +268,8 @@ impl<'lock> LocalDbWriter<'lock> {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if the entry does not exist or the write fails at any stage.
+    /// - [`Error::InvalidMemberName`] if `name` is not one plain file name.
+    /// - [`Error::Io`] if the entry does not exist or the write fails at any stage.
     pub fn write_raw(
         &self,
         entry: &EntryName,
@@ -276,6 +277,7 @@ impl<'lock> LocalDbWriter<'lock> {
         contents: &[u8],
         modified: Option<SystemTime>,
     ) -> Result<()> {
+        check_member_name(name)?;
         let path = self.entry_path(entry).join(name);
         atomic_write_at(&path, contents, modified)
     }
@@ -441,8 +443,10 @@ impl EntryWrite {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if the temporary cannot be created or written.
+    /// - [`Error::InvalidMemberName`] if `name` is not one plain file name.
+    /// - [`Error::Io`] if the temporary cannot be created or written.
     pub fn raw(&mut self, name: &str, contents: &[u8], modified: Option<SystemTime>) -> Result<()> {
+        check_member_name(name)?;
         let mut temporary = Temporary::create(&self.dir.join(name))?;
         temporary.write_all(contents)?;
         // After the write, which would otherwise move the time forward again. Before
@@ -585,6 +589,25 @@ fn not_an_entry(path: &Path) -> Error {
         IoAction::Remove,
         std::io::Error::new(std::io::ErrorKind::NotADirectory, "entry is not a real directory"),
     )
+}
+
+/// Refuses a name that is not one plain file name.
+///
+/// `Path::join` keeps a `..`, and replaces the whole path when the name is absolute. So a name
+/// with a `/`, a `.` or a `..` would put the file outside the entry directory.
+fn check_member_name(name: &str) -> Result<()> {
+    use std::path::Component;
+
+    let mut components = Path::new(name).components();
+    let plain = matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(only)), None) if only == name
+    );
+    if plain && !name.contains('\0') {
+        Ok(())
+    } else {
+        Err(Error::InvalidMemberName { name: piko_db::excerpt(name) })
+    }
 }
 
 /// The file name a record of this kind is stored under.
@@ -948,6 +971,31 @@ mod tests {
         assert!(!staging.exists(), "the staging directory must be removed on drop");
         assert!(!writer.entry_path(&new).exists(), "nothing may be published without a commit");
         assert!(writer.entry_path(&old).join("desc").exists(), "the old entry must be intact");
+    }
+
+    /// A member is named by one plain file name. A name with a `/`, a `.` or a `..` would put
+    /// the file outside the entry, so both doors refuse it and write nothing.
+    #[test]
+    fn a_member_name_that_leaves_the_entry_is_refused() {
+        let harness = Harness::new();
+        let lock = harness.lock();
+        let writer = LocalDbWriter::new(harness.dbpath(), &lock, Limits::default()).unwrap();
+        let installed = entry("foo-1.0.0-1");
+        writer.create_entry(&installed).unwrap();
+        let outside = harness.dbpath().join("outside");
+        let absolute = outside.to_str().unwrap().to_owned();
+        let mut staged = writer.entry_write(&entry("bar-1.0.0-1"), None).unwrap();
+
+        for name in [absolute.as_str(), "../outside", "sub/install", "install/", ".", "..", ""] {
+            let direct = writer.write_raw(&installed, name, b"x", None);
+            assert!(matches!(direct, Err(Error::InvalidMemberName { .. })), "{name:?}: {direct:?}");
+            let through = staged.raw(name, b"x", None);
+            assert!(matches!(through, Err(Error::InvalidMemberName { .. })), "{name:?}");
+        }
+
+        assert!(!outside.exists() && !harness.dbpath().join("local/outside").exists());
+        writer.write_raw(&installed, "install", b"x", None).unwrap();
+        staged.raw("mtree", b"x", None).unwrap();
     }
 
     /// A staged write must produce the same bytes as the per-file path it replaces. Otherwise

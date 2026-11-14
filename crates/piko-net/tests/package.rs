@@ -15,10 +15,11 @@ use std::{
     net::TcpListener,
     path::Path,
     str::FromStr as _,
+    time::Duration,
 };
 
 use alpm_types::PackageFileName;
-use piko_net::{Cancel, PackageFetch, Refresher};
+use piko_net::{Cancel, Limits, PackageFetch, Refresher};
 use piko_sig::Policy;
 
 mod connection;
@@ -102,6 +103,74 @@ fn fetch_declared(
         wanted(&file_name, &servers, policy, size),
         &Cancel::new(),
     )
+}
+
+/// Serves one `200` whose body is `chunks` chunks of 256 bytes, one every `pause`.
+fn serve_slowly(chunks: usize, pause: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else { return };
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) != 0 && line != "\r\n" {
+            line.clear();
+        }
+        let length = chunks.saturating_mul(256);
+        let head =
+            format!("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {length}\r\n\r\n");
+        let _ = stream.write_all(head.as_bytes());
+        for _ in 0..chunks {
+            if stream.write_all(&[7_u8; 256]).is_err() || stream.flush().is_err() {
+                return;
+            }
+            std::thread::sleep(pause);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Bounds short enough to test: one second for the response to begin, and one second with no
+/// bytes.
+fn short_waits() -> Refresher {
+    Refresher::new(Limits {
+        timeout: Duration::from_secs(1),
+        stall_timeout: Some(Duration::from_secs(1)),
+        ..Limits::default()
+    })
+}
+
+/// No bound covers the whole transfer. A body that keeps arriving completes, however long it
+/// takes against the two waits.
+#[test]
+fn a_slow_transfer_that_keeps_arriving_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    // Three seconds in all, and never more than 250 ms without a byte.
+    let url = serve_slowly(12, Duration::from_millis(250));
+    let (file_name, servers) = (file_name(), [url]);
+
+    let path = short_waits()
+        .fetch_package(dir.path(), wanted(&file_name, &servers, unsigned(), None), &Cancel::new())
+        .unwrap();
+
+    assert_eq!(std::fs::read(path).unwrap().len(), 12 * 256);
+}
+
+/// A body that stops arriving is given up after the stall bound, and nothing reaches the cache.
+#[test]
+fn a_transfer_that_stops_is_given_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = serve_slowly(2, Duration::from_secs(4));
+    let (file_name, servers) = (file_name(), [url]);
+    let started = std::time::Instant::now();
+
+    let error = short_waits()
+        .fetch_package(dir.path(), wanted(&file_name, &servers, unsigned(), None), &Cancel::new())
+        .unwrap_err();
+
+    assert!(error.to_string().contains("timeout"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    assert!(!dir.path().join(NAME).exists());
 }
 
 /// A missing package downloads and lands in the cache under its own name.
@@ -408,4 +477,69 @@ fn a_cache_server_is_asked_again_after_any_number_of_misses() {
     let seen = finish(&cache, cache_server);
     assert_eq!(seen.iter().filter(|request| request.starts_with("GET")).count(), 5, "{seen:?}");
     drop(finish(&good, good_server));
+}
+
+/// A server that answers every request with `body` after a short wait, and counts them.
+fn counting_server(
+    body: &'static [u8],
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&count);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            seen.fetch_add(1, Ordering::Relaxed);
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) != 0 && line != "\r\n" {
+                    line.clear();
+                }
+                // Long enough for every worker of the batch to hold a transfer at once.
+                std::thread::sleep(Duration::from_millis(100));
+                connection::write_closing(&mut stream, &ok_response(body));
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}"), count)
+}
+
+/// Mirror spreading starts each group of workers on another mirror. It never starts one past a
+/// `CacheServer`: a cache that holds every file serves every file.
+#[test]
+fn every_worker_of_a_batch_asks_the_cache_server_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, cache_requests) = counting_server(b"from the cache");
+    let (mirror, mirror_requests) = counting_server(b"from the mirror");
+    let servers = [cache, mirror];
+    let names: Vec<PackageFileName> = (0..10)
+        .map(|n| PackageFileName::from_str(&format!("foo{n}-1.0.0-1-x86_64.pkg.tar.zst")).unwrap())
+        .collect();
+    let batch: Vec<PackageFetch<'_>> = names
+        .iter()
+        .map(|name| wanted(name, &servers, unsigned(), None).with_cache_servers(1))
+        .collect();
+
+    let results = Refresher::default().fetch_packages(
+        dir.path(),
+        &batch,
+        piko_net::Concurrency::new(5),
+        &Cancel::new(),
+        &|_| {},
+    );
+
+    for result in results {
+        assert_eq!(std::fs::read(result.unwrap()).unwrap(), b"from the cache");
+    }
+    let count = |requests: &std::sync::atomic::AtomicUsize| {
+        requests.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    assert_eq!((count(&cache_requests), count(&mirror_requests)), (10, 0));
 }

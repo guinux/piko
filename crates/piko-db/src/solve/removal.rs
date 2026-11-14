@@ -27,6 +27,8 @@
 //! the user typed). The guard itself, its prompt, and its `pacman.conf` parsing are a
 //! frontend's concern.
 
+use std::collections::HashSet;
+
 use crate::solve::glob::{
     Expansion, ExpansionFailure, expand_installed_names, expand_installed_targets,
 };
@@ -189,14 +191,15 @@ pub enum NamedRemovalFailure {
 pub struct NamedRemoval {
     /// One entry per glob target, in the order the targets were given.
     pub expansions: Vec<Expansion>,
-    /// The entries, in the order the targets were given, or the first target that has none.
+    /// The entries, each one once, in the order the targets first named them, or the first
+    /// target that has none.
     pub outcome: Result<Vec<EntryName>, NamedRemovalFailure>,
 }
 
 /// Names the installed entries `targets` designate, and checks nothing else.
 ///
 /// This is `piko remove --nodeps`, pacman's `-Rdd`: exactly the packages named, in the order
-/// named, with no dependency checked. It can leave the system with unsatisfied dependencies,
+/// named, with no dependency checked. A package that two targets name is one entry. It can leave the system with unsatisfied dependencies,
 /// which is the stated intent of the flag.
 ///
 /// A glob target expands against installed package names only
@@ -214,8 +217,13 @@ pub fn named_removal(
     limits: &Limits,
 ) -> Result<NamedRemoval, ExpansionFailure> {
     let (names, expansions) = expand_installed_names(local, targets, limits)?;
+    // A name given twice, or selected by two patterns, is one entry. `alpm_remove_pkg`
+    // (`remove.c:68`) skips a duplicate target the same way. An entry listed twice is a second
+    // removal of a directory the first one already took away.
+    let mut seen: HashSet<&str> = HashSet::new();
     let outcome = names
         .iter()
+        .filter(|name| seen.insert(name.as_str()))
         .map(|name| {
             local
                 .get_str(name)
@@ -392,6 +400,23 @@ mod tests {
         let entries = named(&scenario, &["lib", "app"]).outcome.unwrap();
         let spelled: Vec<&str> = entries.iter().map(EntryName::as_str).collect();
         assert_eq!(spelled, ["lib-2.0.0-1", "app-1.0.0-1"], "`app` still needs `lib`");
+    }
+
+    /// A name given twice, and a name that a pattern also selects, is one entry. A second
+    /// entry is a second removal of the same directory, which stops the transaction part-way.
+    #[test]
+    fn nodeps_names_an_entry_once_however_many_targets_name_it() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("lib-a", "1.0.0-1"))
+            .installed(PackageSpec::new("lib-b", "1.0.0-1"))
+            .build();
+
+        for targets in [&["lib-b", "lib-a", "lib-b"][..], &["lib-b", "lib-*", "l*"][..]] {
+            let removal = named(&scenario, targets);
+            let entries = removal.outcome.unwrap();
+            let spelled: Vec<&str> = entries.iter().map(EntryName::as_str).collect();
+            assert_eq!(spelled, ["lib-b-1.0.0-1", "lib-a-1.0.0-1"], "{targets:?}");
+        }
     }
 
     /// A pattern expands against installed names, and says what it selected.

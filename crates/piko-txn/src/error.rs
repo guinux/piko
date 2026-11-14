@@ -145,6 +145,25 @@ pub enum Error {
         kind: &'static str,
     },
 
+    /// A hard link member names a target that is not a file the same package ships before it.
+    ///
+    /// A hard link is the one member that reaches a file by name. With a target outside the
+    /// package, it would give a second name to a file that is already on the system.
+    #[error(
+        "{}: the hard link {} names {}, which is not an earlier member of the package",
+        shown(path),
+        shown(member),
+        shown(target)
+    )]
+    HardLinkOutsidePackage {
+        /// The package archive.
+        path: PathBuf,
+        /// The hard link's path, as the archive spells it.
+        member: PathBuf,
+        /// The target it names.
+        target: PathBuf,
+    },
+
     /// A member's owner is not a user and group id the kernel can set.
     ///
     /// An id is 32 bits, and `u32::MAX` is `-1`, which `chown` reads as "leave unchanged". A
@@ -313,6 +332,20 @@ pub enum Error {
         reason: String,
         /// What the hook printed before it failed.
         output: Vec<String>,
+    },
+
+    /// A trusted hook file or hook directory could not be read or parsed when the
+    /// `PreTransaction` hooks were read, so the transaction was not started.
+    ///
+    /// The file can hold a hook that must run before the transaction, or one that sets
+    /// `AbortOnFail`. libalpm refuses the transaction for the same reason (`hook.c:625`).
+    #[error(
+        "the transaction was not started, because the PreTransaction hooks could not all be read:{}",
+        problems.iter().map(|problem| format!("\n  {}", said(problem))).collect::<String>()
+    )]
+    HooksUnusable {
+        /// Each problem, as [`crate::hook::Problem`] displays it.
+        problems: Vec<String>,
     },
 
     /// The transaction stopped because [`crate::Transaction::cancel`]'s flag was raised.

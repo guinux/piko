@@ -86,6 +86,11 @@ pub enum SkipReason {
     /// libalpm warns and skips (`add.c:208`). Treating the file list as authoritative over the
     /// archive is the same principle as the local database's directory-name-wins rule.
     NotInFileList,
+    /// The entry is a hard link, and this extraction did not write its target at the target's
+    /// own path: `NoExtract` skipped it, or it went to a `.pacnew`.
+    ///
+    /// A link made anyway would name whatever file was at that path before the package.
+    LinkTargetNotExtracted,
 }
 
 /// What to do with an entry.

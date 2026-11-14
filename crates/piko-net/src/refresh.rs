@@ -49,7 +49,10 @@ pub enum Outcome {
 /// Bounds and behaviour for downloading.
 ///
 /// A mirror is an untrusted party until its signature is checked. So every number here exists to
-/// stop one from deciding how long piko runs, or how much disk it uses.
+/// stop one from deciding how long piko waits, or how much disk it uses.
+///
+/// No number bounds how long a whole transfer takes. A large package on a slow link takes as
+/// long as it takes. [`Limits::timeout`] and [`Limits::stall_timeout`] bound each wait instead.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Largest database that will be accepted.
@@ -65,8 +68,16 @@ pub struct Limits {
     /// headroom above that rather than a measurement, enforced the same way: against bytes
     /// actually received.
     pub max_package_bytes: u64,
-    /// How long to wait for the whole request.
+    /// How long a server may take to begin its response, once the request is sent.
     pub timeout: Duration,
+    /// How long a transfer may receive nothing before it is given up.
+    ///
+    /// The bound restarts each time bytes arrive, so it refuses a transfer that stopped, and
+    /// never one that is slow. libalpm gives up a transfer below 1 byte per second for 10
+    /// seconds (`dload.c`, `CURLOPT_LOW_SPEED_TIME`).
+    ///
+    /// `None` is no bound, which is what `DisableDownloadTimeout` asks libalpm for.
+    pub stall_timeout: Option<Duration>,
     /// How many further servers are asked for a newer database when the one in place is older
     /// than the age limit.
     ///
@@ -86,6 +97,7 @@ impl Default for Limits {
             max_bytes: 128 * 1024 * 1024,
             max_package_bytes: 8 * 1024 * 1024 * 1024,
             timeout: Duration::from_secs(60),
+            stall_timeout: Some(Duration::from_secs(10)),
             freshness_probes: 3,
             archive: piko_db::Limits::default(),
         }
@@ -263,8 +275,7 @@ struct Downloaded {
 ///
 /// Cancellation is observable between requests and between 64 KiB chunks, never inside a connect.
 /// So this is the longest a worker can ignore a Ctrl+C. Bounding it tightly keeps a cancellation
-/// prompt when one mirror in a batch has gone dark. The transfer itself still gets the far more
-/// generous [`Limits::timeout`].
+/// prompt when one mirror in a batch has gone dark. A name lookup gets the same bound.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Which of a repository's two archives a refresh asks for.
@@ -314,9 +325,12 @@ pub struct PackageFetch<'a> {
     pub file_name: &'a PackageFileName,
     /// The repository it belongs to, for naming it in an error.
     pub repo_name: &'a str,
-    /// `Server`/`CacheServer`, tried in order from wherever this transfer's worker starts.
+    /// Every `CacheServer`, then every `Server`. The cache servers are tried first and in order.
+    /// The others are tried in order from wherever this transfer's worker starts.
     pub servers: &'a [String],
     /// How many entries at the front of [`Self::servers`] are `CacheServer`s.
+    ///
+    /// Every worker of a batch asks them before any other server.
     ///
     /// A cache server's errors are not counted against its host, so it is never skipped. A
     /// cache that does not hold one file answers 404, and still holds the next one.
@@ -383,6 +397,51 @@ impl<'a> PackageFetch<'a> {
     }
 }
 
+/// How downloads run: how they are confined, and what bounds them.
+///
+/// A frontend builds it once from `pacman.conf` with [`DownloadSettings::from_options`], and
+/// gives it to everything that downloads. So a database refresh, a package download and a
+/// package named by its URL are confined and bounded the same way.
+#[derive(Clone, Debug)]
+pub struct DownloadSettings {
+    /// How each request is confined.
+    pub sandbox: Sandbox,
+    /// The bounds of each transfer.
+    pub limits: Limits,
+}
+
+impl DownloadSettings {
+    /// The settings `pacman.conf` asks for.
+    ///
+    /// The sandbox is [`Sandbox::from_options`]. `DisableDownloadTimeout` removes
+    /// [`Limits::stall_timeout`], so a transfer that receives nothing is never given up. The
+    /// bounds on a name lookup, on a connection and on the start of the response stay: libalpm
+    /// removes its connection timeout too, and piko keeps the waits that no slow link explains.
+    #[must_use]
+    pub fn from_options(options: &piko_db::config::Options) -> Self {
+        let mut limits = Limits::default();
+        if options.disable_download_timeout {
+            limits.stall_timeout = None;
+        }
+        Self { sandbox: Sandbox::from_options(options), limits }
+    }
+
+    /// The default bounds, with every request made in this process.
+    ///
+    /// For a test, and for a caller that confines the whole process by other means.
+    #[must_use]
+    pub fn unconfined() -> Self {
+        Self { sandbox: Sandbox::disabled(), limits: Limits::default() }
+    }
+}
+
+impl Default for DownloadSettings {
+    /// The default sandbox and the default bounds: what an empty `pacman.conf` asks for.
+    fn default() -> Self {
+        Self { sandbox: Sandbox::default(), limits: Limits::default() }
+    }
+}
+
 /// The first name that appears twice, if any.
 fn first_duplicate(names: impl Iterator<Item = String>) -> Option<String> {
     let mut seen = std::collections::HashSet::new();
@@ -418,6 +477,12 @@ impl Refresher {
         }
     }
 
+    /// Builds a refresher from `settings`: its bounds, and its sandbox.
+    #[must_use]
+    pub fn from_settings(settings: DownloadSettings) -> Self {
+        Self::new(settings.limits).with_sandbox(settings.sandbox)
+    }
+
     /// Runs every request in a helper process confined by `sandbox`.
     ///
     /// A disabled sandbox keeps requests in this process. See [`Sandbox`](crate::Sandbox).
@@ -438,7 +503,7 @@ impl Refresher {
     }
 
     const fn timeouts(limits: &Limits) -> Timeouts {
-        Timeouts { whole: limits.timeout, connect: CONNECT_TIMEOUT }
+        Timeouts { connect: CONNECT_TIMEOUT, response: limits.timeout, stall: limits.stall_timeout }
     }
 
     /// Refreshes `<repo>.db` into `sync_dir`, verifying before it lands.
@@ -869,6 +934,18 @@ impl Refresher {
         // `DatabaseOptional`.
         match response.status {
             200 => {}
+            // A `304` answers the `If-Modified-Since` this request carried. With none sent, there
+            // may be no local copy at all, and "current" would report a database that does not
+            // exist. So it is this server's failure, and the next server is asked.
+            304 if local.since.is_none() => {
+                return Err(Error::Io {
+                    path: PathBuf::from(&*without_credentials(url)),
+                    action: "download",
+                    source: std::io::Error::other(
+                        "the server answered \"not modified\" to an unconditional request",
+                    ),
+                });
+            }
             304 => return Ok(Fetched::NotModified),
             other => {
                 return Err(Error::Io {
@@ -1152,6 +1229,7 @@ impl Refresher {
     ) -> Result<PathBuf> {
         let PackageFetch { file_name, repo_name, servers, cache_servers, policy, size } = wanted;
         let caches = servers.get(..cache_servers).unwrap_or(servers);
+        let mirrors = servers.get(cache_servers..).unwrap_or_default();
         // The failure of a request to `server`, recorded unless `server` is a cache.
         let failed = |server: &str| {
             if !caches.iter().any(|cache| cache == server) {
@@ -1172,7 +1250,10 @@ impl Refresher {
         let controls = Controls { cancel, progress };
 
         let mut attempts = Vec::new();
-        for server in concurrency.servers_for(servers, worker) {
+        // Every worker asks every cache first, in the configured order. Only the mirrors are
+        // spread across workers: a rotation of the whole list would start some workers past the
+        // caches, and a cache exists to be asked before any mirror.
+        for server in caches.iter().chain(concurrency.servers_for(mirrors, worker)) {
             let url = format!("{}/{name}", server.trim_end_matches('/'));
             if self.health.skips(server) {
                 attempts
@@ -1190,11 +1271,9 @@ impl Refresher {
                 },
                 controls,
             ) {
-                // A server answering "not modified" to a request that carried no
-                // `If-Modified-Since` is not behaving like HTTP. Treat it as a failure of
-                // this server rather than silently reporting success with nothing
-                // downloaded. `LocalCopy::NONE` has no time to be behind, so `Behind` cannot
-                // arise here, and is treated the same way.
+                // `LocalCopy::NONE` sends no `If-Modified-Since` and has no time to compare, so
+                // `fetch` returns neither of these for a package. Each one is a failure of this
+                // server all the same, rather than a success with nothing downloaded.
                 Ok(Fetched::NotModified | Fetched::Behind { .. }) => {
                     failed(server);
                     attempts.push((
@@ -1595,6 +1674,28 @@ mod tests {
         ] {
             assert_eq!(parse_http_date(bad), None, "{bad} was accepted");
         }
+    }
+
+    /// `DisableDownloadTimeout` removes the stall bound and nothing else.
+    #[test]
+    fn disable_download_timeout_removes_the_stall_bound_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = |text: &str| {
+            let path = dir.path().join("pacman.conf");
+            std::fs::write(&path, text).unwrap();
+            piko_db::config::PacmanConfig::open(&path).unwrap().options
+        };
+        let default = Limits::default();
+
+        let kept = DownloadSettings::from_options(&options("[options]\n")).limits;
+        assert_eq!(kept.stall_timeout, default.stall_timeout);
+        assert!(kept.stall_timeout.is_some());
+
+        let disabled =
+            DownloadSettings::from_options(&options("[options]\nDisableDownloadTimeout\n")).limits;
+        assert_eq!(disabled.stall_timeout, None);
+        assert_eq!(disabled.timeout, default.timeout);
+        assert_eq!(disabled.max_bytes, default.max_bytes);
     }
 
     #[test]

@@ -234,6 +234,9 @@ impl KeyringAdmin {
     /// This call sets the mode only on a directory it created itself. An existing keyring keeps its
     /// current mode.
     ///
+    /// An existing keyring must be one no other user could change, as [`Self::open`] requires.
+    /// The test runs before this call writes a file or starts GnuPG.
+    ///
     /// The master key is RSA-4096, certify-capable, and has no expiry. It carries no passphrase,
     /// because this keyring must be usable by an unattended `piko install`, exactly like pacman's
     /// own keyring. It exists only to locally sign ([`Self::lsign`]) other keys. piko never uses
@@ -242,11 +245,14 @@ impl KeyringAdmin {
     /// # Errors
     ///
     /// [`Error::Gpgme`] if the directory cannot be created, or key generation fails.
+    /// [`Error::KeyringUnusable`] if another user could change the keyring.
     pub fn init(home: impl AsRef<Path>) -> Result<(Self, InitOutcome)> {
         let home = home.as_ref().to_path_buf();
         if create_keyring_dir(&home)? {
             set_mode(&home, KEYRING_DIR_MODE, "set the keyring directory's permissions")?;
         }
+        // Before anything is written, and before GnuPG reads a `gpg.conf` another user wrote.
+        piko_sig::ensure_trusted_keyring(&home)?;
         // Before any GPGME context opens. An existing `pubring.gpg` is what makes GnuPG use the
         // legacy keyring format rather than create `pubring.kbx` beside it. `pacman-key` reads
         // only the former.
@@ -323,14 +329,23 @@ impl KeyringAdmin {
 
     /// Opens an already-initialized keyring for administration.
     ///
+    /// The keyring must be one no other user could change: not the directory, not a directory
+    /// on the way to it, and not anything directly in it, which must hold no symbolic link
+    /// either. [`piko_sig::Keyring::open`] applies the same rule to a reader. Every operation
+    /// here runs GnuPG, and GnuPG starts the program that the keyring's `gpg.conf` names as its
+    /// agent. A keyring that fails the test is repaired with `chown`, `chmod` and `rm`, not with
+    /// GnuPG.
+    ///
     /// # Errors
     ///
-    /// [`Error::KeyringUnusable`] if `home` is not a directory or GPGME cannot reach it.
+    /// [`Error::KeyringUnusable`] if `home` is not a directory, if another user could change it
+    /// or anything directly in it, if it holds a symbolic link, or if GPGME cannot reach it.
     pub fn open(home: impl AsRef<Path>) -> Result<Self> {
         let home = home.as_ref().to_path_buf();
         if !home.is_dir() {
             return Err(Error::KeyringUnusable { home, reason: "not a directory".to_owned() });
         }
+        piko_sig::ensure_trusted_keyring(&home)?;
         let admin = Self { home };
         drop(admin.context()?);
         Ok(admin)
@@ -746,6 +761,9 @@ const MAX_CONF_BYTES: u64 = 1024 * 1024;
 /// in any of three shapes: bare, commented out, or followed by a value. So a user who wrote
 /// `# no-greeting` or changed a timeout keeps their line, and a repeated `init` appends nothing.
 ///
+/// A file whose last line has no newline gets one before the first option, so that line and
+/// the option stay two lines. `add_gpg_conf_option` joins them.
+///
 /// The file is read and appended through one descriptor, opened `O_NOFOLLOW | O_NONBLOCK` and
 /// `fstat`-checked, the properties `piko_db::fs_util` enforces for a read. That module opens
 /// read-only, and a second open for the append could land on a different file. A symlink is
@@ -788,6 +806,12 @@ fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
         }
         appended.push_str(option);
         appended.push('\n');
+    }
+    // A last line with no newline would take the first option as its own tail:
+    // `trust-model pgp` becomes `trust-model pgpno-greeting`, which GnuPG refuses at every
+    // later call. The newline goes in the same write as the options.
+    if !appended.is_empty() && !current.is_empty() && !current.ends_with('\n') {
+        appended.insert(0, '\n');
     }
 
     file.write_all(appended.as_bytes()).map_err(describe("write a keyring configuration file"))?;
@@ -1231,7 +1255,7 @@ mod tests {
             std::os::unix::fs::symlink(target, home.join(name)).unwrap();
 
             let err = KeyringAdmin::init(&home).unwrap_err();
-            assert!(matches!(err, Error::Gpgme { .. }), "{name}: {err:?}");
+            assert!(matches!(err, Error::KeyringUnusable { .. }), "{name}: {err:?}");
             std::fs::remove_file(home.join(name)).unwrap();
         }
 
@@ -1239,6 +1263,97 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "secret\n");
         let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    /// The open itself refuses a link, whatever tested the keyring before it. A link that
+    /// appears after that test must still create nothing and extend nothing outside.
+    #[test]
+    fn a_symlinked_configuration_file_is_never_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim");
+        std::fs::write(&victim, "secret\n").unwrap();
+        let dangling = outside.path().join("created-by-init");
+
+        for (name, target) in [("gpg.conf", &dangling), ("gpg-agent.conf", &victim)] {
+            let link = dir.path().join(name);
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            let err = ensure_conf_options(&link, GPG_CONF_OPTIONS).unwrap_err();
+            assert!(matches!(err, Error::Gpgme { .. }), "{name}: {err:?}");
+        }
+
+        assert!(!dangling.exists(), "a file was created through a dangling link");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "secret\n");
+    }
+
+    /// GnuPG starts the agent that `gpg.conf` names. A keyring another user could change is
+    /// therefore refused before `init` writes a file and before any operation starts GnuPG.
+    #[test]
+    fn a_keyring_another_user_could_change_is_refused_before_gnupg_runs() {
+        let chmod = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let home = tempfile::tempdir().unwrap();
+        let conf = home.path().join("gpg.conf");
+        std::fs::write(&conf, "agent-program /nonexistent/planted\n").unwrap();
+
+        chmod(&conf, 0o644);
+        chmod(home.path(), 0o777);
+        let from_init = KeyringAdmin::init(home.path()).unwrap_err();
+        let from_open = KeyringAdmin::open(home.path()).unwrap_err();
+        chmod(home.path(), 0o700);
+        for error in [&from_init, &from_open] {
+            assert!(
+                matches!(error, Error::KeyringUnusable { reason, .. }
+                    if reason.contains("writable by its group or others")),
+                "{error:?}"
+            );
+        }
+
+        chmod(&conf, 0o666);
+        for error in [
+            KeyringAdmin::init(home.path()).unwrap_err(),
+            KeyringAdmin::open(home.path()).unwrap_err(),
+        ] {
+            assert!(
+                matches!(&error, Error::KeyringUnusable { reason, .. }
+                    if reason.contains("gpg.conf")),
+                "{error:?}"
+            );
+        }
+
+        let entries: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, ["gpg.conf"], "a refused init must write nothing");
+        assert_eq!(
+            std::fs::read_to_string(&conf).unwrap(),
+            "agent-program /nonexistent/planted\n",
+            "a refused init must not extend the configuration"
+        );
+    }
+
+    /// A last line with no newline stays a line of its own. Joined to the first option, it
+    /// becomes an option GnuPG does not know, and every later call fails.
+    #[test]
+    fn an_option_is_never_joined_to_an_unterminated_last_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("gpg.conf");
+        std::fs::write(&conf, "trust-model pgp").unwrap();
+
+        ensure_conf_options(&conf, GPG_CONF_OPTIONS).unwrap();
+        let after_first = std::fs::read_to_string(&conf).unwrap();
+        ensure_conf_options(&conf, GPG_CONF_OPTIONS).unwrap();
+
+        assert!(after_first.starts_with("trust-model pgp\nno-greeting\n"), "{after_first}");
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), after_first);
+
+        // Nothing to append means nothing is written, the newline included.
+        let complete = dir.path().join("gpg-agent.conf");
+        std::fs::write(&complete, "disable-scdaemon").unwrap();
+        ensure_conf_options(&complete, GPG_AGENT_CONF_OPTIONS).unwrap();
+        assert_eq!(std::fs::read_to_string(&complete).unwrap(), "disable-scdaemon");
     }
 
     /// `trustdb.gpg` is re-moded on every `init`, including one over an existing keyring. A

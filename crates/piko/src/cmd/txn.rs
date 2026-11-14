@@ -92,8 +92,8 @@ pub struct InstallOptions {
     /// `pacman.conf`'s `CheckSpace`: weigh the transaction against free disk space before
     /// writing anything. There is no flag for it, because pacman has none either.
     pub check_space: bool,
-    /// The download sandbox `pacman.conf` configures.
-    pub sandbox: piko_net::Sandbox,
+    /// How downloads are confined and bounded, from `pacman.conf`.
+    pub downloads: piko_net::DownloadSettings,
     /// A signal handler already installed by an earlier step (`update`'s pre-refresh), reused
     /// instead of installing a second one. A second registration would receive every signal
     /// the first one does. `None` when nothing installed one yet. `install` installs its own,
@@ -345,7 +345,7 @@ pub fn install(
         cancel,
         piko_net::Concurrency::new(options.parallel_downloads),
         options.check_space,
-        options.sandbox.clone(),
+        options.downloads.clone(),
         rig.sink,
     ) {
         Ok(source) => source,
@@ -517,7 +517,9 @@ fn prepare_file_targets(
     // stops the load. Nothing has been fetched yet, so the run ends quietly.
     let mut stopped = false;
     let mut fetch = |url: &str| {
-        if writeln!(out, "Fetching {}", piko_net::without_credentials(url)).is_err() {
+        // Flushed, because `out` is buffered and the download that follows can take minutes.
+        let line = writeln!(out, "Fetching {}", piko_net::without_credentials(url));
+        if line.and_then(|()| out.flush()).is_err() {
             stopped = true;
             return Err(piko_txn::Error::Cancelled { completed: 0, total: 0 });
         }
@@ -587,7 +589,7 @@ fn fetch_package_url(
         url,
         cache,
         Policy::for_package(options.remote_file_sig_level),
-        options.sandbox.clone(),
+        options.downloads.clone(),
         &cancel,
         &|_| {},
     )
@@ -807,6 +809,12 @@ pub fn remove(
         Err(code) => return code,
     };
 
+    // After the prompts, so Ctrl+C at one of them still ends the process at once. From here a
+    // signal stops the removal between two steps. At its default action, a hangup from a closed
+    // terminal would end the process in the middle of a package, and leave `db.lck` behind.
+    // Nothing is installed for a plan with no step, which commits nothing.
+    let cancel = (!plan.steps().is_empty()).then(|| crate::signal::install_cancel_handler().0);
+
     // `--overwrite` is install-side: a removal writes no file. A removal plan checks no
     // signature, because it installs no package. Scriptlets and hooks are not install-side.
     // `pre_remove` and `post_remove` exist, and `Operation = Remove` is a hook trigger.
@@ -819,6 +827,7 @@ pub fn remove(
         recording: side_effects.recording,
         // A removal writes no file, but it does save modified configuration files.
         report_pending: true,
+        cancel,
         ..Settings::default()
     };
     run(
@@ -1008,10 +1017,11 @@ struct Settings {
     /// `pacman.conf`'s `CheckSpace`. Always `false` for a removal: a removal only frees space,
     /// and libalpm runs no check for one either.
     check_space: bool,
-    /// The `SIGINT` flag, read once between verification and the commit.
+    /// The flag a signal raises, read once between verification and the commit, and by the
+    /// commit before each step.
     ///
     /// [`run`] holds that check, and explains it. This is `None` for a transaction with no
-    /// handler installed, which is every removal.
+    /// handler installed: a removal whose plan has no step.
     cancel: Option<piko_net::Cancel>,
     /// Whether a finished commit names the configuration files it left behind.
     ///
@@ -1292,13 +1302,9 @@ fn report_side_effects(report: &piko_txn::Report) {
 /// note on atomicity in [`piko_txn::journal`]. What is left to do is decided by
 /// [`journal::Record::recovery`]. This function only spells it as command lines.
 ///
-/// `dbpath_flag` is the `--dbpath` the user gave, if any. The commands repeat it, so they act
-/// on the database this report read.
-pub fn report(
-    dbpath: &Path,
-    dbpath_flag: Option<&Path>,
-    out: &mut impl std::io::Write,
-) -> ExitCode {
+/// `flags` holds the `--config` and the `--dbpath` the user gave. The commands repeat them, so
+/// they act on the database this report read.
+pub fn report(dbpath: &Path, flags: GlobalFlags<'_>, out: &mut impl std::io::Write) -> ExitCode {
     // `join` normalizes a `dbpath` the caller spelled with a trailing separator, which a
     // formatted "{dbpath}/piko-journal" would print as a doubled slash.
     let journal_path = dbpath.join(journal::JOURNAL_FILE);
@@ -1388,7 +1394,7 @@ pub fn report(
         emit!(out, "{line}");
     }
     emit!(out, "The applied steps cannot be undone. To finish the transaction, run in order:");
-    for command in recovery_commands(&recovery, &record.root, dbpath_flag, &leftovers) {
+    for command in recovery_commands(&recovery, &record.root, flags, &leftovers) {
         emit!(out, "  {command}");
     }
     if !recovery.interrupted.is_empty() {
@@ -1405,6 +1411,16 @@ pub fn report(
         }
     }
     ExitCode::SUCCESS
+}
+
+/// The global flags a printed command repeats, so it reads the configuration and the database
+/// the command that printed it read.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GlobalFlags<'a> {
+    /// `--config`, when it names another file than the default one.
+    pub config: Option<&'a Path>,
+    /// `--dbpath`, when the command line gave one.
+    pub dbpath: Option<&'a Path>,
 }
 
 /// The files that must go before piko can run a transaction again: `db.lck`, when it is there,
@@ -1461,11 +1477,15 @@ impl Leftovers {
 fn recovery_commands(
     recovery: &journal::Recovery,
     root: &Path,
-    dbpath_flag: Option<&Path>,
+    flags: GlobalFlags<'_>,
     leftovers: &Leftovers,
 ) -> Vec<String> {
     let mut piko = String::from("piko");
-    if let Some(dbpath) = dbpath_flag {
+    if let Some(config) = flags.config {
+        piko.push_str(" --config ");
+        piko.push_str(&shell_word(&config.to_string_lossy()));
+    }
+    if let Some(dbpath) = flags.dbpath {
         piko.push_str(" --dbpath ");
         piko.push_str(&shell_word(&dbpath.to_string_lossy()));
     }
@@ -1590,7 +1610,12 @@ mod tests {
             unreadable: Vec::new(),
         };
 
-        let commands = recovery_commands(&recovery, Path::new("/"), None, &journal_only(JOURNAL));
+        let commands = recovery_commands(
+            &recovery,
+            Path::new("/"),
+            GlobalFlags::default(),
+            &journal_only(JOURNAL),
+        );
         assert_eq!(
             commands,
             [
@@ -1613,14 +1638,18 @@ mod tests {
         let commands = recovery_commands(
             &recovery,
             Path::new("/mnt/new root"),
-            Some(Path::new("/mnt/db")),
+            GlobalFlags {
+                config: Some(Path::new("/mnt/pacman.conf")),
+                dbpath: Some(Path::new("/mnt/db")),
+            },
             &journal_only("/mnt/db/piko-journal"),
         );
         assert_eq!(
             commands,
             [
                 "rm /mnt/db/piko-journal",
-                "piko --dbpath /mnt/db remove --root '/mnt/new root' --nodeps old",
+                "piko --config /mnt/pacman.conf --dbpath /mnt/db remove --root '/mnt/new root' \
+                 --nodeps old",
             ]
         );
     }
@@ -1628,8 +1657,12 @@ mod tests {
     /// Nothing left to do: only the journal goes.
     #[test]
     fn an_empty_recovery_only_removes_the_journal() {
-        let commands =
-            recovery_commands(&Recovery::default(), Path::new("/"), None, &journal_only(JOURNAL));
+        let commands = recovery_commands(
+            &Recovery::default(),
+            Path::new("/"),
+            GlobalFlags::default(),
+            &journal_only(JOURNAL),
+        );
         assert_eq!(commands, ["rm /var/lib/pacman/piko-journal"]);
     }
 
@@ -1650,7 +1683,8 @@ mod tests {
         std::fs::write(&lock, b"").unwrap();
         let leftovers = Leftovers::find(db.path(), &journal);
         let recovery = Recovery { remove: vec!["old".parse().unwrap()], ..Recovery::default() };
-        let commands = recovery_commands(&recovery, Path::new("/"), None, &leftovers);
+        let commands =
+            recovery_commands(&recovery, Path::new("/"), GlobalFlags::default(), &leftovers);
         assert_eq!(
             commands,
             [

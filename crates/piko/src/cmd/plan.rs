@@ -81,7 +81,12 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
                 eprintln!("Error: every package satisfying {target} is ignored");
             }
             for candidate in candidates {
-                eprintln!("  {}-{} ({})", candidate.name, candidate.version, candidate.reason);
+                eprintln!(
+                    "  {}-{} ({})",
+                    candidate.name,
+                    candidate.version,
+                    crate::output::escaped(&candidate.reason)
+                );
             }
             eprintln!(
                 "Note: piko never installs an ignored package; edit IgnorePkg or \
@@ -142,8 +147,16 @@ fn plural(count: usize, noun: &str) -> String {
 }
 
 /// `items`, comma-separated, cut off at [`EXPANSION_PREVIEW`] entries.
+///
+/// Each item is escaped by `piko_db::printable`. A group name is `%GROUPS%` text, which a
+/// mirror chooses.
 fn listed(items: &[String]) -> String {
-    let shown = items.iter().take(EXPANSION_PREVIEW).cloned().collect::<Vec<_>>().join(", ");
+    let shown = items
+        .iter()
+        .take(EXPANSION_PREVIEW)
+        .map(|item| piko_db::printable(item))
+        .collect::<Vec<_>>()
+        .join(", ");
     match items.len().checked_sub(EXPANSION_PREVIEW) {
         Some(rest) if rest > 0 => format!("{shown}, and {rest} more"),
         _ => shown,
@@ -243,10 +256,13 @@ pub(crate) fn print_ignored_change(
 /// `IgnorePkg = gedit` covering `gedit` explains itself, and pacman prints nothing more. A
 /// glob or a group does not. `IgnorePkg = linux*` holding back `linux-firmware` is otherwise
 /// a decision with no visible cause. The user then has to guess which entry to edit.
+///
+/// The line is escaped: an `IgnoreGroup` reason names the group that matched, and a group name
+/// is `%GROUPS%` text, which a mirror chooses.
 fn ignore_detail(name: &str, reason: &piko_db::resolve::IgnoreReason) -> Option<String> {
     match reason {
         piko_db::resolve::IgnoreReason::Package { pattern } if pattern == name => None,
-        other => Some(other.to_string()),
+        other => Some(crate::output::escaped(other)),
     }
 }
 

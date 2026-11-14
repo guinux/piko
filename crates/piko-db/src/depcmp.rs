@@ -168,16 +168,17 @@ fn exact_v1_version(provided: &RelationOrSoname) -> Option<Version> {
 /// The version a v1 soname states, as libalpm's one version string: `<version>-<arch>`
 /// reassembled from the two typed fields and parsed back. Returns `None` for a basic soname,
 /// which states none, and for a string that is not a valid `Version`.
+///
+/// The parse goes through [`crate::comparable`], so a string `alpm-types` cannot compare is
+/// `None` too. The readers already refuse such a soname. A caller can still build one with the
+/// `alpm-types` parser alone, and the comparison that follows would panic on it.
 fn soname_v1_version(soname: &SonameV1) -> Option<Version> {
-    match soname {
-        SonameV1::Basic(_) => None,
-        SonameV1::Explicit { version, architecture, .. } => {
-            format!("{version}-{architecture}").parse().ok()
-        }
-        SonameV1::Unversioned { soname, architecture, .. } => {
-            format!("{soname}-{architecture}").parse().ok()
-        }
-    }
+    let text = match soname {
+        SonameV1::Basic(_) => return None,
+        SonameV1::Explicit { version, architecture, .. } => format!("{version}-{architecture}"),
+        SonameV1::Unversioned { soname, architecture, .. } => format!("{soname}-{architecture}"),
+    };
+    crate::comparable::parse::<Version>(&text).ok()
 }
 
 /// The name half of a v1 relation — a package name, or a shared object name.
@@ -334,6 +335,19 @@ mod tests {
         // An unconstrained (`ALPM_DEP_MOD_ANY`) soname provide can never satisfy a versioned
         // dependency, the same rule a named relation provide follows.
         assert!(!provides_satisfies(&relation("libalpm.so"), &dep));
+    }
+
+    /// Two unversioned sonames of one name, one with a run of digits `alpm-types` cannot
+    /// compare. Both come from the `alpm-types` parser alone, as a caller can build them. The
+    /// pair does not match, and the comparison that would panic never runs.
+    #[test]
+    fn a_soname_alpm_types_cannot_compare_matches_nothing_and_does_not_panic() {
+        let small = relation("libx.so=lib1.so-64");
+        let huge = relation("libx.so=lib99999999999999999999.so-64");
+
+        assert!(!provides_satisfies(&huge, &small));
+        assert!(!provides_satisfies(&small, &huge));
+        assert!(provides_satisfies(&huge, &huge), "an identical requirement satisfies itself");
     }
 
     #[test]

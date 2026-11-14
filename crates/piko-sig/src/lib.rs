@@ -90,8 +90,8 @@ mod keyring;
 
 pub use decision::{Policy, Rejection, SignatureOutcome, Status, Trust, Verdict, decide};
 pub use error::{Error, Result};
-#[doc(hidden)]
-pub use keyring::open_context;
 pub use keyring::{
     Checked, Keyring, MAX_SIGNATURE_BYTES, signature_path, verify_database, verify_database_dated,
 };
+#[doc(hidden)]
+pub use keyring::{ensure_trusted_keyring, open_context};

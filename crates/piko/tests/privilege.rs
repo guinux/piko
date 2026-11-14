@@ -14,14 +14,21 @@ use std::process::{Command, Output, Stdio};
 ///
 /// Returns `None` when the test runs as root.
 fn run_unprivileged(args: &[&str]) -> Option<Output> {
+    let dir = tempfile::tempdir().unwrap();
+    run_unprivileged_with(&dir.path().join("missing.conf"), args)
+}
+
+/// Runs `piko` with `args` and the pacman.conf at `config`.
+///
+/// Returns `None` when the test runs as root.
+fn run_unprivileged_with(config: &std::path::Path, args: &[&str]) -> Option<Output> {
     if rustix::process::geteuid().is_root() {
         return None;
     }
-    let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_piko"))
         .args(args)
         .arg("--config")
-        .arg(dir.path().join("missing.conf"))
+        .arg(config)
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -56,10 +63,39 @@ fn a_transaction_into_slash_is_refused_even_with_dbpath_named() {
 fn a_transaction_into_another_root_is_refused_with_the_configured_dbpath() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path().to_str().unwrap();
-    let Some(output) = run_unprivileged(&["install", "--root", root, "--noconfirm", "foo"]) else {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::fs::canonicalize(dir.path()).unwrap();
+    let config = dir.path().join("pacman.conf");
+    std::fs::write(&config, format!("[options]\nDBPath = {}\n", db.display())).unwrap();
+
+    let Some(output) =
+        run_unprivileged_with(&config, &["install", "--root", root, "--noconfirm", "foo"])
+    else {
         return;
     };
-    assert_refused(&output, "install", "/var/lib/pacman/");
+    assert_refused(&output, "install", db.to_str().unwrap());
+}
+
+/// With no `DBPath` directive, `--root` places the database inside the root, as pacman does.
+/// The transaction then writes to no system path, and reads no database of the running system.
+#[test]
+fn a_named_root_takes_the_default_dbpath_with_it() {
+    let root = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(root.path()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("pacman.conf");
+    std::fs::write(&config, "[options]\n").unwrap();
+
+    let args = ["remove", "--root", root.to_str().unwrap(), "--noconfirm", "foo"];
+    for config in [config, dir.path().join("missing.conf")] {
+        let Some(output) = run_unprivileged_with(&config, &args) else {
+            return;
+        };
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(!stderr.contains("must run as root"), "{stderr}");
+        assert!(!stderr.contains(" /var/lib/pacman"), "{stderr}");
+    }
 }
 
 #[test]

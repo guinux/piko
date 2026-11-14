@@ -5,10 +5,18 @@
 //! or edit trust. A crate boundary turns that from a code-review question into a compile error
 //! — the same rule `piko-db-write` already applies to `piko-db`.
 //!
-//! The dependency runs one way. This crate reads through `piko_sig::open_context` to bind a
-//! GPGME context to a directory — the one piece of setup identical on both sides of the split
-//! — and otherwise never references `piko-sig`'s verification path. `piko-sig` never
+//! The dependency runs one way. This crate calls `piko_sig::ensure_trusted_keyring` to refuse a
+//! keyring another user could change, and `piko_sig::open_context` to bind a GPGME context to
+//! a directory. Both are identical on the two sides of the split. It otherwise never
+//! references `piko-sig`'s verification path, except in [`fn@verify`]. `piko-sig` never
 //! references this crate.
+//!
+//! # A keyring another user could change is refused
+//!
+//! [`KeyringAdmin::init`] and [`KeyringAdmin::open`] apply the rule
+//! [`piko_sig::Keyring::open`] applies, before GnuPG starts. GnuPG reads `gpg.conf` from the
+//! keyring and starts the agent it names, so an administrator that ran over such a keyring
+//! would run another user's program with its own privileges.
 //!
 //! # Why GPGME, never a `gpg` subprocess
 //!

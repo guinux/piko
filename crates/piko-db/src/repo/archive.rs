@@ -19,9 +19,10 @@
 //!    once here.
 
 use std::{
+    borrow::Cow,
     collections::HashSet,
     io::Read as _,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -98,7 +99,7 @@ pub(crate) fn walk(
     let (mut archive, bounds) = open_bounded(path, limits)?;
     let classify = |source: std::io::Error| classify_io_error(path, source, &bounds, limits);
 
-    let entries = archive.entries().map_err(classify)?;
+    let entries = raw_entries(&mut archive).map_err(classify)?;
     let mut newest = NewestMember::default();
     // Keyed on the *parsed* identity, rather than on the raw path string. That identity is the
     // entry directory name plus which member it is. A path spelled differently but denoting the
@@ -106,8 +107,14 @@ pub(crate) fn walk(
     // duplicate check would then disagree with the identity everything downstream uses.
     let mut seen: HashSet<(Box<str>, Member)> = HashSet::new();
 
+    let mut extensions = Extensions::default();
+
     for entry in entries {
         let mut entry = entry.map_err(classify)?;
+        if extensions.absorb(&mut entry, path, &bounds, limits)? {
+            continue;
+        }
+        let long_path = extensions.take_path();
         newest.observe(entry.header());
 
         // The header is consulted before the path is materialised. So the directory member
@@ -121,9 +128,9 @@ pub(crate) fn walk(
         // Classified while the borrow on `entry` is live. The outcome is owned, which ends that
         // borrow so the member can be read below. The full path string is built only for a member
         // that is about to be reported. An accepted one never allocates it.
-        let classified = match entry.path() {
-            Err(_) => Classified::NonUtf8,
-            Ok(raw) => classify_member(&raw, is_regular),
+        let classified = match member_path(&entry, long_path.as_deref()) {
+            None => Classified::NonUtf8,
+            Some(raw) => classify_member(&raw, is_regular),
         };
 
         let (entry_name, member) = match classified {
@@ -183,8 +190,12 @@ pub(crate) fn newest_member_time(path: &Path, limits: &Limits) -> Result<Option<
     let (mut archive, bounds) = open_bounded(path, limits)?;
     let classify = |source: std::io::Error| classify_io_error(path, source, &bounds, limits);
     let mut newest = NewestMember::default();
-    for entry in archive.entries().map_err(classify)? {
-        newest.observe(entry.map_err(classify)?.header());
+    for entry in raw_entries(&mut archive).map_err(classify)? {
+        let entry = entry.map_err(classify)?;
+        // An extension header is not a member, and its body is passed over, never read.
+        if !is_extension(entry.header()) {
+            newest.observe(entry.header());
+        }
     }
     Ok(newest.value())
 }
@@ -295,10 +306,7 @@ enum Classified {
 /// Allocating the path as a `String` is deferred to the branches that actually report it. An
 /// accepted member never needs one, and it is by far the common case.
 fn classify_member(raw: &Path, is_regular: bool) -> Classified {
-    let rejected = |reason: SkipReason| Classified::Rejected {
-        path: raw.to_string_lossy().into_owned(),
-        reason,
-    };
+    let rejected = |reason: SkipReason| Classified::Rejected { path: reported_path(raw), reason };
 
     if !is_regular {
         return rejected(SkipReason::NotARegularFile);
@@ -355,11 +363,16 @@ pub(crate) fn walk_matching(
     let (mut archive, bounds) = open_bounded(path, limits)?;
     let classify = |source: std::io::Error| classify_io_error(path, source, &bounds, limits);
 
-    let entries = archive.entries().map_err(classify)?;
+    let entries = raw_entries(&mut archive).map_err(classify)?;
     let mut still_wanted: HashSet<&Name> = wanted.clone();
+    let mut extensions = Extensions::default();
 
     for entry in entries {
         let mut entry = entry.map_err(classify)?;
+        if extensions.absorb(&mut entry, path, &bounds, limits)? {
+            continue;
+        }
+        let long_path = extensions.take_path();
 
         if entry.header().entry_type() != tar::EntryType::Regular {
             continue;
@@ -368,15 +381,15 @@ pub(crate) fn walk_matching(
         // Nothing is reported from this walk, so no member's path is ever materialised as a
         // `String`. The identity is parsed straight out of the borrowed path. An entry that is
         // not one of `wanted` is skipped without allocating.
-        let entry_name = match entry.path() {
-            Ok(raw) => match two_components_of(&raw) {
+        let entry_name = match member_path(&entry, long_path.as_deref()) {
+            Some(raw) => match two_components_of(&raw) {
                 Some((dir_str, "files")) => match EntryName::parse(dir_str) {
                     Ok(parsed) => parsed,
                     Err(_) => continue,
                 },
                 _ => continue,
             },
-            Err(_) => continue,
+            None => continue,
         };
 
         if !still_wanted.remove(entry_name.name()) {
@@ -398,33 +411,41 @@ pub(crate) fn walk_matching(
 
 /// Reads one member whole, as text, refusing one larger than [`Limits::repo_entry_bytes`].
 ///
-/// The size the header declares is tested first, so an oversized member is refused before it is
-/// read. The read stops one byte past the bound, which tells a member at the limit from one
-/// over it, whatever the header said.
+/// See `read_bounded` for how the bound is applied.
 fn read_member(
     entry: &mut tar::Entry<'_, BoundedReader<Decoder>>,
     path: &Path,
     bounds: &Bounds,
     limits: &Limits,
 ) -> Result<String> {
+    let buf = read_bounded(entry, path, bounds, limits, Limit::RepoEntry)?;
+    String::from_utf8(buf)
+        .map_err(|error| Error::NotUtf8 { path: path.to_path_buf(), source: error.utf8_error() })
+}
+
+/// Reads the body of one tar entry whole, refusing one larger than `limit` allows.
+///
+/// The size the header declares is tested first, so an oversized body is refused before it is
+/// read. The read stops one byte past the bound, whatever the header said.
+fn read_bounded(
+    entry: &mut tar::Entry<'_, BoundedReader<Decoder>>,
+    path: &Path,
+    bounds: &Bounds,
+    limits: &Limits,
+    limit: Limit,
+) -> Result<Vec<u8>> {
     let classify = |source: std::io::Error| classify_io_error(path, source, bounds, limits);
-    let too_large = || Error::LimitExceeded {
-        path: path.to_path_buf(),
-        limit: Limit::RepoEntry,
-        max: limits.repo_entry_bytes,
-    };
+    let max = limits.get(limit);
+    let too_large = || Error::LimitExceeded { path: path.to_path_buf(), limit, max };
 
     let declared = entry.header().size().map_err(classify)?;
-    if declared > limits.repo_entry_bytes {
+    if declared > max {
         return Err(too_large());
     }
     let mut buf = Vec::new();
-    entry
-        .take(limits.repo_entry_bytes.saturating_add(1))
-        .read_to_end(&mut buf)
-        .map_err(classify)?;
+    entry.take(max.saturating_add(1)).read_to_end(&mut buf).map_err(classify)?;
     let read = u64::try_from(buf.len()).unwrap_or(u64::MAX);
-    if read > limits.repo_entry_bytes {
+    if read > max {
         return Err(too_large());
     }
     // `tar` reads a member through a `Take` over the stream, so an archive cut inside a member
@@ -436,8 +457,123 @@ fn read_member(
             "the archive ends inside a member",
         )));
     }
-    String::from_utf8(buf)
-        .map_err(|error| Error::NotUtf8 { path: path.to_path_buf(), source: error.utf8_error() })
+    Ok(buf)
+}
+
+/// The entries of `archive`, extension headers included, each as the archive holds it.
+///
+/// `tar` otherwise reads a GNU long name and a PAX record list itself, whole and with no
+/// bound, before it yields the member they describe. [`Extensions`] reads them instead,
+/// against [`Limits::repo_extension_bytes`].
+fn raw_entries(
+    archive: &mut tar::Archive<BoundedReader<Decoder>>,
+) -> std::io::Result<tar::Entries<'_, BoundedReader<Decoder>>> {
+    Ok(archive.entries()?.raw(true))
+}
+
+/// Whether `header` opens a tar extension header: a GNU long name, a GNU long link name, or a
+/// PAX record list. As in `tar`, only a `ustar` or GNU header can be one.
+fn is_extension(header: &tar::Header) -> bool {
+    let kind = header.entry_type();
+    (header.as_gnu().is_some() || header.as_ustar().is_some())
+        && (kind.is_gnu_longname()
+            || kind.is_gnu_longlink()
+            || kind.is_pax_local_extensions()
+            || kind.is_pax_global_extensions())
+}
+
+/// The path that the extension headers before a member give it.
+///
+/// A GNU long name is the path itself. A PAX record list gives one in its `path` record. When
+/// a member has both, the GNU long name is its path, as in `tar`. A link name and a global
+/// record list give no path to a `desc` or a `files` member, and are passed over. A PAX `size`
+/// record is not read: the header of a member states its size, and a member of a repository
+/// archive is far below the 8 GiB that header can state.
+#[derive(Default)]
+struct Extensions {
+    gnu_long_name: Option<Vec<u8>>,
+    pax_path: Option<Vec<u8>>,
+}
+
+impl Extensions {
+    /// Reads `entry` if it is an extension header, and returns whether it was one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::LimitExceeded`] naming [`Limit::RepoExtension`] if the header is larger than
+    /// [`Limits::repo_extension_bytes`]. It is refused before it is read.
+    fn absorb(
+        &mut self,
+        entry: &mut tar::Entry<'_, BoundedReader<Decoder>>,
+        path: &Path,
+        bounds: &Bounds,
+        limits: &Limits,
+    ) -> Result<bool> {
+        if !is_extension(entry.header()) {
+            return Ok(false);
+        }
+        let kind = entry.header().entry_type();
+        if kind.is_gnu_longname() {
+            let mut name = read_bounded(entry, path, bounds, limits, Limit::RepoExtension)?;
+            // GNU tar ends the name with a NUL.
+            if name.last() == Some(&0) {
+                name.pop();
+            }
+            self.gnu_long_name = Some(name);
+        } else if kind.is_pax_local_extensions() {
+            let records = read_bounded(entry, path, bounds, limits, Limit::RepoExtension)?;
+            // A record that does not parse is passed over, as `tar` passes over it.
+            let path_record = tar::PaxExtensions::new(&records)
+                .filter_map(std::result::Result::ok)
+                .find(|record| record.key_bytes() == b"path");
+            if let Some(record) = path_record {
+                self.pax_path = Some(record.value_bytes().to_vec());
+            }
+        }
+        Ok(true)
+    }
+
+    /// The path the headers read since the last member give this one, if they give one.
+    fn take_path(&mut self) -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let pax = self.pax_path.take();
+        self.gnu_long_name.take().or(pax).map(|bytes| std::ffi::OsString::from_vec(bytes).into())
+    }
+}
+
+/// The path of a member: the one its extension headers gave it, or the one in its own header.
+/// `None` when the header's path cannot be read.
+fn member_path<'a>(
+    entry: &'a tar::Entry<'_, BoundedReader<Decoder>>,
+    long_path: Option<&'a Path>,
+) -> Option<Cow<'a, Path>> {
+    match long_path {
+        Some(path) => Some(Cow::Borrowed(path)),
+        None => entry.path().ok(),
+    }
+}
+
+/// The most characters of a refused member's path that a diagnostic keeps.
+const REPORTED_PATH_CHARS: usize = 256;
+
+/// The path of a refused member, as a diagnostic keeps it: its first
+/// [`REPORTED_PATH_CHARS`] characters, with `…` after them if it is longer.
+///
+/// A diagnostic stays with the open database. So a path the archive chose must not decide how
+/// much memory it holds, nor how long the line a frontend prints is.
+fn reported_path(raw: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let bytes = raw.as_os_str().as_bytes();
+    // Four bytes are the most one character takes, so this prefix holds enough of them.
+    let prefix = bytes.get(..REPORTED_PATH_CHARS.saturating_mul(4)).unwrap_or(bytes);
+    let text = String::from_utf8_lossy(prefix);
+    match text.char_indices().nth(REPORTED_PATH_CHARS) {
+        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or_default()),
+        None if prefix.len() < bytes.len() => format!("{text}…"),
+        None => text.into_owned(),
+    }
 }
 
 /// Refuses a `files` member with more lines than [`Limits::repo_entry_paths`].
@@ -519,7 +655,12 @@ fn classify_io_error(
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "a failing assertion in a test should abort it loudly")]
+#[expect(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    reason = "a failing assertion in a test should abort it loudly, and a test computes on its own values"
+)]
 mod tests {
     use std::{io::Write as _, path::PathBuf};
 
@@ -687,6 +828,162 @@ mod tests {
             matches!(&err, Error::LimitExceeded { limit: Limit::RepoEntry, .. }),
             "got {err:?}"
         );
+    }
+
+    /// An archive of one extension header of `kind` holding `body`, then the member `member`
+    /// with `content`.
+    fn gzip_tar_with_extension(
+        kind: tar::EntryType,
+        body: &[u8],
+        member: &str,
+        content: &[u8],
+    ) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(kind);
+        header.set_path("././@LongLink").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_cksum();
+        builder.append(&header, body).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_path(member).unwrap();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append(&header, content).unwrap();
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&builder.into_inner().unwrap()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// One PAX record, `<length> <key>=<value>` and a line feed, where the length counts itself.
+    fn pax_record(key: &str, value: &str) -> Vec<u8> {
+        let rest = format!(" {key}={value}\n");
+        let mut length = rest.len();
+        while length != rest.len() + length.to_string().len() {
+            length = rest.len() + length.to_string().len();
+        }
+        format!("{length}{rest}").into_bytes()
+    }
+
+    /// The members a walk of `path` accepts, as `(entry, member, text)`, and the paths it skips.
+    fn walked(path: &Path, limits: &Limits) -> (Vec<(String, &'static str, String)>, Vec<String>) {
+        let (mut items, mut skipped) = (Vec::new(), Vec::new());
+        walk(
+            path,
+            limits,
+            |item| {
+                items.push(match item {
+                    ArchiveItem::Desc { entry, text } => (entry.as_str().to_owned(), "desc", text),
+                    ArchiveItem::Files { entry, text } => {
+                        (entry.as_str().to_owned(), "files", text)
+                    }
+                });
+                Ok(())
+            },
+            |skip| skipped.push(skip.path),
+        )
+        .unwrap();
+        (items, skipped)
+    }
+
+    /// `tar` reads an extension header whole before the member it describes, so the member
+    /// bound never sees it. A header over its own bound is refused by the size it declares,
+    /// in each of the three walks that read one.
+    #[test]
+    fn refuses_an_oversized_extension_header_before_it_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = Limits { repo_extension_bytes: 64, ..Limits::default() };
+        let refused = |error: &Error| {
+            matches!(error, Error::LimitExceeded { limit: Limit::RepoExtension, max: 64, .. })
+        };
+
+        for kind in [tar::EntryType::GNULongName, tar::EntryType::XHeader] {
+            let bytes = gzip_tar_with_extension(kind, &[b'a'; 4096], "foo-1.0.0-1/files", b"x");
+            let path = write_archive(dir.path(), "core.files", &bytes);
+
+            let error = walk(&path, &limits, |_| Ok(()), |_| {}).unwrap_err();
+            assert!(refused(&error), "{kind:?}: got {error:?}");
+            let foo = name("foo");
+            let wanted = HashSet::from([&foo]);
+            let error = walk_matching(&path, &limits, &wanted, |_, _| Ok(())).unwrap_err();
+            assert!(refused(&error), "{kind:?}: got {error:?}");
+            // This walk reads no body, so an extension header costs it nothing.
+            assert_eq!(newest_member_time(&path, &limits).unwrap(), None);
+        }
+    }
+
+    /// A GNU long name and a PAX `path` record still give the next member its path, and only
+    /// that member.
+    #[test]
+    fn an_extension_header_within_the_bound_names_the_next_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = format!("{}-1.0.0-1", "n".repeat(180));
+        let member = format!("{long}/desc");
+
+        let mut gnu_name = member.clone().into_bytes();
+        gnu_name.push(0);
+        let cases = [
+            (tar::EntryType::GNULongName, gnu_name),
+            (tar::EntryType::XHeader, pax_record("path", &member)),
+        ];
+        for (kind, body) in cases {
+            let mut bytes = gzip_tar_with_extension(kind, &body, "short-1.0.0-1/desc", b"long");
+            // One more member, with no extension header of its own: the walk must give it the
+            // path of its own header, not the long one again.
+            bytes = {
+                let mut tar_bytes = Vec::new();
+                flate2::read::GzDecoder::new(bytes.as_slice()).read_to_end(&mut tar_bytes).unwrap();
+                tar_bytes.truncate(tar_bytes.len() - 1024);
+                let mut builder = tar::Builder::new(tar_bytes);
+                let mut header = tar::Header::new_gnu();
+                header.set_size(5);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, "bar-1.0.0-1/desc", &b"plain"[..]).unwrap();
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(&builder.into_inner().unwrap()).unwrap();
+                encoder.finish().unwrap()
+            };
+            let path = write_archive(dir.path(), "core.db", &bytes);
+
+            let (items, skipped) = walked(&path, &Limits::default());
+
+            assert!(skipped.is_empty(), "{kind:?}: {skipped:?}");
+            assert_eq!(
+                items,
+                [
+                    (long.clone(), "desc", "long".to_owned()),
+                    ("bar-1.0.0-1".to_owned(), "desc", "plain".to_owned()),
+                ],
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// A diagnostic stays with the open database, so it keeps the start of a refused path only.
+    #[test]
+    fn a_refused_member_is_reported_by_the_start_of_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut long_name = vec![b'a'; 8192];
+        long_name.push(0);
+        let bytes = gzip_tar_with_extension(
+            tar::EntryType::GNULongName,
+            &long_name,
+            "x-1.0.0-1/desc",
+            b"x",
+        );
+        let path = write_archive(dir.path(), "core.db", &bytes);
+
+        let (items, skipped) = walked(&path, &Limits::default());
+
+        assert!(items.is_empty());
+        let [reported] = skipped.as_slice() else { panic!("got {skipped:?}") };
+        assert_eq!(reported.chars().count(), REPORTED_PATH_CHARS + 1);
+        assert!(reported.ends_with('…'));
+        assert_eq!(reported_path(Path::new("foo-1.0.0-1/other")), "foo-1.0.0-1/other");
     }
 
     #[test]

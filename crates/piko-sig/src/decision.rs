@@ -133,9 +133,28 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// The policy an unresolved level gets: a signature is required, from a fully trusted key.
+    ///
+    /// [`SigLevel::USE_DEFAULT`] means "not set here; inherit from the enclosing scope". Only
+    /// the configuration knows that scope, so a level that still carries the sentinel states
+    /// no policy at all. Its other bits are clear, and read as bits they say
+    /// `SigLevel = Never`. A caller that passes one took a raw configuration field in place
+    /// of `Options::effective_local_file_sig_level`, its remote counterpart, or
+    /// `RepositoryConfig::effective_sig_level`. The strictest policy turns that mistake into
+    /// a refused file, where the bits alone turn it into an unsigned install.
+    const UNRESOLVED: Self =
+        Self { check: true, optional: false, marginal_ok: false, unknown_ok: false };
+
     /// The policy `level` states for package files.
+    ///
+    /// `level` is a resolved level. One that still carries [`SigLevel::USE_DEFAULT`] gets the
+    /// strictest policy, never the "no check" its clear bits spell: a required signature from
+    /// a fully trusted key.
     #[must_use]
     pub fn for_package(level: SigLevel) -> Self {
+        if level.contains(SigLevel::USE_DEFAULT) {
+            return Self::UNRESOLVED;
+        }
         Self {
             check: level.contains(SigLevel::PACKAGE),
             optional: level.contains(SigLevel::PACKAGE_OPTIONAL),
@@ -145,8 +164,14 @@ impl Policy {
     }
 
     /// The policy `level` states for repository databases.
+    ///
+    /// As [`Self::for_package`], a level that still carries [`SigLevel::USE_DEFAULT`] gets the
+    /// strictest policy.
     #[must_use]
     pub fn for_database(level: SigLevel) -> Self {
+        if level.contains(SigLevel::USE_DEFAULT) {
+            return Self::UNRESOLVED;
+        }
         Self {
             check: level.contains(SigLevel::DATABASE),
             optional: level.contains(SigLevel::DATABASE_OPTIONAL),
@@ -556,6 +581,29 @@ mod tests {
         let optional = Policy { optional: true, ..REQUIRED_TRUSTED };
         let sigs = [signature(Status::Invalid, Trust::Full)];
         assert_eq!(decide(&sigs, optional), Verdict::Rejected(Rejection::Invalid));
+    }
+
+    /// The sentinel means "inherit", and its other bits are clear. Read as bits, it is
+    /// `SigLevel = Never`: a frontend that passes a raw configuration field would install an
+    /// unsigned file. Both scopes hold it to the strictest policy, whatever else it carries.
+    #[test]
+    fn an_unresolved_level_gets_the_strictest_policy_not_no_check() {
+        let relaxed = SigLevel::USE_DEFAULT
+            | SigLevel::PACKAGE_OPTIONAL
+            | SigLevel::PACKAGE_UNKNOWN_OK
+            | SigLevel::DATABASE_OPTIONAL
+            | SigLevel::DATABASE_MARGINAL_OK;
+        for level in [SigLevel::USE_DEFAULT, relaxed] {
+            assert_eq!(Policy::for_package(level), REQUIRED_TRUSTED);
+            assert_eq!(Policy::for_database(level), REQUIRED_TRUSTED);
+        }
+        assert_eq!(
+            decide(&[], Policy::for_package(SigLevel::USE_DEFAULT)),
+            Verdict::Rejected(Rejection::MissingRequired)
+        );
+        // The zero value is a resolved `SigLevel = Never`, and still asks for nothing.
+        assert!(!Policy::for_package(SigLevel::default()).check);
+        assert!(!Policy::for_database(SigLevel::default()).check);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::io::{self, Read, Write};
 use crate::error::{printable, without_credentials};
 
 /// The first line of a request. It changes whenever the format does.
-const REQUEST_MAGIC: &str = "piko-fetch 1";
+const REQUEST_MAGIC: &str = "piko-fetch 2";
 
 /// The largest request the helper reads. A URL is the only part that can grow.
 pub(crate) const MAX_REQUEST: u64 = 16 * 1024;
@@ -88,10 +88,12 @@ pub(crate) struct Request {
     pub(crate) url: String,
     /// The `If-Modified-Since` value, if the request is conditional.
     pub(crate) if_modified_since: Option<String>,
-    /// The whole request's timeout, in seconds.
-    pub(crate) timeout_secs: u64,
-    /// The connect timeout, in seconds.
-    pub(crate) connect_timeout_secs: u64,
+    /// How long the response may take to begin after the connection, in milliseconds.
+    pub(crate) response_timeout_millis: u64,
+    /// The connect timeout, in milliseconds.
+    pub(crate) connect_timeout_millis: u64,
+    /// How long the transfer may receive nothing, in milliseconds. `None` is no limit.
+    pub(crate) stall_timeout_millis: Option<u64>,
     /// Whether the helper applies Landlock.
     pub(crate) filesystem: bool,
     /// Whether the helper applies the system call filter.
@@ -104,12 +106,13 @@ impl Request {
     /// The request as the bytes written on the helper's stdin.
     pub(crate) fn encode(&self) -> Vec<u8> {
         let ports: Vec<String> = self.ports.iter().map(u16::to_string).collect();
+        let stall = self.stall_timeout_millis.map(|millis| millis.to_string()).unwrap_or_default();
         format!(
-            "{REQUEST_MAGIC}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            "{REQUEST_MAGIC}\n{}\n{}\n{}\n{}\n{stall}\n{}\n{}\n{}\n",
             self.url,
             self.if_modified_since.as_deref().unwrap_or_default(),
-            self.timeout_secs,
-            self.connect_timeout_secs,
+            self.response_timeout_millis,
+            self.connect_timeout_millis,
             u8::from(self.filesystem),
             u8::from(self.syscalls),
             ports.join(","),
@@ -147,8 +150,11 @@ impl Request {
         }
         let since = next("If-Modified-Since line")?;
         let if_modified_since = (!since.is_empty()).then(|| since.to_owned());
-        let timeout_secs = parse_number(next("timeout")?, "timeout")?;
-        let connect_timeout_secs = parse_number(next("connect timeout")?, "connect timeout")?;
+        let response_timeout_millis = parse_number(next("response timeout")?, "response timeout")?;
+        let connect_timeout_millis = parse_number(next("connect timeout")?, "connect timeout")?;
+        let stall = next("stall timeout line")?;
+        let stall_timeout_millis =
+            if stall.is_empty() { None } else { Some(parse_number(stall, "stall timeout")?) };
         let filesystem = parse_flag(next("filesystem flag")?)?;
         let syscalls = parse_flag(next("system call flag")?)?;
         let ports = next("port list")?;
@@ -164,8 +170,9 @@ impl Request {
         Ok(Self {
             url,
             if_modified_since,
-            timeout_secs,
-            connect_timeout_secs,
+            response_timeout_millis,
+            connect_timeout_millis,
+            stall_timeout_millis,
             filesystem,
             syscalls,
             ports,
@@ -388,8 +395,9 @@ mod tests {
         Request {
             url: "https://mirror.example/core/os/x86_64/core.db".to_owned(),
             if_modified_since: Some("Sat, 26 Sep 2026 10:00:00 GMT".to_owned()),
-            timeout_secs: 60,
-            connect_timeout_secs: 10,
+            response_timeout_millis: 60_000,
+            connect_timeout_millis: 10_000,
+            stall_timeout_millis: Some(10_000),
             filesystem: true,
             syscalls: false,
             ports: vec![53, 443],
@@ -401,7 +409,12 @@ mod tests {
         let request = request();
         assert_eq!(Request::decode(request.encode().as_slice()).unwrap(), request);
 
-        let bare = Request { if_modified_since: None, ports: Vec::new(), ..request };
+        let bare = Request {
+            if_modified_since: None,
+            stall_timeout_millis: None,
+            ports: Vec::new(),
+            ..request
+        };
         assert_eq!(Request::decode(bare.encode().as_slice()).unwrap(), bare);
     }
 
@@ -409,12 +422,12 @@ mod tests {
     fn a_malformed_request_is_refused() {
         let text = String::from_utf8(request().encode()).unwrap();
         for bad in [
-            text.replace("piko-fetch 1", "piko-fetch 2"),
-            text.replace("\n60\n", "\nsixty\n"),
+            text.replace("piko-fetch 2", "piko-fetch 1"),
+            text.replace("\n60000\n", "\nsixty\n"),
             text.replace("53,443", "53,70000"),
             text.replace('\n', "\r\n"),
             text.replace("GMT", "GMT\r"),
-            "piko-fetch 1\n".to_owned(),
+            "piko-fetch 2\n".to_owned(),
             "x".repeat((MAX_REQUEST as usize).saturating_add(1)),
         ] {
             assert!(Request::decode(bad.as_bytes()).is_err(), "{bad:?}");

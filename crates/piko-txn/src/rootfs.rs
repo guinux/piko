@@ -61,6 +61,12 @@ pub enum UnsafePath {
     Blank,
     /// A component contains a byte the kernel cannot accept in a file name.
     InvalidComponent,
+    /// The path is not UTF-8 text.
+    ///
+    /// Conflict detection, `%FILES%` and the hook triggers hold a path as text. A path that is
+    /// not text has no exact spelling there, so those readers would see another path than the
+    /// one extraction writes.
+    NotUtf8,
 }
 
 impl std::fmt::Display for UnsafePath {
@@ -72,6 +78,7 @@ impl std::fmt::Display for UnsafePath {
             Self::Empty => "the path is empty",
             Self::Blank => "the path is made of white space only",
             Self::InvalidComponent => "a component is not a usable file name",
+            Self::NotUtf8 => "the path is not UTF-8 text",
         })
     }
 }
@@ -94,7 +101,8 @@ impl std::fmt::Display for UnsafePath {
 /// # Errors
 ///
 /// [`Error::UnsafeArchivePath`] if the path is absolute, empty or made of white space only,
-/// holds a `.` or `..` component or a repeated separator, or holds a NUL byte.
+/// holds a `.` or `..` component or a repeated separator, holds a NUL byte, or is not UTF-8
+/// text.
 pub fn components(relative: &Path) -> Result<Vec<&OsStr>> {
     use std::os::unix::ffi::OsStrExt as _;
 
@@ -107,8 +115,13 @@ pub fn components(relative: &Path) -> Result<Vec<&OsStr>> {
     if bytes.first() == Some(&b'/') {
         return refuse(UnsafePath::Absolute);
     }
+    // Every reader that compares paths holds them as text. A lossy conversion would give
+    // those readers a path that differs from the one written here.
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return refuse(UnsafePath::NotUtf8);
+    };
     // The same test as the `files` reader's, on the same text, so the rule cannot drift.
-    if std::str::from_utf8(bytes).is_ok_and(|text| text.trim().is_empty()) {
+    if text.trim().is_empty() {
         return refuse(UnsafePath::Blank);
     }
     let body = bytes.strip_suffix(b"/").unwrap_or(bytes);
@@ -447,6 +460,20 @@ mod tests {
     fn refuses_absolute_paths() {
         for path in ["/etc/passwd", "/"] {
             assert_eq!(refused(path), UnsafePath::Absolute, "{path:?}");
+        }
+    }
+
+    /// A path that is not text has no exact spelling in `%FILES%` or in conflict detection.
+    #[test]
+    fn refuses_a_path_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        for bytes in [&b"usr/bin/l\xffs"[..], b"usr\xfe/bin/ls", b"\xff"] {
+            let path = Path::new(OsStr::from_bytes(bytes));
+            let Err(Error::UnsafeArchivePath { reason, .. }) = components(path) else {
+                panic!("{path:?} was accepted");
+            };
+            assert_eq!(reason, UnsafePath::NotUtf8, "{path:?}");
         }
     }
 

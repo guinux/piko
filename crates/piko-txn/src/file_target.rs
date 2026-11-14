@@ -345,7 +345,7 @@ pub fn load_targets(
 /// reported as a malformed URL rather than as a cache problem. And a URL already in the cache
 /// needs no writable directory at all.
 ///
-/// The download runs in a helper confined by `sandbox`, as every repository package's does.
+/// The download is confined and bounded by `downloads`, as every repository package's is.
 ///
 /// Nothing is verified here. The file joins the transaction as an ordinary file target and is
 /// checked in [`crate::Transaction::verify`], under `policy`.
@@ -361,7 +361,7 @@ pub fn fetch_url(
     url: &str,
     cache: &CacheDirSource,
     policy: Policy,
-    sandbox: piko_net::Sandbox,
+    downloads: piko_net::DownloadSettings,
     cancel: &piko_net::Cancel,
     progress: &(dyn Fn(piko_net::Event) + Sync),
 ) -> Result<PathBuf> {
@@ -388,8 +388,7 @@ pub fn fetch_url(
     }
 
     let download_dir = crate::source::select_download_dir(cache.directories())?;
-    piko_net::Refresher::default()
-        .with_sandbox(sandbox)
+    piko_net::Refresher::from_settings(downloads)
         .fetch_package_with_progress(
             download_dir.path(),
             // No repository describes a URL target, so `max_package_bytes` alone bounds it.
@@ -643,9 +642,15 @@ mod tests {
         let cancel = piko_net::Cancel::new();
 
         for url in ["https://host/notapackage", "https://host/"] {
-            let error =
-                fetch_url(url, &cache, policy(), piko_net::Sandbox::disabled(), &cancel, &|_| {})
-                    .unwrap_err();
+            let error = fetch_url(
+                url,
+                &cache,
+                policy(),
+                piko_net::DownloadSettings::unconfined(),
+                &cancel,
+                &|_| {},
+            )
+            .unwrap_err();
             assert!(matches!(error, Error::InvalidPackageUrl { .. }), "{url}: got {error:?}");
         }
     }
@@ -661,9 +666,15 @@ mod tests {
         let cancel = piko_net::Cancel::new();
 
         let url = format!("https://host.invalid/{name}");
-        let error =
-            fetch_url(&url, &cache, policy(), piko_net::Sandbox::disabled(), &cancel, &|_| {})
-                .unwrap_err();
+        let error = fetch_url(
+            &url,
+            &cache,
+            policy(),
+            piko_net::DownloadSettings::unconfined(),
+            &cancel,
+            &|_| {},
+        )
+        .unwrap_err();
         let Error::UnsupportedPackageCompression { packages } = &error else {
             panic!("got {error:?}");
         };
@@ -684,8 +695,15 @@ mod tests {
         // Nothing to check: the hit stands.
         let unchecked = Policy { check: false, ..policy() };
         assert_eq!(
-            fetch_url(&url, &cache, unchecked, piko_net::Sandbox::disabled(), &cancel, &|_| {})
-                .unwrap(),
+            fetch_url(
+                &url,
+                &cache,
+                unchecked,
+                piko_net::DownloadSettings::unconfined(),
+                &cancel,
+                &|_| {}
+            )
+            .unwrap(),
             dir.path().join(name)
         );
 
@@ -694,15 +712,29 @@ mod tests {
         // rejected, without needing a server.
         let checked = Policy { check: true, ..policy() };
         assert!(
-            fetch_url(&url, &cache, checked, piko_net::Sandbox::disabled(), &cancel, &|_| {})
-                .is_err()
+            fetch_url(
+                &url,
+                &cache,
+                checked,
+                piko_net::DownloadSettings::unconfined(),
+                &cancel,
+                &|_| {}
+            )
+            .is_err()
         );
 
         // With the signature there, the hit stands again.
         std::fs::write(dir.path().join(format!("{name}.sig")), b"not a real signature").unwrap();
         assert_eq!(
-            fetch_url(&url, &cache, checked, piko_net::Sandbox::disabled(), &cancel, &|_| {})
-                .unwrap(),
+            fetch_url(
+                &url,
+                &cache,
+                checked,
+                piko_net::DownloadSettings::unconfined(),
+                &cancel,
+                &|_| {}
+            )
+            .unwrap(),
             dir.path().join(name)
         );
     }

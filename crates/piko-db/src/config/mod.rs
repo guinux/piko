@@ -174,10 +174,83 @@ pub struct Options {
     pub disable_sandbox_syscalls: bool,
     /// `SigLevel`. Default `PACKAGE | DATABASE` (required, trusted-only).
     pub sig_level: SigLevel,
-    /// `LocalFileSigLevel`, merged against `sig_level`.
+    /// `LocalFileSigLevel`, merged against `sig_level`, as the file sets it.
+    ///
+    /// When no directive sets it, this is [`SigLevel::USE_DEFAULT`] alone. To verify a
+    /// package, read [`Self::effective_local_file_sig_level`], never this field.
     pub local_file_sig_level: SigLevel,
-    /// `RemoteFileSigLevel`, merged against `sig_level`.
+    /// `RemoteFileSigLevel`, merged against `sig_level`, as the file sets it.
+    ///
+    /// When no directive sets it, this is [`SigLevel::USE_DEFAULT`] alone. To verify a
+    /// package, read [`Self::effective_remote_file_sig_level`], never this field.
     pub remote_file_sig_level: SigLevel,
+    /// Whether a `DBPath` directive set [`Self::db_path`].
+    db_path_set: bool,
+    /// Whether a `LogFile` directive set [`Self::log_file`].
+    log_file_set: bool,
+}
+
+impl Options {
+    /// Whether a `DBPath` directive set [`Self::db_path`], rather than a default.
+    #[must_use]
+    pub const fn sets_db_path(&self) -> bool {
+        self.db_path_set
+    }
+
+    /// The database path for a root the command line named (`--root`).
+    ///
+    /// A `DBPath` directive wins. Without one, the database is inside `root`, as pacman's
+    /// `setdefaults` places it (`conf.c`): a root the command line names moves the default
+    /// database with it. [`Self::db_path`] holds the default for `RootDir` only.
+    #[must_use]
+    pub fn db_path_in(&self, root: &Path) -> PathBuf {
+        if self.db_path_set { self.db_path.clone() } else { default_db_path_in(root) }
+    }
+
+    /// The transaction log for a root the command line named (`--root`).
+    ///
+    /// The same rule as [`Self::db_path_in`]: a `LogFile` directive wins, and the default is
+    /// inside `root`.
+    #[must_use]
+    pub fn log_file_in(&self, root: &Path) -> PathBuf {
+        if self.log_file_set { self.log_file.clone() } else { default_log_file_in(root) }
+    }
+
+    /// The `SigLevel` a package file named by path is held to: `LocalFileSigLevel`, or the
+    /// global `SigLevel` when no directive sets one.
+    ///
+    /// libalpm makes the same fallback when it reads the option
+    /// (`alpm_option_get_local_file_siglevel`, `handle.c:917`). The field keeps the
+    /// [`SigLevel::USE_DEFAULT`] sentinel, so `piko conf` prints no line for a directive the
+    /// file does not hold, as `pacman-conf` prints none. The sentinel has no `PACKAGE` bit, so
+    /// the field alone does not state the policy this directive resolves to.
+    #[must_use]
+    pub fn effective_local_file_sig_level(&self) -> SigLevel {
+        self.local_file_sig_level.or_inherit(self.sig_level)
+    }
+
+    /// The `SigLevel` a package file named by URL is held to: `RemoteFileSigLevel`, or the
+    /// global `SigLevel` when no directive sets one.
+    ///
+    /// The fallback is libalpm's (`alpm_option_get_remote_file_siglevel`, `handle.c:941`), for
+    /// the reason [`Self::effective_local_file_sig_level`] gives. The `pacman.conf` Arch ships
+    /// sets no `RemoteFileSigLevel`, so this fallback decides the default policy for a URL.
+    #[must_use]
+    pub fn effective_remote_file_sig_level(&self) -> SigLevel {
+        self.remote_file_sig_level.or_inherit(self.sig_level)
+    }
+}
+
+/// The default database path inside `root`: `<root>/var/lib/pacman/`.
+#[must_use]
+pub fn default_db_path_in(root: &Path) -> PathBuf {
+    root.join(DEFAULT_DB_PATH.trim_start_matches('/'))
+}
+
+/// The default transaction log inside `root`: `<root>/var/log/pacman.log`.
+#[must_use]
+pub fn default_log_file_in(root: &Path) -> PathBuf {
+    root.join(DEFAULT_LOG_FILE.trim_start_matches('/'))
 }
 
 /// Why pacman does not register a repository section (`alpm_register_syncdb`, `db.c:47`).
@@ -246,7 +319,7 @@ impl RepositoryConfig {
     /// directive is parsed at all. That is what separates "unset" from "explicitly set".
     #[must_use]
     pub fn effective_sig_level(&self, global: SigLevel) -> SigLevel {
-        if self.sig_level.contains(SigLevel::USE_DEFAULT) { global } else { self.sig_level }
+        self.sig_level.or_inherit(global)
     }
 }
 
@@ -584,16 +657,14 @@ impl<'a> Parser<'a> {
         self.set_section(Section::None); // flush a trailing in-progress repo section
 
         let root_was_set = self.options.root_dir.is_some();
+        let db_path_set = self.options.db_path.is_some();
+        let log_file_set = self.options.log_file.is_some();
         let root_dir = self.options.root_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_ROOT_DIR));
 
         let (db_path, log_file) = if root_was_set {
             (
-                self.options
-                    .db_path
-                    .unwrap_or_else(|| root_dir.join(DEFAULT_DB_PATH.trim_start_matches('/'))),
-                self.options
-                    .log_file
-                    .unwrap_or_else(|| root_dir.join(DEFAULT_LOG_FILE.trim_start_matches('/'))),
+                self.options.db_path.unwrap_or_else(|| default_db_path_in(&root_dir)),
+                self.options.log_file.unwrap_or_else(|| default_log_file_in(&root_dir)),
             )
         } else {
             (
@@ -655,6 +726,8 @@ impl<'a> Parser<'a> {
             sig_level: self.options.sig_level,
             local_file_sig_level,
             remote_file_sig_level,
+            db_path_set,
+            log_file_set,
         };
 
         let mut repositories = Vec::with_capacity(self.repos.len());
@@ -1027,6 +1100,30 @@ mod tests {
         assert_eq!(config.options.sig_level, SigLevel::default_global());
         assert!(config.repositories.is_empty());
         assert!(config.diagnostics().is_empty());
+    }
+
+    /// A root the command line names moves the default database and log with it. A directive
+    /// stays where it points.
+    #[test]
+    fn a_named_root_moves_the_default_db_path_and_log_file_only() {
+        let dir = TempDir::new().unwrap();
+        let root = Path::new("/mnt");
+
+        let path = write_conf(&dir, "plain.conf", "[options]\n");
+        let options = PacmanConfig::open(&path).unwrap().options;
+        assert!(!options.sets_db_path());
+        assert_eq!(options.db_path_in(root), Path::new("/mnt/var/lib/pacman/"));
+        assert_eq!(options.log_file_in(root), Path::new("/mnt/var/log/pacman.log"));
+        assert_eq!(options.db_path_in(Path::new("/")), Path::new(DEFAULT_DB_PATH));
+
+        let db = dir.path().join("db");
+        std::fs::create_dir(&db).unwrap();
+        let text = format!("[options]\nDBPath = {}\nLogFile = /x/piko.log\n", db.display());
+        let path = write_conf(&dir, "set.conf", &text);
+        let options = PacmanConfig::open(&path).unwrap().options;
+        assert!(options.sets_db_path());
+        assert_eq!(options.db_path_in(root), options.db_path);
+        assert_eq!(options.log_file_in(root), Path::new("/x/piko.log"));
     }
 
     #[test]
@@ -1457,6 +1554,59 @@ mod tests {
         assert!(!config.database_sig_level(&name("extra")).contains(SigLevel::DATABASE));
         assert_eq!(config.database_sig_level(&name("testing")), global, "no [testing] section");
         assert!(config.repository(&name("testing")).is_none());
+    }
+
+    /// A package file named by path or by URL is held to the global `SigLevel` when no
+    /// directive sets its own. The raw fields hold the `USE_DEFAULT` sentinel, which has no
+    /// `PACKAGE` bit: read as bits, they say `SigLevel = Never`. They keep the sentinel so
+    /// that `piko conf` prints no line for either directive, as `pacman-conf` prints none.
+    #[test]
+    fn a_file_sig_level_no_directive_sets_inherits_the_global_one() {
+        let dir = TempDir::new().unwrap();
+        let path = write_conf(
+            &dir,
+            "pacman.conf",
+            "[options]\nArchitecture = x86_64\nSigLevel = Required DatabaseOptional\n",
+        );
+        let options = PacmanConfig::open(&path).unwrap().options;
+
+        assert_eq!(options.local_file_sig_level, SigLevel::USE_DEFAULT);
+        assert_eq!(options.remote_file_sig_level, SigLevel::USE_DEFAULT);
+        for effective in
+            [options.effective_local_file_sig_level(), options.effective_remote_file_sig_level()]
+        {
+            assert_eq!(effective, options.sig_level);
+            assert!(effective.contains(SigLevel::PACKAGE), "the global PackageRequired applies");
+            assert!(!effective.contains(SigLevel::PACKAGE_OPTIONAL));
+        }
+    }
+
+    /// A directive that sets a file level decides it, and leaves the other file level to the
+    /// global `SigLevel`. A partial directive changes its own bits only.
+    #[test]
+    fn a_file_sig_level_a_directive_sets_keeps_it() {
+        let dir = TempDir::new().unwrap();
+        let path = write_conf(
+            &dir,
+            "pacman.conf",
+            "[options]\nArchitecture = x86_64\nSigLevel = Required DatabaseOptional\n\
+             LocalFileSigLevel = Never\n",
+        );
+        let options = PacmanConfig::open(&path).unwrap().options;
+        assert!(!options.effective_local_file_sig_level().contains(SigLevel::PACKAGE));
+        assert_eq!(options.effective_remote_file_sig_level(), options.sig_level);
+
+        let path = write_conf(
+            &dir,
+            "pacman.conf",
+            "[options]\nArchitecture = x86_64\nSigLevel = Required DatabaseOptional\n\
+             RemoteFileSigLevel = PackageTrustAll\n",
+        );
+        let options = PacmanConfig::open(&path).unwrap().options;
+        let remote = options.effective_remote_file_sig_level();
+        assert!(remote.contains(SigLevel::PACKAGE), "the global PackageRequired still applies");
+        assert!(remote.contains(SigLevel::PACKAGE_UNKNOWN_OK));
+        assert_eq!(options.effective_local_file_sig_level(), options.sig_level);
     }
 
     /// A repository that sets its own `SigLevel` keeps it rather than the global one.

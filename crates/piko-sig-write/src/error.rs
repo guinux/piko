@@ -81,10 +81,11 @@ pub enum Error {
 }
 
 impl From<piko_sig::Error> for Error {
-    /// [`piko_sig::open_context`] is the one function this crate calls into `piko-sig` for.
-    /// Its only failure mode is [`piko_sig::Error::KeyringUnusable`], so the conversion is
-    /// total in practice. A future verification-only variant reaching here becomes
-    /// [`Error::Gpgme`] rather than losing the message.
+    /// This crate calls two functions of `piko-sig` to open a keyring:
+    /// `piko_sig::ensure_trusted_keyring` and `piko_sig::open_context`. Their only failure
+    /// mode is [`piko_sig::Error::KeyringUnusable`], so the conversion is total in practice. A
+    /// future verification-only variant reaching here becomes [`Error::Gpgme`] rather than
+    /// losing the message.
     fn from(source: piko_sig::Error) -> Self {
         match source {
             piko_sig::Error::KeyringUnusable { home, reason } => {

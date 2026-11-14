@@ -119,6 +119,9 @@ pub enum Limit {
     RepoInflated,
     /// The maximum size of a single member (`desc` or `files`) inside a repository archive.
     RepoEntry,
+    /// The maximum size of one tar extension header inside a repository archive: a GNU long
+    /// name or a PAX record list.
+    RepoExtension,
     /// The maximum size of a `pacman.conf` file, or any file it `Include`s.
     PacmanConf,
     /// The maximum size of an alpm `.hook` file.
@@ -156,6 +159,7 @@ impl Limit {
             Self::RepoCompressed => "compressed repository archive",
             Self::RepoInflated => "inflated repository archive",
             Self::RepoEntry => "repository archive member",
+            Self::RepoExtension => "repository archive extension header",
             Self::PacmanConf => "pacman.conf file",
             Self::Hook => "hook file",
             Self::MountTable => "mount table",
@@ -242,6 +246,17 @@ pub struct Limits {
     /// Maximum size in bytes of a single member (`desc` or `files`) inside a repository
     /// archive.
     pub repo_entry_bytes: u64,
+    /// Maximum size in bytes of one tar extension header inside a repository archive: a GNU
+    /// long name, a GNU long link name, or a PAX record list.
+    ///
+    /// Such a header gives the next member a path too long for its own header. It is read
+    /// whole before the member it describes, so [`Limits::repo_entry_bytes`] does not bound
+    /// it. The size the header declares is tested before it is read.
+    ///
+    /// A member path is `<name>-<version>/desc` or `<name>-<version>/files`. The longest one
+    /// in this machine's repositories is 88 bytes, and `repo-add` writes no extension header
+    /// for a path that fits the 255 bytes of a `ustar` header. The default is far above both.
+    pub repo_extension_bytes: u64,
     /// Maximum number of packages a repository database archive may contain.
     ///
     /// Exceeding this is a hard error, for the same reason as [`Limits::max_entries`]. It is
@@ -431,6 +446,7 @@ impl Default for Limits {
             repo_compressed_bytes: 256 * MIB,
             repo_inflated_bytes: u64::from(u32::MAX),
             repo_entry_bytes: 64 * MIB,
+            repo_extension_bytes: 64 * KIB,
             repo_max_packages: 1 << 20,
             repo_max_relations: 1 << 21,
             repo_max_paths: 1 << 25,
@@ -468,6 +484,7 @@ impl Limits {
             Limit::RepoCompressed => self.repo_compressed_bytes,
             Limit::RepoInflated => self.repo_inflated_bytes,
             Limit::RepoEntry => self.repo_entry_bytes,
+            Limit::RepoExtension => self.repo_extension_bytes,
             Limit::PacmanConf => self.pacman_conf_bytes,
             Limit::Hook => self.hook_bytes,
             Limit::MountTable => self.mount_table_bytes,
@@ -545,6 +562,7 @@ mod tests {
         assert_eq!(limits.get(Limit::RepoCompressed), limits.repo_compressed_bytes);
         assert_eq!(limits.get(Limit::RepoInflated), limits.repo_inflated_bytes);
         assert_eq!(limits.get(Limit::RepoEntry), limits.repo_entry_bytes);
+        assert_eq!(limits.get(Limit::RepoExtension), limits.repo_extension_bytes);
         assert_eq!(limits.get(Limit::PacmanConf), limits.pacman_conf_bytes);
     }
 

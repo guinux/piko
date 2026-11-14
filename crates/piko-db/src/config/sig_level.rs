@@ -67,6 +67,16 @@ impl SigLevel {
         Self(self.0 | other.0)
     }
 
+    /// This level, or `inherited` when this level is the [`Self::USE_DEFAULT`] sentinel.
+    ///
+    /// The sentinel is tested as a bit, the way libalpm tests `ALPM_SIG_USE_DEFAULT`. The
+    /// parser clears the bit when a directive sets the level, so a level that still carries it
+    /// holds nothing of its own.
+    #[must_use]
+    pub(crate) fn or_inherit(self, inherited: Self) -> Self {
+        if self.contains(Self::USE_DEFAULT) { inherited } else { self }
+    }
+
     fn unset(&mut self, flag: Self) {
         self.0 &= !flag.0;
     }

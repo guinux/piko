@@ -10,6 +10,12 @@
 //! where it reads it, and none reaches a comparison. Each reader refuses it as it refuses any
 //! other value that does not convert. libalpm's `rpmvercmp` compares digit runs of any length;
 //! no package carries one this long.
+//!
+//! The same check refuses a control character. `alpm-types` accepts every ASCII character in a
+//! `pkgver` except white space and six delimiters, so it accepts an escape sequence. A frontend
+//! prints a version on almost every line, and a sequence in one could set the terminal's title
+//! or write its clipboard. Every reader of a version passes here, so one refusal covers each
+//! place a version is printed.
 
 use std::str::FromStr;
 
@@ -25,7 +31,7 @@ pub trait Comparable {
     /// # Errors
     ///
     /// [`alpm_types::Error::InvalidInteger`] for the first numeric segment that does not fit
-    /// a `usize`.
+    /// a `usize`. [`alpm_types::Error::ValueContainsInvalidChars`] for a control character.
     fn check_comparable(&self) -> Result<(), alpm_types::Error>;
 }
 
@@ -44,8 +50,11 @@ where
 }
 
 /// Checks each numeric segment of a `pkgver` as `alpm-types` reads it: a maximal run of numeric
-/// characters, which a `pkgver` holds in ASCII only.
+/// characters, which a `pkgver` holds in ASCII only. Refuses a control character first.
 fn check_pkgver(pkgver: &str) -> Result<(), alpm_types::Error> {
+    if let Some(invalid_char) = pkgver.chars().find(|character| character.is_control()) {
+        return Err(alpm_types::Error::ValueContainsInvalidChars { invalid_char });
+    }
     for run in pkgver.split(|c: char| !c.is_numeric()).filter(|run| !run.is_empty()) {
         run.parse::<usize>()?;
     }
@@ -92,7 +101,11 @@ impl Comparable for SonameV1 {
     fn check_comparable(&self) -> Result<(), alpm_types::Error> {
         match self {
             Self::Explicit { version, .. } => version.check_comparable(),
-            Self::Basic(_) | Self::Unversioned { .. } => Ok(()),
+            // libalpm reads `name=soname-arch` as an `=` constraint whose version is the
+            // soname, and `crate::depcmp` compares it as one. So its digits are checked as a
+            // `pkgver`'s are.
+            Self::Unversioned { soname, .. } => check_pkgver(soname.as_str()),
+            Self::Basic(_) => Ok(()),
         }
     }
 }
@@ -107,7 +120,7 @@ impl Comparable for VersionOrSoname {
     fn check_comparable(&self) -> Result<(), alpm_types::Error> {
         match self {
             Self::Version(version) => version.check_comparable(),
-            Self::Soname(_) => Ok(()),
+            Self::Soname(soname) => check_pkgver(soname.as_str()),
         }
     }
 }
@@ -153,6 +166,34 @@ mod tests {
         }
         let soname = format!("libfoo.so={PAST_USIZE}-64");
         assert!(parse::<RelationOrSoname>(&soname).is_err(), "{soname}");
+    }
+
+    /// `libfoo.so=libfoo-<digits>.so-64` holds no version in the `alpm-types` sense, but a
+    /// dependency check compares its soname as one. So its digits are checked too.
+    #[test]
+    fn a_numeric_segment_past_usize_is_refused_in_an_unversioned_soname() {
+        let soname = format!("libfoo.so=libfoo-{PAST_USIZE}.so-64");
+        assert!(matches!(
+            RelationOrSoname::from_str(&soname),
+            Ok(RelationOrSoname::SonameV1(SonameV1::Unversioned { .. }))
+        ));
+        assert!(parse::<RelationOrSoname>(&soname).is_err(), "{soname}");
+        assert!(parse::<RelationOrSoname>("libgegl-npd-0.4.so=libgegl-npd-0.4.so-64").is_ok());
+    }
+
+    /// `alpm-types` accepts an escape sequence in a `pkgver`. A version is printed on almost
+    /// every line a frontend writes, so the readers refuse one.
+    #[test]
+    fn a_control_character_in_a_version_is_refused() {
+        // A title change: an escape, an operating system command, and the bell that ends it.
+        let version = "1\u{1b}]0;PWNED\u{7}-1";
+        assert!(FullVersion::from_str(version).is_ok(), "alpm-types refuses it now");
+        assert!(parse::<FullVersion>(version).is_err());
+        assert!(parse::<PackageRelation>(&format!("foo>={version}")).is_err());
+        assert!(parse::<RelationOrSoname>(&format!("foo={version}")).is_err());
+        for version in ["1\u{0}-1", "1\u{7f}-1", "1\u{8}-1"] {
+            assert!(parse::<FullVersion>(version).is_err(), "{version:?}");
+        }
     }
 
     #[test]

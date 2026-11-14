@@ -1,6 +1,7 @@
 //! The download sandbox: every request to a mirror runs in a confined helper process.
 
 mod confine;
+pub use confine::Confined;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod fuzzing;
@@ -13,7 +14,7 @@ use std::{
     process::{Child, ChildStdout, Command, ExitCode, Stdio},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, RecvTimeoutError},
     },
     time::{Duration, Instant},
@@ -40,9 +41,9 @@ pub(crate) const HELPER_ARG: &str = "__fetch";
 /// The executable the helper is started from.
 const SELF_EXE: &str = "/proc/self/exe";
 
-/// How long the helper may outlive its own timeout before the parent kills it.
+/// How long the helper may outlive one of its own timeouts before the parent kills it.
 ///
-/// The helper enforces the request's timeout itself. This bound is for a helper that does not.
+/// The helper enforces the request's timeouts itself. This bound is for a helper that does not.
 const WATCHDOG_GRACE: Duration = Duration::from_secs(5);
 
 /// How often the watchdog looks at the cancellation flag.
@@ -214,11 +215,40 @@ impl Default for Sandbox {
     }
 }
 
-/// The two timeouts a request runs under.
+/// The timeouts a request runs under.
+///
+/// None of them bounds the whole transfer. A package of several gigabytes on a slow link takes
+/// as long as it takes, and a bound on the total would refuse it on every server. What is
+/// bounded is each wait: for a connection, for the response to begin, and for the next bytes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Timeouts {
-    pub(crate) whole: Duration,
+    /// How long a name lookup may take, and then how long a connection may take to establish.
     pub(crate) connect: Duration,
+    /// How long the response may take to begin, once the request is sent.
+    pub(crate) response: Duration,
+    /// How long the transfer may receive nothing. `None` is no limit.
+    pub(crate) stall: Option<Duration>,
+}
+
+impl Timeouts {
+    /// How long a helper may stay silent before its first frame: one name lookup, one
+    /// connection and one response, and the grace.
+    fn opening(self) -> Duration {
+        self.connect
+            .saturating_add(self.connect)
+            .saturating_add(self.response)
+            .saturating_add(WATCHDOG_GRACE)
+    }
+
+    /// How long a helper may stay silent between two frames of a body.
+    fn between_frames(self) -> Option<Duration> {
+        self.stall.map(|stall| stall.saturating_add(WATCHDOG_GRACE))
+    }
+}
+
+/// `duration` in whole milliseconds, as a request carries it.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Why a request did not produce a response.
@@ -254,8 +284,9 @@ impl Enabled {
         let request = Request {
             url: url.to_owned(),
             if_modified_since: if_modified_since.map(str::to_owned),
-            timeout_secs: timeouts.whole.as_secs(),
-            connect_timeout_secs: timeouts.connect.as_secs(),
+            response_timeout_millis: millis(timeouts.response),
+            connect_timeout_millis: millis(timeouts.connect),
+            stall_timeout_millis: timeouts.stall.map(millis),
             filesystem: self.filesystem,
             syscalls: self.syscalls,
             ports: allowed_ports(url),
@@ -283,7 +314,7 @@ impl Enabled {
         })?;
 
         let (stdin, stdout) = (child.stdin.take(), child.stdout.take());
-        let guard = Guard::new(child, timeouts.whole.saturating_add(WATCHDOG_GRACE), cancel);
+        let guard = Guard::new(child, timeouts, cancel);
         let (Some(mut stdin), Some(stdout)) = (stdin, stdout) else {
             return Err(Failure::Sandbox("the download helper has no pipes".to_owned()));
         };
@@ -296,7 +327,10 @@ impl Enabled {
 
         let mut reader = Reader::new(stdout);
         match reader.opening() {
-            Ok(Opening::Header(header)) => Ok((header, Fetch { reader, guard })),
+            Ok(Opening::Header(header)) => {
+                guard.activity.begin_body();
+                Ok((header, Fetch { reader, guard }))
+            }
             Ok(Opening::Failure(message)) => Err(Failure::Request(message)),
             Ok(Opening::Setup(message)) => Err(Failure::Sandbox(message)),
             Err(error) => Err(Failure::Request(guard.describe(&error))),
@@ -393,7 +427,57 @@ pub(crate) struct Fetch {
 
 impl Read for Fetch {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.reader.read(buffer).map_err(|error| std::io::Error::other(self.guard.describe(&error)))
+        // Marked before the read as well as after it. The silence the watchdog measures is then
+        // the time this process waited for the helper, and never the time it spent writing the
+        // previous chunk to disk.
+        self.guard.activity.mark();
+        let read = self.reader.read(buffer);
+        self.guard.activity.mark();
+        read.map_err(|error| std::io::Error::other(self.guard.describe(&error)))
+    }
+}
+
+/// When the parent last waited for, or heard from, a helper.
+///
+/// The watchdog measures the helper's silence against it. A transfer that keeps sending is
+/// never killed for its length.
+#[derive(Debug)]
+struct Activity {
+    started: Instant,
+    /// The last mark, in milliseconds after `started`.
+    last_millis: AtomicU64,
+    /// Whether the first frame arrived, so the bound is the one between two frames.
+    in_body: AtomicBool,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            last_millis: AtomicU64::new(0),
+            in_body: AtomicBool::new(false),
+        }
+    }
+
+    fn mark(&self) {
+        self.last_millis.store(millis(self.started.elapsed()), Ordering::Relaxed);
+    }
+
+    fn begin_body(&self) {
+        self.mark();
+        self.in_body.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the helper has been silent for longer than `timeouts` allow.
+    fn expired(&self, timeouts: Timeouts) -> bool {
+        let limit = if self.in_body.load(Ordering::Relaxed) {
+            timeouts.between_frames()
+        } else {
+            Some(timeouts.opening())
+        };
+        let silent =
+            millis(self.started.elapsed()).saturating_sub(self.last_millis.load(Ordering::Relaxed));
+        limit.is_some_and(|limit| silent >= millis(limit))
     }
 }
 
@@ -403,26 +487,29 @@ struct Guard {
     child: Arc<Mutex<Child>>,
     /// Dropping the sender stops the watchdog.
     stop: Option<mpsc::Sender<()>>,
-    /// Set when the watchdog killed the helper for running too long.
+    /// Set when the watchdog killed the helper for staying silent too long.
     timed_out: Arc<AtomicBool>,
+    /// What the watchdog measures the helper's silence against.
+    activity: Arc<Activity>,
 }
 
 impl Guard {
-    fn new(child: Child, limit: Duration, cancel: &Cancel) -> Self {
+    fn new(child: Child, timeouts: Timeouts, cancel: &Cancel) -> Self {
         let child = Arc::new(Mutex::new(child));
         let timed_out = Arc::new(AtomicBool::new(false));
+        let activity = Arc::new(Activity::new());
         let (stop, stopped) = mpsc::channel::<()>();
         let watched = Arc::clone(&child);
         let flag = Arc::clone(&timed_out);
+        let heard = Arc::clone(&activity);
         let cancel = cancel.clone();
-        let deadline = Instant::now().checked_add(limit);
         std::thread::spawn(move || {
             loop {
                 match stopped.recv_timeout(WATCHDOG_TICK) {
                     Err(RecvTimeoutError::Timeout) => {}
                     Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
                 }
-                let expired = deadline.is_some_and(|deadline| Instant::now() >= deadline);
+                let expired = heard.expired(timeouts);
                 if expired || cancel.is_requested() {
                     flag.store(expired, Ordering::Relaxed);
                     // Under the lock, so the process cannot have been reaped and its id reused.
@@ -433,7 +520,7 @@ impl Guard {
                 }
             }
         });
-        Self { child, stop: Some(stop), timed_out }
+        Self { child, stop: Some(stop), timed_out, activity }
     }
 
     /// The message for a read that failed, naming a timeout when the watchdog caused it.
@@ -466,7 +553,7 @@ impl Drop for Guard {
 /// # Errors
 ///
 /// A message naming the restriction that could not be applied.
-pub fn confine_self(filesystem: bool, syscalls: bool, ports: &[u16]) -> Result<(), String> {
+pub fn confine_self(filesystem: bool, syscalls: bool, ports: &[u16]) -> Result<Confined, String> {
     confine::apply(&confine::Confinement { filesystem, syscalls, ports })
 }
 
@@ -518,8 +605,9 @@ fn helper_main() -> ExitCode {
     }
 
     let agent = crate::transport::agent(Timeouts {
-        whole: Duration::from_secs(request.timeout_secs),
-        connect: Duration::from_secs(request.connect_timeout_secs),
+        connect: Duration::from_millis(request.connect_timeout_millis),
+        response: Duration::from_millis(request.response_timeout_millis),
+        stall: request.stall_timeout_millis.map(Duration::from_millis),
     });
     let call =
         crate::transport::request(&agent, &request.url, request.if_modified_since.as_deref());

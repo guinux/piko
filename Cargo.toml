@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "1.0.0-rc.1"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0 OR MIT"
@@ -87,7 +87,7 @@ base64 = "0.22"
 thiserror = "2"
 # rustls + platform-verifier: keeps piko's TLS stack pure Rust while still validating
 # against the system CA store, same as libcurl/pacman.
-ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+ureq = { version = "3.5", default-features = false, features = ["rustls", "platform-verifier"] }
 time = "0.3"
 # Reads the machine's time zone rules (TZif, or a POSIX `TZ` string), so a timestamp is
 # rendered in the offset that applied at that instant. piko reads the bytes itself, bounded;
@@ -103,12 +103,12 @@ signal-hook = "0.4"
 # CLI-only ANSI styling for the transaction progress display.
 console = "0.16"
 
-piko-db = { path = "crates/piko-db", version = "0.9.0" }
-piko-db-write = { path = "crates/piko-db-write", version = "0.9.0" }
-piko-net = { path = "crates/piko-net", version = "0.9.0" }
-piko-sig = { path = "crates/piko-sig", version = "0.9.0" }
-piko-sig-write = { path = "crates/piko-sig-write", version = "0.9.0" }
-piko-txn = { path = "crates/piko-txn", version = "0.9.0" }
+piko-db = { path = "crates/piko-db", version = "1.0.0-rc.1" }
+piko-db-write = { path = "crates/piko-db-write", version = "1.0.0-rc.1" }
+piko-net = { path = "crates/piko-net", version = "1.0.0-rc.1" }
+piko-sig = { path = "crates/piko-sig", version = "1.0.0-rc.1" }
+piko-sig-write = { path = "crates/piko-sig-write", version = "1.0.0-rc.1" }
+piko-txn = { path = "crates/piko-txn", version = "1.0.0-rc.1" }
 
 [profile.release]
 # A package manager runs as root; keep overflow checks on in release builds.

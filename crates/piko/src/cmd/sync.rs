@@ -137,10 +137,11 @@ pub fn resolve_and_print(
             eprintln!("Error: every package satisfying {target} is ignored");
             for (resolved, reason) in &ignored {
                 eprintln!(
-                    "  {}-{} in {} ({reason})",
+                    "  {}-{} in {} ({})",
                     resolved.package().name(),
                     resolved.package().version(),
-                    resolved.repo()
+                    resolved.repo(),
+                    crate::output::escaped(reason)
                 );
             }
         }

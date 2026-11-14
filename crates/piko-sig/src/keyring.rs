@@ -24,7 +24,8 @@ use crate::{
 /// be a directory already.
 ///
 /// This is the only piece of GPGME setup shared across the read/write split. Everything past
-/// binding the context stays on its own side of it.
+/// binding the context stays on its own side of it. It does not test the keyring: a caller
+/// runs [`ensure_trusted_keyring`] first.
 ///
 /// It is hidden from the documentation and not part of the crate's stable interface: it
 /// returns a `gpgme` type, so a `gpgme` upgrade can change it. It exists for `piko-sig-write`
@@ -53,8 +54,8 @@ pub fn open_context(home: &Path) -> Result<gpgme::Context> {
     Ok(context)
 }
 
-/// The most entries [`ensure_trusted`] reads from a keyring directory. `pacman-key --init`
-/// writes about twenty.
+/// The most entries [`ensure_trusted_keyring`] reads from a keyring directory. `pacman-key
+/// --init` writes about twenty.
 const MAX_KEYRING_ENTRIES: usize = 4096;
 
 /// Fails if a user other than root and this process's own could change the keyring at `home`:
@@ -68,11 +69,19 @@ const MAX_KEYRING_ENTRIES: usize = 4096;
 /// none, and a link would put a directory outside `home` in charge of what GnuPG reads. GnuPG
 /// itself only warns about unsafe permissions, and libalpm checks none.
 ///
+/// The test runs before GnuPG starts, for a reader and for an administrator alike. `gpg.conf`
+/// names the agent GnuPG starts (`agent-program`), so GnuPG run over a keyring another user
+/// can change runs that user's program with this process's privileges.
+///
+/// It is hidden from the documentation and not part of the crate's stable interface. It is one
+/// step of [`Keyring::open`], and exists alone for `piko-sig-write`, which opens a keyring
+/// without a [`Keyring`].
+///
 /// # Errors
 ///
 /// [`Error::KeyringUnusable`] naming the entry and why, or when the directory cannot be listed,
-/// holds a symbolic link, or holds more than [`MAX_KEYRING_ENTRIES`] entries.
-fn ensure_trusted(home: &Path) -> Result<()> {
+/// holds a symbolic link, or holds more than `MAX_KEYRING_ENTRIES` entries.
+pub fn ensure_trusted_keyring(home: &Path) -> Result<()> {
     let unusable = |reason: String| Error::KeyringUnusable { home: home.to_path_buf(), reason };
     let untrusted = |path: &Path, distrust: piko_db::fs_util::Distrust| {
         unusable(format!("{} is {distrust}, so another user could change it", path.display()))
@@ -138,7 +147,7 @@ impl Keyring {
         if !home.is_dir() {
             return Err(Error::KeyringUnusable { home, reason: "not a directory".to_owned() });
         }
-        ensure_trusted(&home)?;
+        ensure_trusted_keyring(&home)?;
         let keyring = Self { home };
         // Constructed and dropped purely to prove it can be.
         drop(keyring.context()?);

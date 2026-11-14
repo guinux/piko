@@ -814,10 +814,15 @@ impl<'a> Universe<'a> {
 
         // Installed providers first (`deps.c:709`), then the rest, each already in
         // repository-then-scan order because the index was filled in interning order.
+        //
+        // The index lists a package once per `%PROVIDES%` entry filed under the key, so a
+        // package can come twice. The set makes that test cost the same for the millionth
+        // provider of one name as for the first: a repository chooses how many there are.
+        let mut seen: HashSet<SolvableId> = found.iter().copied().collect();
         for installed_pass in [true, false] {
             for id in providers {
                 let Some(solvable) = self.get(*id) else { continue };
-                if solvable.is_installed() != installed_pass || found.contains(id) {
+                if solvable.is_installed() != installed_pass || seen.contains(id) {
                     continue;
                 }
                 // `resolvedep`'s `pkg->name_hash != dep->name_hash` guard. A package named
@@ -832,10 +837,32 @@ impl<'a> Universe<'a> {
                     .any(|provided| depcmp::provides_satisfies(provided, dep))
                 {
                     found.push(*id);
+                    seen.insert(*id);
                 }
             }
         }
 
+        found
+    }
+
+    /// Every candidate for which [`Solvable::satisfies`] holds on `dep`, in identifier order.
+    ///
+    /// A candidate satisfies `dep` by its own name or by a named `%PROVIDES%` entry, and both
+    /// carry the name of `dep`. So the name group and the bucket of that name hold every
+    /// match, and a `%CONFLICTS%` entry costs those two lists, not a pass over every
+    /// candidate.
+    pub(crate) fn matching(&self, dep: &PackageRelation) -> Vec<SolvableId> {
+        let name: &str = dep.name.as_ref();
+        let providers = self.provides.get(name).map_or(&[][..], Vec::as_slice);
+        let mut found: Vec<SolvableId> = self
+            .candidates_named(name)
+            .iter()
+            .chain(providers)
+            .copied()
+            .filter(|id| self.get(*id).is_some_and(|solvable| solvable.satisfies(dep)))
+            .collect();
+        found.sort_unstable();
+        found.dedup();
         found
     }
 
@@ -1175,6 +1202,25 @@ mod tests {
         assert_eq!(names(&universe, &found), ["installed-impl", "repo-impl"]);
     }
 
+    /// A package that provides one name in two versions is filed twice under that name, and
+    /// is one satisfier.
+    #[test]
+    fn a_package_that_provides_a_name_twice_is_one_satisfier() {
+        let scenario = Scenario::new()
+            .installed(
+                PackageSpec::new("installed-impl", "1.0.0-1").provides(["virtual=1", "virtual=2"]),
+            )
+            .repo(
+                "core",
+                [PackageSpec::new("repo-impl", "1.0.0-1").provides(["virtual=1", "virtual=2"])],
+            )
+            .build();
+        let universe = universe(&scenario);
+
+        let found = universe.satisfiers(&relation("virtual"));
+        assert_eq!(names(&universe, &found), ["installed-impl", "repo-impl"]);
+    }
+
     #[test]
     fn a_version_constraint_filters_literal_candidates() {
         let scenario = Scenario::new()
@@ -1348,6 +1394,37 @@ mod tests {
         assert!(impl_pkg.satisfies(&"virtual".parse().unwrap()));
         assert!(impl_pkg.satisfies(&"impl".parse().unwrap()));
         assert!(!impl_pkg.satisfies(&"unrelated".parse().unwrap()));
+    }
+
+    /// The index lookup names exactly the candidates the predicate accepts, in identifier
+    /// order: by name, through a provide, with and without a version, and never twice.
+    #[test]
+    fn the_indexed_conflict_lookup_agrees_with_the_predicate() {
+        let scenario = Scenario::new()
+            .installed(PackageSpec::new("virtual", "1.0.0-1").provides(["virtual=1.0.0"]))
+            .installed(PackageSpec::new("other", "1.0.0-1").provides(["lib:libvirtual.so.1"]))
+            .repo(
+                "core",
+                [
+                    PackageSpec::new("virtual", "2.0.0-1"),
+                    PackageSpec::new("impl", "1.0.0-1").provides(["virtual=1.5", "virtual=3"]),
+                    PackageSpec::new("loose", "1.0.0-1").provides(["virtual"]),
+                    PackageSpec::new("unrelated", "1.0.0-1").provides(["virtual2"]),
+                ],
+            )
+            .build();
+        let universe = universe(&scenario);
+
+        for text in ["virtual", "virtual>=2", "virtual<2", "virtual=3", "impl", "absent"] {
+            let dep: PackageRelation = text.parse().unwrap();
+            let scanned: Vec<SolvableId> = universe
+                .iter()
+                .filter(|solvable| solvable.satisfies(&dep))
+                .map(|solvable| solvable.id())
+                .collect();
+            assert_eq!(universe.matching(&dep), scanned, "{text}");
+        }
+        assert_eq!(universe.matching(&"virtual".parse().unwrap()).len(), 4);
     }
 
     #[test]

@@ -128,6 +128,16 @@ pub enum Error {
         source: crate::record::RecordError,
     },
 
+    /// A file to write into an entry was named by something other than one plain file name.
+    ///
+    /// A name that holds a `/`, or is `.` or `..`, would put the file outside the entry. A
+    /// writer of the local database runs as root, so the name is refused, never joined.
+    #[error("{name:?} does not name a file inside a database entry")]
+    InvalidMemberName {
+        /// The refused name, truncated for display.
+        name: String,
+    },
+
     /// A read performed on the way to a write failed.
     #[error(transparent)]
     Read(#[from] piko_db::Error),

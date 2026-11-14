@@ -257,3 +257,39 @@ fn force_bypasses_the_conditional_request() {
         requests.get(1).unwrap()
     );
 }
+
+/// A `304` answers a condition. With no database installed, the request carried none, so the
+/// answer is the server's failure and the next server supplies the database.
+#[test]
+fn a_not_modified_answer_to_an_unconditional_request_moves_to_the_next_server() {
+    let dir = SyncDir::new();
+    let sync = dir.path();
+    let live = database("a real database", FIRST);
+    let (broken, first) = serve(vec![not_modified()]);
+    let (url, second) = serve(vec![ok_response(&live, "Tue, 18 Aug 2026 18:18:06 GMT")]);
+
+    let refreshed = Refresher::default()
+        .refresh(
+            sync,
+            &common::lock(sync),
+            "core",
+            &[broken.clone(), url],
+            None,
+            unsigned(),
+            false,
+            &piko_net::Cancel::new(),
+        )
+        .unwrap();
+
+    assert_eq!(refreshed.outcome, Outcome::Updated);
+    assert_eq!(std::fs::read(sync.join("core.db")).unwrap(), live);
+    drop((first.join(), second.join()));
+
+    // With no other server, the refresh fails. It never reports a database that is not there.
+    let dir = SyncDir::new();
+    let (broken, server) = serve(vec![not_modified()]);
+    let message = refresh(dir.path(), &broken).unwrap_err().to_string();
+    assert!(message.contains("not modified"), "{message}");
+    assert!(!dir.path().join("core.db").exists());
+    drop(server.join());
+}

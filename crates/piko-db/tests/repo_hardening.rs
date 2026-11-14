@@ -166,6 +166,39 @@ fn an_oversized_member_is_refused() {
     assert!(matches!(&err, Error::LimitExceeded { limit: Limit::RepoEntry, .. }), "got {err:?}");
 }
 
+/// A GNU long name is read whole before the member it names, so the member bound does not
+/// cover it. It has a bound of its own, tested on the size its header declares.
+#[test]
+fn an_oversized_extension_header_is_refused() {
+    use std::io::Write as _;
+
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::GNULongName);
+    header.set_path("././@LongLink").unwrap();
+    header.set_size(1 << 20);
+    header.set_cksum();
+    builder.append(&header, vec![b'a'; 1 << 20].as_slice()).unwrap();
+    let desc = desc_for("foo", "1.0.0-1");
+    let mut header = tar::Header::new_gnu();
+    header.set_size(desc.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    let member = format!("{}/desc", entry("foo", "1.0.0-1"));
+    builder.append_data(&mut header, member, desc.as_bytes()).unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&builder.into_inner().unwrap()).unwrap();
+    let fixture = RepoFixture::new();
+    let path = fixture.write_archive("core.db", &encoder.finish().unwrap());
+
+    let err = RepoDatabase::open(&path).unwrap_err();
+
+    assert!(
+        matches!(&err, Error::LimitExceeded { limit: Limit::RepoExtension, .. }),
+        "got {err:?}"
+    );
+}
+
 #[test]
 fn a_fifo_named_like_an_archive_does_not_block() {
     let fixture = RepoFixture::new();

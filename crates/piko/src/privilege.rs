@@ -27,7 +27,8 @@ pub enum Target<'a> {
         root: &'a Path,
         /// The resolved database path.
         dbpath: &'a Path,
-        /// Whether `--dbpath` gave `dbpath`.
+        /// Whether the command line placed `dbpath`: `--dbpath` gave it, or `--root` did and
+        /// no `DBPath` directive overrides that root.
         dbpath_named: bool,
     },
     /// A refresh: the sync databases under `dbpath`.

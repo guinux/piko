@@ -11,7 +11,8 @@
 //!   Whatever user the helper runs as, the secrets that user can read stay out of reach: a
 //!   keyring, a home directory, an SSH key.
 //! - Landlock also limits TCP `connect` to a list of ports and forbids `bind`, and scopes signals
-//!   and abstract UNIX sockets to the helper, when the kernel supports it.
+//!   and abstract UNIX sockets to the helper, when the kernel supports it. It refuses a UNIX
+//!   socket that a path names, except the resolver's (`RESOLVER_SOCKETS`).
 //! - The system call filter also refuses `execve`, `execveat`, and any `clone` that makes a new
 //!   process rather than a thread. A helper cannot start another program, and cannot leave a
 //!   process behind that outlives it.
@@ -24,13 +25,24 @@
 //! `DisableSandboxFilesystem` is the way to accept it.
 
 use landlock::{
-    ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath,
-    PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope,
+    ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, LandlockStatus, NetPort,
+    PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus, Scope,
 };
 use libseccomp::{ScmpAction, ScmpArgCompare, ScmpCompareOp, ScmpFilterContext, ScmpSyscall};
 
 /// The newest Landlock ABI this code asks for. An older kernel enforces what it supports.
-const LANDLOCK_ABI: ABI = ABI::V6;
+///
+/// ABI 9 adds the right to connect to a UNIX socket that a path names. Below it, the helper
+/// reaches every such socket its user can open: Landlock's scope covers abstract sockets only,
+/// and a system call filter cannot read the address `connect` is given.
+const LANDLOCK_ABI: ABI = ABI::V9;
+
+/// The one directory whose UNIX sockets the helper may connect to: `systemd-resolved`'s, which
+/// `nss-resolve` asks for every name. It answers name lookups and nothing else.
+///
+/// Every other socket a path names is refused: a session bus starts programs for its user, and a
+/// key agent signs for them.
+const RESOLVER_SOCKETS: &str = "/run/systemd/resolve";
 
 /// The system calls libalpm refuses (`sandbox_syscalls.c`), in the same groups.
 ///
@@ -242,7 +254,7 @@ pub(crate) struct Confinement<'a> {
 /// # Errors
 ///
 /// A message naming the restriction that could not be applied.
-pub(crate) fn apply(confinement: &Confinement<'_>) -> Result<(), String> {
+pub(crate) fn apply(confinement: &Confinement<'_>) -> Result<Confined, String> {
     // A core dump would write the process's memory, TLS secrets included, to disk.
     rustix::process::setrlimit(
         rustix::process::Resource::Core,
@@ -255,13 +267,22 @@ pub(crate) fn apply(confinement: &Confinement<'_>) -> Result<(), String> {
     rustix::thread::set_no_new_privs(true)
         .map_err(|error| format!("could not set no_new_privs: {error}"))?;
 
-    if confinement.filesystem {
-        landlock(confinement.ports)?;
-    }
+    let landlock_abi = if confinement.filesystem { landlock(confinement.ports)? } else { None };
     if confinement.syscalls {
         seccomp()?;
     }
-    Ok(())
+    Ok(Confined { landlock_abi })
+}
+
+/// What [`confine_self`](crate::confine_self) applied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct Confined {
+    /// The Landlock ABI the kernel enforces, or `None` when Landlock was not asked for.
+    ///
+    /// A restriction newer than this ABI is not in force: TCP ports need 4, signals and abstract
+    /// UNIX sockets need 6, and a UNIX socket that a path names needs 9.
+    pub landlock_abi: Option<i32>,
 }
 
 /// Every path [`READABLE`] names, then those the certificate variables name.
@@ -278,8 +299,8 @@ fn readable_paths() -> Vec<std::path::PathBuf> {
 }
 
 /// Makes the file system non-executable, unwritable, and readable only at [`readable_paths`],
-/// and limits TCP to `ports`.
-fn landlock(ports: &[u16]) -> Result<(), String> {
+/// and limits TCP to `ports`. Returns the ABI the kernel enforces.
+fn landlock(ports: &[u16]) -> Result<Option<i32>, String> {
     let fail = |error: landlock::RulesetError| format!("could not apply Landlock: {error}");
 
     let mut ruleset = Ruleset::default()
@@ -299,11 +320,15 @@ fn landlock(ports: &[u16]) -> Result<(), String> {
         // be opened, usually because it does not exist here, is simply not granted.
         let Ok(fd) = PathFd::new(&path) else { continue };
         // A directory-only right on a file makes the kernel refuse the rule.
-        let read: BitFlags<AccessFs> = if std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
-            AccessFs::ReadFile | AccessFs::ReadDir
-        } else {
-            AccessFs::ReadFile.into()
-        };
+        let mut read: BitFlags<AccessFs> =
+            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                AccessFs::ReadFile | AccessFs::ReadDir
+            } else {
+                AccessFs::ReadFile.into()
+            };
+        if path == std::path::Path::new(RESOLVER_SOCKETS) {
+            read |= AccessFs::ResolveUnix;
+        }
         ruleset = ruleset.add_rule(PathBeneath::new(fd, read)).map_err(fail)?;
     }
     let connect: BitFlags<AccessNet> = AccessNet::ConnectTcp.into();
@@ -317,7 +342,10 @@ fn landlock(ports: &[u16]) -> Result<(), String> {
                     (set DisableSandboxFilesystem to download without it)"
             .to_owned());
     }
-    Ok(())
+    Ok(match status.landlock {
+        LandlockStatus::Available { effective_abi, .. } => Some(effective_abi as i32),
+        LandlockStatus::NotEnabled | LandlockStatus::NotImplemented => None,
+    })
 }
 
 /// Loads the system call filter.

@@ -477,6 +477,9 @@ fn run(cli: &Cli, zone: piko_txn::history::LocalZone) -> Result<ExitCode, Error>
                     named: cli.dbpath.is_some(),
                 },
             )?;
+            // Before the first line goes to the log. A refresh that cannot read its
+            // configuration synchronizes nothing, and must not record that it did.
+            let parsed = require_pacman_config(cli, &config)?;
             let record = recording(cli, &config, &resolve_dbpath(cli, &config), zone);
             cmd::txn::note(
                 &record,
@@ -485,7 +488,7 @@ fn run(cli: &Cli, zone: piko_txn::history::LocalZone) -> Result<ExitCode, Error>
             cmd::txn::note(&record, "synchronizing package lists");
             let (cancel, _mode) = crate::signal::install_cancel_handler();
             cmd::refresh::refresh(
-                require_pacman_config(cli, &config)?,
+                parsed,
                 &resolve_dbpath(cli, &config),
                 repos,
                 cmd::refresh::Options {
@@ -498,7 +501,12 @@ fn run(cli: &Cli, zone: piko_txn::history::LocalZone) -> Result<ExitCode, Error>
             )
         }
         Command::Report => {
-            cmd::txn::report(&resolve_dbpath(cli, &config), cli.dbpath.as_deref(), &mut out)
+            let flags = cmd::txn::GlobalFlags {
+                config: Some(cli.config.as_path())
+                    .filter(|path| *path != Path::new(cli::DEFAULT_CONFIG_PATH)),
+                dbpath: cli.dbpath.as_deref(),
+            };
+            cmd::txn::report(&resolve_dbpath(cli, &config), flags, &mut out)
         }
         Command::History { last, package, since, until, all, quiet } => cmd::history::history(
             &resolve_log_file(cli, &config),
@@ -572,7 +580,7 @@ fn require_transaction_root(
         &Target::Transaction {
             root,
             dbpath: &resolve_dbpath(cli, config),
-            dbpath_named: cli.dbpath.is_some(),
+            dbpath_named: context::dbpath_is_named(cli, config),
         },
     )
 }
@@ -754,7 +762,7 @@ fn sync(
             download_only: args.download_only,
             parallel_downloads: parsed.options.parallel_downloads,
             check_space: parsed.options.check_space,
-            sandbox: piko_net::Sandbox::from_options(&parsed.options),
+            downloads: piko_net::DownloadSettings::from_options(&parsed.options),
             pre_cancel,
         },
         out,

@@ -65,6 +65,11 @@ fn main() -> ExitCode {
         ("the_helper_runs_in_a_pid_namespace_under_the_hosts_proc", runs_in_a_pid_namespace),
         ("a_missing_signature_is_absent_through_the_helper", missing_signature_is_absent),
         ("a_cancellation_stops_a_helper_waiting_on_a_silent_server", cancellation_stops_helper),
+        (
+            "a_slow_transfer_that_keeps_arriving_completes_through_the_helper",
+            slow_transfer_completes,
+        ),
+        ("a_transfer_that_stops_is_given_up_through_the_helper", stopped_transfer_is_given_up),
         ("the_helper_cannot_write_a_file", cannot_write),
         ("the_helper_cannot_read_outside_what_a_request_needs", cannot_read_elsewhere),
         ("the_helper_cannot_change_a_files_metadata", cannot_change_metadata),
@@ -72,6 +77,10 @@ fn main() -> ExitCode {
         ("the_system_call_filter_alone_refuses_a_new_process", filter_alone_refuses_a_process),
         ("the_helper_cannot_connect_to_a_port_it_was_not_given", cannot_connect_elsewhere),
         ("the_helper_can_connect_to_a_port_it_was_given", can_connect_to_its_port),
+        (
+            "the_helper_cannot_connect_to_a_unix_socket_a_path_names",
+            cannot_connect_to_a_unix_socket,
+        ),
         ("the_helper_can_read_a_file_and_start_a_thread", can_read_and_start_a_thread),
         ("as_root_the_helper_runs_as_the_download_user", runs_as_the_download_user),
         ("as_root_without_a_download_user_the_helper_runs_as_nobody", runs_as_nobody),
@@ -102,9 +111,17 @@ fn probe(arguments: &[String]) -> ExitCode {
     // Landlock alone also refuses a program, because it grants no execute right. This action
     // leaves it out, so only the system call filter can refuse.
     let filesystem = action != "spawn-without-landlock";
-    if let Err(message) = piko_net::confine_self(filesystem, true, &ports) {
-        eprintln!("confinement failed: {message}");
-        return ExitCode::from(4);
+    let confined = match piko_net::confine_self(filesystem, true, &ports) {
+        Ok(confined) => confined,
+        Err(message) => {
+            eprintln!("confinement failed: {message}");
+            return ExitCode::from(4);
+        }
+    };
+    // Landlock refuses a UNIX socket that a path names from ABI 9 only.
+    if action == "connect-unix" && confined.landlock_abi.is_none_or(|abi| abi < 9) {
+        println!("skipped: needs Landlock ABI 9, this kernel has {:?}", confined.landlock_abi);
+        return ExitCode::SUCCESS;
     }
 
     let refused = |result: std::io::Result<()>| match result {
@@ -130,6 +147,7 @@ fn probe(arguments: &[String]) -> ExitCode {
             }
         }
         "exec" | "spawn-without-landlock" => refused(Command::new(target).status().map(drop)),
+        "connect-unix" => refused(std::os::unix::net::UnixStream::connect(target).map(drop)),
         "connect" => refused(TcpStream::connect(("127.0.0.1", port.unwrap_or(1))).map(drop)),
         "connect-allowed" => match TcpStream::connect(("127.0.0.1", port.unwrap_or(1))) {
             Ok(_) => ExitCode::SUCCESS,
@@ -239,6 +257,16 @@ fn filter_alone_refuses_a_process() {
 fn cannot_connect_elsewhere() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     run_probe("connect", &listener.local_addr().unwrap().port().to_string());
+}
+
+/// A socket this user owns, as a session bus or a key agent is. Landlock refuses it from ABI 9,
+/// and the probe checks nothing on a kernel below it.
+fn cannot_connect_to_a_unix_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bus");
+    let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::os::unix::net::UnixStream::connect(&path).unwrap();
+    run_probe("connect-unix", path.to_str().unwrap());
 }
 
 fn can_connect_to_its_port() {
@@ -415,6 +443,66 @@ fn cancellation_stops_helper() {
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     assert!(!dir.path().join(NAME).exists());
     drop(held.join());
+}
+
+/// Serves one `200` whose body is `chunks` chunks of 256 bytes, one every `pause`.
+fn serve_slowly(chunks: usize, pause: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else { return };
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) != 0 && line != "\r\n" {
+            line.clear();
+        }
+        let length = chunks.saturating_mul(256);
+        let head =
+            format!("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {length}\r\n\r\n");
+        let _ = stream.write_all(head.as_bytes());
+        for _ in 0..chunks {
+            if stream.write_all(&[7_u8; 256]).is_err() || stream.flush().is_err() {
+                return;
+            }
+            std::thread::sleep(pause);
+        }
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// The helper's own timeouts and the parent's watchdog both restart with each chunk, so a body
+/// that keeps arriving outlives every one of them.
+fn slow_transfer_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    // Three seconds in all, and never more than 250 ms without a byte.
+    let url = serve_slowly(12, Duration::from_millis(250));
+    let refresher = Refresher::new(Limits {
+        timeout: Duration::from_secs(1),
+        stall_timeout: Some(Duration::from_secs(1)),
+        ..Limits::default()
+    })
+    .with_sandbox(Sandbox::new(None, true, true));
+
+    let path = fetch(&refresher, dir.path(), &[url], unsigned(), &Cancel::new()).unwrap();
+
+    assert_eq!(std::fs::read(path).unwrap().len(), 12 * 256);
+}
+
+/// A body that stops is given up: by the helper's own stall bound, or by the watchdog 5 s after
+/// it. Nothing reaches the cache.
+fn stopped_transfer_is_given_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = serve_slowly(2, Duration::from_secs(20));
+    let refresher =
+        Refresher::new(Limits { stall_timeout: Some(Duration::from_secs(1)), ..Limits::default() })
+            .with_sandbox(Sandbox::new(None, true, true));
+    let started = Instant::now();
+
+    let error = fetch(&refresher, dir.path(), &[url], unsigned(), &Cancel::new()).unwrap_err();
+
+    assert!(error.to_string().contains("time"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert!(!dir.path().join(NAME).exists());
 }
 
 /// As root, the helper runs as the download user, with no supplementary group. The test binary

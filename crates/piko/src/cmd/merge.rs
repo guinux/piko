@@ -99,13 +99,19 @@ pub fn merge(
     }
 
     let pending: Vec<&Pending> =
-        scan.pending().iter().filter(|entry| covered(entry, &options.selection)).collect();
+        scan.pending().iter().filter(|entry| covered(entry, root, &options.selection)).collect();
+    // A typed path that names no pending file is a mistake to report. Without this line, the
+    // run would end in silence and in success, which reads as "resolved".
+    let unmatched = self::unmatched(scan.pending(), root, &options.selection);
+    for raw in &unmatched {
+        eprintln!("Error: {} names no pending file", piko_db::printable(raw));
+    }
 
     if options.output {
         for entry in &pending {
             emit!(out, "{}", piko_db::printable_path(&root.join(&entry.pacfile)));
         }
-        return ExitCode::SUCCESS;
+        return if unmatched.is_empty() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
     }
 
     // Both programs are validated once, before anything is touched. An unbalanced quote is a
@@ -119,7 +125,8 @@ pub fn merge(
         }
     };
 
-    self::resolve_all(&root_dir, root, cache_dirs, &pending, &programs, out)
+    let code = self::resolve_all(&root_dir, root, cache_dirs, &pending, &programs, out);
+    if unmatched.is_empty() { code } else { ExitCode::FAILURE }
 }
 
 /// Names the configuration files a finished transaction left behind.
@@ -659,14 +666,35 @@ fn configured(flag: Option<&str>, variable: &str, default: &str) -> Result<Vec<O
 }
 
 /// Whether `entry` is in the run's selection.
-fn covered(entry: &Pending, selection: &Selection) -> bool {
+fn covered(entry: &Pending, root: &Path, selection: &Selection) -> bool {
     match selection {
         Selection::All => true,
-        Selection::Typed(typed) => typed.iter().any(|raw| {
-            let wanted = Path::new(raw.trim_end_matches('/'));
-            let wanted = wanted.strip_prefix("/").unwrap_or(wanted);
-            wanted == entry.pacfile || wanted == entry.target
-        }),
+        Selection::Typed(typed) => typed.iter().any(|raw| self::names(raw, root, entry)),
+    }
+}
+
+/// Whether the typed path `raw` names `entry`, by its installed file or its pending one.
+///
+/// Three spellings name one path: the host path under `root`, which `--output` prints, the
+/// absolute path inside the root, and the path relative to the root.
+fn names(raw: &str, root: &Path, entry: &Pending) -> bool {
+    let typed = Path::new(raw.trim_end_matches('/'));
+    let inside = typed.strip_prefix("/").unwrap_or(typed);
+    [typed.strip_prefix(root).ok(), Some(inside)]
+        .into_iter()
+        .flatten()
+        .any(|wanted| wanted == entry.pacfile || wanted == entry.target)
+}
+
+/// The typed paths of `selection` that name no entry of `pending`.
+fn unmatched<'a>(pending: &[Pending], root: &Path, selection: &'a Selection) -> Vec<&'a str> {
+    match selection {
+        Selection::All => Vec::new(),
+        Selection::Typed(typed) => typed
+            .iter()
+            .filter(|raw| !pending.iter().any(|entry| self::names(raw, root, entry)))
+            .map(String::as_str)
+            .collect(),
     }
 }
 

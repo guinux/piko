@@ -124,6 +124,67 @@ fn a_group_listing_escapes_the_group_name() {
     assert!(stdout.contains("grp\\u{1b}]52"), "{stdout}");
 }
 
+/// A glob target that matches a group names that group, escaped: the name is `%GROUPS%` text.
+#[test]
+fn plan_escapes_a_group_name_a_pattern_matched() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = setup(dir.path(), "nice");
+    std::fs::create_dir_all(dir.path().join("local")).unwrap();
+
+    let (stdout, stderr) = piko(&config, &["plan", "grp*"]);
+    assert_inert(&stdout);
+    assert_inert(&stderr);
+    assert!(stderr.contains("Groups: grp\\u{1b}]52"), "{stderr}");
+}
+
+/// An `IgnoreGroup` refusal names the group that matched, escaped, in `plan` and in `resolve`.
+#[test]
+fn an_ignore_reason_escapes_the_group_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = setup(dir.path(), "nice");
+    std::fs::create_dir_all(dir.path().join("local")).unwrap();
+    let text = std::fs::read_to_string(&config).unwrap();
+    let ignoring = dir.path().join("ignoring.conf");
+    std::fs::write(
+        &ignoring,
+        text.replace("SigLevel = Never\n", "SigLevel = Never\nIgnoreGroup = grp*\n"),
+    )
+    .unwrap();
+
+    for command in ["plan", "resolve"] {
+        let (stdout, stderr) = piko(&ignoring, &[command, "foo"]);
+        assert_inert(&stdout);
+        assert_inert(&stderr);
+        assert!(stderr.contains("via group grp\\u{1b}]52"), "{command}: {stderr}");
+    }
+}
+
+/// An entry whose version holds a title change is not a package. No command prints the version
+/// as the mirror wrote it, and the diagnostic that names the entry is escaped.
+#[test]
+fn a_version_holding_an_escape_sequence_never_reaches_the_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = setup(dir.path(), "nice");
+    let version = format!("1{TITLE}-1");
+    let forged = desc("nice").replace("%VERSION%\n1.0-1", &format!("%VERSION%\n{version}"));
+    let fixture = RepoFixture::new();
+    let built = fixture
+        .write_gzip_archive("evil.db", &[(&format!("foo-{version}/desc"), forged.as_bytes())]);
+    std::fs::copy(built, dir.path().join("sync/evil.db")).unwrap();
+
+    for args in [
+        &["search", "--repo", "evil", "foo"][..],
+        &["list", "--repo", "evil"],
+        &["info", "--repo", "evil", "foo"],
+        &["plan", "foo"],
+    ] {
+        let (stdout, stderr) = piko(&config, args);
+        assert_inert(&stdout);
+        assert_inert(&stderr);
+        assert!(!stdout.contains("PWNED"), "{args:?} listed the entry:\n{stdout}");
+    }
+}
+
 /// A `%PGPSIG%` that is not base64 refuses the entry. The parse error quotes the line it
 /// refused, payload and carriage return included, and keeps only its own line feeds.
 #[test]

@@ -21,6 +21,9 @@ pub struct Cli {
     /// Path to the ALPM database directory. Defaults to `DBPath` from the parsed
     /// pacman.conf (see `--config`); falls back to `/var/lib/pacman` with a warning if that
     /// cannot be read. Resolved through `realpath`, as pacman resolves it, so it must exist.
+    ///
+    /// With `--root` and no `DBPath` directive, the default is inside that root instead:
+    /// `<root>/var/lib/pacman`. The same holds for `--logfile` and `LogFile`.
     #[arg(long, global = true, value_name = "PATH", value_parser = resolved_path)]
     pub dbpath: Option<PathBuf>,
 
@@ -53,6 +56,19 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// The `--root` the command line gave, for a subcommand that takes one.
+    pub fn root(&self) -> Option<&std::path::Path> {
+        match &self.command {
+            Command::Install { root, .. }
+            | Command::Update { root, .. }
+            | Command::Remove { root, .. }
+            | Command::Merge { root, .. } => root.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -849,6 +865,9 @@ pub enum Command {
 
         /// Resolve only these paths, instead of everything pending. Either the installed file
         /// or the pending one names a pair.
+        ///
+        /// A path is taken as --output prints it, or as a path inside --root. A path that
+        /// names no pending file is an error.
         #[arg(value_name = "PATH")]
         paths: Vec<String>,
     },

@@ -100,6 +100,10 @@ fn max_hook_bytes() -> u64 {
 /// Something wrong with one hook file, or with a whole phase of hooks. Every variant but
 /// [`Problem::Warning`] stopped a hook being used.
 ///
+/// [`Problem::leaves_a_hook_unread`] is true for a file or a directory that is trusted and
+/// could not be read or parsed. A transaction refuses to start when the `PreTransaction` read
+/// meets one. An untrusted file or directory is read as if it was not there.
+///
 /// Returned, not logged, like every other diagnostic in the workspace. libalpm makes a parse
 /// failure fatal for `PreTransaction` and merely noisy for `PostTransaction` (`hook.c:625`).
 /// Reproducing that decision is the caller's job. This type carries the fact; it does not act
@@ -163,6 +167,20 @@ pub enum Problem {
     },
 }
 
+impl Problem {
+    /// Whether a trusted hook file, or a trusted hook directory, could not be read or parsed.
+    ///
+    /// Such a file can hold a hook that must run. An untrusted one is not counted: another
+    /// user wrote it, or could have, so it says nothing about what must run.
+    #[must_use]
+    pub const fn leaves_a_hook_unread(&self) -> bool {
+        matches!(
+            self,
+            Self::UnreadableDirectory { .. } | Self::UnreadableHook { .. } | Self::Invalid(_)
+        )
+    }
+}
+
 /// Every hook found, in the order they will run.
 #[derive(Debug, Default)]
 pub struct Hooks {
@@ -173,12 +191,18 @@ impl Hooks {
     /// Reads every `.hook` in `directories`, in `pacman.conf` order.
     ///
     /// Returns what parsed and, separately, everything that did not. A single bad hook file
-    /// does not hide the rest. This matches libalpm's behavior, and it is the only useful
+    /// does not hide the rest. A trusted file that cannot be read or parsed keeps its name: it
+    /// was written to replace the hook of a lower priority directory, and leaves that hook off. This matches libalpm's behavior, and it is the only useful
     /// choice when a package drops the file there.
     #[must_use]
     pub fn collect(directories: &[PathBuf]) -> (Self, Vec<Problem>) {
         let mut hooks: Vec<Hook> = Vec::new();
         let mut problems = Vec::new();
+        // The names of the trusted hook files that could not be read or parsed. Such a file
+        // keeps its name, so the file of the same name in a lower priority directory does not
+        // run in its place. An untrusted file keeps nothing: another user could then turn a
+        // hook off.
+        let mut refused: Vec<String> = Vec::new();
 
         // Last to first: a later directory overrides an earlier one of the same file name.
         for directory in directories.iter().rev() {
@@ -195,7 +219,7 @@ impl Hooks {
                 if !name.ends_with(HOOK_SUFFIX) {
                     continue;
                 }
-                if hooks.iter().any(|hook| hook.name == name) {
+                if hooks.iter().any(|hook| hook.name == name) || refused.contains(&name) {
                     // Already provided by a higher-priority directory.
                     continue;
                 }
@@ -210,7 +234,12 @@ impl Hooks {
                     }
                     // A directory named `something.hook`. libalpm skips it silently.
                     Ok(None) => {}
-                    Err(problem) => problems.push(problem),
+                    Err(problem) => {
+                        if problem.leaves_a_hook_unread() {
+                            refused.push(name);
+                        }
+                        problems.push(problem);
+                    }
                 }
             }
         }
@@ -565,6 +594,22 @@ Exec = /bin/true
             hooks.triggered(When::PostTransaction, &summary).is_empty(),
             "the masked hook still fired"
         );
+    }
+
+    /// A file written to replace a hook, and refused, still keeps the name. The hook it was
+    /// meant to replace must not run in its place.
+    #[test]
+    fn a_refused_hook_file_keeps_its_name() {
+        let system = tempfile::tempdir().unwrap();
+        let custom = tempfile::tempdir().unwrap();
+        write(system.path(), "noisy.hook", BODY);
+        write(custom.path(), "noisy.hook", "[Trigger]\nOperation = Instal\n");
+
+        let (hooks, problems) =
+            Hooks::collect(&[system.path().to_path_buf(), custom.path().to_path_buf()]);
+        assert!(matches!(problems.as_slice(), [Problem::Invalid(_)]), "{problems:?}");
+        assert!(problems.iter().all(Problem::leaves_a_hook_unread));
+        assert!(hooks.all().is_empty(), "the lower priority hook was loaded");
     }
 
     /// A symlink to `/dev/null` is the spelling `alpm-hooks(5)` actually gives, so the reader

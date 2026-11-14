@@ -128,6 +128,10 @@ pub struct SigningPolicy {
 /// - A package file named by path is held to `LocalFileSigLevel`.
 /// - A package file named by URL is held to `RemoteFileSigLevel`.
 ///
+/// Each of the last two inherits [`SigningPolicy::sig_level`] when no directive sets it
+/// (`piko_db::config::Options::effective_local_file_sig_level` and its remote counterpart).
+/// The parsed field then holds only a sentinel, which states no policy of its own.
+///
 /// The split between the last two is `pacman -U`'s: `upgrade.c` partitions its targets on
 /// `strstr(i->data, "://")` and loads each half under its own directive. `piko_txn::classify`
 /// makes the same split.
@@ -139,8 +143,8 @@ pub fn signing_policy(parsed: &PacmanConfig) -> SigningPolicy {
     SigningPolicy {
         gpg_dir: parsed.options.gpg_dir.clone(),
         sig_level: parsed.options.sig_level,
-        local_file_sig_level: parsed.options.local_file_sig_level,
-        remote_file_sig_level: parsed.options.remote_file_sig_level,
+        local_file_sig_level: parsed.options.effective_local_file_sig_level(),
+        remote_file_sig_level: parsed.options.effective_remote_file_sig_level(),
     }
 }
 
@@ -219,11 +223,42 @@ pub fn resolve_root_dir(cli: &Cli, config: &ConfigCache) -> PathBuf {
     configured_path(None, cli, config, |options| &options.root_dir, DEFAULT_ROOT_DIR)
 }
 
-/// Resolves the effective database root, in three steps. `--dbpath` if given, else `DBPath` from
-/// the parsed pacman.conf, else the hardcoded default with a warning if that cannot be read
-/// either. `--config` names the file, and defaults to `/etc/pacman.conf`.
+/// Resolves the effective database root. `--dbpath` if given, else `DBPath` from the parsed
+/// pacman.conf, else the default: inside `--root` when the command line gave one, else the
+/// hardcoded one. A configuration that cannot be read takes the default, with a warning.
+/// `--config` names the file, and defaults to `/etc/pacman.conf`.
+///
+/// The `--root` step is pacman's `setdefaults` (`conf.c`): a root the command line names moves
+/// the default database with it. Without that step, a transaction into `--root /mnt` plans
+/// against the database of the running system and records its packages there.
 pub fn resolve_dbpath(cli: &Cli, config: &ConfigCache) -> PathBuf {
-    configured_path(cli.dbpath.as_deref(), cli, config, |options| &options.db_path, DEFAULT_DB_PATH)
+    let Some(root) = cli.root().filter(|_| cli.dbpath.is_none()) else {
+        return configured_path(
+            cli.dbpath.as_deref(),
+            cli,
+            config,
+            |options| &options.db_path,
+            DEFAULT_DB_PATH,
+        );
+    };
+    rooted_path(
+        root,
+        cli,
+        config,
+        piko_db::config::Options::db_path_in,
+        piko_db::config::default_db_path_in,
+    )
+}
+
+/// Whether the command line placed the database: `--dbpath` named it, or `--root` did and no
+/// `DBPath` directive overrides that root.
+///
+/// The privilege check reads this. A database path that comes from pacman.conf or from the
+/// hardcoded default is the system's.
+pub fn dbpath_is_named(cli: &Cli, config: &ConfigCache) -> bool {
+    cli.dbpath.is_some()
+        || (cli.root().is_some()
+            && !config.get(cli).is_ok_and(|parsed| parsed.options.sets_db_path()))
 }
 
 /// Resolves the keyring `piko key` administers, in three steps. `--gpgdir` if given, else
@@ -239,11 +274,45 @@ pub fn resolve_gpg_dir(gpgdir: Option<&Path>, cli: &Cli, config: &ConfigCache) -
 /// Resolves the effective transaction log, in three steps. `--logfile` if given, else `LogFile`
 /// from the parsed pacman.conf, else the hardcoded default with a warning.
 ///
-/// The same three-step resolution [`resolve_dbpath`] uses, and for the same reason. A transaction
-/// should still be recorded when the config is unreadable, rather than silently recorded nowhere.
+/// The same resolution [`resolve_dbpath`] uses, `--root` step included, and for the same reason.
+/// A transaction should still be recorded when the config is unreadable, rather than silently
+/// recorded nowhere.
 pub fn resolve_log_file(cli: &Cli, config: &ConfigCache) -> PathBuf {
     let flag = cli.log_file.as_deref();
-    configured_path(flag, cli, config, |options| &options.log_file, DEFAULT_LOG_FILE)
+    let Some(root) = cli.root().filter(|_| flag.is_none()) else {
+        return configured_path(flag, cli, config, |options| &options.log_file, DEFAULT_LOG_FILE);
+    };
+    rooted_path(
+        root,
+        cli,
+        config,
+        piko_db::config::Options::log_file_in,
+        piko_db::config::default_log_file_in,
+    )
+}
+
+/// The resolution of a path whose default follows `--root`: the directive when the parsed
+/// pacman.conf holds one, else the default inside `root`, with a warning when the
+/// configuration cannot be read.
+fn rooted_path(
+    root: &Path,
+    cli: &Cli,
+    config: &ConfigCache,
+    configured: impl FnOnce(&piko_db::config::Options, &Path) -> PathBuf,
+    default: impl FnOnce(&Path) -> PathBuf,
+) -> PathBuf {
+    match config.get(cli) {
+        Ok(parsed) => configured(&parsed.options, root),
+        Err(error) => {
+            let path = default(root);
+            crate::output::warn(format_args!(
+                "failed to read {} ({error}); falling back to {}",
+                cli.config.display(),
+                path.display()
+            ));
+            path
+        }
+    }
 }
 
 /// The three-step resolution the `resolve_*` functions share: `flag` if given, else the
@@ -290,9 +359,20 @@ pub fn recording(
 /// whitespace is quoted, so the line can be read back as the command it was. That matters for a
 /// package file path, the one argument that routinely contains a space.
 fn command_line() -> String {
-    std::env::args_os()
+    self::render_command_line(
+        std::env::args_os().map(|argument| argument.to_string_lossy().into_owned()),
+    )
+}
+
+/// [`command_line`], over `arguments`.
+///
+/// The user information of a URL is taken out of each argument, by
+/// [`piko_net::without_credentials`]. A package URL can carry a password, and `LogFile` is a
+/// file every user can read.
+fn render_command_line(arguments: impl Iterator<Item = String>) -> String {
+    arguments
         .map(|argument| {
-            let text = argument.to_string_lossy().into_owned();
+            let text = piko_net::without_credentials(&argument).into_owned();
             if text.contains(char::is_whitespace) { format!("'{text}'") } else { text }
         })
         .collect::<Vec<_>>()
@@ -508,7 +588,7 @@ pub fn open_all_repos(
     config: &ConfigCache,
 ) -> Result<Vec<(DbUsage, RepoDatabase)>, ConfigUnavailable> {
     let parsed = require_pacman_config(cli, config)?;
-    let dbpath = cli.dbpath.clone().unwrap_or_else(|| parsed.options.db_path.clone());
+    let dbpath = resolve_dbpath(cli, config);
 
     let mut opened = Vec::with_capacity(parsed.repositories.len());
     for repo in parsed.registered_repositories() {
@@ -541,14 +621,19 @@ pub fn open_all_repos(
 ///
 /// # Errors
 ///
-/// [`ConfigUnavailable`] if `pacman.conf` could not be read.
+/// [`ConfigUnavailable`] if `pacman.conf` could not be read and `packages` is not empty.
 pub fn open_repos_for_packages(
     cli: &Cli,
     config: &ConfigCache,
     packages: &[String],
 ) -> Result<Vec<RepoDatabase>, ConfigUnavailable> {
+    // Nothing to look for opens nothing, and so needs no configuration. `piko info` and
+    // `piko files` pass the names the local database does not hold.
+    if packages.is_empty() {
+        return Ok(Vec::new());
+    }
     let parsed = require_pacman_config(cli, config)?;
-    let dbpath = cli.dbpath.clone().unwrap_or_else(|| parsed.options.db_path.clone());
+    let dbpath = resolve_dbpath(cli, config);
 
     let mut remaining: std::collections::HashSet<&str> =
         packages.iter().map(String::as_str).collect();
@@ -635,6 +720,25 @@ mod tests {
         path.display().to_string()
     }
 
+    /// A configuration that sets neither file directive holds a named file to the global
+    /// `SigLevel`. The policy never carries the parser's sentinel, which states no policy.
+    #[test]
+    fn a_named_file_inherits_the_global_sig_level() {
+        use piko_db::config::SigLevel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_conf(dir.path(), "[options]\nSigLevel = Required DatabaseOptional\n");
+        let parsed = PacmanConfig::open(path).unwrap();
+
+        let policy = signing_policy(&parsed);
+
+        for level in [policy.local_file_sig_level, policy.remote_file_sig_level] {
+            assert_eq!(level, policy.sig_level);
+            assert!(level.contains(SigLevel::PACKAGE));
+            assert!(!level.contains(SigLevel::USE_DEFAULT));
+        }
+    }
+
     /// Measured against `pacman -Sc`: two `--cachedir` flags over a config naming one
     /// directory report all three, command line first.
     #[test]
@@ -689,6 +793,49 @@ mod tests {
         let cli = cli(&["--config", &path]);
 
         assert_eq!(resolve_root_dir(&cli, &ConfigCache::default()), PathBuf::from(root));
+    }
+
+    /// A root the command line names moves the default database and log with it. A directive or
+    /// a flag still wins.
+    #[test]
+    fn a_named_root_moves_the_default_dbpath_and_log_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = directory(dir.path(), "root");
+        let db = directory(dir.path(), "db");
+        let plain = write_conf(dir.path(), "[options]\n");
+        let remove = |args: &[&str]| {
+            let mut argv = vec!["piko"];
+            argv.extend_from_slice(args);
+            argv.extend_from_slice(&["remove", "--root", &root, "foo"]);
+            Cli::parse_from(argv)
+        };
+
+        let cli = remove(&["--config", &plain]);
+        let cache = ConfigCache::default();
+        assert_eq!(resolve_dbpath(&cli, &cache), Path::new(&root).join("var/lib/pacman/"));
+        assert_eq!(resolve_log_file(&cli, &cache), Path::new(&root).join("var/log/pacman.log"));
+        assert!(dbpath_is_named(&cli, &cache));
+
+        let cli = remove(&["--config", &plain, "--dbpath", &db]);
+        assert_eq!(resolve_dbpath(&cli, &ConfigCache::default()), PathBuf::from(&db));
+
+        let set = dir.path().join("set.conf");
+        std::fs::write(&set, format!("[options]\nDBPath = {db}\n")).unwrap();
+        let cli = remove(&["--config", &set.display().to_string()]);
+        let cache = ConfigCache::default();
+        assert_eq!(resolve_dbpath(&cli, &cache), PathBuf::from(&db));
+        assert!(!dbpath_is_named(&cli, &cache));
+    }
+
+    /// The recorded command line names a package URL without its password.
+    #[test]
+    fn a_recorded_command_line_holds_no_url_password() {
+        let arguments =
+            ["piko", "install", "https://user:s3cret@host.example/a-1-1-any.pkg.tar.zst", "a b"];
+        assert_eq!(
+            render_command_line(arguments.iter().map(|argument| (*argument).to_owned())),
+            "piko install https://host.example/a-1-1-any.pkg.tar.zst 'a b'"
+        );
     }
 
     /// The flag must not need a readable config. A caller installing into a new root names both

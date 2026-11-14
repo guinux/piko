@@ -333,6 +333,13 @@ fn set_metadata_fd(
 
 /// Creates a directory, or leaves an existing one alone.
 ///
+/// A symbolic link that leads to a directory is left alone too: conflict detection accepts it
+/// as the directory the package wants. Anything else at the name is removed, and the directory
+/// is created in its place. This is case 4 of the matrix in [`super::decision::decide`], which
+/// libarchive carries out under `ARCHIVE_EXTRACT_UNLINK` (`add.c:296`). Conflict detection
+/// lets a file reach this point only when a rule explains it: the old version of the package
+/// owned it, the transaction removes its owner, or `--overwrite` releases it.
+///
 /// An existing directory keeps its mode. libalpm warns when the modes differ but changes
 /// nothing (`add.c:258`), because the directory may be shared with another package or
 /// adjusted deliberately.
@@ -355,7 +362,19 @@ fn write_directory(
     let mode = Mode::from_raw_mode(member.mode & 0o7777);
     match rustix::fs::mkdirat(resolved.dir(), name, mode) {
         Ok(()) => {}
-        Err(rustix::io::Errno::EXIST) => return Ok(()),
+        Err(rustix::io::Errno::EXIST) => {
+            let is_directory = rustix::fs::statat(resolved.dir(), name, AtFlags::empty())
+                .is_ok_and(|stat| {
+                    rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                        == rustix::fs::FileType::Directory
+                });
+            if is_directory {
+                return Ok(());
+            }
+            remove_existing(resolved, name)?;
+            rustix::fs::mkdirat(resolved.dir(), name, mode)
+                .map_err(|source| io(name, IoAction::CreateDir, source))?;
+        }
         Err(source) => return Err(io(name, IoAction::CreateDir, source)),
     }
 

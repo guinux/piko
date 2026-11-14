@@ -31,7 +31,7 @@
 //! in flight to cancel gracefully. Ctrl+C there should kill the process on the first press,
 //! exactly as it does with no handler installed at all.
 //!
-//! Instead, a caller installs this only once it is about to do something that can download. It
+//! Instead, a caller installs this only once it is about to download or to commit. It
 //! then passes the resulting [`Handoff`] on to whatever comes after it in the same run, rather
 //! than installing a second time:
 //!
@@ -50,6 +50,8 @@
 //! - Failing all of the above, `cmd::txn::install` installs its own handler right after its
 //!   confirmation gate passes. Nothing is installed yet while that prompt is up, so Ctrl+C
 //!   already kills the process by the OS's default disposition.
+//! - `cmd::txn::remove` installs one after its prompts too. A removal downloads nothing, but
+//!   its commit stops between two steps in the same way.
 
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 

@@ -46,8 +46,9 @@
 //! # Which values fit
 //!
 //! The format has no escaping. A value is one line, so it must not be empty (a blank line ends
-//! the section), must hold no line break (it would read back as several values), and must not
-//! read as a `%KEYWORD%` header (it would open a section of that name). `_alpm_local_db_write`
+//! the section), must hold no line break (it would read back as several values), must hold no
+//! NUL (libalpm reads a line as a C string, and stops there), and must not read as a `%KEYWORD%`
+//! header (it would open a section of that name). `_alpm_local_db_write`
 //! writes such a value anyway. A package could then decide what its own entry says: a group
 //! named `%REASON%` followed by `1` reads back as an install reason, and a member path holding
 //! a newline adds lines to `%FILES%`, so the package appears to own a file it never shipped.
@@ -328,8 +329,8 @@ impl Record {
     /// # Errors
     ///
     /// - [`RecordError::InvalidKeyword`] if `keyword` would not read back as its header.
-    /// - [`RecordError::UnrepresentableValue`] if a value is empty, holds a line break, or reads
-    ///   as a `%KEYWORD%` header. The record is left unchanged.
+    /// - [`RecordError::UnrepresentableValue`] if a value is empty, holds a line break or a NUL,
+    ///   or reads as a `%KEYWORD%` header. The record is left unchanged.
     pub fn set(&mut self, keyword: &str, values: Vec<String>) -> Result<(), RecordError> {
         if values.is_empty() {
             self.remove(keyword);
@@ -397,7 +398,7 @@ impl Record {
 
 /// Refuses a keyword that would not read back as the `%KEYWORD%` header it is written as.
 fn check_keyword(keyword: &str) -> Result<(), RecordError> {
-    let fits = !keyword.is_empty() && !keyword.contains(['%', '\n', '\r']);
+    let fits = !keyword.is_empty() && !keyword.contains(['%', '\n', '\r', '\0']);
     if fits {
         Ok(())
     } else {
@@ -410,11 +411,16 @@ fn check_keyword(keyword: &str) -> Result<(), RecordError> {
 /// A carriage return is refused anywhere, not only where it would be lost. No field pacman
 /// records holds one, and a reader that splits on `\r\n` would read it differently from one
 /// that splits on `\n`.
+///
+/// A NUL is refused anywhere too. libalpm reads a line as a C string, which ends at the first
+/// NUL. So `%REASON%`, a NUL, then any text is a value here and a section header there.
 fn check_value(keyword: &str, value: &str) -> Result<(), RecordError> {
     let reason = if value.is_empty() {
         "an empty line ends a section"
     } else if value.contains(['\n', '\r']) {
         "a line break would read back as several values"
+    } else if value.contains('\0') {
+        "a reader of C strings would stop at the NUL"
     } else if piko_db::meta::section::section_keyword(value).is_some() {
         "it would read back as a section header"
     } else {
@@ -622,6 +628,26 @@ mod tests {
         let error = record.set("GROUPS", vec!["%REASON%".to_owned(), "1".to_owned()]).unwrap_err();
         assert!(matches!(error, RecordError::UnrepresentableValue { .. }), "got {error:?}");
         assert!(record.get("REASON").is_none());
+    }
+
+    /// libalpm reads each line as a C string. For it, `%REASON%`, a NUL, then any text is the
+    /// header `%REASON%`, so the next value would be the install reason. piko's own reader sees
+    /// one value there, which is why the header test alone does not refuse it.
+    #[test]
+    fn a_value_holding_a_nul_cannot_forge_a_section_for_a_c_string_reader() {
+        let mut record = Record::new(RecordKind::Desc);
+        for value in ["%REASON%\0x", "a\0b", "\0"] {
+            let error = record.set("GROUPS", vec![value.to_owned(), "1".to_owned()]).unwrap_err();
+            assert!(
+                matches!(error, RecordError::UnrepresentableValue { .. }),
+                "{value:?}: got {error:?}"
+            );
+        }
+        assert!(record.sections().is_empty());
+        assert!(matches!(
+            Section::new("GROUPS\0", Vec::new()),
+            Err(RecordError::InvalidKeyword { .. })
+        ));
     }
 
     /// Values that only look unusual still fit: a `%` that does not open and close a keyword,
