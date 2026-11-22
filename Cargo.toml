@@ -95,7 +95,7 @@ time = "0.3"
 # no feature that searches the system or bundles a database is turned on.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 # `string`: the help headings and the aliases a translated --help sets are built at run time.
-clap = { version = "4", features = ["derive", "string"] }
+clap = { version = "4", features = ["derive", "string", "wrap_help"] }
 tempfile = "3"
 # CLI-only progress bar/spinner for downloads and transaction steps
 indicatif = "0.18"

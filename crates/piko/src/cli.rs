@@ -20,7 +20,7 @@ pub const DEFAULT_KEYRINGS_DIR: &str = "/usr/share/pacman/keyrings/";
 
 /// A simple, secure ALPM package manager.
 #[derive(Debug, Parser)]
-#[command(name = "piko", version, about, long_about = None)]
+#[command(name = "piko", version, about, long_about = None, max_term_width = 100)]
 pub struct Cli {
     /// Path to the ALPM database directory. Defaults to `DBPath` from the parsed
     /// pacman.conf (see `--config`); falls back to `/var/lib/pacman` with a warning if that
