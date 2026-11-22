@@ -27,51 +27,47 @@ pub fn why(local: &LocalDatabase, target: &str, out: &mut impl std::io::Write) -
     };
 
     let Some(result) = explain_why_installed(&universe, target) else {
-        eprintln!("Error: package {target} is not installed");
+        crate::i18n::print_error!("cli-not-installed", name = target.to_string());
         return ExitCode::FAILURE;
     };
 
     let show = |id: SolvableId| {
-        universe
-            .get(id)
-            .map_or_else(|| "<unknown>".to_owned(), |s| format!("{} {}", s.name(), s.version()))
+        universe.get(id).map_or_else(
+            || crate::i18n::tr!("cli-unknown"),
+            |s| format!("{} {}", s.name(), s.version()),
+        )
     };
 
     match result {
         WhyResult::Explicit(id) => {
-            emit!(out, "{} was installed explicitly", show(id));
+            emit!(out, "{}", crate::i18n::tr!("why-explicit", package = show(id)));
         }
         WhyResult::Orphan { target, direct } if direct.is_empty() => {
-            emit!(
-                out,
-                "{} is installed as a dependency, and nothing installed requires it",
-                show(target)
-            );
-            emit!(
-                out,
-                "(an orphan by hard dependencies; `piko plan -R -s` would sweep it. \
-                 It may still be an optional dependency of something — `pacman -Qdt` counts \
-                 those as required, `pacman -Qdtt` does not.)"
-            );
+            emit!(out, "{}", crate::i18n::tr!("why-orphan", package = show(target)));
+            emit!(out, "{}", crate::i18n::tr!("why-orphan-note"));
         }
         WhyResult::Orphan { target, direct } => {
-            emit!(out, "{} is installed as a dependency, required by:", show(target));
+            emit!(out, "{}", crate::i18n::tr!("why-required-by", package = show(target)));
             for id in &direct {
                 emit!(out, "  {}", show(*id));
             }
-            emit!(
-                out,
-                "but no explicitly-installed package requires it, directly or indirectly \
-                 — this whole group is orphaned"
-            );
+            emit!(out, "{}", crate::i18n::tr!("why-group-orphaned"));
         }
         WhyResult::Chain(chain) => {
             for (depth, id) in chain.iter().enumerate() {
                 let indent = "  ".repeat(depth);
                 if depth == 0 {
-                    emit!(out, "{}{} (explicitly installed)", indent, show(*id));
+                    emit!(
+                        out,
+                        "{indent}{}",
+                        crate::i18n::tr!("why-chain-root", package = show(*id))
+                    );
                 } else {
-                    emit!(out, "{}└─ requires {}", indent, show(*id));
+                    emit!(
+                        out,
+                        "{indent}└─ {}",
+                        crate::i18n::tr!("why-chain-requires", package = show(*id))
+                    );
                 }
             }
         }

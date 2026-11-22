@@ -141,6 +141,7 @@
 mod cancel;
 mod concurrency;
 mod error;
+mod error_message;
 mod freshness;
 mod health;
 mod pool;
@@ -152,7 +153,7 @@ mod transport;
 
 pub use cancel::Cancel;
 pub use concurrency::Concurrency;
-pub use error::{Error, Result, without_credentials};
+pub use error::{Error, IoAction, Result, Uncheckable, without_credentials};
 pub use freshness::{FreshnessNote, FreshnessPolicy, Refreshed};
 pub use progress::{Event, Kind};
 pub use refresh::{

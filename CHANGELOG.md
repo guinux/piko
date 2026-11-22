@@ -6,9 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- piko speaks French when the locale selects French (`LANG=fr_FR.UTF-8`, for example). The
+  selection follows gettext: `LC_ALL`, then `LC_MESSAGES`, then `LANG`, and `LANGUAGE` unless the
+  locale is `C`. `LC_ALL=C` keeps every message in English. The diagnostics, the questions, the
+  progress rows, the step lists, the summaries and the `piko info` grid are translated. A
+  question accepts `o` and `oui` in French, and `y` and `yes` in every language.
+- The errors of every piko library are translated too: a file that cannot be read, a size limit,
+  a refused file, an invalid `pacman.conf` line, a file conflict, a package that does not fit on
+  the disk, a download every server refused, a locked database, a refused signature, a key that
+  is not in the keyring. So are the type of a tar member, the name of a package bound, the GnuPG
+  operation that failed and why a signature was refused. A reason written as free text stays in
+  English: what a hook, a server, GnuPG or the system said.
+- A size is written with the decimal mark and the unit names of the language, in the progress
+  bars too: `5.04 MiB` in English, `5,04 Mio` in French.
+- The `--help` text is translated too, with the words clap writes: the headings, the `--help`
+  and `--version` flags, the `help` subcommand, a default value and an alias. So is an error in
+  the command line itself: an unknown option, a missing value, two options that conflict.
+- These stay in English: `piko conf`, the names and versions of a `--names` or `--quiet`
+  listing, dates, the lines written to `pacman.log`, a tip clap writes itself, and the errors of
+  the libraries piko depends on, `std::io::Error` among them.
+- The new `piko-i18n` crate. A library type returns a `Message`, an identifier and its values,
+  and a frontend renders it in the language of its user with a `Catalog`. `Fact`, `Shape` and
+  `Remedy` of `piko_db::solve`, `piko_db::Error`, `piko_db::local::SchemaVersionError`,
+  `piko_db::repo::RepoNameError`, `piko_db_write::Error`, `piko_db_write::RecordError`,
+  `piko_txn::Error`, `piko_net::Error`, `piko_sig::Error`, `piko_sig::Rejection` and
+  `piko_sig_write::Error` implement `Localize`. `Arg::list` joins messages into a list, with a
+  separator each language writes. An `Arg::Message` nests a message in another, rendered in the
+  same language. An `Arg::Size` is a number of bytes, and `Catalog::size` renders one alone.
+
+### Changed
+
+- A reason a library error held as English text is now a type a frontend can match and
+  translate: `piko_txn::MemberType`, `Obstacle`, `PackageLimit`, `SignatureRefusal` and
+  `Discarded`; `piko_net::IoAction` and `Uncheckable`; `piko_sig::Operation` and
+  `piko_sig_write::Operation`; `piko_db_write::Unrepresentable`. `piko_txn::Error`'s and
+  `piko_net::Error`'s signature errors hold the `piko_sig::Rejection` or `piko_sig::Error` itself,
+  and a checksum mismatch holds both digests. Each still prints the same English text.
+
+- A file conflict counts its files, and a failed download its servers, with the singular or
+  plural form (`1 file`, `2 servers`). A member a directory stands in the way of says
+  `a directory is in the way`, not `DirectoryInTheWay`.
+- A count is written with the singular or plural form it needs: `1 further problem not shown`,
+  `1 transaction`, `2 groups`, `1 update available`, not `problem(s)`, `transaction(s)` or
+  `group(s)`.
+
 ## [1.0.0-rc.1] - 2026-11-14
 
 ### Changed
+
+- A reason a library error held as English text is now a type a frontend can match and
+  translate: `piko_txn::MemberType`, `Obstacle`, `PackageLimit`, `SignatureRefusal` and
+  `Discarded`; `piko_net::IoAction` and `Uncheckable`; `piko_sig::Operation` and
+  `piko_sig_write::Operation`; `piko_db_write::Unrepresentable`. `piko_txn::Error`'s and
+  `piko_net::Error`'s signature errors hold the `piko_sig::Rejection` or `piko_sig::Error` itself,
+  and a checksum mismatch holds both digests. Each still prints the same English text.
 
 - `--max-age` defaults to 40 days, up from 14. A database older than that is reported as
   stale. `--max-age 0` still turns the check off.

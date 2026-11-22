@@ -22,6 +22,14 @@ use piko_db::fixture::RepoFixture;
 
 const PIKO: &str = env!("CARGO_BIN_EXE_piko");
 
+/// A `piko` command in English, whatever the locale of the machine. The tests compare its
+/// output with English text.
+fn piko_command() -> Command {
+    let mut command = Command::new(PIKO);
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// A `<dbpath>` holding one repository database, `core`, with a single package in it.
 fn dbpath_with_core(dir: &Path) {
     let sync = dir.join("sync");
@@ -58,12 +66,7 @@ fn write_config(dir: &Path, sig_level: &str) -> std::path::PathBuf {
 }
 
 fn list_repo(config: &Path) -> std::process::Output {
-    Command::new(PIKO)
-        .arg("--config")
-        .arg(config)
-        .args(["list", "--repo", "core"])
-        .output()
-        .unwrap()
+    piko_command().arg("--config").arg(config).args(["list", "--repo", "core"]).output().unwrap()
 }
 
 /// The ordinary Arch case: no `.sig` anywhere. `DatabaseOptional` says that is fine.
@@ -158,7 +161,7 @@ fn the_files_sibling_is_verified_before_its_file_lists_are_read() {
     std::fs::write(dir.path().join("sync/core.files.sig"), b"not a real signature").unwrap();
     let config = write_config(dir.path(), "Required DatabaseOptional");
 
-    let output = Command::new(PIKO)
+    let output = piko_command()
         .arg("--config")
         .arg(&config)
         .args(["files", "--repo", "core", "acl"])

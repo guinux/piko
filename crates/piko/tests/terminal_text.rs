@@ -19,6 +19,14 @@ use piko_db::fixture::RepoFixture;
 
 const PIKO: &str = env!("CARGO_BIN_EXE_piko");
 
+/// A `piko` command in English, whatever the locale of the machine. The tests compare its
+/// output with English text.
+fn piko_command() -> Command {
+    let mut command = Command::new(PIKO);
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// An OSC 52 clipboard write, then a title change, both ended by a bell.
 const PAYLOAD: &str = "\u{1b}]52;c;cHduZWQ=\u{7}\u{1b}]0;PWNED\u{7}";
 
@@ -66,7 +74,7 @@ fn setup(dir: &Path, description: &str) -> std::path::PathBuf {
 
 /// Runs `piko --config <config> <args>`, and returns its stdout and stderr.
 fn piko(config: &Path, args: &[&str]) -> (String, String) {
-    let output = Command::new(PIKO).arg("--config").arg(config).args(args).output().unwrap();
+    let output = piko_command().arg("--config").arg(config).args(args).output().unwrap();
     (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
 }
 

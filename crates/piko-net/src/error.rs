@@ -5,6 +5,76 @@ use std::path::PathBuf;
 /// A [`Result`](std::result::Result) with this crate's [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// The filesystem or network operation an [`Error::Io`] names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum IoAction {
+    /// Downloading a file.
+    Download,
+    /// Creating a file.
+    Create,
+    /// Reading a download as it arrives.
+    ReadDownload,
+    /// Writing a download to its temporary file.
+    WriteDownload,
+}
+
+impl std::fmt::Display for IoAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Download => "download",
+            Self::Create => "create",
+            Self::ReadDownload => "read the download of",
+            Self::WriteDownload => "write the download of",
+        })
+    }
+}
+
+/// Why the signature of a downloaded database could not be checked.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Uncheckable {
+    /// The signature could not be fetched.
+    Unreachable {
+        /// The URL of the signature, without credentials.
+        url: String,
+        /// What the download helper reported.
+        reason: String,
+    },
+    /// The server answered with a status other than 200.
+    Status {
+        /// The URL of the signature, without credentials.
+        url: String,
+        /// The HTTP status.
+        status: u16,
+    },
+    /// The server answered 200 with an empty body.
+    Empty {
+        /// The URL of the signature, without credentials.
+        url: String,
+    },
+    /// The policy asks for a signature, and the caller gave no keyring.
+    NoKeyring,
+    /// GnuPG could not check the signature.
+    Keyring(piko_sig::Error),
+}
+
+impl std::fmt::Display for Uncheckable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable { url, reason } => write!(f, "could not fetch {url}: {reason}"),
+            Self::Status { url, status } => {
+                write!(f, "{url} answered HTTP {status} rather than 200")
+            }
+            Self::Empty { url } => write!(f, "{url} returned an empty signature"),
+            Self::NoKeyring => {
+                f.write_str("the policy requires a signature but no keyring was given")
+            }
+            Self::Keyring(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 /// Something went wrong fetching or installing a database.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -15,8 +85,8 @@ pub enum Error {
     /// support thread. One mirror 404s, another times out, a third serves HTML from a captive
     /// portal. The user needs to see which.
     #[error(
-        "could not download {file} from any of {} server(s):\n  {}",
-        attempts.len(),
+        "could not download {file} from any of {}:\n  {}",
+        match attempts.len() { 1 => "1 server".to_owned(), count => format!("{count} servers") },
         attempts.iter().map(|(url, why)| format!("{url}: {why}")).collect::<Vec<_>>().join("\n  ")
     )]
     AllServersFailed {
@@ -118,7 +188,7 @@ pub enum Error {
         /// The file that was rejected.
         file: String,
         /// Which rule refused it.
-        reason: String,
+        reason: piko_sig::Rejection,
     },
 
     /// The downloaded database could not be checked at all.
@@ -130,7 +200,7 @@ pub enum Error {
         /// The file that could not be checked.
         file: String,
         /// What went wrong.
-        reason: String,
+        reason: Uncheckable,
     },
 
     /// A filesystem operation failed.
@@ -139,7 +209,7 @@ pub enum Error {
         /// The path involved.
         path: PathBuf,
         /// What was being attempted.
-        action: &'static str,
+        action: IoAction,
         /// The underlying failure.
         #[source]
         source: std::io::Error,
@@ -281,7 +351,7 @@ mod tests {
     fn with_causes_keeps_the_whole_chain() {
         let error = Error::Io {
             path: "http://a.example/core.db".into(),
-            action: "download",
+            action: IoAction::Download,
             source: std::io::Error::other("io: Connection reset by peer"),
         };
         assert_eq!(
@@ -297,7 +367,7 @@ mod tests {
         let url = "http://a.example/core.db";
         let reset = |path: &str| Error::Io {
             path: path.into(),
-            action: "download",
+            action: IoAction::Download,
             source: std::io::Error::other("io: Connection reset by peer"),
         };
         assert_eq!(attempt_reason(url, &reset(url)), "io: Connection reset by peer");
@@ -364,7 +434,7 @@ mod tests {
         let url = "https://user:secret@a.example/core.db";
         let error = Error::Io {
             path: without_credentials(url).as_ref().into(),
-            action: "download",
+            action: IoAction::Download,
             source: std::io::Error::other("unexpected HTTP status 404"),
         };
         assert_eq!(attempt_reason(url, &error), "unexpected HTTP status 404");
@@ -374,7 +444,7 @@ mod tests {
     fn a_rejection_says_the_existing_database_is_intact() {
         let error = Error::SignatureRejected {
             file: "core.db".to_owned(),
-            reason: "the signature is invalid".to_owned(),
+            reason: piko_sig::Rejection::Invalid,
         };
         assert!(error.to_string().contains("unchanged"), "{error}");
     }

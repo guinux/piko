@@ -9,9 +9,11 @@ use std::{cell::OnceCell, process::ExitCode};
 use alpm_types::{PackageInstallReason, PackageValidation};
 use piko_db::{local::LocalDatabase, local::LocalPackage, solve::DependentsIndex};
 
+use crate::i18n::tr;
 use crate::output::{emit, escaped, join, report};
 use crate::style::{
-    field_list, info_build_fields, info_date, info_description_fields, info_label, optional_deps,
+    Field, field_list, info_build_fields, info_date, info_description_fields, info_label, none,
+    optional_deps, unknown,
 };
 
 /// Builds `pacman -Qi`'s "Install Reason" text.
@@ -19,16 +21,16 @@ use crate::style::{
 /// Mirrors `dump_pkg_full`'s switch (`pacman/src/pacman/package.c`) rather than
 /// [`PackageInstallReason`]'s own `Display`, which renders the on-disk numeral (`"0"`/`"1"`)
 /// instead of a human sentence.
-fn install_reason_label(reason: PackageInstallReason) -> &'static str {
+fn install_reason_label(reason: PackageInstallReason) -> String {
     match reason {
-        PackageInstallReason::Explicit => "Explicitly installed",
-        PackageInstallReason::Depend => "Installed as a dependency for another package",
+        PackageInstallReason::Explicit => tr!("info-explicit"),
+        PackageInstallReason::Depend => tr!("info-dependency"),
     }
 }
 
 /// Colors [`install_reason_label`]. An explicit install is bold, being the state a user
 /// actually chose. A dependency is dim, being a consequence of that choice.
-fn styled_install_reason(reason: PackageInstallReason) -> console::StyledObject<&'static str> {
+fn styled_install_reason(reason: PackageInstallReason) -> console::StyledObject<String> {
     let style = match reason {
         PackageInstallReason::Explicit => console::Style::new().bold(),
         PackageInstallReason::Depend => console::Style::new().dim(),
@@ -45,15 +47,15 @@ fn styled_install_reason(reason: PackageInstallReason) -> console::StyledObject<
 /// validation value.
 fn validation_label(validation: &[PackageValidation]) -> String {
     if validation.is_empty() {
-        return "Unknown".to_owned();
+        return unknown();
     }
-    let labels: Vec<&str> = validation
+    let labels: Vec<String> = validation
         .iter()
         .map(|value| match value {
-            PackageValidation::None => "None",
-            PackageValidation::Md5 => "MD5 Sum",
-            PackageValidation::Sha256 => "SHA-256 Sum",
-            PackageValidation::Pgp => "Signature",
+            PackageValidation::None => none(),
+            PackageValidation::Md5 => tr!("info-validation-md5"),
+            PackageValidation::Sha256 => tr!("info-validation-sha256"),
+            PackageValidation::Pgp => tr!("info-validation-signature"),
         })
         .collect();
     join(&labels)
@@ -64,9 +66,9 @@ fn validation_label(validation: &[PackageValidation]) -> String {
 /// dim.
 fn styled_validation(validation: &[PackageValidation]) -> console::StyledObject<String> {
     let text = validation_label(validation);
-    let style = if text.contains("Signature") {
+    let style = if validation.contains(&PackageValidation::Pgp) {
         console::Style::new().green()
-    } else if text == "Unknown" {
+    } else if validation.is_empty() {
         console::Style::new().dim()
     } else {
         console::Style::new().yellow()
@@ -74,8 +76,8 @@ fn styled_validation(validation: &[PackageValidation]) -> console::StyledObject<
     style.apply_to(text)
 }
 
-fn yes_no(value: bool) -> &'static str {
-    if value { "Yes" } else { "No" }
+fn yes_no(value: bool) -> String {
+    if value { tr!("info-yes") } else { tr!("info-no") }
 }
 
 /// The installed database, with its "Required By" and "Optional For" index built on first use.
@@ -146,41 +148,44 @@ pub fn info(
             }
         });
     info_description_fields!(out, package, desc, &optional);
-    field_list!(out, "Required By     :", &dependents.required_by, 5);
-    field_list!(out, "Optional For    :", &dependents.optional_for, 5);
-    field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
-    field_list!(out, "Replaces        :", desc.replaces(), 5);
+    field_list!(out, Field::RequiredBy, &dependents.required_by, 5);
+    field_list!(out, Field::OptionalFor, &dependents.optional_for, 5);
+    field_list!(out, Field::ConflictsWith, desc.conflicts(), 5);
+    field_list!(out, Field::Replaces, desc.replaces(), 5);
     info_build_fields!(out, desc, zone);
     let install_date = info_date(desc.install_date(), &desc.section_values("INSTALLDATE"), zone);
-    emit!(out, "{} {install_date}", info_label("Install Date    :"));
+    emit!(out, "{} {install_date}", info_label(Field::InstallDate));
     emit!(
         out,
         "{} {}",
-        info_label("Install Reason  :"),
+        info_label(Field::InstallReason),
         styled_install_reason(desc.install_reason())
     );
-    emit!(out, "{} {}", info_label("Install Script  :"), yes_no(package.has_install_scriptlet()));
+    emit!(out, "{} {}", info_label(Field::InstallScript), yes_no(package.has_install_scriptlet()));
     let validation = match desc.validation() {
         Ok(validation) => styled_validation(validation),
         Err(_) => console::Style::new()
             .dim()
             .apply_to(escaped(desc.section_values("VALIDATION").join(" "))),
     };
-    emit!(out, "{} {}", info_label("Validated By    :"), validation);
+    emit!(out, "{} {}", info_label(Field::ValidatedBy), validation);
     // A field shown as written above is named on stderr, so stdout stays what pacman prints.
     for reason in desc.invalid_fields() {
         crate::output::warn(format!("{}: {reason}", package.name()));
     }
     if let Some(error) = unanswered {
-        crate::output::warn(format!(
-            "{}: the optional dependencies marked [installed] may be incomplete: {error}",
-            package.name()
+        crate::output::warn(tr!(
+            "info-optional-incomplete",
+            package = package.name().to_string(),
+            mark = tr!("info-installed-mark"),
+            reason = crate::output::describe(&error)
         ));
     }
     for unread in &dependents.unread {
-        crate::output::warn(format!(
-            "Optional For may be incomplete: {}: {}",
-            unread.package, unread.reason
+        crate::output::warn(tr!(
+            "info-optional-for-incomplete",
+            package = unread.package.to_string(),
+            reason = unread.reason.to_string()
         ));
     }
 

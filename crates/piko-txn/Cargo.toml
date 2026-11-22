@@ -17,6 +17,8 @@ alpm-types.workspace = true
 base64.workspace = true
 piko-db.workspace = true
 piko-db-write.workspace = true
+# The message of each error, for a frontend that renders it in the language of its user.
+piko-i18n.workspace = true
 piko-net.workspace = true
 piko-sig.workspace = true
 rustix.workspace = true
@@ -41,3 +43,5 @@ proptest.workspace = true
 # The local-database side of conflict detection needs a database to ask, and `DbFixture`
 # builds throwaway ones. Tests use fixtures in a tempdir, never real system paths.
 piko-db = { workspace = true, features = ["fixture"] }
+# The tests render each error through the catalog.
+piko-i18n = { workspace = true, features = ["catalog"] }

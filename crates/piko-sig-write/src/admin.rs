@@ -12,7 +12,7 @@ use rustix::fs::OFlags;
 
 use crate::{
     edit::ScriptedInteractor,
-    error::{Error, Result},
+    error::{Error, Operation, Result},
 };
 
 /// The agent socket GnuPG binds inside a keyring directory, when no runtime directory is
@@ -95,7 +95,7 @@ impl OwnerTrust {
             Self::Ultimate => Ok("5"),
             Self::Unknown | Self::Undefined => Err(Error::gpgme(
                 PathBuf::new(),
-                "set ownertrust",
+                Operation::SetOwnertrustLevel,
                 format!("{self:?} cannot be assigned through the trust menu"),
             )),
         }
@@ -205,7 +205,7 @@ impl KeyringAdmin {
     /// The check runs only after GnuPG has already refused, never before. A long keyring path is
     /// perfectly usable whenever the standard socket directory exists. Testing the length up
     /// front would refuse a working keyring.
-    fn agent_error(&self, action: &'static str, source: &gpgme::Error) -> Error {
+    fn agent_error(&self, action: Operation, source: &gpgme::Error) -> Error {
         let mut message = source.to_string();
         if source.code() == gpgme::Error::NO_AGENT.code() {
             let socket = self.home.join(AGENT_SOCKET);
@@ -249,7 +249,7 @@ impl KeyringAdmin {
     pub fn init(home: impl AsRef<Path>) -> Result<(Self, InitOutcome)> {
         let home = home.as_ref().to_path_buf();
         if create_keyring_dir(&home)? {
-            set_mode(&home, KEYRING_DIR_MODE, "set the keyring directory's permissions")?;
+            set_mode(&home, KEYRING_DIR_MODE, Operation::SetKeyringDirMode)?;
         }
         // Before anything is written, and before GnuPG reads a `gpg.conf` another user wrote.
         piko_sig::ensure_trusted_keyring(&home)?;
@@ -261,26 +261,27 @@ impl KeyringAdmin {
         let admin = Self { home };
         let mut context = admin.context()?;
 
-        let (master_key_created, master_key_expiry_removed) =
-            match admin.find_master_key(&mut context)? {
-                Some(master) => (false, admin.clear_master_expiry(&mut context, &master)?),
-                None => {
-                    // `NOEXPIRE` is required, not implied by the zero duration.
-                    // `gpgme_op_createkey` reads an expiry of zero as "GnuPG's default", three
-                    // years in GnuPG 2.4, and only the flag asks for none.
-                    context
-                        .create_key_with_flags(
-                            MASTER_KEY_USERID,
-                            "rsa4096",
-                            Duration::ZERO,
-                            gpgme::CreateKeyFlags::CERT
-                                | gpgme::CreateKeyFlags::NOPASSWD
-                                | gpgme::CreateKeyFlags::NOEXPIRE,
-                        )
-                        .map_err(|source| admin.agent_error("generate the master key", &source))?;
-                    (true, false)
-                }
-            };
+        let (master_key_created, master_key_expiry_removed) = match admin
+            .find_master_key(&mut context)?
+        {
+            Some(master) => (false, admin.clear_master_expiry(&mut context, &master)?),
+            None => {
+                // `NOEXPIRE` is required, not implied by the zero duration.
+                // `gpgme_op_createkey` reads an expiry of zero as "GnuPG's default", three
+                // years in GnuPG 2.4, and only the flag asks for none.
+                context
+                    .create_key_with_flags(
+                        MASTER_KEY_USERID,
+                        "rsa4096",
+                        Duration::ZERO,
+                        gpgme::CreateKeyFlags::CERT
+                            | gpgme::CreateKeyFlags::NOPASSWD
+                            | gpgme::CreateKeyFlags::NOEXPIRE,
+                    )
+                    .map_err(|source| admin.agent_error(Operation::GenerateMasterKey, &source))?;
+                (true, false)
+            }
+        };
 
         // `pacman-key` runs `gpg --update-trustdb` for the same reason. `check_keyring` refuses
         // a keyring whose `trustdb.gpg` it cannot read, and a fresh home has none until
@@ -290,7 +291,7 @@ impl KeyringAdmin {
             admin.update_trustdb()?;
         }
         if piko_db::fs_util::exists_no_follow(&trustdb) {
-            set_mode(&trustdb, READABLE_MODE, "set the trust database's permissions")?;
+            set_mode(&trustdb, READABLE_MODE, Operation::SetTrustDbMode)?;
         }
 
         Ok((admin, InitOutcome { master_key_created, master_key_expiry_removed }))
@@ -323,7 +324,7 @@ impl KeyringAdmin {
         // key changes; `init` generates a master key with no subkeys.
         context
             .set_expire(master, Duration::ZERO, std::iter::empty::<&str>())
-            .map_err(|source| self.agent_error("remove the master key's expiry date", &source))?;
+            .map_err(|source| self.agent_error(Operation::RemoveMasterKeyExpiry, &source))?;
         Ok(true)
     }
 
@@ -368,7 +369,7 @@ impl KeyringAdmin {
     ) -> Result<Option<gpgme::Key>> {
         let candidates = context
             .find_secret_keys(["piko@localhost"])
-            .map_err(|source| Error::gpgme(&self.home, "search for the master key", source))?;
+            .map_err(|source| Error::gpgme(&self.home, Operation::SearchMasterKey, source))?;
         // `find_secret_keys` matches substrings across every user ID field, not just email. So
         // require the exact identity. An unrelated key mentioning "piko@localhost" in a comment
         // can then never be mistaken for piko's own master key.
@@ -395,7 +396,7 @@ impl KeyringAdmin {
         // The open refuses a FIFO or device node rather than blocking on it or reading it
         // without end.
         let file = piko_db::fs_util::open_following_symlinks(path)
-            .map_err(|source| Error::gpgme(path, "read", source))?;
+            .map_err(|source| Error::gpgme(path, Operation::Read, source))?;
         self.import_file(file, path)
     }
 
@@ -409,11 +410,15 @@ impl KeyringAdmin {
         let mut context = self.context()?;
         // Streamed, not loaded: `gpgme::Data::load` allocates the whole file up front, and the
         // file is as large as its writer chose.
-        let describe =
-            |message: String| Error::Gpgme { path: path.to_path_buf(), action: "read", message };
+        let describe = |message: String| Error::Gpgme {
+            path: path.to_path_buf(),
+            action: Operation::Read,
+            message,
+        };
         let data = gpgme::Data::from_seekable_reader(file)
             .map_err(|wrapped| describe(wrapped.error().to_string()))?;
-        let result = context.import(data).map_err(|source| Error::gpgme(path, "import", source))?;
+        let result =
+            context.import(data).map_err(|source| Error::gpgme(path, Operation::Import, source))?;
         Ok(ImportSummary::from_gpgme(&result))
     }
 
@@ -446,7 +451,7 @@ impl KeyringAdmin {
         // signed", and pile up a duplicate local signature on every `populate`.
         context
             .set_key_list_mode(gpgme::KeyListMode::LOCAL | gpgme::KeyListMode::SIGS)
-            .map_err(|source| Error::gpgme(&self.home, "set key list mode for", source))?;
+            .map_err(|source| Error::gpgme(&self.home, Operation::SetKeyListMode, source))?;
         let master = self.master_key(&mut context)?;
         let target = self.get_key(&mut context, fingerprint)?;
 
@@ -461,7 +466,7 @@ impl KeyringAdmin {
 
         context
             .add_signer(&master)
-            .map_err(|source| self.agent_error("select the master key as signer", &source))?;
+            .map_err(|source| self.agent_error(Operation::SelectSigner, &source))?;
         context
             .sign_key_with_flags(
                 &target,
@@ -469,7 +474,7 @@ impl KeyringAdmin {
                 Duration::ZERO,
                 gpgme::KeySigningFlags::LOCAL,
             )
-            .map_err(|source| self.agent_error("locally sign", &source))?;
+            .map_err(|source| self.agent_error(Operation::LocallySign, &source))?;
         Ok(true)
     }
 
@@ -501,10 +506,10 @@ impl KeyringAdmin {
                 &target,
                 ScriptedInteractor::set_owner_trust(digit, level == OwnerTrust::Ultimate),
                 gpgme::Data::new().map_err(|source| {
-                    Error::gpgme(&self.home, "allocate a scratch buffer", source)
+                    Error::gpgme(&self.home, Operation::AllocateBuffer, source)
                 })?,
             )
-            .map_err(|source| Error::gpgme(&self.home, "set ownertrust on", source))?;
+            .map_err(|source| Error::gpgme(&self.home, Operation::SetOwnertrust, source))?;
         Ok(true)
     }
 
@@ -528,10 +533,10 @@ impl KeyringAdmin {
                 &target,
                 ScriptedInteractor::disable(),
                 gpgme::Data::new().map_err(|source| {
-                    Error::gpgme(&self.home, "allocate a scratch buffer", source)
+                    Error::gpgme(&self.home, Operation::AllocateBuffer, source)
                 })?,
             )
-            .map_err(|source| Error::gpgme(&self.home, "disable", source))?;
+            .map_err(|source| Error::gpgme(&self.home, Operation::Disable, source))?;
         Ok(true)
     }
 
@@ -567,7 +572,7 @@ impl KeyringAdmin {
         }
         context
             .delete_key_with_flags(&target, flags)
-            .map_err(|source| Error::gpgme(&self.home, "delete", source))
+            .map_err(|source| Error::gpgme(&self.home, Operation::Delete, source))
     }
 
     /// Every public key currently in the keyring.
@@ -603,7 +608,7 @@ impl KeyringAdmin {
         let mut context = self.context()?;
         let keys = context
             .find_keys(patterns.iter().map(String::as_str))
-            .map_err(|source| Error::gpgme(&self.home, "list keys in", source))?;
+            .map_err(|source| Error::gpgme(&self.home, Operation::ListKeys, source))?;
         keys.map(|key| self.describe(&self.readable(key)?)).collect()
     }
 
@@ -636,13 +641,13 @@ impl KeyringAdmin {
     ///
     /// [`Error::Gpgme`] carrying what GnuPG said.
     fn readable(&self, entry: std::result::Result<gpgme::Key, gpgme::Error>) -> Result<gpgme::Key> {
-        entry.map_err(|source| Error::gpgme(&self.home, "read a key from", source))
+        entry.map_err(|source| Error::gpgme(&self.home, Operation::ReadKey, source))
     }
 
     fn describe(&self, key: &gpgme::Key) -> Result<KeyInfo> {
         let fingerprint = key
             .fingerprint()
-            .map_err(|_| Error::gpgme(&self.home, "read the fingerprint of", "not valid UTF-8"))?;
+            .map_err(|_| Error::gpgme(&self.home, Operation::ReadFingerprint, "not valid UTF-8"))?;
         Ok(KeyInfo {
             fingerprint: fingerprint.to_owned(),
             user_ids: key.user_ids().filter_map(|uid| uid.id().ok().map(str::to_owned)).collect(),
@@ -665,8 +670,9 @@ impl KeyringAdmin {
     /// [`Error::Gpgme`] if GnuPG cannot be run.
     pub fn update_trustdb(&self) -> Result<()> {
         let mut context = self.context()?;
-        let keys =
-            context.keys().map_err(|source| Error::gpgme(&self.home, "list keys in", source))?;
+        let keys = context
+            .keys()
+            .map_err(|source| Error::gpgme(&self.home, Operation::ListKeys, source))?;
         // Walked, not collected. [`Self::list_keys`] would allocate a `KeyInfo` per key, with a
         // `String` per user ID, and drop all of it. GnuPG recomputes validity as it produces
         // each key. The walk alone is therefore the whole effect.
@@ -737,10 +743,10 @@ fn write_layout(home: &Path) -> Result<()> {
         // `create_new` is `O_EXCL`, which never follows a symlink. The mode is then set on the
         // descriptor just created, not on the path, which could be swapped in between.
         match no_follow(File::options().write(true).create_new(true)).open(&path) {
-            Ok(file) => fchmod(&file, &path, *mode, "set a keyring file's permissions")?,
+            Ok(file) => fchmod(&file, &path, *mode, Operation::SetKeyringFileMode)?,
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(source) => {
-                return Err(Error::gpgme(path, "create a keyring file", source));
+                return Err(Error::gpgme(path, Operation::CreateKeyringFile, source));
             }
         }
     }
@@ -772,17 +778,17 @@ const MAX_CONF_BYTES: u64 = 1024 * 1024;
 /// on the system.
 fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
     let describe =
-        |action: &'static str| move |source: std::io::Error| Error::gpgme(path, action, source);
+        |action: Operation| move |source: std::io::Error| Error::gpgme(path, action, source);
 
     let (mut file, created) = match no_follow(File::options().read(true).append(true)).open(path) {
         Ok(file) => (file, false),
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             let file = no_follow(File::options().read(true).append(true).create_new(true))
                 .open(path)
-                .map_err(describe("create a keyring configuration file"))?;
+                .map_err(describe(Operation::CreateConfFile))?;
             (file, true)
         }
-        Err(source) => return Err(describe("open a keyring configuration file")(source)),
+        Err(source) => return Err(describe(Operation::OpenConfFile)(source)),
     };
     ensure_regular(&file, path)?;
 
@@ -790,11 +796,11 @@ fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
     (&file)
         .take(MAX_CONF_BYTES.saturating_add(1))
         .read_to_string(&mut current)
-        .map_err(describe("read a keyring configuration file"))?;
+        .map_err(describe(Operation::ReadConfFile))?;
     if current.len() as u64 > MAX_CONF_BYTES {
         return Err(Error::gpgme(
             path,
-            "read a keyring configuration file",
+            Operation::ReadConfFile,
             format!("it is larger than {MAX_CONF_BYTES} bytes"),
         ));
     }
@@ -814,9 +820,9 @@ fn ensure_conf_options(path: &Path, options: &[&str]) -> Result<()> {
         appended.insert(0, '\n');
     }
 
-    file.write_all(appended.as_bytes()).map_err(describe("write a keyring configuration file"))?;
+    file.write_all(appended.as_bytes()).map_err(describe(Operation::WriteConfFile))?;
     if created {
-        fchmod(&file, path, READABLE_MODE, "set a keyring configuration file's permissions")?;
+        fchmod(&file, path, READABLE_MODE, Operation::SetConfFileMode)?;
     }
     Ok(())
 }
@@ -847,7 +853,7 @@ fn ensure_regular(file: &File, path: &Path) -> Result<()> {
     if is_file {
         return Ok(());
     }
-    Err(Error::gpgme(path, "use a keyring file", "it is not a regular file"))
+    Err(Error::gpgme(path, Operation::UseKeyringFile, "it is not a regular file"))
 }
 
 /// Sets `path`'s mode through a descriptor, never through the path.
@@ -856,7 +862,7 @@ fn ensure_regular(file: &File, path: &Path) -> Result<()> {
 /// link in a keyring directory another user can write to would make that file world-readable.
 /// The path is opened `O_NOFOLLOW`, and the mode goes to the descriptor with `fchmod(2)`.
 /// Only a regular file or a directory is changed.
-fn set_mode(path: &Path, mode: u32, action: &'static str) -> Result<()> {
+fn set_mode(path: &Path, mode: u32, action: Operation) -> Result<()> {
     let file = no_follow(File::options().read(true))
         .open(path)
         .map_err(|source| Error::gpgme(path, action, source))?;
@@ -868,7 +874,7 @@ fn set_mode(path: &Path, mode: u32, action: &'static str) -> Result<()> {
 }
 
 /// Sets the mode of the open `file`, naming `path` and `action` if that fails.
-fn fchmod(file: &File, path: &Path, mode: u32, action: &'static str) -> Result<()> {
+fn fchmod(file: &File, path: &Path, mode: u32, action: Operation) -> Result<()> {
     file.set_permissions(std::fs::Permissions::from_mode(mode))
         .map_err(|source| Error::gpgme(path, action, source))
 }
@@ -889,8 +895,7 @@ fn fchmod(file: &File, path: &Path, mode: u32, action: &'static str) -> Result<(
 /// An existing symlink to a directory counts as existing. pacman-key tests for existence, not for
 /// a directory. Its own comment gives the reason: "someone may want to use a symlink here".
 fn create_keyring_dir(home: &Path) -> Result<bool> {
-    let describe =
-        |source: std::io::Error| Error::gpgme(home, "create the keyring directory", source);
+    let describe = |source: std::io::Error| Error::gpgme(home, Operation::CreateKeyringDir, source);
     match std::fs::create_dir(home) {
         Ok(()) => Ok(true),
         Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
@@ -984,8 +989,8 @@ mod tests {
             "the fixture must exceed the limit"
         );
 
-        let named = admin.agent_error("generate the master key", &gpgme::Error::NO_AGENT);
-        let other = admin.agent_error("generate the master key", &gpgme::Error::GENERAL);
+        let named = admin.agent_error(Operation::GenerateMasterKey, &gpgme::Error::NO_AGENT);
+        let other = admin.agent_error(Operation::GenerateMasterKey, &gpgme::Error::GENERAL);
 
         assert!(named.to_string().contains("would be"), "{named}");
         assert!(named.to_string().contains("S.gpg-agent"), "{named}");
@@ -997,7 +1002,7 @@ mod tests {
     fn a_missing_agent_under_a_short_path_adds_no_hint() {
         let admin = KeyringAdmin { home: PathBuf::from("/tmp/k") };
 
-        let error = admin.agent_error("locally sign", &gpgme::Error::NO_AGENT);
+        let error = admin.agent_error(Operation::LocallySign, &gpgme::Error::NO_AGENT);
 
         assert!(!error.to_string().contains("would be"), "{error}");
     }
@@ -1387,7 +1392,7 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&victim, &link).unwrap();
 
-        assert!(set_mode(&link, READABLE_MODE, "test").is_err());
+        assert!(set_mode(&link, READABLE_MODE, Operation::SetKeyringFileMode).is_err());
         let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }

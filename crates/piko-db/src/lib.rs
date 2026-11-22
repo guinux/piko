@@ -98,6 +98,7 @@ pub mod desc_compat;
 mod eager;
 mod entry_name;
 mod error;
+mod error_message;
 pub mod fs_util;
 pub mod glob;
 pub mod groups;

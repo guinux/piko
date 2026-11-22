@@ -14,6 +14,8 @@ workspace = true
 [dependencies]
 piko-db.workspace = true
 piko-sig.workspace = true
+# The message of each error, for a frontend that renders it in the language of its user.
+piko-i18n.workspace = true
 # `v1_15` exposes `gpgme_op_setexpire`, which `init` uses to clear the master key's expiry
 # date. GPGME 1.15 dates from 2020; the flag is a compile-time gate in the bindings only.
 gpgme = { workspace = true, features = ["v1_15"] }
@@ -22,4 +24,6 @@ rustix.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# The tests render each error through the catalog.
+piko-i18n = { workspace = true, features = ["catalog"] }
 tempfile.workspace = true

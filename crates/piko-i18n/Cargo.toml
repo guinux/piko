@@ -1,0 +1,27 @@
+[package]
+name = "piko-i18n"
+version.workspace = true
+description = "Translatable messages for piko: message identifiers, and the catalog that renders them"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The library crates depend on this crate without the catalog: a `Message` is an identifier and
+# its arguments, and needs no dependency. A frontend turns `catalog` on to render one.
+catalog = ["dep:fluent-bundle", "dep:fluent-syntax", "dep:unic-langid", "dep:thiserror"]
+
+[dependencies]
+fluent-bundle = { workspace = true, optional = true }
+fluent-syntax = { workspace = true, optional = true }
+unic-langid = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Turns the catalog on for this crate's own tests, whatever the command line selects.
+piko-i18n = { path = ".", features = ["catalog"] }

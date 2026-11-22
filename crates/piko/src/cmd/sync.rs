@@ -89,7 +89,7 @@ pub fn check_updates(
     }
 
     emit!(out, "");
-    emit!(out, "{} update{} available", updates.len(), if updates.len() == 1 { "" } else { "s" });
+    emit!(out, "{}", crate::i18n::tr!("sync-updates-available", count = updates.len()));
 
     for (update, reason) in &ignored {
         crate::cmd::plan::print_ignored_change(
@@ -109,12 +109,12 @@ pub fn resolve_and_print(
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     if opened.is_empty() {
-        eprintln!("Error: no configured repository could be opened; see warnings above");
+        crate::i18n::print_error!("sync-no-repository");
         return ExitCode::FAILURE;
     }
 
     let Ok(dep) = piko_db::comparable::parse::<alpm_types::RelationOrSoname>(target) else {
-        eprintln!("Error: {target} is not a valid dependency string");
+        crate::i18n::print_error!("plan-invalid-dependency", target = target);
         return ExitCode::FAILURE;
     };
 
@@ -129,20 +129,18 @@ pub fn resolve_and_print(
         // the name being wrong.
         let ignored = repos.ignored_satisfiers(&dep);
         if ignored.is_empty() {
-            eprintln!(
-                "Error: no package satisfying {target} was found in any configured \
-                 repository"
-            );
+            crate::i18n::print_error!("plan-not-found", target = target);
         } else {
-            eprintln!("Error: every package satisfying {target} is ignored");
+            crate::i18n::print_error!("plan-target-ignored", target = target);
             for (resolved, reason) in &ignored {
-                eprintln!(
-                    "  {}-{} in {} ({})",
-                    resolved.package().name(),
-                    resolved.package().version(),
-                    resolved.repo(),
-                    crate::output::escaped(reason)
+                let line = crate::i18n::tr!(
+                    "sync-ignored-candidate",
+                    package =
+                        format!("{}-{}", resolved.package().name(), resolved.package().version()),
+                    repository = resolved.repo().to_string(),
+                    reason = crate::output::escaped(reason)
                 );
+                eprintln!("  {line}");
             }
         }
         return ExitCode::FAILURE;

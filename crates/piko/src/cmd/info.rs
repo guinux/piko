@@ -36,7 +36,7 @@ pub fn installed(
             emit!(out, "");
         }
         let Some(package) = db.get_str(name) else {
-            eprintln!("Error: package {name} is not installed");
+            crate::i18n::print_error!("cli-not-installed", name = name.to_string());
             ok = false;
             continue;
         };
@@ -63,7 +63,11 @@ pub fn repo(
             emit!(out, "");
         }
         let Some(package) = db.get_str(name) else {
-            eprintln!("Error: package {name} is not in {}", db.path().display());
+            crate::i18n::print_error!(
+                "cli-not-in-repository",
+                name = name.to_string(),
+                path = db.path().display().to_string()
+            );
             ok = false;
             continue;
         };
@@ -113,10 +117,7 @@ pub fn installed_then_repos(
                 }
             }
             None => {
-                eprintln!(
-                    "Error: package {name} is not installed and not in any configured \
-                     repository"
-                );
+                crate::i18n::print_error!("cli-not-found-anywhere", name = name.to_string());
                 ok = false;
             }
         }

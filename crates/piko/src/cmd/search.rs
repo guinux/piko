@@ -66,7 +66,7 @@ fn print_rows(
 ) -> ExitCode {
     if rows.is_empty() {
         if !quiet {
-            emit!(out, "0 found");
+            emit!(out, "{}", crate::i18n::tr!("search-found", count = 0usize));
         }
         return ExitCode::FAILURE;
     }
@@ -103,11 +103,13 @@ fn print_rows(
     match installed_count {
         Some(installed) if installed > 0 => emit!(
             out,
-            "{} found · {}",
-            rows.len(),
-            console::Style::new().green().apply_to(format!("{installed} installed"))
+            "{} · {}",
+            crate::i18n::tr!("search-found", count = rows.len()),
+            console::Style::new()
+                .green()
+                .apply_to(crate::i18n::tr!("search-installed", count = installed))
         ),
-        _ => emit!(out, "{} found", rows.len()),
+        _ => emit!(out, "{}", crate::i18n::tr!("search-found", count = rows.len())),
     }
     ExitCode::SUCCESS
 }
@@ -123,9 +125,10 @@ fn local_rows(db: &LocalDatabase, terms: &[String]) -> Vec<Row> {
             prefix: String::new(),
             name: package.name().to_string(),
             version: package.version().to_string(),
-            description: package
-                .desc()
-                .map_or_else(|_| "(desc unavailable)".to_owned(), |d| escaped(d.description())),
+            description: package.desc().map_or_else(
+                |_| crate::i18n::tr!("search-desc-unavailable"),
+                |d| escaped(d.description()),
+            ),
             installed: true,
         })
         .collect()
@@ -142,9 +145,10 @@ fn repo_row(db: &RepoDatabase, package: &piko_db::repo::RepoPackage) -> Row {
         version: package.version().to_string(),
         // A hit whose deferred `desc` will not parse still matched on name, provides, or
         // groups, so it is still a result. Saying so beats dropping it silently.
-        description: package
-            .desc()
-            .map_or_else(|_| "<desc could not be parsed>".to_owned(), |d| escaped(d.description())),
+        description: package.desc().map_or_else(
+            |_| crate::i18n::tr!("search-desc-unparsed"),
+            |d| escaped(d.description()),
+        ),
         installed: false,
     }
 }

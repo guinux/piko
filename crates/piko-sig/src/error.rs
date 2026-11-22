@@ -5,6 +5,34 @@ use std::path::PathBuf;
 /// A [`Result`](std::result::Result) with this crate's [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// The GnuPG operation an [`Error::Gpgme`] names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Operation {
+    /// Reading a detached signature.
+    ReadSignature,
+    /// Reading the signature of a file.
+    ReadSignatureOf,
+    /// Reading the file a signature covers.
+    ReadSignedFile,
+    /// Verifying a signature.
+    Verify,
+    /// Looking up the key that made a signature.
+    LookUpSigningKey,
+}
+
+impl std::fmt::Display for Operation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ReadSignature => "read the signature",
+            Self::ReadSignatureOf => "read the signature of",
+            Self::ReadSignedFile => "read the signed file",
+            Self::Verify => "verify",
+            Self::LookUpSigningKey => "look up the signing key of",
+        })
+    }
+}
+
 /// Something went wrong while verifying, as opposed to a file simply failing verification.
 ///
 /// The distinction is the point of this type. "This package's signature is untrusted" is not
@@ -34,7 +62,7 @@ pub enum Error {
         /// The file involved.
         path: PathBuf,
         /// What was being attempted.
-        action: &'static str,
+        action: Operation,
         /// What GnuPG said.
         ///
         /// Text, not GPGME's error type. That type is not `Send`, and a caller wanting to

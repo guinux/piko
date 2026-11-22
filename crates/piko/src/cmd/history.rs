@@ -41,10 +41,7 @@ pub fn history(
     ) {
         (Ok(since), Ok(until)) => (since, until),
         (Err(bad), _) | (_, Err(bad)) => {
-            eprintln!(
-                "Error: {bad} is not a time this understands; use YYYY-MM-DD or \
-                 YYYY-MM-DDTHH:MM:SS+ZZZZ"
-            );
+            crate::i18n::print_error!("history-bad-time", time = bad.to_string());
             return ExitCode::FAILURE;
         }
     };
@@ -60,17 +57,17 @@ pub fn history(
     };
 
     if records.is_empty() {
-        emit!(out, "No transactions recorded");
+        emit!(out, "{}", crate::i18n::tr!("history-empty"));
         // An empty history and an unreadable one are different answers. Naming the files it
         // read is what lets a user tell "nothing has happened" from "piko looked in the wrong
         // place".
         emit!(
             out,
             "{}",
-            console::Style::new().dim().apply_to(format!(
-                "read {} and {}",
-                log_file.display(),
-                store.display()
+            console::Style::new().dim().apply_to(crate::i18n::tr!(
+                "history-read",
+                log = log_file.display().to_string(),
+                store = store.display().to_string()
             ))
         );
         return unfinished_note(dbpath, out);
@@ -92,7 +89,7 @@ pub fn history(
     }
 
     emit!(out, "");
-    emit!(out, "{} transaction(s)", records.len());
+    emit!(out, "{}", crate::i18n::tr!("history-count", count = records.len()));
     unfinished_note(dbpath, out)
 }
 
@@ -113,7 +110,7 @@ impl Widths {
             return widths;
         }
         for action in records.iter().flat_map(|record| shown_actions(record, options)) {
-            widths.verb = widths.verb.max(verb(action).len());
+            widths.verb = widths.verb.max(verb(action).chars().count());
             widths.name = widths.name.max(piko_db::printable(action.name()).len());
         }
         widths
@@ -149,7 +146,7 @@ fn print_record(
     // The same spelling the log line carries, in the same time zone. So a line here can be
     // found in `pacman.log` by searching for it.
     let when = record.started.map_or_else(
-        || "unknown date".to_owned(),
+        || crate::i18n::tr!("history-unknown-date"),
         |epoch| piko_txn::history::render_timestamp(epoch, options.zone),
     );
 
@@ -159,7 +156,9 @@ fn print_record(
     // about.
     let hidden = options.quiet || !options.packages.is_empty();
     let count = match record.actions.len() {
-        count if hidden && count > 1 => format!("  ({count} packages)"),
+        count if hidden && count > 1 => {
+            format!("  ({})", crate::i18n::tr!("history-packages", count = count))
+        }
         _ => String::new(),
     };
     // `--quiet` is one line per transaction, so the command line stays on it. There is no
@@ -237,10 +236,19 @@ const fn kind_of(action: &Action) -> ChangeKind {
 }
 
 /// The word, past tense — this command reports what already happened, where `piko plan`
-/// previews what will. [`piko_txn::history::Action::verb`] is that word, and is what both
-/// records write, so the screen and the files cannot disagree about it.
-fn verb(action: &Action) -> &'static str {
-    action.verb()
+/// previews what will.
+///
+/// In English it is [`piko_txn::history::Action::verb`], the word both records write, so the
+/// screen and the files agree. Another language translates that word on the screen only. The
+/// records stay in English, because pacman and piko read them back.
+fn verb(action: &Action) -> String {
+    match action {
+        Action::Installed { .. } => crate::i18n::tr!("history-verb-installed"),
+        Action::Upgraded { .. } => crate::i18n::tr!("history-verb-upgraded"),
+        Action::Downgraded { .. } => crate::i18n::tr!("history-verb-downgraded"),
+        Action::Reinstalled { .. } => crate::i18n::tr!("history-verb-reinstalled"),
+        Action::Removed { .. } => crate::i18n::tr!("history-verb-removed"),
+    }
 }
 
 /// The version column: `1.0.0-1`, or `1.0.0-1 -> 1.1.0-1` where the version changed.
@@ -283,9 +291,7 @@ fn unfinished_note(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
             emit!(
                 out,
                 "{}",
-                console::Style::new()
-                    .yellow()
-                    .apply_to("an unfinished transaction is recorded; run `piko report` to see it")
+                console::Style::new().yellow().apply_to(crate::i18n::tr!("history-unfinished"))
             );
             ExitCode::SUCCESS
         }
@@ -296,10 +302,9 @@ fn unfinished_note(dbpath: &Path, out: &mut impl std::io::Write) -> ExitCode {
             emit!(
                 out,
                 "{}",
-                console::Style::new().yellow().apply_to(
-                    "an unfinished transaction is recorded, but its journal cannot be read; \
-                     run `piko report` to see it"
-                )
+                console::Style::new()
+                    .yellow()
+                    .apply_to(crate::i18n::tr!("history-unfinished-unreadable"))
             );
             ExitCode::SUCCESS
         }

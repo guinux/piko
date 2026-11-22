@@ -11,7 +11,10 @@ mod cli;
 mod cmd;
 mod context;
 mod error;
+mod help;
+mod i18n;
 mod output;
+mod parse_error;
 mod privilege;
 mod progress;
 mod signal;
@@ -21,7 +24,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::Parser as _;
+use clap::{CommandFactory as _, FromArgMatches as _};
 use piko_db::resolve::IgnoreList;
 use piko_db::solve::{NoCache, PackageCache};
 use piko_txn::CacheDirSource;
@@ -51,7 +54,12 @@ fn main() -> ExitCode {
 
     // Read once, so every timestamp piko writes or shows uses one zone.
     let zone = piko_txn::history::LocalZone::capture();
-    let cli = Cli::parse();
+    let command = help::localize(Cli::command(), i18n::language());
+    let matches = command
+        .try_get_matches()
+        .unwrap_or_else(|error| error.apply::<parse_error::Formatter>().exit());
+    let cli = Cli::from_arg_matches(&matches)
+        .unwrap_or_else(|error| error.apply::<parse_error::Formatter>().exit());
 
     match run(&cli, zone) {
         Ok(code) => code,
@@ -78,7 +86,7 @@ fn exec_helper() -> Option<ExitCode> {
     }
 
     let Err(message) = piko_txn::exec::helper_main(&arguments.collect::<Vec<_>>());
-    eprintln!("Error: {message}");
+    eprintln!("{}", crate::i18n::error(&message.to_string()));
     Some(ExitCode::FAILURE)
 }
 
@@ -225,7 +233,7 @@ fn run(cli: &Cli, zone: piko_txn::history::LocalZone) -> Result<ExitCode, Error>
         }
         Command::Search { terms, installed, repos, repo, quiet } => {
             if cmd::search::all_blank(terms) {
-                eprintln!("Error: every search term is blank; name what to search for");
+                crate::i18n::print_error!("main-blank-search");
                 return Ok(ExitCode::FAILURE);
             }
             if *installed {
@@ -308,7 +316,7 @@ fn run(cli: &Cli, zone: piko_txn::history::LocalZone) -> Result<ExitCode, Error>
             let ignores = IgnoreList::new(&parsed.options.ignore_pkg, &parsed.options.ignore_group);
             let format = if *names { cmd::plan::Format::Names } else { cmd::plan::Format::Full };
             if targets.is_empty() && !*sysupgrade {
-                eprintln!("Error: no targets given (use --sysupgrade to upgrade everything)");
+                crate::i18n::print_error!("main-no-targets");
                 return Ok(ExitCode::FAILURE);
             }
             let mode = if *remove {
@@ -559,7 +567,7 @@ fn run(cli: &Cli, zone: piko_txn::history::LocalZone) -> Result<ExitCode, Error>
     if let Err(error) = out.flush()
         && error.kind() != io::ErrorKind::BrokenPipe
     {
-        eprintln!("Error: failed to write output: {error}");
+        crate::i18n::print_error!("cli-write-failed", error = error.to_string());
         return Ok(ExitCode::FAILURE);
     }
 

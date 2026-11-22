@@ -22,7 +22,8 @@ fn print_providers(
     relation: &str,
     providers: &[SolvableId],
 ) -> std::io::Result<()> {
-    writeln!(out, ":: There are {} providers available for {relation}:", providers.len())?;
+    let header = crate::i18n::tr!("provider-header", count = providers.len(), relation = relation);
+    writeln!(out, ":: {header}")?;
     crate::cmd::write_candidates(out, universe, providers)
 }
 
@@ -41,8 +42,8 @@ pub fn ask(
     if print_providers(out, universe, relation, &question.providers).is_err() {
         return first;
     }
-    let prompt = "Enter a number (default=1): ";
-    let index = output::select(out, prompt, question.providers.len(), 0);
+    let prompt = format!("{} ", crate::i18n::tr!("provider-prompt"));
+    let index = output::select(out, &prompt, question.providers.len(), 0);
     question.providers.get(index).copied().unwrap_or(first)
 }
 
@@ -55,24 +56,22 @@ pub fn report_defaults(universe: &Universe<'_>, report: &AmbiguityReport) {
     if report.is_empty() {
         return;
     }
-    eprintln!(
-        "Note: {} dependency requirement(s) have several providers; the first was taken \
-         (an interactive `piko install` asks which one to use)",
-        report.found().len()
-    );
+    crate::i18n::print_note!("provider-defaults", count = report.found().len());
     for ambiguity in report.found() {
         let taken = ambiguity
             .providers
             .first()
             .map_or_else(|| "?".to_owned(), |id| crate::cmd::candidate_name(universe, *id));
-        eprintln!(
-            "  {} requires {}: took {taken}, among {}",
-            crate::cmd::candidate_name(universe, ambiguity.dependent),
-            relation_of(universe, ambiguity),
-            crate::cmd::candidate_sample(universe, &ambiguity.providers),
+        let line = crate::i18n::tr!(
+            "provider-default",
+            package = crate::cmd::candidate_name(universe, ambiguity.dependent),
+            relation = relation_of(universe, ambiguity),
+            taken = taken,
+            sample = crate::cmd::candidate_sample(universe, &ambiguity.providers)
         );
+        eprintln!("  {line}");
     }
     if report.dropped() > 0 {
-        eprintln!("  {} further requirement(s) not shown", report.dropped());
+        eprintln!("  {}", crate::i18n::tr!("cli-requirements-not-shown", count = report.dropped()));
     }
 }

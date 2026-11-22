@@ -193,7 +193,7 @@ pub fn install(
     let file_candidates = loaded.candidates();
 
     let steplist = crate::progress::StepList::new();
-    let resolving = steplist.spinner("Resolving dependencies");
+    let resolving = steplist.spinner(&crate::i18n::tr!("txn-resolving"));
 
     let universe = match Universe::build(
         catalog.local,
@@ -202,7 +202,12 @@ pub fn install(
     ) {
         Ok(universe) => universe,
         Err(error) => {
-            crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
+            crate::progress::settle_row(
+                &steplist,
+                out,
+                resolving,
+                &crate::i18n::tr!("txn-resolving"),
+            );
             report_error(&error);
             return ExitCode::FAILURE;
         }
@@ -239,7 +244,7 @@ pub fn install(
     {
         steplist.suspend(|| crate::cmd::provider::report_defaults(&universe, &planned.defaulted));
     }
-    crate::progress::settle_row(&steplist, out, resolving, "Resolving dependencies");
+    crate::progress::settle_row(&steplist, out, resolving, &crate::i18n::tr!("txn-resolving"));
     let InstallPlan { plan: built, explicit: explicit_targets, .. } = match planned {
         Ok(planned) => planned,
         Err(failure) => {
@@ -258,7 +263,7 @@ pub fn install(
     crate::cmd::plan::print_diagnostics(&universe, &built, reach);
 
     if built.steps().is_empty() {
-        emit!(out, "Nothing to do");
+        emit!(out, "{}", crate::i18n::tr!("txn-nothing-to-do"));
         return ExitCode::SUCCESS;
     }
 
@@ -272,9 +277,9 @@ pub fn install(
 
     emit!(out, "");
     let prompt = if options.download_only {
-        "Proceed with download? [Y/n] "
+        format!("{} ", crate::i18n::tr!("txn-prompt-download"))
     } else {
-        "Proceed with installation? [Y/n] "
+        format!("{} ", crate::i18n::tr!("txn-prompt-install"))
     };
     // A handler may already be installed: by `update`'s pre-refresh step (`main::sync`), or by
     // `prepare_file_targets` for a package URL it had to fetch. Both happened before this
@@ -283,8 +288,8 @@ pub fn install(
     // happens when no handler exists yet (the `None` branch). Nothing at the prompt needs a
     // graceful stop.
     let answered = match &pre_cancel {
-        Some(handoff) => handoff.mode.during_prompt(|| proceed(out, options.noconfirm, prompt)),
-        None => proceed(out, options.noconfirm, prompt),
+        Some(handoff) => handoff.mode.during_prompt(|| proceed(out, options.noconfirm, &prompt)),
+        None => proceed(out, options.noconfirm, &prompt),
     };
     if !answered {
         return ExitCode::SUCCESS;
@@ -325,10 +330,7 @@ pub fn install(
         Err(error) => {
             report_error(&error);
             if matches!(error, piko_txn::Error::KeyringUnusable { .. }) {
-                eprintln!(
-                    "Note: set SigLevel = Never in pacman.conf to install without \
-                     checking signatures"
-                );
+                crate::i18n::print_note!("txn-siglevel-never-hint");
             }
             return ExitCode::FAILURE;
         }
@@ -469,10 +471,7 @@ impl<W: std::io::Write> InstallQuestions for Prompts<'_, W> {
 
     fn withheld(&mut self, count: usize) {
         self.steplist.suspend(|| {
-            eprintln!(
-                "Warning: {count} further provider question(s) not asked; the first candidate \
-                 was taken"
-            );
+            crate::i18n::print_warning!("txn-questions-withheld", count = count);
         });
     }
 }
@@ -518,7 +517,9 @@ fn prepare_file_targets(
     let mut stopped = false;
     let mut fetch = |url: &str| {
         // Flushed, because `out` is buffered and the download that follows can take minutes.
-        let line = writeln!(out, "Fetching {}", piko_net::without_credentials(url));
+        let text =
+            crate::i18n::tr!("txn-fetching", url = piko_net::without_credentials(url).to_string());
+        let line = writeln!(out, "{text}");
         if line.and_then(|()| out.flush()).is_err() {
             stopped = true;
             return Err(piko_txn::Error::Cancelled { completed: 0, total: 0 });
@@ -605,11 +606,7 @@ fn fetch_package_url(
 fn warn_about_ambiguous_targets(classified: &[TargetKind], catalog: &Catalog<'_>) {
     for spelled in classified.iter().filter_map(TargetKind::ambiguous_name) {
         if catalog.repos.iter().any(|(_, repository)| repository.get_str(spelled).is_some()) {
-            eprintln!(
-                "Warning: {spelled} names both a file here and a package in a \
-                 repository; installing the file (write ./{spelled} to silence this, or \
-                 move the file to install the package)"
-            );
+            crate::i18n::print_warning!("txn-ambiguous-target", name = spelled);
         }
     }
 }
@@ -631,7 +628,10 @@ fn report_download_dir(steplist: &crate::progress::StepList, dir: &piko_txn::Dow
             crate::output::warn(rejected);
         }
         if dir.created() {
-            eprintln!("Warning: no {} cache exists, creating...", dir.path().display());
+            crate::i18n::print_warning!(
+                "txn-creating-cache",
+                path = dir.path().display().to_string()
+            );
         }
     });
 }
@@ -712,7 +712,7 @@ fn emit_line(out: &mut impl std::io::Write, line: &str) -> Result<(), ExitCode> 
         if error.kind() == std::io::ErrorKind::BrokenPipe {
             return Err(ExitCode::SUCCESS);
         }
-        eprintln!("Error: failed to write output: {error}");
+        crate::i18n::print_error!("cli-write-failed", error = error.to_string());
         return Err(ExitCode::FAILURE);
     }
     Ok(())
@@ -864,12 +864,12 @@ fn named_only(
     let found = match removal.outcome {
         Ok(found) => found,
         Err(NamedRemovalFailure::NotInstalled(name)) => {
-            eprintln!("Error: package {name} is not installed");
+            crate::i18n::print_error!("cli-not-installed", name = name.to_string());
             return Err(ExitCode::FAILURE);
         }
         // A failure this frontend does not know yet.
         Err(other) => {
-            eprintln!("Error: {other:?}");
+            crate::i18n::print_error!("cli-unknown-failure", failure = format!("{other:?}"));
             return Err(ExitCode::FAILURE);
         }
     };
@@ -883,11 +883,11 @@ fn named_only(
         return Err(ExitCode::FAILURE);
     }
 
-    emit_line(out, &format!("Removing {} package(s):", found.len()))?;
+    emit_line(out, &crate::i18n::tr!("txn-removing-packages", count = found.len()))?;
     for entry in &found {
         emit_line(out, &format!("  {}", entry.as_str()))?;
     }
-    if !proceed(out, options.noconfirm, "Do you want to remove these packages? [Y/n] ") {
+    if !proceed(out, options.noconfirm, &format!("{} ", crate::i18n::tr!("txn-prompt-remove"))) {
         return Err(ExitCode::SUCCESS);
     }
 
@@ -907,7 +907,7 @@ fn planned(
     options: &RemoveOptions,
     out: &mut impl std::io::Write,
 ) -> Result<TransactionPlan, ExitCode> {
-    let resolving = steplist.spinner("Resolving dependencies");
+    let resolving = steplist.spinner(&crate::i18n::tr!("txn-resolving"));
     let limits = piko_db::Limits::default();
     let universe = match piko_db::solve::Universe::build(
         local,
@@ -916,7 +916,12 @@ fn planned(
     ) {
         Ok(universe) => universe,
         Err(error) => {
-            crate::progress::settle_row(steplist, out, resolving, "Resolving dependencies");
+            crate::progress::settle_row(
+                steplist,
+                out,
+                resolving,
+                &crate::i18n::tr!("txn-resolving"),
+            );
             report_error(&error);
             return Err(ExitCode::FAILURE);
         }
@@ -935,12 +940,17 @@ fn planned(
     ) {
         Ok(removal) => removal,
         Err(failure) => {
-            crate::progress::settle_row(steplist, out, resolving, "Resolving dependencies");
+            crate::progress::settle_row(
+                steplist,
+                out,
+                resolving,
+                &crate::i18n::tr!("txn-resolving"),
+            );
             crate::cmd::plan::report_expansion_failure(&failure);
             return Err(ExitCode::FAILURE);
         }
     };
-    crate::progress::settle_row(steplist, out, resolving, "Resolving dependencies");
+    crate::progress::settle_row(steplist, out, resolving, &crate::i18n::tr!("txn-resolving"));
 
     // Before the outcome either way. A refusal names packages the user may never have typed, and
     // the pattern that pulled them in is what explains the list.
@@ -973,7 +983,7 @@ fn planned(
         Err(error) => {
             report_error(&error);
             if matches!(error, piko_txn::Error::NotARemoval) {
-                eprintln!("Note: this is a bug; run `piko plan -R` to see the plan");
+                crate::i18n::print_note!("txn-not-a-removal");
             }
             return Err(ExitCode::FAILURE);
         }
@@ -991,7 +1001,7 @@ fn planned(
     }
 
     emit_line(out, "")?;
-    if !proceed(out, options.noconfirm, "Do you want to remove these packages? [Y/n] ") {
+    if !proceed(out, options.noconfirm, &format!("{} ", crate::i18n::tr!("txn-prompt-remove"))) {
         return Err(ExitCode::SUCCESS);
     }
 
@@ -1071,7 +1081,7 @@ fn run(
     // `remove` passes no rows, so the call costs it nothing.
     if plan.steps().is_empty() {
         progress.clear_downloads();
-        emit!(out, "Nothing to do");
+        emit!(out, "{}", crate::i18n::tr!("txn-nothing-to-do"));
         return ExitCode::SUCCESS;
     }
 
@@ -1200,21 +1210,17 @@ fn run_locked(
 /// The line printed after a commit that failed, telling the user what the failure left.
 ///
 /// `journal_left` is whether the journal is still on disk.
-fn stop_note(error: &piko_txn::Error, journal_left: bool) -> Option<&'static str> {
+fn stop_note(error: &piko_txn::Error, journal_left: bool) -> Option<String> {
     match error {
         // A hook that aborted the run explains itself through the error, which already
         // carries what it printed. See `Error::HookAborted`. It never leaves a journal.
         piko_txn::Error::HookAborted { .. } => None,
-        _ if !journal_left => Some("Note: nothing was changed; no step of the transaction ran"),
+        _ if !journal_left => Some(crate::i18n::note(&crate::i18n::tr!("txn-nothing-changed"))),
         // The user requested this stop, so it is not reported as a breakage.
-        piko_txn::Error::Cancelled { .. } => Some(
-            "Note: the steps that ran are recorded; \
-             run `piko report` to see them, then re-run to finish",
-        ),
-        _ => Some(
-            "Error: the transaction stopped part-way; \
-             run `piko report` to see what was applied",
-        ),
+        piko_txn::Error::Cancelled { .. } => {
+            Some(crate::i18n::note(&crate::i18n::tr!("txn-cancelled-recorded")))
+        }
+        _ => Some(crate::i18n::error(&crate::i18n::tr!("txn-stopped-part-way"))),
     }
 }
 
@@ -1228,7 +1234,7 @@ fn report_refusal(error: &piko_txn::Error) {
         error,
         piko_txn::Error::UnfinishedTransaction { .. } | piko_txn::Error::JournalUnreadable { .. }
     ) {
-        eprintln!("A previous transaction did not finish; run `piko report` to see it");
+        eprintln!("{}", crate::i18n::tr!("txn-previous-unfinished"));
     }
 }
 
@@ -1247,14 +1253,17 @@ fn report_refusal(error: &piko_txn::Error) {
 fn report_side_effects(report: &piko_txn::Report) {
     for run in &report.scriptlets {
         if run.outcome.truncated {
-            eprintln!("Warning: {}'s scriptlet output was truncated", run.package);
+            crate::i18n::print_warning!(
+                "txn-scriptlet-truncated",
+                package = run.package.to_string()
+            );
         }
         if !run.outcome.succeeded() {
-            eprintln!(
-                "Warning: {}'s {} scriptlet {}",
-                run.package,
-                run.kind.as_str(),
-                run.outcome.describe()
+            crate::i18n::print_warning!(
+                "txn-scriptlet-failed",
+                package = run.package.to_string(),
+                kind = run.kind.as_str(),
+                outcome = run.outcome.describe().to_string()
             );
         }
     }
@@ -1287,10 +1296,14 @@ fn report_side_effects(report: &piko_txn::Report) {
     // refusal name the same cause the same way.
     for run in &report.hooks {
         if run.outcome.as_ref().is_some_and(|outcome| outcome.truncated) {
-            eprintln!("Warning: hook {}'s output was truncated", run.name);
+            crate::i18n::print_warning!("txn-hook-truncated", hook = run.name.to_string());
         }
         if !run.succeeded() {
-            eprintln!("Warning: hook {} {}", run.name, run.failure_reason());
+            crate::i18n::print_warning!(
+                "txn-hook-failed",
+                hook = run.name.to_string(),
+                reason = run.failure_reason().to_string()
+            );
         }
     }
 }
@@ -1312,23 +1325,27 @@ pub fn report(dbpath: &Path, flags: GlobalFlags<'_>, out: &mut impl std::io::Wri
     let record = match journal::read(dbpath) {
         Ok(Some(record)) => record,
         Ok(None) => {
-            emit!(out, "No unfinished transaction is recorded");
+            emit!(out, "{}", crate::i18n::tr!("report-none"));
             return ExitCode::SUCCESS;
         }
         Err(piko_txn::Error::JournalUnreadable { reason, .. }) => {
             // The journal is there, so a previous run did not finish. What it did is unknown,
             // so no command can finish it. Removing the journal is the only way to run a
             // transaction again, and only the user can decide that it is safe.
-            emit!(out, "An unfinished transaction is recorded, but its journal cannot be read");
-            emit!(out, "  Journal: {}", journal_path.display());
-            emit!(out, "  Reason:  {}", piko_db::printable_lines(&reason.to_string()));
+            emit!(out, "{}", crate::i18n::tr!("report-unreadable"));
+            emit!(
+                out,
+                "  {}",
+                crate::i18n::tr!("report-journal", path = journal_path.display().to_string())
+            );
+            let reason = piko_db::printable_lines(&reason.to_string());
+            emit!(out, "  {}", crate::i18n::tr!("report-reason", reason = reason));
             emit!(out, "");
-            emit!(out, "piko refuses every transaction while the journal is there. The system");
-            emit!(out, "can be partly changed. Read the journal, and check the packages it names.");
+            emit!(out, "{}", crate::i18n::tr!("report-unreadable-help"));
             for line in leftovers.lock_note() {
                 emit!(out, "{line}");
             }
-            emit!(out, "Then remove {}:", leftovers.pronoun());
+            emit!(out, "{}", leftovers.then_remove());
             for command in leftovers.commands() {
                 emit!(out, "  {command}");
             }
@@ -1341,31 +1358,52 @@ pub fn report(dbpath: &Path, flags: GlobalFlags<'_>, out: &mut impl std::io::Wri
     };
 
     if !record.begun {
-        emit!(out, "A transaction was recorded but never started; the system is unchanged");
+        emit!(out, "{}", crate::i18n::tr!("report-never-started"));
         for line in leftovers.lock_note() {
             emit!(out, "{line}");
         }
-        emit!(out, "Remove the journal to clear it:");
+        emit!(out, "{}", crate::i18n::tr!("report-remove-journal"));
         for command in leftovers.commands() {
             emit!(out, "  {command}");
         }
         return ExitCode::SUCCESS;
     }
 
-    emit!(out, "An unfinished transaction was interrupted");
-    emit!(out, "  Root:   {}", record.root.display());
-    emit!(out, "  DBPath: {}", record.dbpath.display());
-    emit!(out, "  {} of {} steps completed", record.completed.len(), record.steps.len());
+    emit!(out, "{}", crate::i18n::tr!("report-interrupted"));
+    emit!(out, "  {}", crate::i18n::tr!("report-root", path = record.root.display().to_string()));
+    emit!(
+        out,
+        "  {}",
+        crate::i18n::tr!("report-dbpath", path = record.dbpath.display().to_string())
+    );
+    let progress = crate::i18n::tr!(
+        "report-progress",
+        completed = record.completed.len(),
+        total = record.steps.len()
+    );
+    emit!(out, "  {progress}");
 
     let outstanding = record.outstanding();
     if outstanding.is_empty() {
-        emit!(out, "Every step completed; only the journal itself was left behind");
+        emit!(out, "{}", crate::i18n::tr!("report-all-completed"));
     } else {
-        emit!(out, "Not applied:");
+        emit!(out, "{}", crate::i18n::tr!("report-not-applied"));
         for intent in outstanding {
             match intent {
-                Intent::Install { package, .. } => emit!(out, "  Install {package}"),
-                Intent::Remove { entry } => emit!(out, "  Remove {entry}"),
+                Intent::Install { package, .. } => {
+                    emit!(
+                        out,
+                        "  {}",
+                        crate::i18n::tr!("report-install", package = package.to_string())
+                    );
+                }
+                Intent::Remove { entry } => {
+                    emit!(
+                        out,
+                        "  {}",
+                        crate::i18n::tr!("report-remove", package = entry.to_string())
+                    );
+                }
             }
         }
     }
@@ -1380,11 +1418,11 @@ pub fn report(dbpath: &Path, flags: GlobalFlags<'_>, out: &mut impl std::io::Wri
             for line in leftovers.lock_note() {
                 emit!(out, "{line}");
             }
-            emit!(out, "The applied steps cannot be undone. Remove the journal:");
+            emit!(out, "{}", crate::i18n::tr!("report-cannot-undo-remove"));
             for command in leftovers.commands() {
                 emit!(out, "  {command}");
             }
-            emit!(out, "Then run the operation again");
+            emit!(out, "{}", crate::i18n::tr!("report-run-again"));
             return ExitCode::FAILURE;
         }
     };
@@ -1393,19 +1431,17 @@ pub fn report(dbpath: &Path, flags: GlobalFlags<'_>, out: &mut impl std::io::Wri
     for line in leftovers.lock_note() {
         emit!(out, "{line}");
     }
-    emit!(out, "The applied steps cannot be undone. To finish the transaction, run in order:");
+    emit!(out, "{}", crate::i18n::tr!("report-finish"));
     for command in recovery_commands(&recovery, &record.root, flags, &leftovers) {
         emit!(out, "  {command}");
     }
     if !recovery.interrupted.is_empty() {
         emit!(out, "");
-        emit!(out, "The interruption can have cut the first installs part-way. Then some of their");
-        emit!(out, "files are on disk with no package that owns them. `--overwrite '*'` applies");
-        emit!(out, "to those packages only, and lets them replace these files.");
+        emit!(out, "{}", crate::i18n::tr!("report-cut-installs"));
     }
     if !recovery.unreadable.is_empty() {
         emit!(out, "");
-        emit!(out, "These steps cannot be read from the journal, and are not in the commands:");
+        emit!(out, "{}", crate::i18n::tr!("report-unreadable-steps"));
         for step in &recovery.unreadable {
             emit!(out, "  {step}");
         }
@@ -1454,16 +1490,19 @@ impl Leftovers {
     fn lock_note(&self) -> Vec<String> {
         self.lock.as_ref().map_or_else(Vec::new, |lock| {
             vec![
-                format!("The database lock {} is still there.", lock.display()),
-                "A running piko or pacman also holds it: remove it only if neither runs."
-                    .to_owned(),
+                crate::i18n::tr!("report-lock-present", path = lock.display().to_string()),
+                crate::i18n::tr!("report-lock-held"),
             ]
         })
     }
 
-    /// What "remove" names: the journal alone, or the lock with it.
-    const fn pronoun(&self) -> &'static str {
-        if self.lock.is_some() { "them" } else { "it" }
+    /// The line before the `rm` commands: it names the journal alone, or the lock with it.
+    fn then_remove(&self) -> String {
+        if self.lock.is_some() {
+            crate::i18n::tr!("report-then-remove-them")
+        } else {
+            crate::i18n::tr!("report-then-remove-it")
+        }
     }
 }
 

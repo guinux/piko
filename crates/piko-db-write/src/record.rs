@@ -199,8 +199,33 @@ pub enum RecordError {
         /// The rejected value, truncated for display.
         value: String,
         /// Why it does not fit.
-        reason: &'static str,
+        reason: Unrepresentable,
     },
+}
+
+/// Why a value cannot be written as one value line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Unrepresentable {
+    /// The value is empty, and an empty line ends a section.
+    Empty,
+    /// The value holds a line feed or a carriage return.
+    LineBreak,
+    /// The value holds a NUL.
+    Nul,
+    /// The value is a section header.
+    SectionHeader,
+}
+
+impl std::fmt::Display for Unrepresentable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Empty => "an empty line ends a section",
+            Self::LineBreak => "a line break would read back as several values",
+            Self::Nul => "a reader of C strings would stop at the NUL",
+            Self::SectionHeader => "it would read back as a section header",
+        })
+    }
 }
 
 /// A `desc` or `files` file, preserved well enough to write back unchanged.
@@ -416,13 +441,13 @@ fn check_keyword(keyword: &str) -> Result<(), RecordError> {
 /// NUL. So `%REASON%`, a NUL, then any text is a value here and a section header there.
 fn check_value(keyword: &str, value: &str) -> Result<(), RecordError> {
     let reason = if value.is_empty() {
-        "an empty line ends a section"
+        Unrepresentable::Empty
     } else if value.contains(['\n', '\r']) {
-        "a line break would read back as several values"
+        Unrepresentable::LineBreak
     } else if value.contains('\0') {
-        "a reader of C strings would stop at the NUL"
+        Unrepresentable::Nul
     } else if piko_db::meta::section::section_keyword(value).is_some() {
-        "it would read back as a section header"
+        Unrepresentable::SectionHeader
     } else {
         return Ok(());
     };

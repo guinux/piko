@@ -142,7 +142,7 @@ pub enum Blocker {
         /// The component that stops the walk.
         component: PathBuf,
         /// What it is.
-        reason: &'static str,
+        reason: crate::Obstacle,
     },
 }
 
@@ -645,7 +645,7 @@ enum Located {
         /// The component, root-relative.
         component: PathBuf,
         /// What it is.
-        reason: &'static str,
+        reason: crate::Obstacle,
     },
 }
 
@@ -868,8 +868,12 @@ pub fn load_package(
             if member.path == Path::new(".PKGINFO") {
                 pkginfo = read_pkginfo(contents, package)?;
             } else if member.path == Path::new(".INSTALL") {
-                install_script =
-                    Some(read_whole(contents, package, "scriptlet size", MAX_SCRIPTLET_BYTES)?);
+                install_script = Some(read_whole(
+                    contents,
+                    package,
+                    crate::PackageLimit::ScriptletSize,
+                    MAX_SCRIPTLET_BYTES,
+                )?);
             }
             return Ok(());
         }
@@ -954,7 +958,7 @@ pub fn load_pkginfo(
 ///
 /// As [`read_whole`].
 fn read_pkginfo(contents: &mut dyn std::io::Read, package: &Path) -> Result<Option<String>> {
-    let bytes = read_whole(contents, package, ".PKGINFO size", MAX_PKGINFO_BYTES)?;
+    let bytes = read_whole(contents, package, crate::PackageLimit::PkgInfoSize, MAX_PKGINFO_BYTES)?;
     Ok(String::from_utf8(bytes).ok())
 }
 
@@ -1002,7 +1006,7 @@ const MAX_PKGINFO_BYTES: u64 = 4 * 1024 * 1024;
 fn read_whole(
     contents: &mut dyn std::io::Read,
     package: &Path,
-    limit: &'static str,
+    limit: crate::PackageLimit,
     max: u64,
 ) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -1483,7 +1487,7 @@ mod tests {
                 path: PathBuf::from("usr/sbin/tool"),
                 blocker: Blocker::Unreachable {
                     component: PathBuf::from("usr/sbin"),
-                    reason: "it is a symlink",
+                    reason: crate::Obstacle::Symlink,
                 },
             }]
         );
@@ -1739,7 +1743,13 @@ backup = etc/foo.conf
         let (_keep, path) = package_with_scriptlet(limit + 1);
         let error = load_package(&path, &crate::extract::PackageLimits::default()).unwrap_err();
         assert!(
-            matches!(error, crate::Error::PackageLimitExceeded { limit: "scriptlet size", .. }),
+            matches!(
+                error,
+                crate::Error::PackageLimitExceeded {
+                    limit: crate::PackageLimit::ScriptletSize,
+                    ..
+                }
+            ),
             "got {error:?}"
         );
 
@@ -1761,8 +1771,13 @@ backup = etc/foo.conf
         }
 
         let package = Path::new("foo-1.0.0-1-x86_64.pkg.tar");
-        let error =
-            read_whole(&mut Failing, package, "scriptlet size", MAX_SCRIPTLET_BYTES).unwrap_err();
+        let error = read_whole(
+            &mut Failing,
+            package,
+            crate::PackageLimit::ScriptletSize,
+            MAX_SCRIPTLET_BYTES,
+        )
+        .unwrap_err();
         assert!(
             matches!(&error, crate::Error::Io { path, .. } if path == package),
             "got {error:?}"
@@ -1779,7 +1794,10 @@ backup = etc/foo.conf
 
         let error = load_package(&path, &limits).unwrap_err();
         assert!(
-            matches!(error, crate::Error::PackageLimitExceeded { limit: "inflated size", .. }),
+            matches!(
+                error,
+                crate::Error::PackageLimitExceeded { limit: crate::PackageLimit::InflatedSize, .. }
+            ),
             "got {error:?}"
         );
     }

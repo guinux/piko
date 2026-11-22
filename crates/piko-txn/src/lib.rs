@@ -131,6 +131,7 @@
 
 pub mod conflict;
 mod error;
+mod error_message;
 pub mod exec;
 pub mod extract;
 pub mod file_target;
@@ -156,7 +157,7 @@ mod transaction;
 
 pub use error::{Error, Result};
 
-pub use error::IoAction;
+pub use error::{Discarded, IoAction, MemberType, Obstacle, PackageLimit, SignatureRefusal};
 pub use plan::DownloadOnlyOutcome;
 pub use plan::{
     PackageOrigins, ReasonPolicy, TransactionPlan, check_architecture, check_compression,

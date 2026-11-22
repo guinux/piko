@@ -19,6 +19,8 @@
 
 use std::path::PathBuf;
 
+use piko_i18n::Localize as _;
+
 /// Anything that stops a `piko` subcommand before it can print its answer.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -39,7 +41,7 @@ pub enum Error {
     Config(#[from] crate::context::ConfigUnavailable),
 
     /// A `--repo` argument is not a syntactically valid repository name.
-    #[error("{name} is not a valid repository name")]
+    #[error("{}", crate::i18n::tr!("error-invalid-repo-name", name = .name.as_str()))]
     InvalidRepoName {
         /// What was typed.
         name: String,
@@ -50,7 +52,11 @@ pub enum Error {
     /// Carries [`piko_sig::Rejection`] itself rather than a rendered string. It is a small
     /// `Clone` enum. Keeping it typed means the reason stays inspectable by anything that
     /// matches on this error, rather than only printable.
-    #[error("the signature on {} was rejected: {rejection}", archive.display())]
+    #[error("{}", crate::i18n::tr!(
+        "error-signature-rejected",
+        archive = .archive.display().to_string(),
+        reason = .rejection.message()
+    ))]
     SignatureRejected {
         /// The archive that was refused.
         archive: PathBuf,
@@ -64,7 +70,10 @@ pub enum Error {
     /// places. A rejection is a mirror problem. An uncheckable signature is usually a keyring
     /// one. `piko_sig::Error`'s own message says which. It is kept as a `#[source]` so
     /// [`crate::output::report`] prints it on its own `caused by:` line.
-    #[error("cannot check the signature on {}", archive.display())]
+    #[error("{}", crate::i18n::tr!(
+        "error-signature-uncheckable",
+        archive = .archive.display().to_string()
+    ))]
     SignatureUncheckable {
         /// The archive whose signature could not be checked.
         archive: PathBuf,
@@ -76,13 +85,18 @@ pub enum Error {
     /// A command that writes to a system path was run by a user that is not root.
     ///
     /// See [`crate::privilege`] for which paths count as the system's.
-    #[error("piko {command} must run as root to change {}. Run it as root, or use {flags} to name paths you own", path.display())]
+    #[error("{}", crate::i18n::tr!(
+        "error-not-root",
+        command = *.command,
+        path = .path.display().to_string(),
+        flags = .flags.as_str()
+    ))]
     NotRoot {
         /// The subcommand, as typed.
         command: &'static str,
         /// The system path the command would change.
         path: PathBuf,
-        /// The flags that name paths the user can own instead.
-        flags: &'static str,
+        /// The flags that name paths the user can own instead, in the language of the user.
+        flags: String,
     },
 }

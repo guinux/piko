@@ -34,6 +34,14 @@ use std::{
 
 const PIKO: &str = env!("CARGO_BIN_EXE_piko");
 
+/// A `piko` command in English, whatever the locale of the machine. The tests compare its
+/// output with English text.
+fn piko_command() -> Command {
+    let mut command = Command::new(PIKO);
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// A `.PKGINFO` for `name` at `version`.
 fn pkginfo(name: &str, version: &str, depends: &[&str], backups: &[&str]) -> String {
     let depends: String = depends.iter().map(|entry| format!("depend = {entry}\n")).collect();
@@ -455,7 +463,7 @@ impl Sandbox {
     /// Runs `piko owns` for `targets`. Reads `RootDir` from the sandbox's `pacman.conf`, so
     /// [`Sandbox::set_root_dir`] must have run first.
     fn run_owns(&self, targets: &[&str], extra: &[&str]) -> Output {
-        let mut command = Command::new(PIKO);
+        let mut command = piko_command();
         command
             .arg("owns")
             .arg("--config")
@@ -486,7 +494,7 @@ impl Sandbox {
     /// `--hookdir` points at the sandbox's own empty directory so a removal that goes through
     /// does not run this machine's real `/usr/share/libalpm/hooks`.
     fn run_remove(&self, targets: &[&str], extra: &[&str], answer: Option<&str>) -> Output {
-        let mut command = Command::new(PIKO);
+        let mut command = piko_command();
         command
             .arg("remove")
             .arg("--config")
@@ -516,7 +524,7 @@ impl Sandbox {
     /// nothing and succeeds. A test here checks what piko does with a pair, not what an
     /// external program shows.
     fn run_merge(&self, extra: &[&str], answer: Option<&str>) -> Output {
-        let mut command = Command::new(PIKO);
+        let mut command = piko_command();
         command
             .arg("merge")
             .arg("--config")
@@ -619,6 +627,7 @@ impl Sandbox {
     fn run_install_as(&self, program: &Path, targets: &[&str], extra: &[&str]) -> Output {
         let mut command = Command::new(program);
         command
+            .env("LC_ALL", "C")
             .arg("install")
             .arg("--config")
             .arg(self.path("pacman.conf"))
@@ -647,7 +656,7 @@ impl Sandbox {
     /// refresh from. Any test exercising solve or apply logic against a hand-written
     /// [`Self::write_repo`] fixture must therefore pass `--norefresh`.
     fn run_update(&self, targets: &[&str], extra: &[&str]) -> Output {
-        let mut command = Command::new(PIKO);
+        let mut command = piko_command();
         command
             .arg("update")
             .arg("--config")
@@ -923,7 +932,7 @@ fn a_journal_that_cannot_be_read_refuses_the_transaction() {
         "the journal was changed"
     );
 
-    let report = Command::new(PIKO)
+    let report = piko_command()
         .arg("report")
         .arg("--config")
         .arg(sandbox.path("pacman.conf"))
@@ -955,7 +964,7 @@ fn a_transaction_refuses_a_config_it_cannot_read() {
     let missing = sandbox.path("missing.conf");
 
     for command in ["remove", "install"] {
-        let output = Command::new(PIKO)
+        let output = piko_command()
             .arg(command)
             .arg("--config")
             .arg(&missing)
@@ -989,7 +998,7 @@ fn an_installed_package_is_shown_without_a_readable_config() {
     assert!(installed.status.success(), "{}", text(&installed));
 
     for command in ["info", "files"] {
-        let output = Command::new(PIKO)
+        let output = piko_command()
             .arg(command)
             .arg("--config")
             .arg(sandbox.path("missing.conf"))
@@ -1010,7 +1019,7 @@ fn a_refresh_without_a_readable_config_writes_no_log_line() {
     let sandbox = Sandbox::new();
     let log = sandbox.path("refresh.log");
 
-    let output = Command::new(PIKO)
+    let output = piko_command()
         .arg("refresh")
         .arg("--config")
         .arg(sandbox.path("missing.conf"))
@@ -1165,7 +1174,7 @@ fn a_hook_the_removal_deletes_does_not_run_afterwards() {
     // root of `/`, `/usr/share/libalpm/hooks` is both a host path and a path packages write to.
     let hookdir = sandbox.path("root/hooks");
     let piko = |subcommand: &str| {
-        let mut command = Command::new(PIKO);
+        let mut command = piko_command();
         command
             .arg(subcommand)
             .arg("--config")
@@ -1417,7 +1426,7 @@ fn declining_the_install_prompt_changes_nothing() {
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
     sandbox.write_repo(&[("foo", "1.0.0-1", &[])]);
 
-    let mut child = Command::new(PIKO)
+    let mut child = piko_command()
         .arg("install")
         .arg("--config")
         .arg(sandbox.path("pacman.conf"))
@@ -1452,7 +1461,7 @@ fn declining_the_remove_prompt_changes_nothing() {
     write_package_with(&sandbox.path("cache"), "foo", "1.0.0-1", None, &[]);
     assert!(sandbox.install("1.0.0-1", &[]).status.success());
 
-    let mut child = Command::new(PIKO)
+    let mut child = piko_command()
         .arg("remove")
         .arg("--config")
         .arg(sandbox.path("pacman.conf"))
@@ -2127,7 +2136,7 @@ fn gpg_home() -> Option<tempfile::TempDir> {
 #[test]
 fn root_slash_skips_the_chroot_but_not_the_chdir() {
     let elsewhere = tempfile::tempdir().unwrap();
-    let output = Command::new(PIKO)
+    let output = piko_command()
         .args(["__exec-in-root", "/", "/bin/sh", "-c", "pwd"])
         .current_dir(elsewhere.path())
         .stdin(Stdio::null())
@@ -2183,6 +2192,7 @@ fn chrooted_scriptlets_and_hooks_really_run() {
             .arg(sandbox.path(""))
             .arg(PIKO)
             .args(args)
+            .env("LC_ALL", "C")
             // A variable of whoever started piko. The hook must not see it.
             .env("PIKO_TEST_LEAK", "leaked")
             .stdin(Stdio::null())
@@ -2350,7 +2360,7 @@ fn populate_shell(root: &Path) -> bool {
 
 /// Runs `piko history` against a sandbox, with the given extra arguments.
 fn run_history(sandbox: &Sandbox, extra: &[&str]) -> Output {
-    Command::new(PIKO)
+    piko_command()
         .arg("history")
         .arg("--config")
         .arg(sandbox.path("pacman.conf"))
@@ -2478,10 +2488,10 @@ fn history_filters_by_package_and_shortens_with_quiet() {
     .unwrap();
 
     let all = text(&run_history(&sandbox, &[]));
-    assert!(all.contains("2 transaction(s)"), "{all}");
+    assert!(all.contains("2 transactions"), "{all}");
 
     let filtered = text(&run_history(&sandbox, &["--package", "vim"]));
-    assert!(filtered.contains("1 transaction(s)"), "{filtered}");
+    assert!(filtered.contains("1 transaction"), "{filtered}");
     assert!(!filtered.contains("linux"), "{filtered}");
 
     // A detail line is indented and carries its kind's icon. `--quiet` is one line per
@@ -2626,12 +2636,12 @@ fn history_keeps_the_newest_and_all_overrides_it() {
     std::fs::write(sandbox.path("pacman.log"), log).unwrap();
 
     let last_two = text(&run_history(&sandbox, &["-n", "2"]));
-    assert!(last_two.contains("2 transaction(s)"), "{last_two}");
+    assert!(last_two.contains("2 transactions"), "{last_two}");
     assert!(last_two.contains("p5") && last_two.contains("p4"), "{last_two}");
     assert!(!last_two.contains("p1"), "{last_two}");
 
     let all = text(&run_history(&sandbox, &["-n", "2", "--all"]));
-    assert!(all.contains("5 transaction(s)"), "{all}");
+    assert!(all.contains("5 transactions"), "{all}");
 }
 
 /// An empty history says so, and names what it read. "Nothing happened" and "piko looked in
@@ -2698,7 +2708,7 @@ fn a_completed_install_is_recorded_in_both_records() {
 
     let seen = text(&run_history(&sandbox, &[]));
     assert!(seen.contains("installed") && seen.contains("foo"), "{seen}");
-    assert!(seen.contains("1 transaction(s)"), "{seen}");
+    assert!(seen.contains("1 transaction"), "{seen}");
 }
 
 /// The verb must come from a version comparison. An upgrade and a downgrade of the same
@@ -3229,7 +3239,7 @@ fn an_interactive_transaction_reports_pending_files_without_asking() {
 
     // `y` answers the install confirmation. The second line would answer a follow-up, and is
     // left unread on purpose.
-    let mut child = Command::new(PIKO)
+    let mut child = piko_command()
         .arg("install")
         .arg("--config")
         .arg(sandbox.path("pacman.conf"))

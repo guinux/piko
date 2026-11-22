@@ -160,7 +160,7 @@ fn conf_directive(
 ) -> ExitCode {
     let Some(known) = KNOWN_DIRECTIVES.iter().find(|name| name.eq_ignore_ascii_case(directive))
     else {
-        eprintln!("Error: unknown directive '{directive}'");
+        crate::i18n::print_error!("conf-unknown-directive", directive = directive);
         return ExitCode::FAILURE;
     };
 

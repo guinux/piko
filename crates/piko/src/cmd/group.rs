@@ -19,12 +19,9 @@ fn print_members(
     group: &str,
     members: &[SolvableId],
 ) -> std::io::Result<()> {
-    let count = members.len();
-    if count == 1 {
-        writeln!(out, ":: There is 1 member in group {}:", piko_db::printable(group))?;
-    } else {
-        writeln!(out, ":: There are {count} members in group {}:", piko_db::printable(group))?;
-    }
+    let header =
+        crate::i18n::tr!("group-members", count = members.len(), group = piko_db::printable(group));
+    writeln!(out, ":: {header}")?;
     crate::cmd::write_candidates(out, universe, members)
 }
 
@@ -46,8 +43,8 @@ pub fn answer(
         let chosen = if print_members(out, universe, &group.name, &group.members).is_err() {
             group.members.to_vec()
         } else {
-            let prompt = "Enter a selection (default=all): ";
-            let selected = output::multiselect(out, prompt, group.members.len());
+            let prompt = format!("{} ", crate::i18n::tr!("group-prompt"));
+            let selected = output::multiselect(out, &prompt, group.members.len());
             group
                 .members
                 .iter()
@@ -70,18 +67,15 @@ pub fn report_defaults(universe: &Universe<'_>, groups: &[GroupTarget]) {
     if groups.is_empty() {
         return;
     }
-    eprintln!(
-        "Note: {} group target(s) were taken whole (an interactive `piko install` asks which \
-         members to install)",
-        groups.len()
-    );
+    crate::i18n::print_note!("group-defaults", count = groups.len());
     for group in groups {
-        eprintln!(
-            "  {}: took all {} members, {}",
-            group.name,
-            group.members.len(),
-            crate::cmd::candidate_sample(universe, &group.members)
+        let line = crate::i18n::tr!(
+            "group-default",
+            group = group.name.as_str(),
+            count = group.members.len(),
+            sample = crate::cmd::candidate_sample(universe, &group.members)
         );
+        eprintln!("  {line}");
     }
 }
 

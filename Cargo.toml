@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/piko-db",
     "crates/piko-db-write",
+    "crates/piko-i18n",
     "crates/piko-net",
     "crates/piko-sig",
     "crates/piko-sig-write",
@@ -93,7 +94,8 @@ time = "0.3"
 # rendered in the offset that applied at that instant. piko reads the bytes itself, bounded;
 # no feature that searches the system or bundles a database is turned on.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
-clap = { version = "4", features = ["derive"] }
+# `string`: the help headings and the aliases a translated --help sets are built at run time.
+clap = { version = "4", features = ["derive", "string"] }
 tempfile = "3"
 # CLI-only progress bar/spinner for downloads and transaction steps
 indicatif = "0.18"
@@ -102,9 +104,15 @@ indicatif = "0.18"
 signal-hook = "0.4"
 # CLI-only ANSI styling for the transaction progress display.
 console = "0.16"
+# The message catalog of `piko-i18n`: Fluent's runtime, its parser (the catalog audit reads the
+# syntax tree), and the language tag type a bundle is built for. Pure Rust, no C library.
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+unic-langid = "0.9"
 
 piko-db = { path = "crates/piko-db", version = "1.0.0-rc.1" }
 piko-db-write = { path = "crates/piko-db-write", version = "1.0.0-rc.1" }
+piko-i18n = { path = "crates/piko-i18n", version = "1.0.0-rc.1" }
 piko-net = { path = "crates/piko-net", version = "1.0.0-rc.1" }
 piko-sig = { path = "crates/piko-sig", version = "1.0.0-rc.1" }
 piko-sig-write = { path = "crates/piko-sig-write", version = "1.0.0-rc.1" }

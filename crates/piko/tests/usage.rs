@@ -13,6 +13,14 @@ use piko_db::fixture::RepoFixture;
 
 const PIKO: &str = env!("CARGO_BIN_EXE_piko");
 
+/// A `piko` command in English, whatever the locale of the machine. The tests compare its
+/// output with English text.
+fn piko_command() -> Command {
+    let mut command = Command::new(PIKO);
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// The `desc` of `name`, with the fields a repository reader requires.
 fn desc(name: &str) -> String {
     format!(
@@ -55,7 +63,7 @@ fn setup(dir: &Path) -> PathBuf {
 
 /// Runs `piko --config <config> <args>`, and returns its stdout.
 fn piko(config: &Path, args: &[&str]) -> String {
-    let output = Command::new(PIKO).arg("--config").arg(config).args(args).output().unwrap();
+    let output = piko_command().arg("--config").arg(config).args(args).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8(output.stdout).unwrap()
 }
@@ -67,7 +75,7 @@ fn a_search_the_skipped_repository_alone_would_answer_fails() {
     let dir = tempfile::tempdir().unwrap();
     let config = setup(dir.path());
 
-    let output = Command::new(PIKO)
+    let output = piko_command()
         .arg("--config")
         .arg(&config)
         .args(["search", "--repos", "--quiet", "foobar"])

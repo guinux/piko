@@ -1518,6 +1518,7 @@ dependencies = [
  "indicatif",
  "piko-db",
  "piko-db-write",
+ "piko-i18n",
  "piko-net",
  "piko-sig",
  "piko-sig-write",
@@ -1541,6 +1542,7 @@ dependencies = [
  "alpm-types",
  "flate2",
  "piko-db",
+ "piko-i18n",
  "proptest",
  "rustix",
  "tar",
@@ -1555,10 +1557,22 @@ version = "1.0.0-rc.1"
 dependencies = [
  "alpm-types",
  "piko-db",
+ "piko-i18n",
  "proptest",
  "rustix",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "piko-i18n"
+version = "1.0.0-rc.1"
+dependencies = [
+ "fluent-bundle",
+ "fluent-syntax",
+ "piko-i18n",
+ "thiserror",
+ "unic-langid",
 ]
 
 [[package]]
@@ -1571,6 +1585,7 @@ dependencies = [
  "nix",
  "piko-db",
  "piko-db-write",
+ "piko-i18n",
  "piko-sig",
  "rustix",
  "tempfile",
@@ -1585,6 +1600,7 @@ version = "1.0.0-rc.1"
 dependencies = [
  "gpgme",
  "piko-db",
+ "piko-i18n",
  "tempfile",
  "thiserror",
 ]
@@ -1595,6 +1611,7 @@ version = "1.0.0-rc.1"
 dependencies = [
  "gpgme",
  "piko-db",
+ "piko-i18n",
  "piko-sig",
  "rustix",
  "tempfile",
@@ -1611,6 +1628,7 @@ dependencies = [
  "jiff",
  "piko-db",
  "piko-db-write",
+ "piko-i18n",
  "piko-net",
  "piko-sig",
  "proptest",

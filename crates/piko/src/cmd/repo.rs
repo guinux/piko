@@ -7,9 +7,10 @@ use std::process::ExitCode;
 
 use piko_db::repo::{RepoDatabase, RepoPackage};
 
+use crate::i18n::tr;
 use crate::output::{emit, human_size, join, report};
 use crate::style::{
-    field_list, info_build_fields, info_description_fields, info_label, optional_deps,
+    Field, field_list, info_build_fields, info_description_fields, info_label, optional_deps,
 };
 
 /// Builds `pacman -Si`'s "Validated By" label.
@@ -18,7 +19,8 @@ use crate::style::{
 /// `"Signature"` is added when a `%PGPSIG%` was published. This reproduces libalpm's own
 /// `_sync_get_validation` (`be_sync.c`); it is not a new rule.
 fn validation_label(has_signature: bool) -> String {
-    if has_signature { join(&["SHA-256 Sum", "Signature"]) } else { "SHA-256 Sum".to_owned() }
+    let sha256 = tr!("info-validation-sha256");
+    if has_signature { join(&[sha256, tr!("info-validation-signature")]) } else { sha256 }
 }
 
 /// Colors [`validation_label`]: green once a signature was published, yellow for
@@ -49,18 +51,18 @@ pub fn repo_info(
     };
 
     let bold = console::Style::new().bold();
-    emit!(out, "{} {}", info_label("Repository      :"), bold.apply_to(db.name()));
+    emit!(out, "{} {}", info_label(Field::Repository), bold.apply_to(db.name()));
     let optional =
         optional_deps(desc.optional_depends(), desc.section_values("OPTDEPENDS"), |_| false);
     info_description_fields!(out, package, desc, &optional);
-    field_list!(out, "Conflicts With  :", desc.conflicts(), 5);
-    field_list!(out, "Replaces        :", desc.replaces(), 5);
-    emit!(out, "{} {}", info_label("Download Size   :"), human_size(desc.compressed_size()));
+    field_list!(out, Field::ConflictsWith, desc.conflicts(), 5);
+    field_list!(out, Field::Replaces, desc.replaces(), 5);
+    emit!(out, "{} {}", info_label(Field::DownloadSize), human_size(desc.compressed_size()));
     info_build_fields!(out, desc, zone);
     emit!(
         out,
         "{} {}",
-        info_label("Validated By    :"),
+        info_label(Field::ValidatedBy),
         styled_validation(desc.pgp_signature().is_some())
     );
     // A field shown as written above is named on stderr, so stdout stays what pacman prints.

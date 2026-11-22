@@ -6,10 +6,12 @@
 
 use piko_db::config::{CleanMethod, DbUsage, SigLevel};
 
+use crate::i18n::{caused_by, error, tr, warning};
+
 /// Prints an error and its whole cause chain.
 ///
 /// Without the chain, "failed to parse .../desc" would omit the reason it failed to parse.
-pub fn report(error: &dyn std::error::Error) {
+pub fn report(error: &(dyn std::error::Error + 'static)) {
     write_report(&mut std::io::stderr().lock(), error);
 }
 
@@ -25,14 +27,62 @@ pub fn report(error: &dyn std::error::Error) {
 /// Every message in the chain is escaped by [`piko_db::printable_lines`]. An error from an
 /// upstream parser quotes the bytes it refused, and those bytes came from a mirror or a
 /// package.
-pub fn write_report(out: &mut impl std::io::Write, error: &dyn std::error::Error) {
-    let _ = writeln!(out, "Error: {}", piko_db::printable_lines(&error.to_string()));
+pub fn write_report(out: &mut impl std::io::Write, failure: &(dyn std::error::Error + 'static)) {
+    let text = piko_db::printable_lines(&describe(failure));
+    let _ = writeln!(out, "{}", error(&text));
 
-    let mut source = error.source();
+    let mut source = failure.source();
     while let Some(cause) = source {
-        let _ = writeln!(out, "  Caused by: {}", piko_db::printable_lines(&cause.to_string()));
+        let text = piko_db::printable_lines(&describe(cause));
+        let _ = writeln!(out, "  {}", caused_by(&text));
         source = cause.source();
     }
+}
+
+/// One error of a cause chain, in the language of the user.
+///
+/// An error whose type has a message renders through the catalog. Any other renders as its
+/// `Display`, which for an error of another library is English.
+pub fn describe(error: &(dyn std::error::Error + 'static)) -> String {
+    if let Some(error) = error.downcast_ref::<piko_db::Error>() {
+        return crate::i18n::localized(error);
+    }
+    if let Some(crate::error::Error::Db(error)) = error.downcast_ref::<crate::error::Error>() {
+        return crate::i18n::localized(error);
+    }
+    // `piko_txn::Error` holds a `piko_db::Error` behind a `Box` or an `Arc`, and its source is
+    // the pointer, not the error it points to.
+    if let Some(error) = error.downcast_ref::<Box<piko_db::Error>>() {
+        return crate::i18n::localized(&**error);
+    }
+    if let Some(error) = error.downcast_ref::<std::sync::Arc<piko_db::Error>>() {
+        return crate::i18n::localized(&**error);
+    }
+    if let Some(error) = error.downcast_ref::<piko_txn::Error>() {
+        return crate::i18n::localized(error);
+    }
+    if let Some(error) = error.downcast_ref::<piko_net::Error>() {
+        return crate::i18n::localized(error);
+    }
+    if let Some(error) = error.downcast_ref::<piko_db_write::Error>() {
+        return crate::i18n::localized(error);
+    }
+    if let Some(error) = error.downcast_ref::<piko_db_write::RecordError>() {
+        return crate::i18n::localized(error);
+    }
+    if let Some(error) = error.downcast_ref::<piko_sig::Error>() {
+        return crate::i18n::localized(error);
+    }
+    if let Some(error) = error.downcast_ref::<piko_sig_write::Error>() {
+        return crate::i18n::localized(error);
+    }
+    if let Some(error) = error.downcast_ref::<piko_db::local::SchemaVersionError>() {
+        return crate::i18n::localized(error);
+    }
+    if let Some(error) = error.downcast_ref::<piko_db::repo::RepoNameError>() {
+        return crate::i18n::localized(error);
+    }
+    error.to_string()
 }
 
 /// Prints `message` on stderr as a warning, escaped by [`piko_db::printable_lines`].
@@ -40,7 +90,7 @@ pub fn write_report(out: &mut impl std::io::Write, error: &dyn std::error::Error
 /// A diagnostic can quote a database member, a parse error, or a server's answer. None of
 /// these is text piko wrote.
 pub fn warn(message: impl std::fmt::Display) {
-    eprintln!("Warning: {}", piko_db::printable_lines(&message.to_string()));
+    eprintln!("{}", warning(&piko_db::printable_lines(&message.to_string())));
 }
 
 /// `value` as text, escaped by [`fn@piko_db::printable`].
@@ -56,7 +106,7 @@ pub fn escaped(value: impl std::fmt::Display) -> String {
 /// Printed rather than swallowed so the output is never mistaken for the complete list.
 pub fn report_dropped_diagnostics(dropped: usize) {
     if dropped > 0 {
-        eprintln!("Warning: {dropped} further problem(s) not shown");
+        eprintln!("{}", warning(&tr!("cli-problems-not-shown", count = dropped)));
     }
 }
 
@@ -70,7 +120,7 @@ macro_rules! emit {
             if error.kind() == ::std::io::ErrorKind::BrokenPipe {
                 return ::std::process::ExitCode::SUCCESS;
             }
-            eprintln!("Error: failed to write output: {error}");
+            $crate::i18n::print_error!("cli-write-failed", error = error.to_string());
             return ::std::process::ExitCode::FAILURE;
         }
     };
@@ -86,8 +136,8 @@ pub(crate) use emit;
 /// [`crate::cmd::removal::hold_pkg_allows`]). The default is a parameter here rather than two
 /// near-identical functions.
 ///
-/// An empty line (the user just pressed Enter) answers `default`. `y`/`yes` accepts, and
-/// anything else declines, both case-insensitively. A closed or empty stdin is treated as a
+/// An empty line (the user just pressed Enter) answers `default`. `y`/`yes`, or a word of the
+/// language that means yes, accepts, and anything else declines, both case-insensitively. A closed or empty stdin is treated as a
 /// decline rather than as `default`. `read_line` returning zero bytes signals this; an
 /// answered Enter never does that, since it always yields at least the newline. An unattended
 /// run should refuse to proceed, not silently proceed because nobody was there to answer.
@@ -107,7 +157,7 @@ pub fn confirm(out: &mut impl std::io::Write, prompt: &str, default: bool) -> bo
     if answer.is_empty() {
         return default;
     }
-    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
+    crate::i18n::is_yes(answer)
 }
 
 /// Prints `prompt` and waits for a 1-based choice among `count`, returning a 0-based index.
@@ -148,7 +198,7 @@ pub fn select(out: &mut impl std::io::Write, prompt: &str, count: usize, default
             Selection::Answered(index) => return index,
             Selection::Empty => return default,
             Selection::Invalid => {
-                eprintln!("Invalid value: it must be a number between 1 and {count}");
+                eprintln!("{}", tr!("cli-invalid-number", count = count));
             }
         }
     }
@@ -192,7 +242,7 @@ pub fn multiselect(out: &mut impl std::io::Write, prompt: &str, count: usize) ->
         if let Some(selected) = parse_multiselect(&line, count) {
             return selected;
         }
-        eprintln!("Invalid value: it must be a number or a range between 1 and {count}");
+        eprintln!("{}", tr!("cli-invalid-selection", count = count));
     }
 }
 
@@ -236,7 +286,7 @@ pub fn choose(
             return index;
         }
         let spelled: Vec<String> = letters.iter().map(char::to_string).collect();
-        eprintln!("Invalid value: it must be one of {}", spelled.join(", "));
+        eprintln!("{}", tr!("cli-invalid-letter", letters = spelled.join(", ")));
     }
 }
 
@@ -407,19 +457,20 @@ pub fn sig_level_lines(level: SigLevel, package_only: bool) -> Vec<&'static str>
 /// Renders a list as a space-separated line, or `None` when empty, as pacman does.
 pub fn join<T: ToString>(items: &[T]) -> String {
     if items.is_empty() {
-        return "None".to_owned();
+        return crate::style::none();
     }
     items.iter().map(ToString::to_string).collect::<Vec<_>>().join("  ")
 }
 
-/// Renders a byte count using binary (1024-based) units, e.g. `"5.04 MiB"`.
+/// Renders a byte count using binary (1024-based) units, e.g. `"5.04 MiB"`, in the language
+/// of this process: the decimal mark and the unit names are the catalog's.
 ///
 /// The prefixes are pacman's, and the unit rule is not: this changes unit at 1024 and prints a
 /// byte count bare, where pacman's `humanize_size` changes unit only past 2048 and prints two
 /// decimals everywhere. So `1.68 MiB` here is `1723.35 KiB` in `pacman -Qi`, and `0 B` is
-/// `0.00 B`. The progress bars render sizes by the same rule as this function.
+/// `0.00 B`. The progress bars render sizes through this function too.
 pub fn human_size(bytes: u64) -> String {
-    indicatif::BinaryBytes(bytes).to_string()
+    crate::i18n::size(bytes)
 }
 
 /// Renders a Unix timestamp as a date and time in `zone`, e.g.
@@ -436,7 +487,10 @@ pub fn human_size(bytes: u64) -> String {
 pub fn human_date(timestamp: i64, zone: piko_txn::history::LocalZone) -> String {
     let offset = zone.offset_at(timestamp);
     let Ok(instant) = time::OffsetDateTime::from_unix_timestamp(timestamp) else {
-        return format!("{timestamp} (timestamp out of range)");
+        return crate::i18n::tr!(
+            "output-timestamp-out-of-range",
+            timestamp = timestamp.to_string()
+        );
     };
     // A timestamp near the end of the representable range can leave it once shifted into the
     // local zone. That is a rendering failure, not a reason to panic, so it reports itself the
@@ -445,7 +499,10 @@ pub fn human_date(timestamp: i64, zone: piko_txn::history::LocalZone) -> String 
         .ok()
         .and_then(|zone| instant.checked_to_offset(zone))
     else {
-        return format!("{timestamp} (timestamp out of range)");
+        return crate::i18n::tr!(
+            "output-timestamp-out-of-range",
+            timestamp = timestamp.to_string()
+        );
     };
 
     format!(
@@ -679,6 +736,19 @@ mod tests {
     #[test]
     fn human_size_matches_a_real_installed_size() {
         assert_eq!(human_size(5_283_285), "5.04 MiB");
+    }
+
+    /// The catalog writes a size as `indicatif` writes one in English, so a size piko prints
+    /// reads the same as the sizes of the libraries piko uses.
+    #[test]
+    fn human_size_is_indicatif_s_binary_bytes_in_english() {
+        let mut bytes = 1_u64;
+        while bytes < u64::MAX / 3 {
+            for each in [bytes.saturating_sub(1), bytes, bytes.saturating_add(bytes / 3)] {
+                assert_eq!(human_size(each), indicatif::BinaryBytes(each).to_string(), "{each}");
+            }
+            bytes = bytes.saturating_mul(3);
+        }
     }
 
     #[test]

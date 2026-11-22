@@ -3,6 +3,8 @@
 //! [`crate::progress`] and [`crate::cmd::plan`] follow the same conventions. Most conventions are
 //! domain-specific and stay local to the module that draws them.
 
+use crate::i18n::tr;
+
 /// Returns the green check for "this is done", "this is already the case", or "this is the
 /// line naming what follows".
 ///
@@ -19,23 +21,163 @@ pub(crate) fn checkmark() -> console::StyledObject<&'static str> {
     console::Style::new().green().apply_to("✓")
 }
 
-/// Dims a fixed-width field label, e.g. `"Name            :"`, for `piko info`'s label:value
-/// grid.
+/// A field of the `piko info` grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Field {
+    /// `Repository`.
+    Repository,
+    /// `Name`.
+    Name,
+    /// `Version`.
+    Version,
+    /// `Description`.
+    Description,
+    /// `Architecture`.
+    Architecture,
+    /// `URL`.
+    Url,
+    /// `Licenses`.
+    Licenses,
+    /// `Groups`.
+    Groups,
+    /// `Provides`.
+    Provides,
+    /// `Depends On`.
+    DependsOn,
+    /// `Optional Deps`.
+    OptionalDeps,
+    /// `Required By`.
+    RequiredBy,
+    /// `Optional For`.
+    OptionalFor,
+    /// `Conflicts With`.
+    ConflictsWith,
+    /// `Replaces`.
+    Replaces,
+    /// `Download Size`.
+    DownloadSize,
+    /// `Installed Size`.
+    InstalledSize,
+    /// `Packager`.
+    Packager,
+    /// `Build Date`.
+    BuildDate,
+    /// `Install Date`.
+    InstallDate,
+    /// `Install Reason`.
+    InstallReason,
+    /// `Install Script`.
+    InstallScript,
+    /// `Validated By`.
+    ValidatedBy,
+}
+
+impl Field {
+    /// Every field, so the label column is as wide as the longest label of the language.
+    const ALL: [Self; 23] = [
+        Self::Repository,
+        Self::Name,
+        Self::Version,
+        Self::Description,
+        Self::Architecture,
+        Self::Url,
+        Self::Licenses,
+        Self::Groups,
+        Self::Provides,
+        Self::DependsOn,
+        Self::OptionalDeps,
+        Self::RequiredBy,
+        Self::OptionalFor,
+        Self::ConflictsWith,
+        Self::Replaces,
+        Self::DownloadSize,
+        Self::InstalledSize,
+        Self::Packager,
+        Self::BuildDate,
+        Self::InstallDate,
+        Self::InstallReason,
+        Self::InstallScript,
+        Self::ValidatedBy,
+    ];
+
+    /// The name of the field, in the language of this process.
+    fn word(self) -> String {
+        match self {
+            Self::Repository => tr!("info-field-repository"),
+            Self::Name => tr!("info-field-name"),
+            Self::Version => tr!("info-field-version"),
+            Self::Description => tr!("info-field-description"),
+            Self::Architecture => tr!("info-field-architecture"),
+            Self::Url => tr!("info-field-url"),
+            Self::Licenses => tr!("info-field-licenses"),
+            Self::Groups => tr!("info-field-groups"),
+            Self::Provides => tr!("info-field-provides"),
+            Self::DependsOn => tr!("info-field-depends-on"),
+            Self::OptionalDeps => tr!("info-field-optional-deps"),
+            Self::RequiredBy => tr!("info-field-required-by"),
+            Self::OptionalFor => tr!("info-field-optional-for"),
+            Self::ConflictsWith => tr!("info-field-conflicts-with"),
+            Self::Replaces => tr!("info-field-replaces"),
+            Self::DownloadSize => tr!("info-field-download-size"),
+            Self::InstalledSize => tr!("info-field-installed-size"),
+            Self::Packager => tr!("info-field-packager"),
+            Self::BuildDate => tr!("info-field-build-date"),
+            Self::InstallDate => tr!("info-field-install-date"),
+            Self::InstallReason => tr!("info-field-install-reason"),
+            Self::InstallScript => tr!("info-field-install-script"),
+            Self::ValidatedBy => tr!("info-field-validated-by"),
+        }
+    }
+
+    /// The name of the field, padded to the label column, then `:`. In English this is
+    /// pacman's `"Name            :"`: 16 columns, then the colon.
+    fn label(self) -> String {
+        let word = self.word();
+        let padding = label_width().saturating_sub(console::measure_text_width(&word));
+        format!("{word}{}:", " ".repeat(padding))
+    }
+}
+
+/// The width of the label column, before its colon: the longest label and one space, and at
+/// least the 16 columns pacman uses in English.
+fn label_width() -> usize {
+    static WIDTH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WIDTH.get_or_init(|| {
+        let longest = Field::ALL
+            .iter()
+            .map(|field| console::measure_text_width(&field.word()))
+            .max()
+            .unwrap_or(0);
+        longest.saturating_add(1).max(16)
+    })
+}
+
+/// The placeholder of a field that holds nothing: `None`.
+pub(crate) fn none() -> String {
+    tr!("info-none")
+}
+
+/// The placeholder of a field whose value is not known: `Unknown`.
+pub(crate) fn unknown() -> String {
+    tr!("info-unknown")
+}
+
+/// Dims the label of a field of `piko info`'s label:value grid.
 ///
 /// Shared between [`crate::cmd::local::info`] and [`crate::cmd::repo::repo_info`], which draw
 /// the same grid over two different package sources. Dimming the label rather than the value
 /// keeps the value, not its caption, as the visually dominant part of the line.
-pub(crate) fn info_label(text: &'static str) -> console::StyledObject<&'static str> {
-    console::Style::new().dim().apply_to(text)
+pub(crate) fn info_label(field: Field) -> console::StyledObject<String> {
+    console::Style::new().dim().apply_to(field.label())
 }
 
-/// Dims `value` when it is `piko`'s "nothing here" placeholder, `"None"` or `"Unknown"`. An
+/// Dims `value` when it is `piko`'s "nothing here" placeholder, [`none`] or [`unknown`]. An
 /// absent field then recedes instead of matching the visual weight of real data.
 ///
 /// Shared for the same reason as [`info_label`]: both `info` renderers list fields that fall
 /// back to one of these two placeholders.
 pub(crate) fn info_value(value: String) -> console::StyledObject<String> {
-    let style = if value == "None" || value == "Unknown" {
+    let style = if value == none() || value == unknown() {
         console::Style::new().dim()
     } else {
         console::Style::new()
@@ -60,7 +202,7 @@ pub(crate) fn info_url(
 ) -> console::StyledObject<String> {
     match normalized.or_else(|| raw.map(str::to_owned)) {
         Some(url) => console::Style::new().blue().apply_to(piko_db::printable(&url)),
-        None => info_value("None".to_owned()),
+        None => info_value(none()),
     }
 }
 
@@ -135,18 +277,18 @@ impl ChangeKind {
 /// dependency's description is free text a mirror or a package chose.
 pub(crate) fn render_list_field<T: std::fmt::Display>(
     out: &mut impl std::io::Write,
-    label: &'static str,
+    label: Field,
     items: &[T],
     per_line: usize,
 ) -> std::process::ExitCode {
     use crate::output::emit;
 
     if items.is_empty() {
-        emit!(out, "{} {}", info_label(label), info_value("None".to_owned()));
+        emit!(out, "{} {}", info_label(label), info_value(none()));
         return std::process::ExitCode::SUCCESS;
     }
 
-    let indent = " ".repeat(label.chars().count().saturating_add(1));
+    let indent = " ".repeat(console::measure_text_width(&label.label()).saturating_add(1));
     for (index, chunk) in items.chunks(per_line.max(1)).enumerate() {
         let rendered = chunk.iter().map(crate::output::escaped).collect::<Vec<_>>().join("  ");
         if index == 0 {
@@ -202,7 +344,13 @@ pub(crate) fn optional_deps<E>(
     match typed {
         Ok(optional) => optional
             .iter()
-            .map(|dep| if installed(dep) { format!("{dep} [installed]") } else { dep.to_string() })
+            .map(|dep| {
+                if installed(dep) {
+                    format!("{dep} {}", tr!("info-installed-mark"))
+                } else {
+                    dep.to_string()
+                }
+            })
             .collect(),
         Err(_) => raw.into_iter().map(str::to_owned).collect(),
     }
@@ -218,26 +366,26 @@ pub(crate) fn optional_deps<E>(
 macro_rules! info_description_fields {
     ($out:expr, $package:expr, $desc:expr, $optional:expr) => {{
         use $crate::output::{emit, escaped};
-        use $crate::style::{field_list, info_label, info_url};
+        use $crate::style::{Field, field_list, info_label, info_url};
 
         let (package, desc) = ($package, $desc);
         let bold = console::Style::new().bold();
         let version = console::Style::new().cyan().bold();
         let url = info_url(desc.url().map(ToString::to_string), desc.url_raw());
 
-        emit!($out, "{} {}", info_label("Name            :"), bold.apply_to(package.name()));
-        emit!($out, "{} {}", info_label("Version         :"), version.apply_to(package.version()));
-        emit!($out, "{} {}", info_label("Description     :"), escaped(desc.description()));
-        emit!($out, "{} {}", info_label("Architecture    :"), escaped(desc.architecture()));
-        emit!($out, "{} {url}", info_label("URL             :"));
+        emit!($out, "{} {}", info_label(Field::Name), bold.apply_to(package.name()));
+        emit!($out, "{} {}", info_label(Field::Version), version.apply_to(package.version()));
+        emit!($out, "{} {}", info_label(Field::Description), escaped(desc.description()));
+        emit!($out, "{} {}", info_label(Field::Architecture), escaped(desc.architecture()));
+        emit!($out, "{} {url}", info_label(Field::Url));
         match desc.licenses() {
-            Ok(licenses) => field_list!($out, "Licenses        :", licenses, 5),
-            Err(_) => field_list!($out, "Licenses        :", &desc.section_values("LICENSE"), 5),
+            Ok(licenses) => field_list!($out, Field::Licenses, licenses, 5),
+            Err(_) => field_list!($out, Field::Licenses, &desc.section_values("LICENSE"), 5),
         }
-        field_list!($out, "Groups          :", desc.groups(), 5);
-        field_list!($out, "Provides        :", desc.provides(), 5);
-        field_list!($out, "Depends On      :", desc.depends(), 5);
-        field_list!($out, "Optional Deps   :", $optional, 1);
+        field_list!($out, Field::Groups, desc.groups(), 5);
+        field_list!($out, Field::Provides, desc.provides(), 5);
+        field_list!($out, Field::DependsOn, desc.depends(), 5);
+        field_list!($out, Field::OptionalDeps, $optional, 1);
     }};
 }
 
@@ -249,18 +397,18 @@ pub(crate) use info_description_fields;
 macro_rules! info_build_fields {
     ($out:expr, $desc:expr, $zone:expr) => {{
         use $crate::output::{emit, escaped, human_size};
-        use $crate::style::{info_date, info_label};
+        use $crate::style::{Field, info_date, info_label};
 
         let desc = $desc;
-        emit!($out, "{} {}", info_label("Installed Size  :"), human_size(desc.installed_size()));
+        emit!($out, "{} {}", info_label(Field::InstalledSize), human_size(desc.installed_size()));
         emit!(
             $out,
             "{} {}",
-            info_label("Packager        :"),
+            info_label(Field::Packager),
             escaped(desc.packager_raw().unwrap_or_default())
         );
         let build_date = info_date(desc.build_date(), &desc.section_values("BUILDDATE"), $zone);
-        emit!($out, "{} {build_date}", info_label("Build Date      :"));
+        emit!($out, "{} {build_date}", info_label(Field::BuildDate));
     }};
 }
 
@@ -287,7 +435,7 @@ mod tests {
         let items = vec!["plain".to_owned(), format!("bar: {CLIPBOARD}")];
         let mut out = Vec::new();
         assert_eq!(
-            render_list_field(&mut out, "Optional Deps   :", &items, 1),
+            render_list_field(&mut out, Field::OptionalDeps, &items, 1),
             std::process::ExitCode::SUCCESS
         );
         let text = String::from_utf8(out).unwrap();

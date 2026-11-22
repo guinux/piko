@@ -49,7 +49,7 @@ fn release_warning(lock: DbLock) -> Option<String> {
     let error = lock.release().err()?;
     let cause =
         std::error::Error::source(&error).map_or_else(String::new, |cause| format!(": {cause}"));
-    Some(format!("could not remove lock file {}{cause}", path.display()))
+    Some(crate::i18n::tr!("cli-lock-not-removed", path = path.display().to_string(), cause = cause))
 }
 
 /// Writes a numbered candidate list, grouped by the repository each candidate came from.
@@ -74,7 +74,7 @@ pub(crate) fn write_candidates(
             current = Some(origin);
         }
         let described = universe.get(*id).map_or_else(
-            || "<unknown>".to_owned(),
+            || crate::i18n::tr!("cli-unknown"),
             |solvable| format!("{} {}", solvable.name(), solvable.version()),
         );
         // `index` is bounded by `candidates.len()`.
@@ -85,7 +85,9 @@ pub(crate) fn write_candidates(
 
 /// The name of candidate `id`, or `<unknown>`.
 pub(crate) fn candidate_name(universe: &Universe<'_>, id: SolvableId) -> String {
-    universe.get(id).map_or_else(|| "<unknown>".to_owned(), |solvable| solvable.name().to_string())
+    universe
+        .get(id)
+        .map_or_else(|| crate::i18n::tr!("cli-unknown"), |solvable| solvable.name().to_string())
 }
 
 /// Names the first few `candidates` and counts the rest: `a, b, c, d, e, and 3 more`.
@@ -99,21 +101,25 @@ pub(crate) fn candidate_sample(universe: &Universe<'_>, candidates: &[SolvableId
     let listed: Vec<String> =
         candidates.iter().take(SHOWN).map(|id| candidate_name(universe, *id)).collect();
     let rest = candidates.len().saturating_sub(listed.len());
-    if rest == 0 { listed.join(", ") } else { format!("{}, and {rest} more", listed.join(", ")) }
+    let shown = listed.join(", ");
+    if rest == 0 { shown } else { crate::i18n::tr!("cli-and-more", shown = shown, rest = rest) }
 }
 
 /// Where a candidate came from, as the heading [`write_candidates`] groups it under.
 fn origin_label(universe: &Universe<'_>, id: SolvableId) -> String {
     match universe.get(id).map(|solvable| solvable.origin()) {
-        Some(piko_db::solve::Origin::Repository(index)) => universe
-            .repository_name(index)
-            .map_or_else(|| "Repository ?".to_owned(), |name| format!("Repository {name}")),
+        Some(piko_db::solve::Origin::Repository(index)) => {
+            universe.repository_name(index).map_or_else(
+                || crate::i18n::tr!("cli-origin-repository", name = "?"),
+                |name| crate::i18n::tr!("cli-origin-repository", name = name.to_string()),
+            )
+        }
         // This is reachable. A package file named on the command line is interned as a
         // candidate, and can provide a dependency like any other (`UniverseOptions::files`).
-        Some(piko_db::solve::Origin::File(_)) => "Package file".to_owned(),
+        Some(piko_db::solve::Origin::File(_)) => crate::i18n::tr!("cli-origin-file"),
         // An installed candidate is never listed: it suppresses a provider question, and a
         // group's members are the repository side only.
-        Some(piko_db::solve::Origin::Installed) | None => "Installed".to_owned(),
+        Some(piko_db::solve::Origin::Installed) | None => crate::i18n::tr!("cli-origin-installed"),
     }
 }
 

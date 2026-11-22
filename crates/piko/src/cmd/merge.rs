@@ -95,7 +95,7 @@ pub fn merge(
     }
     report_dropped_diagnostics(scan.problems_dropped());
     if scan.pending_dropped() > 0 {
-        eprintln!("Warning: {} more pending files were not listed", scan.pending_dropped());
+        crate::i18n::print_warning!("merge-pending-not-listed", count = scan.pending_dropped());
     }
 
     let pending: Vec<&Pending> =
@@ -104,7 +104,7 @@ pub fn merge(
     // run would end in silence and in success, which reads as "resolved".
     let unmatched = self::unmatched(scan.pending(), root, &options.selection);
     for raw in &unmatched {
-        eprintln!("Error: {} names no pending file", piko_db::printable(raw));
+        crate::i18n::print_error!("merge-unmatched", path = piko_db::printable(raw));
     }
 
     if options.output {
@@ -120,7 +120,7 @@ pub fn merge(
     let programs = match self::programs(&options) {
         Ok(programs) => programs,
         Err(failure) => {
-            eprintln!("Error: {failure}");
+            eprintln!("{}", crate::i18n::error(&failure));
             return ExitCode::FAILURE;
         }
     };
@@ -147,24 +147,24 @@ pub fn report_pending(root: &Path, report: &piko_txn::Report, out: &mut impl Wri
         return;
     }
 
-    let _ = writeln!(out, "\nConfiguration files need attention:");
+    let _ = writeln!(out, "\n{}", crate::i18n::tr!("merge-attention"));
     for path in &report.pacnews {
-        let _ = writeln!(
-            out,
-            "  {} installed as {}",
-            piko_db::printable_path(&root.join(self::strip(path, ".pacnew"))),
-            piko_db::printable_path(&root.join(path))
+        let line = crate::i18n::tr!(
+            "merge-installed-as",
+            target = piko_db::printable_path(&root.join(self::strip(path, ".pacnew"))),
+            pacfile = piko_db::printable_path(&root.join(path))
         );
+        let _ = writeln!(out, "  {line}");
     }
     for path in &report.pacsaves {
-        let _ = writeln!(
-            out,
-            "  {} saved as {}",
-            piko_db::printable_path(&root.join(self::strip(path, ".pacsave"))),
-            piko_db::printable_path(&root.join(path))
+        let line = crate::i18n::tr!(
+            "merge-saved-as",
+            target = piko_db::printable_path(&root.join(self::strip(path, ".pacsave"))),
+            pacfile = piko_db::printable_path(&root.join(path))
         );
+        let _ = writeln!(out, "  {line}");
     }
-    let _ = writeln!(out, "Run 'piko merge' to resolve them.");
+    let _ = writeln!(out, "{}", crate::i18n::tr!("merge-run-hint"));
     let _ = out.flush();
 }
 
@@ -192,11 +192,11 @@ fn resolve_all(
             Verdict::Unreadable => {
                 // The scan already said why on stderr. No destructive action is offered for a
                 // pair piko could not read.
-                emit!(
-                    out,
-                    "{}: skipped, it could not be read",
-                    piko_db::printable_path(&root.join(&entry.pacfile))
+                let line = crate::i18n::tr!(
+                    "merge-unreadable",
+                    pacfile = piko_db::printable_path(&root.join(&entry.pacfile))
                 );
+                emit!(out, "{line}");
                 continue;
             }
             Verdict::Identical => self::drop_identical(root_dir, root, entry, out),
@@ -211,7 +211,7 @@ fn resolve_all(
     }
 
     for path in &numbered {
-        eprintln!("Warning: ignoring {path}, it has no current version to merge against");
+        crate::i18n::print_warning!("merge-no-current", path = path.as_str());
     }
 
     if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
@@ -240,20 +240,20 @@ fn drop_identical(
 ) -> Decided {
     match merge::remove_if_identical(root_dir, entry, piko_txn::hash::MAX_BACKUP_BYTES) {
         Ok(Outcome::Removed { .. }) => {
-            let _ = writeln!(
-                out,
-                "{}: removed, it holds the same bytes as {}",
-                piko_db::printable_path(&root.join(&entry.pacfile)),
-                piko_db::printable_path(&root.join(&entry.target))
+            let line = crate::i18n::tr!(
+                "merge-identical-removed",
+                pacfile = piko_db::printable_path(&root.join(&entry.pacfile)),
+                target = piko_db::printable_path(&root.join(&entry.target))
             );
+            let _ = writeln!(out, "{line}");
             Decided::Done
         }
         Ok(_) => {
-            let _ = writeln!(
-                out,
-                "{}: kept, it changed since the scan",
-                piko_db::printable_path(&root.join(&entry.pacfile))
+            let line = crate::i18n::tr!(
+                "merge-changed-since",
+                pacfile = piko_db::printable_path(&root.join(&entry.pacfile))
             );
+            let _ = writeln!(out, "{line}");
             Decided::Done
         }
         Err(error) => {
@@ -273,9 +273,12 @@ fn offer_removal(
     out: &mut impl Write,
 ) -> Decided {
     let prompt = format!(
-        "{} does not exist. Remove {}? [y/N] ",
-        piko_db::printable_path(&root.join(&entry.target)),
-        piko_db::printable_path(&root.join(&entry.pacfile))
+        "{} ",
+        crate::i18n::tr!(
+            "merge-target-missing",
+            target = piko_db::printable_path(&root.join(&entry.target)),
+            pacfile = piko_db::printable_path(&root.join(&entry.pacfile))
+        )
     );
     if !confirm(out, &prompt, false) {
         return Decided::Done;
@@ -295,17 +298,16 @@ fn ask(
     let label = entry.kind.label();
     let target = root.join(&entry.target);
     let pacfile = root.join(&entry.pacfile);
-    let _ = writeln!(
-        out,
-        "\n{} and {} differ ({}).",
-        piko_db::printable_path(&target),
-        piko_db::printable_path(&pacfile),
-        entry.package
+    let line = crate::i18n::tr!(
+        "merge-differ",
+        target = piko_db::printable_path(&target),
+        pacfile = piko_db::printable_path(&pacfile),
+        package = entry.package.to_string()
     );
+    let _ = writeln!(out, "\n{line}");
 
     let letters = ['v', 'm', 's', 'r', 'o', 'q'];
-    let prompt =
-        format!("(V)iew, (M)erge, (S)kip, (R)emove {label}, (O)verwrite with {label}, (Q)uit: ");
+    let prompt = format!("{} ", crate::i18n::tr!("merge-menu", label = label.to_string()));
     loop {
         // No `SIGINT` handler is installed here. `piko merge` downloads nothing, so there is
         // nothing to cancel gracefully, and Ctrl+C keeps the default disposition: it kills
@@ -385,7 +387,11 @@ fn merge_one(
     let destination = match self::create_private(&merged) {
         Ok(file) => file,
         Err(error) => {
-            eprintln!("Error: {} cannot be written: {error}", merged.display());
+            crate::i18n::print_error!(
+                "merge-write-failed",
+                path = merged.display().to_string(),
+                error = error.to_string()
+            );
             return Some(Decided::Failed);
         }
     };
@@ -394,21 +400,25 @@ fn merge_one(
     // A non-zero status means the merge program wrote conflict markers, and the file it wrote
     // is exactly the one to look at. Only a program that never started is a failure.
     if status.success() {
-        let _ = writeln!(out, "Merged without conflicts.");
+        let _ = writeln!(out, "{}", crate::i18n::tr!("merge-clean"));
     } else {
-        let _ = writeln!(out, "Merged with conflicts. Review them before keeping the result.");
+        let _ = writeln!(out, "{}", crate::i18n::tr!("merge-conflicts"));
     }
 
     let review = merge::review_diff(&programs.diffprog, &target, &merged)?;
     self::run(&review, None, out)?;
 
-    if !confirm(out, "Keep the merged file? [y/N] ", false) {
+    if !confirm(out, &format!("{} ", crate::i18n::tr!("merge-keep-prompt")), false) {
         return None;
     }
     let contents = match self::read_private(&merged, piko_txn::hash::MAX_BACKUP_BYTES) {
         Ok(contents) => contents,
         Err(error) => {
-            eprintln!("Error: {} cannot be read back: {error}", merged.display());
+            crate::i18n::print_error!(
+                "merge-read-back-failed",
+                path = merged.display().to_string(),
+                error = error.to_string()
+            );
             return Some(Decided::Failed);
         }
     };
@@ -426,10 +436,7 @@ fn write_base(
     out: &mut impl Write,
 ) -> Option<(tempfile::TempDir, PathBuf)> {
     let Some(check) = bases else {
-        let _ = writeln!(
-            out,
-            "No signature policy can check a cached build, so there is no base to merge against."
-        );
+        let _ = writeln!(out, "{}", crate::i18n::tr!("merge-no-policy"));
         return None;
     };
     let lookup = match merge::base_contents(cache_dirs, entry, &BaseLimits::default(), check) {
@@ -440,31 +447,31 @@ fn write_base(
         }
     };
     for refused in &lookup.refused {
-        let _ = writeln!(
-            out,
-            "Not using {} as a base: {}",
-            piko_db::printable_path(&refused.path),
-            piko_db::printable(&refused.reason)
+        let line = crate::i18n::tr!(
+            "merge-base-refused",
+            path = piko_db::printable_path(&refused.path),
+            reason = piko_db::printable(&refused.reason)
         );
+        let _ = writeln!(out, "{line}");
     }
     let contents = match lookup.contents {
         BaseContents::Found { contents, .. } => contents,
         BaseContents::NoBase => {
-            let _ = writeln!(
-                out,
-                "No signed cached build of {} older than {} was found, so there is no base to \
-                 merge against.",
-                entry.package, entry.installed_version
+            let line = crate::i18n::tr!(
+                "merge-no-base",
+                package = entry.package.to_string(),
+                version = entry.installed_version.to_string()
             );
+            let _ = writeln!(out, "{line}");
             return None;
         }
         BaseContents::NotShipped { base } => {
-            let _ = writeln!(
-                out,
-                "{} does not ship {}, so there is no base to merge against.",
-                base.file_name,
-                piko_db::printable_path(&entry.target)
+            let line = crate::i18n::tr!(
+                "merge-not-shipped",
+                package = base.file_name.to_string(),
+                path = piko_db::printable_path(&entry.target)
             );
+            let _ = writeln!(out, "{line}");
             return None;
         }
         BaseContents::Unreadable { error, .. } => {
@@ -473,7 +480,7 @@ fn write_base(
         }
         // An answer this frontend does not know yet: no base it can use.
         _ => {
-            let _ = writeln!(out, "There is no base to merge against.");
+            let _ = writeln!(out, "{}", crate::i18n::tr!("merge-no-base-unknown"));
             return None;
         }
     };
@@ -481,13 +488,17 @@ fn write_base(
     let scratch = match self::scratch_dir() {
         Ok(scratch) => scratch,
         Err(error) => {
-            eprintln!("Error: a scratch directory cannot be used: {error}");
+            crate::i18n::print_error!("merge-scratch-failed", error = error.to_string());
             return None;
         }
     };
     let base = scratch.path().join("base");
     if let Err(error) = self::create_private(&base).and_then(|mut file| file.write_all(&contents)) {
-        eprintln!("Error: {} cannot be written: {error}", base.display());
+        crate::i18n::print_error!(
+            "merge-write-failed",
+            path = base.display().to_string(),
+            error = error.to_string()
+        );
         return None;
     }
     Some((scratch, base))
@@ -537,12 +548,12 @@ fn read_private(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     let file = std::fs::File::from(rustix::fs::open(path, flags, Mode::empty())?);
     if !file.metadata()?.is_file() {
-        return Err(std::io::Error::other("not a regular file"));
+        return Err(std::io::Error::other(crate::i18n::tr!("merge-not-regular")));
     }
     let mut contents = Vec::new();
     file.take(max.saturating_add(1)).read_to_end(&mut contents)?;
     if u64::try_from(contents.len()).unwrap_or(u64::MAX) > max {
-        return Err(std::io::Error::other(format!("larger than {max} bytes")));
+        return Err(std::io::Error::other(crate::i18n::tr!("merge-too-large", max = max)));
     }
     Ok(contents)
 }
@@ -579,7 +590,11 @@ fn run(
     match command.status() {
         Ok(status) => Some(status),
         Err(error) => {
-            eprintln!("Error: {} cannot be started: {error}", invocation.program.to_string_lossy());
+            crate::i18n::print_error!(
+                "merge-start-failed",
+                program = invocation.program.to_string_lossy().into_owned(),
+                error = error.to_string()
+            );
             None
         }
     }
@@ -611,17 +626,26 @@ fn carry_out(
 /// carries the root-relative form, which is the one the library acts on.
 fn describe(root: &Path, outcome: &Outcome) -> String {
     match outcome {
-        Outcome::Skipped => "Left both files in place.".to_owned(),
+        Outcome::Skipped => crate::i18n::tr!("merge-outcome-skipped"),
         Outcome::Removed { pacfile } => {
-            format!("Removed {}.", piko_db::printable_path(&root.join(pacfile)))
+            crate::i18n::tr!(
+                "merge-outcome-removed",
+                path = piko_db::printable_path(&root.join(pacfile))
+            )
         }
         Outcome::Overwritten { target, .. } => {
-            format!("Overwrote {}.", piko_db::printable_path(&root.join(target)))
+            crate::i18n::tr!(
+                "merge-outcome-overwritten",
+                path = piko_db::printable_path(&root.join(target))
+            )
         }
         Outcome::Merged { target, .. } => {
-            format!("Wrote the merged file to {}.", piko_db::printable_path(&root.join(target)))
+            crate::i18n::tr!(
+                "merge-outcome-merged",
+                path = piko_db::printable_path(&root.join(target))
+            )
         }
-        _ => "Done.".to_owned(),
+        _ => crate::i18n::tr!("merge-outcome-done"),
     }
 }
 
@@ -648,8 +672,9 @@ fn programs(options: &Options) -> Result<Programs, String> {
         match merge::BaseCheck::new(signing.sig_level, &signing.gpg_dir) {
             Ok(check) => Some(check),
             Err(error) => {
-                crate::output::warn(format_args!(
-                    "{error}; no cached build can serve as a merge base"
+                crate::output::warn(crate::i18n::tr!(
+                    "merge-no-keyring",
+                    error = error.to_string()
                 ));
                 None
             }
@@ -662,7 +687,9 @@ fn programs(options: &Options) -> Result<Programs, String> {
 fn configured(flag: Option<&str>, variable: &str, default: &str) -> Result<Vec<OsString>, String> {
     let from_environment = std::env::var(variable).ok();
     let value = flag.or(from_environment.as_deref()).unwrap_or(default);
-    merge::parse_program(value).map_err(|error| format!("{variable} cannot be read: {error}"))
+    merge::parse_program(value).map_err(|error| {
+        crate::i18n::tr!("merge-program-unreadable", variable = variable, error = error.to_string())
+    })
 }
 
 /// Whether `entry` is in the run's selection.

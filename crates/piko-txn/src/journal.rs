@@ -75,7 +75,7 @@ use crate::error::{Error, IoAction, Result};
 pub const JOURNAL_FILE: &str = "piko-journal";
 
 /// The format version this build writes and understands.
-const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 1;
 
 /// One thing a transaction intends to do.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -345,7 +345,7 @@ pub fn extract_member(
         if entry.size > limits.max_member_bytes {
             return Err(Error::PackageLimitExceeded {
                 path: member.to_path_buf(),
-                limit: "merge base size",
+                limit: crate::PackageLimit::MergeBaseSize,
                 max: limits.max_member_bytes,
             });
         }
@@ -360,7 +360,7 @@ pub fn extract_member(
         if buffer.len() as u64 > limits.max_member_bytes {
             return Err(Error::PackageLimitExceeded {
                 path: member.to_path_buf(),
-                limit: "merge base size",
+                limit: crate::PackageLimit::MergeBaseSize,
                 max: limits.max_member_bytes,
             });
         }
@@ -740,7 +740,10 @@ mod tests {
         let limits = BaseLimits { max_member_bytes: 10, ..BaseLimits::default() };
         let error = extract_member(&path, Path::new("etc/foo.conf"), &limits).unwrap_err();
         assert!(
-            matches!(error, Error::PackageLimitExceeded { limit: "merge base size", .. }),
+            matches!(
+                error,
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::MergeBaseSize, .. }
+            ),
             "got {error:?}"
         );
     }

@@ -79,10 +79,11 @@
 mod admin;
 mod edit;
 mod error;
+mod error_message;
 mod populate;
 mod verify;
 
 pub use admin::{ImportSummary, InitOutcome, KeyInfo, KeyringAdmin, OwnerTrust};
-pub use error::{Error, Result};
+pub use error::{Error, Operation, Result};
 pub use populate::{PopulateSummary, SideFile, SkippedLine, discover_keyrings};
 pub use verify::{Verification, verify};

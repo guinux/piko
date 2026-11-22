@@ -2,6 +2,10 @@
 //!
 //! Every doc comment on a [`Command`] variant is its `--help` text. It is written for a
 //! reader running `piko help <subcommand>`, not for a reader of this file.
+//!
+//! Each doc comment is also the English message of `locales/en/help.ftl`, which another
+//! language translates (see `crate::help`). A test fails when the two differ, and prints the
+//! entry to copy into the catalog.
 
 use std::path::PathBuf;
 
@@ -981,6 +985,7 @@ pub enum KeyCommand {
 /// The result is absolute, with no link, no `.` or `..` and no trailing slash. A path that
 /// does not exist is refused before any command runs.
 fn resolved_path(value: &str) -> Result<PathBuf, String> {
-    std::fs::canonicalize(value)
-        .map_err(|error| format!("failed to resolve path '{value}': {error}"))
+    std::fs::canonicalize(value).map_err(|error| {
+        crate::i18n::tr!("cli-resolve-path-failed", path = value, reason = error.to_string())
+    })
 }

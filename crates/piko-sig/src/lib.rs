@@ -86,10 +86,11 @@
 
 mod decision;
 mod error;
+mod error_message;
 mod keyring;
 
 pub use decision::{Policy, Rejection, SignatureOutcome, Status, Trust, Verdict, decide};
-pub use error::{Error, Result};
+pub use error::{Error, Operation, Result};
 pub use keyring::{
     Checked, Keyring, MAX_SIGNATURE_BYTES, signature_path, verify_database, verify_database_dated,
 };

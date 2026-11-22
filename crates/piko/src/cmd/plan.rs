@@ -14,6 +14,7 @@ use piko_db::{
     solve::removal_names,
 };
 
+use crate::i18n::{localized, print_error, print_note, print_warning, tr};
 use crate::output::{emit, report};
 use crate::style::ChangeKind;
 
@@ -55,17 +56,14 @@ pub enum Mode<'a> {
 pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure) {
     match failure {
         TargetResolutionFailure::InvalidDependencyString(target) => {
-            eprintln!("Error: {target} is not a valid dependency string");
+            print_error!("plan-invalid-dependency", target = target.to_string());
         }
         TargetResolutionFailure::NotFound { target, nearest } => {
-            eprintln!(
-                "Error: no package satisfying {target} was found in any configured \
-                 repository"
-            );
+            print_error!("plan-not-found", target = target.to_string());
             // The name is right and the version is not. Saying so is the difference between
             // the reader checking their spelling and the reader checking their constraint.
             if let Some(nearest) = nearest {
-                eprintln!("  the closest candidate is {nearest}");
+                eprintln!("  {}", tr!("plan-closest-candidate", nearest = nearest.to_string()));
             }
         }
         TargetResolutionFailure::Pattern(failure) => report_expansion_failure(failure),
@@ -76,9 +74,9 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
             // A pattern names a set, a literal names one thing. "satisfying" reads as the
             // dependency relation, which is the wrong relation for a glob.
             if piko_db::glob::is_pattern(target) {
-                eprintln!("Error: every package matching {target} is ignored");
+                print_error!("plan-pattern-ignored", pattern = target.to_string());
             } else {
-                eprintln!("Error: every package satisfying {target} is ignored");
+                print_error!("plan-target-ignored", target = target.to_string());
             }
             for candidate in candidates {
                 eprintln!(
@@ -88,13 +86,10 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
                     crate::output::escaped(&candidate.reason)
                 );
             }
-            eprintln!(
-                "Note: piko never installs an ignored package; edit IgnorePkg or \
-                 IgnoreGroup in pacman.conf to allow it"
-            );
+            print_note!("plan-never-installs-ignored");
         }
         // A failure this frontend does not know yet.
-        other => eprintln!("Error: {other:?}"),
+        other => print_error!("cli-unknown-failure", failure = format!("{other:?}")),
     }
 }
 
@@ -105,7 +100,10 @@ pub(crate) fn report_target_resolution_failure(failure: &TargetResolutionFailure
 /// `cmd::removal::hold_pkg_allows` gives: a warning under a plan is a warning nobody reads.
 pub(crate) fn print_ignored_targets(ignored: &[IgnoredTarget]) {
     for target in ignored {
-        eprintln!("Warning: ignoring package {}-{}", target.name, target.version);
+        print_warning!(
+            "plan-ignoring-package",
+            package = format!("{}-{}", target.name, target.version)
+        );
         if let Some(detail) = ignore_detail(target.name.as_ref(), &target.reason) {
             eprintln!("  {detail}");
         }
@@ -122,28 +120,32 @@ const EXPANSION_PREVIEW: usize = 20;
 /// every other diagnostic here, so a piped step list stays machine-readable.
 pub(crate) fn print_expansions(expansions: &[Expansion]) {
     for expansion in expansions {
-        eprintln!("Note: {} matched {}", expansion.pattern, counts(expansion));
+        eprintln!("{}", crate::i18n::note(&matched(expansion)));
         if !expansion.groups.is_empty() {
-            eprintln!("  Groups: {}", listed(&expansion.groups));
-            eprintln!("  Packages: {}", listed(&expansion.names));
+            eprintln!("  {}", tr!("cli-groups-list", list = listed(&expansion.groups)));
+            eprintln!("  {}", tr!("cli-packages-list", list = listed(&expansion.names)));
         } else {
             eprintln!("  {}", listed(&expansion.names));
         }
     }
 }
 
-/// `"4 packages"`, or `"2 groups and 47 packages"` when a group was matched too.
-fn counts(expansion: &Expansion) -> String {
-    let packages = plural(expansion.names.len(), "package");
+/// `"gnome-* matched 4 packages"`, or `"… matched 2 groups and 47 packages"` when a group was
+/// matched too.
+fn matched(expansion: &Expansion) -> String {
+    let pattern = &expansion.pattern;
+    let packages = expansion.names.len();
     if expansion.groups.is_empty() {
-        packages
+        tr!("cli-pattern-matched", pattern = pattern.as_str(), packages = packages)
     } else {
-        format!("{} and {packages}", plural(expansion.groups.len(), "group"))
+        let groups = expansion.groups.len();
+        tr!(
+            "cli-pattern-matched-groups",
+            pattern = pattern.as_str(),
+            groups = groups,
+            packages = packages
+        )
     }
-}
-
-fn plural(count: usize, noun: &str) -> String {
-    if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") }
 }
 
 /// `items`, comma-separated, cut off at [`EXPANSION_PREVIEW`] entries.
@@ -158,7 +160,7 @@ fn listed(items: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     match items.len().checked_sub(EXPANSION_PREVIEW) {
-        Some(rest) if rest > 0 => format!("{shown}, and {rest} more"),
+        Some(rest) if rest > 0 => tr!("cli-and-more", shown = shown, rest = rest),
         _ => shown,
     }
 }
@@ -170,32 +172,26 @@ fn listed(items: &[String]) -> String {
 pub(crate) fn report_expansion_failure(failure: &ExpansionFailure) {
     match failure {
         ExpansionFailure::NoMatch { pattern, side: Side::Installable } => {
-            eprintln!(
-                "Error: no package or group matching {pattern} was found in any configured \
-                 repository"
-            );
+            print_error!("plan-pattern-not-found", pattern = pattern.to_string());
         }
         ExpansionFailure::NoMatch { pattern, side: Side::Installed } => {
-            eprintln!("Error: no installed package or group matches {pattern}");
+            print_error!("plan-pattern-not-installed", pattern = pattern.to_string());
         }
         ExpansionFailure::TooBroad { pattern, limit } => {
-            eprintln!("Error: {pattern} matches more than {limit} packages");
-            eprintln!("Note: name the packages, or narrow the pattern");
+            print_error!("plan-pattern-too-broad", pattern = pattern.to_string(), limit = *limit);
+            print_note!("plan-pattern-too-broad-note");
         }
         ExpansionFailure::Versioned(target) => {
-            eprintln!("Error: {target} is a glob pattern with a version requirement");
-            eprintln!(
-                "Note: a pattern expands to names only; name the package to constrain its \
-                 version"
-            );
+            print_error!("plan-pattern-versioned", target = target.to_string());
+            print_note!("plan-pattern-versioned-note");
         }
         // The expansion raises this. It converts to `TargetResolutionFailure::Ignored` before
         // it reaches a frontend, so a pattern and a literal report an ignored target alike.
         ExpansionFailure::AllIgnored { pattern, .. } => {
-            eprintln!("Error: every package matching {pattern} is ignored");
+            print_error!("plan-pattern-ignored", pattern = pattern.to_string());
         }
         // A failure this frontend does not know yet.
-        other => eprintln!("Error: {other:?}"),
+        other => print_error!("cli-unknown-failure", failure = format!("{other:?}")),
     }
 }
 
@@ -234,15 +230,22 @@ pub(crate) fn print_ignored_change(
     let (old_name, old_version) = installed;
     let (new_name, new_version) = available;
     match kind {
-        IgnoredChange::Upgrade => eprintln!(
-            "Warning: {old_name}: ignoring package upgrade ({old_version} => {new_version})"
+        IgnoredChange::Upgrade => print_warning!(
+            "plan-ignoring-upgrade",
+            name = old_name,
+            old = old_version,
+            new = new_version
         ),
-        IgnoredChange::Downgrade => eprintln!(
-            "Warning: {old_name}: ignoring package downgrade ({old_version} => {new_version})"
+        IgnoredChange::Downgrade => print_warning!(
+            "plan-ignoring-downgrade",
+            name = old_name,
+            old = old_version,
+            new = new_version
         ),
-        IgnoredChange::Replacement => eprintln!(
-            "Warning: ignoring package replacement ({old_name}-{old_version} => \
-             {new_name}-{new_version})"
+        IgnoredChange::Replacement => print_warning!(
+            "plan-ignoring-replacement",
+            old = format!("{old_name}-{old_version}"),
+            new = format!("{new_name}-{new_version}")
         ),
     }
     if let Some(detail) = ignore_detail(old_name, reason) {
@@ -275,11 +278,11 @@ pub(crate) fn report_install_failure(failure: &InstallFailure) {
         InstallFailure::Target(failure) => report_target_resolution_failure(failure),
         InstallFailure::Unsatisfiable(diagnosis) => print_diagnosis(diagnosis),
         InstallFailure::LostFileCandidate => {
-            eprintln!("Internal error: the universe lost a package file candidate");
+            eprintln!("{}", tr!("plan-lost-file-candidate"));
         }
         InstallFailure::Planner(error) => report(error.as_ref()),
         // A failure this frontend does not know yet.
-        other => eprintln!("Error: {other:?}"),
+        other => print_error!("cli-unknown-failure", failure = format!("{other:?}")),
     }
 }
 
@@ -319,21 +322,21 @@ impl InstallQuestions for Preview {
 /// [`piko_db::solve::Shape`], never from the call site, so two commands cannot name one
 /// failure two ways.
 pub(crate) fn print_diagnosis(diagnosis: &Diagnosis) {
-    eprintln!("Error: {}", diagnosis.shape());
+    eprintln!("{}", crate::i18n::error(&localized(diagnosis.shape())));
     // Distinguishing this from a failure there was nothing to say about is the point of
     // reporting it. Both leave an empty listing behind.
     if diagnosis.gave_up() {
-        eprintln!("  the explanation itself exceeded the solver's conflict budget");
+        eprintln!("  {}", tr!("cli-explanation-gave-up"));
         return;
     }
     for fact in diagnosis.derivation().facts() {
-        eprintln!("  {fact}");
+        eprintln!("  {}", localized(fact));
     }
     // A bound that trimmed the listing says so. A reader who cannot tell a short explanation
     // from a trimmed one has no reason to trust either.
     let dropped = diagnosis.derivation().facts_dropped();
     if dropped > 0 {
-        eprintln!("  ... and {dropped} further fact(s) not shown");
+        eprintln!("  {}", tr!("cli-facts-not-shown", count = dropped));
     }
     print_remedies(diagnosis);
 }
@@ -350,11 +353,11 @@ fn print_remedies(diagnosis: &Diagnosis) {
         return;
     }
     for remedy in remedies {
-        eprintln!("Try: {remedy}");
+        eprintln!("{}", crate::i18n::try_this(&localized(remedy)));
     }
     let untried = diagnosis.probes_dropped();
     if untried > 0 {
-        eprintln!("  ... and {untried} further change(s) not tried");
+        eprintln!("  {}", tr!("cli-changes-not-tried", count = untried));
     }
 }
 
@@ -380,19 +383,16 @@ pub(crate) fn print_diagnostics(universe: &Universe<'_>, built: &Plan, reach: Re
             PlanDiagnostic::DependencyCycle { package } => {
                 let name = universe
                     .get(*package)
-                    .map_or_else(|| "<unknown>".to_owned(), |solvable| solvable.name().to_string());
-                eprintln!(
-                    "Warning: {name} is on a dependency cycle; it may be installed \
-                     before something it depends on"
-                );
+                    .map_or_else(|| tr!("cli-unknown"), |solvable| solvable.name().to_string());
+                print_warning!("plan-dependency-cycle", name = name);
             }
             // `PlanDiagnostic` is `#[non_exhaustive]`. A kind added later must still be
             // shown, not silently dropped.
-            other => eprintln!("Warning: {other:?}"),
+            other => print_warning!("cli-unknown-failure", failure = format!("{other:?}")),
         }
     }
     if built.diagnostics_dropped() > 0 {
-        eprintln!("Warning: {} further problem(s) not shown", built.diagnostics_dropped());
+        print_warning!("cli-problems-not-shown", count = built.diagnostics_dropped());
     }
     print_broken_dependencies(universe, built, reach);
     print_divergences(universe, built);
@@ -412,15 +412,12 @@ fn print_broken_dependencies(universe: &Universe<'_>, built: &Plan, reach: Reach
     for entry in built.broken_dependencies() {
         let name = universe
             .get(entry.dependent)
-            .map_or_else(|| "<unknown>".to_owned(), |solvable| solvable.name().to_string());
+            .map_or_else(|| tr!("cli-unknown"), |solvable| solvable.name().to_string());
         let relation = relation_of(universe, entry.dependent, entry.dependency);
-        eprintln!("Warning: {name} requires {relation}, which nothing installed provides");
+        print_warning!("plan-broken-dependency", name = name, relation = relation);
     }
     if built.broken_dependencies_dropped() > 0 {
-        eprintln!(
-            "Warning: {} further broken dependency(ies) not shown",
-            built.broken_dependencies_dropped()
-        );
+        print_warning!("plan-broken-not-shown", count = built.broken_dependencies_dropped());
     }
 }
 
@@ -452,22 +449,21 @@ fn print_divergences(universe: &Universe<'_>, built: &Plan) {
     let Fidelity::Diverged { requirements } = built.fidelity() else { return };
 
     let name_of =
-        |id| universe.get(id).map_or_else(|| "<unknown>".to_owned(), |s| s.name().to_string());
-    eprintln!(
-        "Note: {requirements} dependency requirement(s) were satisfied by a candidate \
-         pacman would not have tried first; the plan is valid and may differ from `pacman -Sp`"
-    );
+        |id| universe.get(id).map_or_else(|| tr!("cli-unknown"), |s| s.name().to_string());
+    print_note!("plan-divergences", count = requirements);
     for divergence in built.divergences() {
         let relation = relation_of(universe, divergence.dependent, divergence.dependency);
-        eprintln!(
-            "  {} requires {relation}: took {}, pacman would have tried {}",
-            name_of(divergence.dependent),
-            name_of(divergence.selected),
-            name_of(divergence.preferred),
+        let line = tr!(
+            "plan-divergence",
+            name = name_of(divergence.dependent),
+            relation = relation,
+            taken = name_of(divergence.selected),
+            preferred = name_of(divergence.preferred)
         );
+        eprintln!("  {line}");
     }
     if built.divergences_dropped() > 0 {
-        eprintln!("  {} further requirement(s) not shown", built.divergences_dropped());
+        eprintln!("  {}", tr!("cli-requirements-not-shown", count = built.divergences_dropped()));
     }
 }
 
@@ -502,10 +498,7 @@ fn read_file_targets(
             Ok(loaded)
         }
         Err(piko_txn::Error::UrlNotLoaded { url }) => {
-            eprintln!(
-                "Error: cannot plan {url}: previewing a package URL would have to \
-                 download it; use `piko install` instead"
-            );
+            crate::i18n::print_error!("plan-url-not-loaded", url = url.to_string());
             Err(ExitCode::FAILURE)
         }
         Err(error) => {
@@ -681,7 +674,7 @@ fn cause_lines(
     id: SolvableId,
 ) -> Vec<String> {
     let Some(cause) = explanation.cause(id) else { return Vec::new() };
-    let indent = " ".repeat(CAUSE_INDENT);
+    let indent = " ".repeat(cause_indent());
     let mut lines = vec![format!(
         "{indent}{}",
         console::style(format!("<- {}", describe_cause(universe, cause))).dim()
@@ -694,9 +687,12 @@ fn cause_lines(
 
 /// How far a cause line is indented: past the icon, the verb, and the two spaces around them.
 ///
-/// Fixed rather than measured. The name column's width changes with the longest package name,
-/// and a cause line that moved with it would make two plans hard to compare.
-const CAUSE_INDENT: usize = 13;
+/// Fixed for a language rather than measured on the plan. The name column's width changes with
+/// the longest package name, and a cause line that moved with it would make two plans hard to
+/// compare. It is 13 in English.
+fn cause_indent() -> usize {
+    verb_width().saturating_add(4)
+}
 
 /// The kind a [`Change`] renders as. The icon and color live in [`crate::style::ChangeKind`],
 /// which `piko history` reads the same way.
@@ -708,35 +704,57 @@ const fn kind_of(change: Change) -> ChangeKind {
     }
 }
 
-/// The word, present tense, left-padded to 9 characters.
+/// The word, present tense, of a kind of change.
 ///
-/// `downgrade`/`reinstall`, the longest, need no padding; the rest line up under them. No word
-/// here is shortened to fit. The tense is this command's own: a plan says what *will* happen.
-/// `piko history` pads its own past-tense set to its own width.
-const fn verb(kind: ChangeKind) -> &'static str {
+/// The tense is this command's own: a plan says what *will* happen. `piko history` has its own
+/// past-tense set.
+fn word(kind: ChangeKind) -> String {
     match kind {
-        ChangeKind::Install => "install  ",
-        ChangeKind::Upgrade => "upgrade  ",
-        ChangeKind::Downgrade => "downgrade",
-        ChangeKind::Reinstall => "reinstall",
-        ChangeKind::Remove => "remove   ",
+        ChangeKind::Install => tr!("plan-verb-install"),
+        ChangeKind::Upgrade => tr!("plan-verb-upgrade"),
+        ChangeKind::Downgrade => tr!("plan-verb-downgrade"),
+        ChangeKind::Reinstall => tr!("plan-verb-reinstall"),
+        ChangeKind::Remove => tr!("plan-verb-remove"),
     }
 }
 
-/// The bare word, for the summary tally ("N to install", "M to upgrade", …).
-const fn name(kind: ChangeKind) -> &'static str {
+/// The width of the longest [`word`], in characters: 9 in English, for `downgrade` and
+/// `reinstall`. No word is shortened to fit.
+fn verb_width() -> usize {
+    [
+        ChangeKind::Install,
+        ChangeKind::Upgrade,
+        ChangeKind::Downgrade,
+        ChangeKind::Reinstall,
+        ChangeKind::Remove,
+    ]
+    .into_iter()
+    .map(|kind| console::measure_text_width(&word(kind)))
+    .max()
+    .unwrap_or(0)
+}
+
+/// The [`word`], padded to [`verb_width`], so the rest of each line starts in one column.
+fn verb(kind: ChangeKind) -> String {
+    let word = word(kind);
+    let padding = verb_width().saturating_sub(console::measure_text_width(&word));
+    format!("{word}{}", " ".repeat(padding))
+}
+
+/// The summary tally of a kind ("N to install", "M to upgrade", …).
+fn tally(kind: ChangeKind, count: usize) -> String {
     match kind {
-        ChangeKind::Install => "install",
-        ChangeKind::Upgrade => "upgrade",
-        ChangeKind::Downgrade => "downgrade",
-        ChangeKind::Reinstall => "reinstall",
-        ChangeKind::Remove => "remove",
+        ChangeKind::Install => tr!("plan-tally-install", count = count),
+        ChangeKind::Upgrade => tr!("plan-tally-upgrade", count = count),
+        ChangeKind::Downgrade => tr!("plan-tally-downgrade", count = count),
+        ChangeKind::Reinstall => tr!("plan-tally-reinstall", count = count),
+        ChangeKind::Remove => tr!("plan-tally-remove", count = count),
     }
 }
 
 /// The colored `"{icon} {verb}"` a line starts with.
 fn prefix(kind: ChangeKind) -> console::StyledObject<String> {
-    kind.prefix(self::verb(kind))
+    kind.prefix(&self::verb(kind))
 }
 
 /// Which block of the listing a line belongs to, and in which order the blocks print.
@@ -803,7 +821,7 @@ impl Tally {
 /// this is too.
 fn render_id(universe: &Universe<'_>, id: SolvableId) -> (String, String) {
     universe.get(id).map_or_else(
-        || ("<unknown>".to_owned(), String::new()),
+        || (crate::i18n::tr!("cli-unknown"), String::new()),
         |solvable| (solvable.name().to_string(), solvable.version().to_string()),
     )
 }
@@ -946,9 +964,7 @@ pub(crate) fn print_steps(
     emit!(out, "");
     let counts = tally
         .counted()
-        .map(|(kind, count)| {
-            kind.style().apply_to(format!("{count} to {}", name(kind))).to_string()
-        })
+        .map(|(kind, count)| kind.style().apply_to(self::tally(kind, count)).to_string())
         .collect::<Vec<_>>()
         .join(", ");
     // The download clause is dropped entirely when nothing has to be fetched, instead of
@@ -958,9 +974,12 @@ pub(crate) fn print_steps(
     let download = if built.download_size() == 0 {
         String::new()
     } else {
-        format!(" — {} to download", crate::output::human_size(built.download_size()))
+        let size = crate::output::human_size(built.download_size());
+        format!(" — {}", tr!("plan-download-size", size = size))
     };
-    emit!(out, "{counts}{download} — {} installed size", signed_size(built.installed_size_delta()));
+    let installed =
+        tr!("plan-installed-size", size = signed_size(built.installed_size_delta()).to_string());
+    emit!(out, "{counts}{download} — {installed}");
 
     ExitCode::SUCCESS
 }

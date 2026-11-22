@@ -89,10 +89,7 @@ fn refresh_locked(
         Ok(targets) => targets,
         Err(piko_net::Error::KeyringUnusable { source }) => {
             report(&source);
-            eprintln!(
-                "Note: a repository's SigLevel requires a signature, so refreshing \
-                 cannot continue without a usable keyring"
-            );
+            crate::i18n::print_note!("refresh-keyring-needed");
             return ExitCode::FAILURE;
         }
         Err(error) => {
@@ -108,7 +105,9 @@ fn refresh_locked(
     let rows: Vec<crate::progress::Row> = requests
         .iter()
         .map(|request| {
-            steps.download(&format!("Synchronizing {}", label(request.name, request.kind)), 0)
+            let text =
+                crate::i18n::tr!("refresh-row", repository = label(request.name, request.kind));
+            steps.download(&text, 0)
         })
         .collect();
     let sinks: Vec<_> =
@@ -140,12 +139,15 @@ fn refresh_locked(
                 match refreshed.outcome {
                     Outcome::Updated => row.finish(),
                     Outcome::UpToDate => {
-                        row.finish_plain(format!("{} (up to date)", label(name, *kind)));
+                        row.finish_plain(crate::i18n::tr!(
+                            "refresh-up-to-date",
+                            repository = label(name, *kind)
+                        ));
                     }
                     Outcome::Kept => {
-                        row.finish_plain(format!(
-                            "{} (kept: no newer database)",
-                            label(name, *kind)
+                        row.finish_plain(crate::i18n::tr!(
+                            "refresh-kept",
+                            repository = label(name, *kind)
                         ));
                     }
                     // An outcome this frontend does not know yet: show the target, no detail.
@@ -176,7 +178,9 @@ fn refresh_locked(
     // Through `suspend`, as every other line this function prints. The finished rows still
     // belong to the `MultiProgress`. A bare `eprintln!` writes into the region it draws.
     for wanted in targets.unknown() {
-        steps.suspend(|| eprintln!("Error: {wanted} is not a configured repository"));
+        steps.suspend(|| {
+            crate::i18n::print_error!("refresh-unknown-repository", repository = wanted.to_string())
+        });
         failed = true;
     }
     // Only a repository the command line named. A full refresh skips one silently, as
@@ -184,7 +188,7 @@ fn refresh_locked(
     if !only.is_empty() {
         for skipped in targets.unsynced() {
             steps.suspend(|| {
-                eprintln!("Note: {skipped} is not refreshed: its Usage does not include Sync");
+                crate::i18n::print_note!("refresh-not-synced", repository = skipped.to_string());
             });
         }
     }

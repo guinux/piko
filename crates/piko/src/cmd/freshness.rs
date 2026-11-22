@@ -17,6 +17,8 @@ use piko_db::repo::{
 use piko_net::FreshnessNote;
 
 /// Seconds in a day, the unit `--max-age` is given in.
+use crate::i18n::{tr, warning};
+
 const DAY: u64 = 86_400;
 
 /// `--max-age`'s default, in days: [`DEFAULT_MAX_AGE`].
@@ -31,68 +33,71 @@ pub fn max_age(days: u64) -> Option<Duration> {
 /// The line to print for one note about `file`, prefix included.
 pub fn render_note(file: &str, note: &FreshnessNote, zone: piko_txn::history::LocalZone) -> String {
     match note {
-        FreshnessNote::Behind { server, last_modified } => format!(
-            "Note: {server} is older than the installed {file} (last modified {}). Piko tried \
-             the next server.",
-            date(*last_modified, zone)
-        ),
+        FreshnessNote::Behind { server, last_modified } => crate::i18n::note(&tr!(
+            "fresh-behind",
+            server = server.to_string(),
+            file = file,
+            date = date(*last_modified, zone)
+        )),
         FreshnessNote::RefusedOlder { server, candidate, installed, comparison } => {
             match comparison {
-                Comparison::LostAuthentication => format!(
-                    "Warning: Piko refused the {file} from {server}. It has no valid signature, \
-                     and the installed one is signed ({}). A mirror can do this to hold back \
-                     updates.",
-                    describe(*installed, zone)
-                ),
+                Comparison::LostAuthentication => warning(&tr!(
+                    "fresh-lost-signature",
+                    file = file,
+                    server = server.to_string(),
+                    installed = describe(*installed, zone)
+                )),
                 _ if candidate.is_some_and(|candidate| candidate.tier == Tier::Authenticated) => {
-                    format!(
-                        "Warning: Piko refused a signed {file} from {server} that is older than \
-                         the installed one ({}, installed {}). A mirror can do this to hold back \
-                         updates.",
-                        describe(*candidate, zone),
-                        describe(*installed, zone)
-                    )
+                    warning(&tr!(
+                        "fresh-refused-older",
+                        file = file,
+                        server = server.to_string(),
+                        candidate = describe(*candidate, zone),
+                        installed = describe(*installed, zone)
+                    ))
                 }
-                _ => format!(
-                    "Note: {server} has an older {file} than the installed one ({}, installed \
-                     {}). Piko tried the next server.",
-                    describe(*candidate, zone),
-                    describe(*installed, zone)
-                ),
+                _ => crate::i18n::note(&tr!(
+                    "fresh-older",
+                    server = server.to_string(),
+                    file = file,
+                    candidate = describe(*candidate, zone),
+                    installed = describe(*installed, zone)
+                )),
             }
         }
-        FreshnessNote::AcceptedOlder { server, candidate, replaced } => format!(
-            "Warning: Piko installed an older {file} from {server} ({}, the previous one {}), \
-             because you gave --accept-older.",
-            describe(*candidate, zone),
-            describe(*replaced, zone)
-        ),
+        FreshnessNote::AcceptedOlder { server, candidate, replaced } => warning(&tr!(
+            "fresh-accepted-older",
+            file = file,
+            server = server.to_string(),
+            candidate = describe(*candidate, zone),
+            replaced = describe(*replaced, zone)
+        )),
         FreshnessNote::Stale { publication, age, max_age, probed } => {
             let checked = match probed {
-                0 => "No other server was available to check it against.".to_owned(),
-                1 => "1 other server has nothing newer.".to_owned(),
-                many => format!("{many} other servers have nothing newer."),
+                0 => tr!("fresh-no-other-server"),
+                many => tr!("fresh-other-servers", count = *many),
             };
-            format!(
-                "Warning: {file} is {} old ({}). {checked} A mirror may be out of date, or may \
-                 hold back updates. The limit is {} (--max-age).",
-                human_age(*age),
-                describe(Some(*publication), zone),
-                human_age(*max_age)
-            )
+            warning(&tr!(
+                "fresh-stale",
+                file = file,
+                age = human_age(*age),
+                publication = describe(Some(*publication), zone),
+                checked = checked,
+                limit = human_age(*max_age)
+            ))
         }
         FreshnessNote::FromTheFuture { publication, ahead } => {
             future(file, *publication, *ahead, zone)
         }
-        FreshnessNote::FutureBaselineIgnored { installed, ahead } => format!(
-            "Warning: The installed {file} is dated {} in the future ({}) and is not signed. \
-             Piko did not use that date to refuse an older {file}. Check the system clock.",
-            human_age(*ahead),
-            describe(Some(*installed), zone)
-        ),
+        FreshnessNote::FutureBaselineIgnored { installed, ahead } => warning(&tr!(
+            "fresh-future-baseline",
+            file = file,
+            ahead = human_age(*ahead),
+            publication = describe(Some(*installed), zone)
+        )),
         // `FreshnessNote` is non-exhaustive. A kind this build does not know is still worth a
         // line, rather than silence.
-        other => format!("Note: {file}: {other:?}"),
+        other => crate::i18n::note(&format!("{file}: {other:?}")),
     }
 }
 
@@ -102,11 +107,7 @@ pub fn render_kept(
     installed: Option<Publication>,
     zone: piko_txn::history::LocalZone,
 ) -> String {
-    format!(
-        "Warning: No server has a {file} as new as the installed one ({}). Piko keeps the \
-         installed database.",
-        describe(installed, zone)
-    )
+    warning(&tr!("fresh-kept", file = file, installed = describe(installed, zone)))
 }
 
 /// Warns about each repository database that is too old, or dated in the future.
@@ -125,12 +126,12 @@ pub fn report_stale<'a>(
         let file = format!("{repo}.db");
         match freshness::staleness(publication, now, max_age) {
             Staleness::Fresh => {}
-            Staleness::Stale { age } => eprintln!(
-                "Warning: {file} is {} old ({}). The limit is {} (--max-age). Run 'piko \
-                 refresh' to check the mirrors for a newer one.",
-                human_age(age),
-                describe(Some(publication), zone),
-                human_age(max_age.unwrap_or_default())
+            Staleness::Stale { age } => crate::i18n::print_warning!(
+                "fresh-stale-local",
+                file = file.as_str(),
+                age = human_age(age),
+                publication = describe(Some(publication), zone),
+                limit = human_age(max_age.unwrap_or_default())
             ),
             Staleness::FromTheFuture { ahead } => {
                 eprintln!("{}", future(&file, publication, ahead, zone));
@@ -145,23 +146,24 @@ fn future(
     ahead: Duration,
     zone: piko_txn::history::LocalZone,
 ) -> String {
-    format!(
-        "Warning: {file} is dated {} in the future ({}). Check the system clock.",
-        human_age(ahead),
-        describe(Some(publication), zone)
-    )
+    warning(&tr!(
+        "fresh-future",
+        file = file,
+        ahead = human_age(ahead),
+        publication = describe(Some(publication), zone)
+    ))
 }
 
 /// Says when a database was published, and whether a signature vouches for the date.
 fn describe(publication: Option<Publication>, zone: piko_txn::history::LocalZone) -> String {
     match publication {
         Some(Publication { at, tier: Tier::Authenticated }) => {
-            format!("signed {}", date(at, zone))
+            tr!("fresh-signed", date = date(at, zone))
         }
         Some(Publication { at, tier: Tier::Unauthenticated }) => {
-            format!("published {}", date(at, zone))
+            tr!("fresh-published", date = date(at, zone))
         }
-        None => "undated".to_owned(),
+        None => tr!("fresh-undated"),
     }
 }
 
@@ -172,14 +174,13 @@ fn date(seconds: u64, zone: piko_txn::history::LocalZone) -> String {
 /// Renders a duration in the largest whole unit that fits: days, then hours, then minutes.
 fn human_age(age: Duration) -> String {
     let seconds = age.as_secs();
-    let (count, unit) = if seconds >= DAY {
-        (seconds / DAY, "day")
+    if seconds >= DAY {
+        tr!("fresh-days", count = seconds / DAY)
     } else if seconds >= 3_600 {
-        (seconds / 3_600, "hour")
+        tr!("fresh-hours", count = seconds / 3_600)
     } else {
-        (seconds / 60, "minute")
-    };
-    if count == 1 { format!("1 {unit}") } else { format!("{count} {unit}s") }
+        tr!("fresh-minutes", count = seconds / 60)
+    }
 }
 
 #[cfg(test)]

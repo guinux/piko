@@ -25,6 +25,9 @@ alpm-types.workspace = true
 # Required: piko inflates `mtree` itself, against a bound, rather than letting
 # `alpm-mtree` do it unbounded internally.
 flate2.workspace = true
+# The `Message` of each type a frontend shows: an identifier and its arguments, without the
+# catalog that renders them.
+piko-i18n.workspace = true
 tar.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
@@ -43,6 +46,8 @@ rustix.workspace = true
 alpm-db.workspace = true
 alpm-repo-db.workspace = true
 flate2.workspace = true
+# The English catalog, which the tests compare with each type's `Display`.
+piko-i18n = { workspace = true, features = ["catalog"] }
 proptest.workspace = true
 tempfile.workspace = true
 # Self dev-dependency so integration tests get the fixture builder without `fixture`

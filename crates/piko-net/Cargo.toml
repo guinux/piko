@@ -25,6 +25,8 @@ fuzzing = []
 alpm-types.workspace = true
 piko-db.workspace = true
 piko-db-write.workspace = true
+# The message of each error, for a frontend that renders it in the language of its user.
+piko-i18n.workspace = true
 piko-sig.workspace = true
 thiserror.workspace = true
 # The calendar arithmetic of an HTTP date.
@@ -39,4 +41,6 @@ ureq.workspace = true
 # A refresh dates what it downloads by reading it as a repository archive, so a test mirror has
 # to serve a real one — see `piko-db/src/fixture.rs`.
 piko-db = { workspace = true, features = ["fixture"] }
+# The tests render each error through the catalog.
+piko-i18n = { workspace = true, features = ["catalog"] }
 tempfile.workspace = true

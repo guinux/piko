@@ -8,10 +8,18 @@
 
 use std::process::{Command, Output, Stdio};
 
+/// A `piko` command in English, whatever the locale of the machine. The tests compare its
+/// output with English text.
+fn piko_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_piko"));
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// Runs `piko` with `args` and a pacman.conf that does not exist.
 fn run(args: &[&str]) -> Output {
     let dir = tempfile::tempdir().unwrap();
-    Command::new(env!("CARGO_BIN_EXE_piko"))
+    piko_command()
         .args(args)
         .arg("--config")
         .arg(dir.path().join("missing.conf"))

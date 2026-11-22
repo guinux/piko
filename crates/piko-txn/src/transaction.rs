@@ -298,10 +298,7 @@ pub fn validate_package(
         Some(signature) => keyring.check_bytes(package, signature, policy),
         None => keyring.check(package, policy),
     }
-    .map_err(|source| Error::SignatureUncheckable {
-        package: package.to_path_buf(),
-        reason: source.to_string(),
-    })?;
+    .map_err(|error| Error::SignatureUncheckable { package: package.to_path_buf(), error })?;
 
     match verdict {
         Verdict::Accepted { verified } => {
@@ -310,8 +307,9 @@ pub fn validate_package(
         }
         Verdict::Rejected(rejection) => Err(Error::SignatureRejected {
             package: package.to_path_buf(),
-            reason: rejection.to_string(),
             unsigned: rejection == piko_sig::Rejection::MissingRequired,
+            refusal: crate::SignatureRefusal::Policy(rejection),
+            discarded: crate::Discarded::No,
         }),
     }
 }
@@ -1223,18 +1221,17 @@ pub(crate) fn discard(
     location: &crate::source::Location,
     mut refusal: Error,
 ) -> Error {
-    if let Error::UnusableSource { reason, .. }
-    | Error::ChecksumMismatch { reason, .. }
-    | Error::SignatureRejected { reason, unsigned: false, .. } = &mut refusal
-    {
-        match source.discard(location) {
-            Ok(true) => reason
-                .push_str("; it was removed from the cache, so the next run downloads it again"),
-            Ok(false) => {}
-            Err(error) => {
-                reason.push_str(&format!("; it could not be removed from the cache: {error}"));
-            }
-        }
+    let removal = || match source.discard(location) {
+        Ok(true) => crate::Discarded::Removed,
+        Ok(false) => crate::Discarded::No,
+        Err(error) => crate::Discarded::Failed { reason: error.to_string() },
+    };
+    match &mut refusal {
+        Error::ChecksumMismatch { discarded, .. }
+        | Error::SignatureRejected { discarded, unsigned: false, .. } => *discarded = removal(),
+        // The reason of an unusable source is English text, and the removal is said in it.
+        Error::UnusableSource { reason, .. } => reason.push_str(&removal().to_string()),
+        _ => {}
     }
     refusal
 }
@@ -3666,7 +3663,10 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(&error, Error::UnsupportedMemberType { kind: "character device", .. }),
+            matches!(
+                &error,
+                Error::UnsupportedMemberType { kind: crate::MemberType::CharacterDevice, .. }
+            ),
             "got {error:?}"
         );
         assert!(!root.path().join("usr/bin").exists(), "the payload was extracted anyway");
@@ -4203,7 +4203,7 @@ mod tests {
         assert!(
             matches!(
                 error,
-                Error::PackageLimitExceeded { limit: "installed size the plan declares", .. }
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::DeclaredSize, .. }
             ),
             "got {error:?}"
         );
@@ -4934,10 +4934,10 @@ mod tests {
         let error = install_validated(cache.path(), name, Verification::Disabled, Some(published))
             .unwrap_err();
 
-        let Error::ChecksumMismatch { reason, .. } = &error else {
+        let Error::ChecksumMismatch { discarded, .. } = &error else {
             panic!("expected a checksum mismatch, got {error:?}");
         };
-        assert!(reason.contains("removed from the cache"), "{reason}");
+        assert_eq!(*discarded, crate::Discarded::Removed);
         assert!(!cache.path().join(name).exists(), "the refused file stayed in the cache");
     }
 
@@ -4991,10 +4991,10 @@ mod tests {
 
         let error = install_validated(cache.path(), name, required(keys.path()), Some(published))
             .unwrap_err();
-        let Error::SignatureRejected { reason, .. } = &error else {
+        let Error::SignatureRejected { discarded, .. } = &error else {
             panic!("expected a signature refusal, got {error:?}");
         };
-        assert!(reason.contains("removed from the cache"), "{reason}");
+        assert_eq!(*discarded, crate::Discarded::Removed);
         assert!(!file.exists(), "the refused file stayed in the cache");
         assert!(!piko_sig::signature_path(&file).exists(), "its .sig stayed in the cache");
     }
@@ -5012,11 +5012,17 @@ mod tests {
             .unwrap();
 
         let error = install_validated(cache.path(), name, required(keys.path()), None).unwrap_err();
-        let Error::SignatureRejected { reason, .. } = &error else {
+        let Error::SignatureRejected { refusal, discarded, .. } = &error else {
             panic!("expected a signature refusal, got {error:?}");
         };
-        assert!(reason.contains("not in the keyring"), "{reason}");
-        assert!(reason.contains("removed from the cache"), "{reason}");
+        assert!(
+            matches!(
+                refusal,
+                crate::SignatureRefusal::Policy(piko_sig::Rejection::KeyUnknown { .. })
+            ),
+            "{refusal:?}"
+        );
+        assert_eq!(*discarded, crate::Discarded::Removed);
         assert!(!file.exists(), "the refused file stayed in the cache");
         assert!(!piko_sig::signature_path(&file).exists(), "its .sig stayed in the cache");
     }

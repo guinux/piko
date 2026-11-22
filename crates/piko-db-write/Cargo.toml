@@ -14,10 +14,14 @@ workspace = true
 [dependencies]
 alpm-types.workspace = true
 piko-db.workspace = true
+# The message of each error, for a frontend that renders it in the language of its user.
+piko-i18n.workspace = true
 # `O_NOFOLLOW` on the atomic write's temporary file; see `local::create_temp`.
 rustix.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# The tests render each error through the catalog.
+piko-i18n = { workspace = true, features = ["catalog"] }
 proptest.workspace = true
 tempfile.workspace = true

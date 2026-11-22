@@ -56,7 +56,7 @@ pub fn files_installed(
 
     for name in names {
         let Some(package) = db.get_str(name) else {
-            eprintln!("Error: package {name} is not installed");
+            crate::i18n::print_error!("cli-not-installed", name = name.to_string());
             ok = false;
             continue;
         };
@@ -104,7 +104,11 @@ pub fn files_repo(
         match db.get_str(name) {
             Some(package) => found.push(package),
             None => {
-                eprintln!("Error: package {name} is not in {}", db.path().display());
+                crate::i18n::print_error!(
+                    "cli-not-in-repository",
+                    name = name.to_string(),
+                    path = db.path().display().to_string()
+                );
                 ok = false;
             }
         }
@@ -154,10 +158,7 @@ pub fn files_installed_then_repos(
     for name in names {
         let source = resolve_installed_or_repo(local, dbs, name);
         if source.is_none() {
-            eprintln!(
-                "Error: package {name} is not installed and not in any configured \
-                 repository"
-            );
+            crate::i18n::print_error!("cli-not-found-anywhere", name = name.to_string());
             ok = false;
         }
         sources.push(source);

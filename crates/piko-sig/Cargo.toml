@@ -14,7 +14,11 @@ workspace = true
 [dependencies]
 gpgme.workspace = true
 piko-db.workspace = true
+# The message of each error, for a frontend that renders it in the language of its user.
+piko-i18n.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# The tests render each error through the catalog.
+piko-i18n = { workspace = true, features = ["catalog"] }
 tempfile.workspace = true

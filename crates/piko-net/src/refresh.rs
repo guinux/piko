@@ -14,7 +14,7 @@ use piko_sig::{Checked, Keyring, Policy, Verdict};
 use crate::{
     cancel::Cancel,
     concurrency::Concurrency,
-    error::{Error, Result, attempt_reason, with_causes, without_credentials},
+    error::{Error, IoAction, Result, Uncheckable, attempt_reason, without_credentials},
     freshness::{Baseline, FreshnessNote, FreshnessPolicy, Refreshed},
     health::{self, Health},
     pool,
@@ -640,7 +640,7 @@ impl Refresher {
         }
         std::fs::create_dir_all(sync_dir).map_err(|source| Error::Io {
             path: sync_dir.to_path_buf(),
-            action: "create",
+            action: IoAction::Create,
             source,
         })?;
 
@@ -919,7 +919,7 @@ impl Refresher {
             Err(Failure::Request(reason)) => {
                 return Err(Error::Io {
                     path: PathBuf::from(&*without_credentials(url)),
-                    action: "download",
+                    action: IoAction::Download,
                     source: std::io::Error::other(reason),
                 });
             }
@@ -940,7 +940,7 @@ impl Refresher {
             304 if local.since.is_none() => {
                 return Err(Error::Io {
                     path: PathBuf::from(&*without_credentials(url)),
-                    action: "download",
+                    action: IoAction::Download,
                     source: std::io::Error::other(
                         "the server answered \"not modified\" to an unconditional request",
                     ),
@@ -950,7 +950,7 @@ impl Refresher {
             other => {
                 return Err(Error::Io {
                     path: PathBuf::from(&*without_credentials(url)),
-                    action: "download",
+                    action: IoAction::Download,
                     source: std::io::Error::other(format!("unexpected HTTP status {other}")),
                 });
             }
@@ -1047,7 +1047,7 @@ impl Refresher {
             Err(Failure::Request(reason)) => {
                 return Err(Error::SignatureUncheckable {
                     file: name.to_owned(),
-                    reason: format!("could not fetch {shown}: {reason}"),
+                    reason: Uncheckable::Unreachable { url: shown.into_owned(), reason },
                 });
             }
         };
@@ -1066,7 +1066,7 @@ impl Refresher {
             status => {
                 return Err(Error::SignatureUncheckable {
                     file: name.to_owned(),
-                    reason: format!("{shown} answered HTTP {status} rather than 200"),
+                    reason: Uncheckable::Status { url: shown.into_owned(), status },
                 });
             }
         }
@@ -1092,7 +1092,7 @@ impl Refresher {
         if written == 0 {
             return Err(Error::SignatureUncheckable {
                 file: name.to_owned(),
-                reason: format!("{shown} returned an empty signature"),
+                reason: Uncheckable::Empty { url: shown.into_owned() },
             });
         }
         progress(Event::Downloaded { file: name.to_owned(), kind: Kind::Signature });
@@ -1117,7 +1117,7 @@ impl Refresher {
         let Some(keyring) = keyring else {
             return Err(Error::SignatureUncheckable {
                 file: name.to_owned(),
-                reason: "the policy requires a signature but no keyring was given".to_owned(),
+                reason: Uncheckable::NoKeyring,
             });
         };
 
@@ -1126,7 +1126,7 @@ impl Refresher {
                 .verify_detached(database.path(), signature.path())
                 .map_err(|source| Error::SignatureUncheckable {
                     file: name.to_owned(),
-                    reason: with_causes(&source),
+                    reason: Uncheckable::Keyring(source),
                 })?,
             Signature::NotRequested | Signature::Absent => Vec::new(),
         };
@@ -1135,10 +1135,7 @@ impl Refresher {
         if let Verdict::Rejected(rejection) = checked.verdict {
             // The temporaries drop with the caller, unlinked, and the destination never
             // changed.
-            return Err(Error::SignatureRejected {
-                file: name.to_owned(),
-                reason: rejection.to_string(),
-            });
+            return Err(Error::SignatureRejected { file: name.to_owned(), reason: rejection });
         }
         Ok(checked.signed_at)
     }
@@ -1241,7 +1238,7 @@ impl Refresher {
         }
         std::fs::create_dir_all(cache_dir).map_err(|source| Error::Io {
             path: cache_dir.to_path_buf(),
-            action: "create",
+            action: IoAction::Create,
             source,
         })?;
 
@@ -1480,7 +1477,7 @@ fn stream_bounded(
         }
         let read = reader.read(&mut buffer).map_err(|source| Error::Io {
             path: PathBuf::from(name),
-            action: "read the download of",
+            action: IoAction::ReadDownload,
             source,
         })?;
         if read == 0 {
@@ -1493,7 +1490,7 @@ fn stream_bounded(
         let chunk = buffer.get(..read).unwrap_or_default();
         writer.write_all(chunk).map_err(|source| Error::Io {
             path: PathBuf::from(name),
-            action: "write the download of",
+            action: IoAction::WriteDownload,
             source,
         })?;
         on_chunk(read as u64);

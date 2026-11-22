@@ -48,7 +48,7 @@ fn print_rows(
     rows: &[Row],
     with_icon: bool,
     quiet: bool,
-    summary_word: &str,
+    summary: impl Fn(usize) -> String,
     out: &mut impl std::io::Write,
 ) -> ExitCode {
     if quiet {
@@ -76,7 +76,7 @@ fn print_rows(
     }
 
     emit!(out, "");
-    emit!(out, "{} {summary_word}", rows.len());
+    emit!(out, "{}", summary(rows.len()));
     ExitCode::SUCCESS
 }
 
@@ -86,7 +86,7 @@ pub fn installed(db: &LocalDatabase, quiet: bool, out: &mut impl std::io::Write)
         .iter()
         .map(|package| Row::new(package.name().to_string(), package.version().to_string()))
         .collect();
-    print_rows(&rows, true, quiet, "installed", out)
+    print_rows(&rows, true, quiet, |count| crate::i18n::tr!("list-installed", count = count), out)
 }
 
 /// `piko list --repo <name>`: every package in that repository.
@@ -95,7 +95,7 @@ pub fn repo(db: &RepoDatabase, quiet: bool, out: &mut impl std::io::Write) -> Ex
         .iter()
         .map(|package| Row::new(package.name().to_string(), package.version().to_string()))
         .collect();
-    print_rows(&rows, false, quiet, "listed", out)
+    print_rows(&rows, false, quiet, |count| crate::i18n::tr!("list-listed", count = count), out)
 }
 
 /// `piko list -r`/`--repos`: every repository configured in `config`, one per line, in file
@@ -108,7 +108,7 @@ pub fn repo_names(config: &PacmanConfig, quiet: bool, out: &mut impl std::io::Wr
     }
     if !quiet {
         emit!(out, "");
-        emit!(out, "{} configured", config.repositories.len());
+        emit!(out, "{}", crate::i18n::tr!("list-configured", count = config.repositories.len()));
     }
     ExitCode::SUCCESS
 }
@@ -139,7 +139,13 @@ pub fn explicit(db: &LocalDatabase, quiet: bool, out: &mut impl std::io::Write) 
         }
     }
 
-    let code = print_rows(&rows, true, quiet, "explicitly installed", out);
+    let code = print_rows(
+        &rows,
+        true,
+        quiet,
+        |count| crate::i18n::tr!("list-explicit", count = count),
+        out,
+    );
     if ok { code } else { ExitCode::FAILURE }
 }
 
@@ -165,7 +171,7 @@ pub fn orphans(local: &LocalDatabase, quiet: bool, out: &mut impl std::io::Write
         .map(|solvable| Row::new(solvable.name().to_string(), solvable.version().to_string()))
         .collect();
 
-    print_rows(&rows, true, quiet, "orphaned", out)
+    print_rows(&rows, true, quiet, |count| crate::i18n::tr!("list-orphaned", count = count), out)
 }
 
 /// `piko list -m`/`--foreign`: every installed package whose name is not found in any of `repos`,
@@ -184,7 +190,7 @@ pub fn foreign<'a>(
         .map(|package| Row::new(package.name().to_string(), package.version().to_string()))
         .collect();
 
-    print_rows(&rows, true, quiet, "foreign", out)
+    print_rows(&rows, true, quiet, |count| crate::i18n::tr!("list-foreign", count = count), out)
 }
 
 /// Prints group `names`, one per line, with `list`'s summary line.
@@ -200,7 +206,7 @@ fn print_group_names<'a>(
     }
     if !quiet {
         emit!(out, "");
-        emit!(out, "{count} group(s)");
+        emit!(out, "{}", crate::i18n::tr!("list-groups", count = count));
     }
     ExitCode::SUCCESS
 }
@@ -209,7 +215,7 @@ fn print_group_names<'a>(
 /// whether nothing was missing.
 fn report_missing_groups(missing: &[&str]) -> bool {
     for name in missing {
-        eprintln!("Error: group {name} was not found");
+        crate::i18n::print_error!("list-group-not-found", name = *name);
     }
     missing.is_empty()
 }
@@ -242,7 +248,13 @@ fn print_groups<P>(
             Row { group: Some(piko_db::printable(group)), name, version }
         })
         .collect();
-    let code = print_rows(&rows, with_icon, quiet, "listed", out);
+    let code = print_rows(
+        &rows,
+        with_icon,
+        quiet,
+        |count| crate::i18n::tr!("list-listed", count = count),
+        out,
+    );
     if ok { code } else { ExitCode::FAILURE }
 }
 
@@ -335,7 +347,7 @@ mod tests {
         let (code, out) = lines(|out| groups(scenario.local(), &[], false, false, out));
 
         assert_eq!(code, ExitCode::SUCCESS);
-        assert_eq!(out, ["build", "tools", "", "2 group(s)"]);
+        assert_eq!(out, ["build", "tools", "", "2 groups"]);
     }
 
     /// `pacman -Qg`'s own form: every group with its members, ordered by group then package.
@@ -399,7 +411,7 @@ mod tests {
 
         let (code, names) = lines(|out| repo_groups(repos.iter().copied(), &[], false, false, out));
         assert_eq!(code, ExitCode::SUCCESS);
-        assert_eq!(names, ["tools", "", "1 group(s)"]);
+        assert_eq!(names, ["tools", "", "1 group"]);
 
         let (code, members) =
             lines(|out| repo_groups(repos.iter().copied(), &[], true, false, out));

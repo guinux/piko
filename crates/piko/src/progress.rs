@@ -28,7 +28,7 @@ use std::{
 };
 
 use alpm_types::PackageFileName;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 
 use crate::style::checkmark;
 
@@ -52,11 +52,21 @@ fn style(kind: Kind, finished: bool) -> ProgressStyle {
         (Kind::Counted, false) => "{spinner:.cyan} {msg} ({pos}/{len})".to_owned(),
         (Kind::Counted, true) => format!("{} {{msg}} ({{pos}}/{{len}})", checkmark()),
         (Kind::Download, false) => {
-            "{spinner:.cyan} {msg} [{bar:20.cyan/blue}] {bytes}/{total_bytes}".to_owned()
+            "{spinner:.cyan} {msg} [{bar:20.cyan/blue}] {size}/{total_size}".to_owned()
         }
-        (Kind::Download, true) => format!("{} {{msg}} {{bytes}}/{{total_bytes}}", checkmark()),
+        (Kind::Download, true) => format!("{} {{msg}} {{size}}/{{total_size}}", checkmark()),
     };
-    ProgressStyle::with_template(&template).expect("valid template").progress_chars("=> ")
+    // `{bytes}` and `{total_bytes}` would write English units. These two keys write the sizes
+    // as every other size piko prints.
+    ProgressStyle::with_template(&template)
+        .expect("valid template")
+        .with_key("size", |state: &ProgressState, out: &mut dyn std::fmt::Write| {
+            let _ = out.write_str(&crate::output::human_size(state.pos()));
+        })
+        .with_key("total_size", |state: &ProgressState, out: &mut dyn std::fmt::Write| {
+            let _ = out.write_str(&crate::output::human_size(state.len().unwrap_or(0)));
+        })
+        .progress_chars("=> ")
 }
 
 /// One line of the live display: a spinner-or-bar that starts running and ends up checked off.
@@ -233,9 +243,11 @@ fn in_flight(live: &BTreeSet<String>) -> String {
         })
         .collect();
     match live.len().saturating_sub(names.len()) {
-        0 if names.is_empty() => "Downloading".to_owned(),
-        0 => format!("Downloading {}", names.join(", ")),
-        rest => format!("Downloading {} (+{rest})", names.join(", ")),
+        0 if names.is_empty() => crate::i18n::tr!("progress-downloading"),
+        0 => crate::i18n::tr!("progress-downloading-names", names = names.join(", ")),
+        rest => {
+            crate::i18n::tr!("progress-downloading-more", names = names.join(", "), rest = rest)
+        }
     }
 }
 
@@ -283,9 +295,7 @@ pub(crate) fn download_sink(
 /// (`dload.c:201`).
 fn report_skipped_host(host: &str) {
     suspend_active(|| {
-        crate::output::warn(format_args!(
-            "too many errors from {host}, skipping it for the rest of this run"
-        ));
+        crate::output::warn(crate::i18n::tr!("progress-host-skipped", host = host));
     });
 }
 
@@ -311,8 +321,8 @@ pub(crate) fn download_rig(steplist: &StepList, total_bytes: u64) -> DownloadRig
         return DownloadRig { head: None, row: None, sink: Box::new(|_: piko_net::Event| {}) };
     }
     // Added first, so it renders above the bar it describes.
-    let head = steplist.spinner("Downloading");
-    let row = steplist.download("Downloading packages", total_bytes);
+    let head = steplist.spinner(&crate::i18n::tr!("progress-downloading"));
+    let row = steplist.download(&crate::i18n::tr!("progress-downloading-packages"), total_bytes);
     let sink = download_sink(row.clone(), head.clone());
     DownloadRig { head: Some(head), row: Some(row), sink: Box::new(sink) }
 }
@@ -403,12 +413,14 @@ fn describe_step(step: &piko_txn::Step, replaces: Option<&piko_db::EntryName>) -
     match step {
         piko_txn::Step::Install { package, .. } => {
             if replaces.is_some_and(|old| old.version() != package.version()) {
-                format!("Updating {}", package.name())
+                crate::i18n::tr!("progress-updating", package = package.name().to_string())
             } else {
-                format!("Installing {}", package.name())
+                crate::i18n::tr!("progress-installing", package = package.name().to_string())
             }
         }
-        piko_txn::Step::Remove { entry, .. } => format!("Removing {}", entry.name_str()),
+        piko_txn::Step::Remove { entry, .. } => {
+            crate::i18n::tr!("progress-removing", package = entry.name_str())
+        }
     }
 }
 
@@ -462,32 +474,34 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
             E::SignatureChecked { index, total } => {
                 self.finish_download();
                 let steplist = self.steplist;
-                let row = self
-                    .signature_row
-                    .get_or_insert_with(|| steplist.counted("Verifying signatures", total));
+                let row = self.signature_row.get_or_insert_with(|| {
+                    steplist.counted(&crate::i18n::tr!("progress-verifying-signatures"), total)
+                });
                 row.set_position(index as u64);
             }
             E::PackageVerified { index, total } => {
                 self.finish_download();
                 self.settle_signature();
                 let steplist = self.steplist;
-                let row = self
-                    .verify_row
-                    .get_or_insert_with(|| steplist.counted("Verifying packages", total));
+                let row = self.verify_row.get_or_insert_with(|| {
+                    steplist.counted(&crate::i18n::tr!("progress-verifying-packages"), total)
+                });
                 row.set_position(index as u64);
             }
             E::ConflictCheckStarted => {
                 self.finish_download();
                 self.settle_signature();
                 self.settle_verify();
-                self.conflict_row = Some(self.steplist.spinner("Checking file conflicts"));
+                self.conflict_row =
+                    Some(self.steplist.spinner(&crate::i18n::tr!("progress-checking-conflicts")));
             }
             E::DiskSpaceCheckStarted => {
                 self.finish_download();
                 self.settle_signature();
                 self.settle_verify();
                 self.settle_conflict();
-                self.space_row = Some(self.steplist.spinner("Checking available disk space"));
+                self.space_row =
+                    Some(self.steplist.spinner(&crate::i18n::tr!("progress-checking-space")));
             }
             // `VerifyEvent` is `#[non_exhaustive]`.
             _ => {}
@@ -500,7 +514,7 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
     /// already says what was fetched.
     fn finish_download(&mut self) {
         if let Some(row) = self.download_row.take() {
-            self.settle(row, "Downloading packages");
+            self.settle(row, &crate::i18n::tr!("progress-downloading-packages"));
         }
         if let Some(head) = self.download_head.take() {
             head.finish_and_clear();
@@ -509,25 +523,25 @@ impl<'a, W: std::io::Write> VerifyDriver<'a, W> {
 
     fn settle_signature(&mut self) {
         if let Some(row) = self.signature_row.take() {
-            self.settle(row, "Verifying signatures");
+            self.settle(row, &crate::i18n::tr!("progress-verifying-signatures"));
         }
     }
 
     fn settle_verify(&mut self) {
         if let Some(row) = self.verify_row.take() {
-            self.settle(row, "Verifying packages");
+            self.settle(row, &crate::i18n::tr!("progress-verifying-packages"));
         }
     }
 
     fn settle_conflict(&mut self) {
         if let Some(row) = self.conflict_row.take() {
-            self.settle(row, "Checking file conflicts");
+            self.settle(row, &crate::i18n::tr!("progress-checking-conflicts"));
         }
     }
 
     fn settle_space(&mut self) {
         if let Some(row) = self.space_row.take() {
-            self.settle(row, "Checking available disk space");
+            self.settle(row, &crate::i18n::tr!("progress-checking-space"));
         }
     }
 
@@ -604,7 +618,8 @@ impl<'a, W: std::io::Write> CommitDriver<'a, W> {
             E::HookOutputLine { line, .. } => self.print_line(line),
             E::HookFinished { .. } => self.close(|driver| &mut driver.current),
             E::ScriptletStarted { kind, .. } => {
-                let text = format!("Running {} script", kind.as_str().replace('_', " "));
+                let text =
+                    crate::i18n::tr!("progress-scriptlet", kind = kind.as_str().replace('_', " "));
                 let row = self.steplist.spinner(&text);
                 self.scriptlet = Some(OpenRow { row, text, depth: 1, announced: false });
             }
@@ -618,11 +633,7 @@ impl<'a, W: std::io::Write> CommitDriver<'a, W> {
             }
             E::FlushStarted { steps } => {
                 self.close(|driver| &mut driver.current);
-                let text = if steps == 1 {
-                    "Syncing 1 package to disk".to_owned()
-                } else {
-                    format!("Syncing {steps} packages to disk")
-                };
+                let text = crate::i18n::tr!("progress-syncing", count = steps);
                 let row = self.steplist.spinner(&text);
                 self.current = Some(OpenRow { row, text, depth: 0, announced: false });
             }
@@ -731,12 +742,13 @@ fn print_step_result(
     match (step, outcome) {
         (piko_txn::Step::Install { .. }, StepOutcome::Installed { extraction, pacsaves, .. }) => {
             for path in &extraction.unreadable {
-                let _ =
-                    writeln!(out, "  Warning: could not hash {}", piko_db::printable_path(path));
+                let text =
+                    crate::i18n::tr!("progress-unhashed", path = piko_db::printable_path(path));
+                let _ = writeln!(out, "  {}", crate::i18n::warning(&text));
             }
             for problem in &extraction.xattr_problems {
-                let _ =
-                    writeln!(out, "  Warning: {}", piko_db::printable_lines(&problem.to_string()));
+                let text = piko_db::printable_lines(&problem.to_string());
+                let _ = writeln!(out, "  {}", crate::i18n::warning(&text));
             }
             // A `.pacnew` the user is never told about is a configuration change that never
             // happens, silently.
@@ -745,20 +757,22 @@ fn print_step_result(
                     piko_txn::extract::BackupOutcome::KeptBoth { pacnew },
                 ) = step_outcome
                 {
-                    let _ = writeln!(
-                        out,
-                        "  Installed as {} -- merge it",
-                        piko_db::printable_path(pacnew)
-                    );
+                    let text =
+                        crate::i18n::tr!("progress-pacnew", path = piko_db::printable_path(pacnew));
+                    let _ = writeln!(out, "  {text}");
                 }
             }
             for pacsave in *pacsaves {
-                let _ = writeln!(out, "  Saved {} as .pacsave", piko_db::printable_path(pacsave));
+                let text =
+                    crate::i18n::tr!("progress-pacsave", path = piko_db::printable_path(pacsave));
+                let _ = writeln!(out, "  {text}");
             }
         }
         (piko_txn::Step::Remove { .. }, StepOutcome::Removed { pacsaves }) => {
             for pacsave in *pacsaves {
-                let _ = writeln!(out, "  Saved {} as .pacsave", piko_db::printable_path(pacsave));
+                let text =
+                    crate::i18n::tr!("progress-pacsave", path = piko_db::printable_path(pacsave));
+                let _ = writeln!(out, "  {text}");
             }
         }
         // `Step`/`StepOutcome` are reported together by construction (`Event::StepFinished`),
@@ -832,7 +846,7 @@ mod tests {
         clear_active();
 
         let steplist = StepList::new();
-        let row = steplist.spinner("Downloading packages");
+        let row = steplist.spinner(&crate::i18n::tr!("progress-downloading-packages"));
         clear_active();
         row.finish_and_clear();
     }

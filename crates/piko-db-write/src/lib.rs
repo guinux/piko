@@ -69,6 +69,7 @@
 
 mod atomic;
 mod error;
+mod error_message;
 mod local;
 mod lock;
 mod record;
@@ -77,4 +78,4 @@ pub use atomic::AtomicFile;
 pub use error::{Error, IoAction, Result};
 pub use local::{EntryWrite, LocalDbWriter};
 pub use lock::{DbLock, LOCK_FILE};
-pub use record::{Record, RecordError, RecordKind, Section};
+pub use record::{Record, RecordError, RecordKind, Section, Unrepresentable};

@@ -73,6 +73,14 @@ pub enum RefuseReason {
     DirectoryInTheWay,
 }
 
+impl std::fmt::Display for RefuseReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::DirectoryInTheWay => "a directory is in the way",
+        })
+    }
+}
+
 /// Why an entry is being skipped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]

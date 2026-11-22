@@ -70,11 +70,11 @@ impl<'a> Target<'a> {
     }
 
     /// The flags that name paths the user can own instead.
-    const fn flags(&self) -> &'static str {
+    fn flags(&self) -> String {
         match self {
-            Target::Transaction { .. } => "--root and --dbpath",
-            Target::Databases { .. } => "--dbpath",
-            Target::Keyring { .. } => "--gpgdir",
+            Target::Transaction { .. } => crate::i18n::tr!("privilege-root-and-dbpath"),
+            Target::Databases { .. } => "--dbpath".to_owned(),
+            Target::Keyring { .. } => "--gpgdir".to_owned(),
         }
     }
 }

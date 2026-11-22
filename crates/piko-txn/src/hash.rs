@@ -214,7 +214,7 @@ fn open_regular_at(
 fn too_large(name: &OsStr, max: u64) -> Error {
     Error::PackageLimitExceeded {
         path: Path::new(name).to_path_buf(),
-        limit: "backup file size",
+        limit: crate::PackageLimit::BackupFileSize,
         max,
     }
 }
@@ -283,7 +283,10 @@ mod tests {
         let resolved = root.resolve_parent(Path::new("f")).unwrap();
         let err = file_md5_at(resolved.dir(), resolved.name(), 10).unwrap_err();
         assert!(
-            matches!(err, Error::PackageLimitExceeded { limit: "backup file size", .. }),
+            matches!(
+                err,
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::BackupFileSize, .. }
+            ),
             "got {err:?}"
         );
     }
@@ -411,7 +414,10 @@ mod tests {
         let other = root.resolve_parent(Path::new("b")).unwrap();
         let err = same_contents_at(resolved.dir(), resolved.name(), other.name(), 10).unwrap_err();
         assert!(
-            matches!(err, Error::PackageLimitExceeded { limit: "backup file size", .. }),
+            matches!(
+                err,
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::BackupFileSize, .. }
+            ),
             "got {err:?}"
         );
     }

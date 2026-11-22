@@ -36,6 +36,7 @@
 use std::fmt;
 
 use alpm_types::RelationOrSoname;
+use piko_i18n::{Localize, Message};
 
 use crate::Limits;
 use crate::solve::clause::{ClauseKind, Lit};
@@ -166,6 +167,45 @@ impl fmt::Display for Fact {
     }
 }
 
+impl Localize for Fact {
+    fn message(&self) -> Message {
+        match self {
+            Self::Requested { package } => {
+                Message::new("solve-fact-requested").arg("package", package.as_str())
+            }
+            Self::Excluded { package } => {
+                Message::new("solve-fact-excluded").arg("package", package.as_str())
+            }
+            Self::MustRemain { package } => {
+                Message::new("solve-fact-must-remain").arg("package", package.as_str())
+            }
+            Self::Requires { package, relation } => Message::new("solve-fact-requires")
+                .arg("package", package.as_str())
+                .arg("relation", relation.as_str()),
+            Self::Conflicts { package, other } => Message::new("solve-fact-conflicts")
+                .arg("package", package.as_str())
+                .arg("other", other.as_str()),
+            Self::Replaces { package, replaced } => Message::new("solve-fact-replaces")
+                .arg("package", package.as_str())
+                .arg("replaced", replaced.as_str()),
+            Self::Ignored { relation, candidate, reason } => Message::new("solve-fact-ignored")
+                .arg("relation", relation.as_str())
+                .arg("candidate", candidate.as_str())
+                .arg("reason", reason.as_str()),
+            Self::NoVersion { relation, nearest } => Message::new("solve-fact-no-version")
+                .arg("relation", relation.as_str())
+                .arg("nearest", nearest.as_str()),
+            Self::Chose { package, relation, chosen } => Message::new("solve-fact-chose")
+                .arg("package", package.as_str())
+                .arg("relation", relation.as_str())
+                .arg("chosen", chosen.as_str()),
+            Self::SameName { first, second } => Message::new("solve-fact-same-name")
+                .arg("first", first.as_str())
+                .arg("second", second.as_str()),
+        }
+    }
+}
+
 /// What kind of failure an unsatisfiable core describes.
 ///
 /// libalpm discriminates the same thing by error code — `ALPM_ERR_UNSATISFIED_DEPS`,
@@ -228,6 +268,31 @@ impl fmt::Display for Shape {
                 write!(f, "removing {package} would leave the system unsatisfied")
             }
             Self::Unclassified => write!(f, "the requested transaction has no solution"),
+        }
+    }
+}
+
+impl Localize for Shape {
+    fn message(&self) -> Message {
+        match self {
+            Self::Unsatisfied { relation } => {
+                Message::new("solve-shape-unsatisfied").arg("relation", relation.as_str())
+            }
+            Self::IgnoredOnly { relation } => {
+                Message::new("solve-shape-ignored-only").arg("relation", relation.as_str())
+            }
+            Self::ChosenProvider { relation, chosen } => {
+                Message::new("solve-shape-chosen-provider")
+                    .arg("relation", relation.as_str())
+                    .arg("chosen", chosen.as_str())
+            }
+            Self::Conflict { first, second } => Message::new("solve-shape-conflict")
+                .arg("first", first.as_str())
+                .arg("second", second.as_str()),
+            Self::Removal { package } => {
+                Message::new("solve-shape-removal").arg("package", package.as_str())
+            }
+            Self::Unclassified => Message::new("solve-shape-unclassified"),
         }
     }
 }
@@ -328,6 +393,25 @@ impl fmt::Display for Remedy {
             Self::Unignore { package, reason } => {
                 write!(f, "allow {package}, which {reason} covers")
             }
+        }
+    }
+}
+
+impl Localize for Remedy {
+    fn message(&self) -> Message {
+        match self {
+            Self::DropTarget { package } => {
+                Message::new("solve-remedy-drop-target").arg("package", package.as_str())
+            }
+            Self::AllowRemoval { package } => {
+                Message::new("solve-remedy-allow-removal").arg("package", package.as_str())
+            }
+            Self::ChooseOther { relation, provider } => Message::new("solve-remedy-choose-other")
+                .arg("relation", relation.as_str())
+                .arg("provider", provider.as_str()),
+            Self::Unignore { package, reason } => Message::new("solve-remedy-unignore")
+                .arg("package", package.as_str())
+                .arg("reason", reason.as_str()),
         }
     }
 }
@@ -1499,5 +1583,100 @@ mod tests {
         let derivation = Derivation::build(&universe, encoded.problem(), &unsat, &limits);
         assert!(!derivation.is_empty(), "there should be something to say");
         assert!(!derivation.to_string().contains("(derived)"), "{derivation}");
+    }
+
+    /// One value of every variant, with an argument distinct from every other in its message,
+    /// so a message that swaps two variables renders differently from `Display`.
+    fn every_message() -> Vec<(String, piko_i18n::Message)> {
+        let text = |value: &str| value.to_owned();
+        let facts = [
+            Fact::Requested { package: text("a 1-1") },
+            Fact::Excluded { package: text("a 1-1") },
+            Fact::MustRemain { package: text("a 1-1") },
+            Fact::Requires { package: text("a 1-1"), relation: text("b>=2") },
+            Fact::Conflicts { package: text("a 1-1"), other: text("b 2-1") },
+            Fact::Replaces { package: text("a 1-1"), replaced: text("b 2-1") },
+            Fact::Ignored {
+                relation: text("b>=2"),
+                candidate: text("b 2-1"),
+                reason: text("IgnorePkg = b"),
+            },
+            Fact::NoVersion { relation: text("b>=3"), nearest: text("b 2-1") },
+            Fact::Chose { package: text("a 1-1"), relation: text("sh"), chosen: text("dash 1-1") },
+            Fact::SameName { first: text("a 1-1"), second: text("a 2-1") },
+        ];
+        let shapes = [
+            Shape::Unsatisfied { relation: text("b>=3") },
+            Shape::IgnoredOnly { relation: text("b>=2") },
+            Shape::ChosenProvider { relation: text("sh"), chosen: text("dash 1-1") },
+            Shape::Conflict { first: text("a 1-1"), second: text("b 2-1") },
+            Shape::Removal { package: text("a 1-1") },
+            Shape::Unclassified,
+        ];
+        let remedies = [
+            Remedy::DropTarget { package: text("a 1-1") },
+            Remedy::AllowRemoval { package: text("a 1-1") },
+            Remedy::ChooseOther { relation: text("sh"), provider: text("bash 5-1") },
+            Remedy::Unignore { package: text("b 2-1"), reason: text("IgnorePkg = b") },
+        ];
+        // A match with no wildcard arm: a new variant fails to compile here until it has a
+        // sample above.
+        for fact in &facts {
+            match fact {
+                Fact::Requested { .. }
+                | Fact::Excluded { .. }
+                | Fact::MustRemain { .. }
+                | Fact::Requires { .. }
+                | Fact::Conflicts { .. }
+                | Fact::Replaces { .. }
+                | Fact::Ignored { .. }
+                | Fact::NoVersion { .. }
+                | Fact::Chose { .. }
+                | Fact::SameName { .. } => {}
+            }
+        }
+        for shape in &shapes {
+            match shape {
+                Shape::Unsatisfied { .. }
+                | Shape::IgnoredOnly { .. }
+                | Shape::ChosenProvider { .. }
+                | Shape::Conflict { .. }
+                | Shape::Removal { .. }
+                | Shape::Unclassified => {}
+            }
+        }
+        for remedy in &remedies {
+            match remedy {
+                Remedy::DropTarget { .. }
+                | Remedy::AllowRemoval { .. }
+                | Remedy::ChooseOther { .. }
+                | Remedy::Unignore { .. } => {}
+            }
+        }
+        let mut all = Vec::new();
+        all.extend(facts.iter().map(|each| (each.to_string(), each.message())));
+        all.extend(shapes.iter().map(|each| (each.to_string(), each.message())));
+        all.extend(remedies.iter().map(|each| (each.to_string(), each.message())));
+        all
+    }
+
+    #[test]
+    fn the_english_catalog_renders_each_message_as_display_does() {
+        let catalog =
+            piko_i18n::Catalog::new(piko_i18n::Language::English, piko_i18n::Placeables::Plain);
+        for (display, message) in every_message() {
+            assert_eq!(catalog.try_format(&message).as_deref(), Ok(display.as_str()));
+        }
+    }
+
+    #[test]
+    fn every_language_renders_each_message() {
+        for language in piko_i18n::Language::ALL {
+            let catalog = piko_i18n::Catalog::new(*language, piko_i18n::Placeables::Plain);
+            for (_, message) in every_message() {
+                let rendered = catalog.try_format(&message);
+                assert!(rendered.is_ok(), "{language:?}: {rendered:?}");
+            }
+        }
     }
 }

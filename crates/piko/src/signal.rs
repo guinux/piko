@@ -136,7 +136,12 @@ impl Handler {
             // `cmd::txn`'s provider question holds the draw lock across that prompt. A request
             // for the lock here would wait for the answer the signal just refused to give. The
             // prompt's own `suspend` hides the rows already, so nothing can overdraw this.
-            eprintln!("{}", if signal == SIGINT { "Interrupted" } else { "Terminated" });
+            let text = if signal == SIGINT {
+                crate::i18n::tr!("signal-interrupted")
+            } else {
+                crate::i18n::tr!("signal-terminated")
+            };
+            eprintln!("{text}");
             std::process::exit(128_i32.saturating_add(signal));
         }
         if self.cancel.is_requested() {
@@ -146,7 +151,7 @@ impl Handler {
             // This clears the rows rather than suspending them. The process ends on the next
             // line, so the rows have no reason to come back.
             crate::progress::clear_active();
-            eprintln!("Still stopping -- forcing exit");
+            eprintln!("{}", crate::i18n::tr!("signal-forcing-exit"));
             std::process::exit(130);
         }
         if signal != SIGHUP {
@@ -155,9 +160,9 @@ impl Handler {
                 // downloading, verification and the commit, and all three stop on it. A phase
                 // named here would be the wrong one for every signal that lands in the others.
                 if signal == SIGINT {
-                    eprintln!("Stopping (press Ctrl+C again to force quit)...");
+                    eprintln!("{}", crate::i18n::tr!("signal-stopping"));
                 } else {
-                    eprintln!("Stopping: terminate request received...");
+                    eprintln!("{}", crate::i18n::tr!("signal-stopping-terminate"));
                 }
             });
         }

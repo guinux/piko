@@ -13,7 +13,7 @@ use piko_db::config::SigLevel;
 
 use crate::{
     decision::{Policy, SignatureOutcome, Status, Trust, Verdict, newest_creation},
-    error::{Error, Result},
+    error::{Error, Operation, Result},
 };
 
 /// Binds a GPGME context to `home` as its `GNUPGHOME`.
@@ -188,7 +188,7 @@ impl Keyring {
     /// Returns [`Error::Gpgme`] if GnuPG could not be run, the files could not be opened or are
     /// not regular files, or a signing key could not be looked up.
     pub fn verify_detached(&self, path: &Path, signature: &Path) -> Result<Vec<SignatureOutcome>> {
-        self.verify_against(path, stream(signature, "read the signature")?)
+        self.verify_against(path, stream(signature, Operation::ReadSignature)?)
     }
 
     /// Verifies `signature`, held in memory, over the contents of `path`.
@@ -207,7 +207,7 @@ impl Keyring {
     ) -> Result<Vec<SignatureOutcome>> {
         let detached = gpgme::Data::from_bytes(signature).map_err(|source| Error::Gpgme {
             path: path.to_path_buf(),
-            action: "read the signature of",
+            action: Operation::ReadSignatureOf,
             message: source.to_string(),
         })?;
         self.verify_against(path, detached)
@@ -220,11 +220,11 @@ impl Keyring {
         detached: gpgme::Data<'_>,
     ) -> Result<Vec<SignatureOutcome>> {
         let mut context = self.context()?;
-        let signed = stream(path, "read the signed file")?;
+        let signed = stream(path, Operation::ReadSignedFile)?;
 
         let result = context.verify_detached(detached, signed).map_err(|source| Error::Gpgme {
             path: path.to_path_buf(),
-            action: "verify",
+            action: Operation::Verify,
             message: source.to_string(),
         })?;
 
@@ -360,7 +360,7 @@ pub fn verify_database_dated(
 }
 
 /// Opens `path` as a GPGME data object that GnuPG reads from as it hashes.
-fn stream(path: &Path, action: &'static str) -> Result<gpgme::Data<'static>> {
+fn stream(path: &Path, action: Operation) -> Result<gpgme::Data<'static>> {
     let describe = |message: String| Error::Gpgme { path: path.to_path_buf(), action, message };
     let file = piko_db::fs_util::open_following_symlinks(path)
         .map_err(|source| describe(source.to_string()))?;
@@ -525,7 +525,7 @@ fn signing_key(
         Err(error) if error.code() == gpgme::Error::EOF.code() => Ok(None),
         Err(error) => Err(Error::Gpgme {
             path: path.to_path_buf(),
-            action: "look up the signing key of",
+            action: Operation::LookUpSigningKey,
             message: error.to_string(),
         }),
     }

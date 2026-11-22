@@ -69,36 +69,31 @@ pub fn hold_pkg_allows(
     }
 
     for name in held {
-        eprintln!("Warning: {name} is designated as a HoldPkg");
+        crate::i18n::print_warning!("removal-held", name = name.as_str());
     }
     if noconfirm {
         // Deliberately does not name a flag. `piko remove` arrives here from `--noconfirm`;
         // `piko plan -R` arrives here always (see the call site for why `--print` forces it).
-        eprintln!(
-            "Error: HoldPkg was found in the target list, and this run cannot ask confirmation"
-        );
+        crate::i18n::print_error!("removal-held-unattended");
         return false;
     }
-    crate::output::confirm(
-        out,
-        "HoldPkg was found in target list. Do you want to continue? [y/N] ",
-        false,
-    )
+    let prompt = format!("{} ", crate::i18n::tr!("removal-held-prompt"));
+    crate::output::confirm(out, &prompt, false)
 }
 
 /// Prints a [`RemovalFailure`] to stderr, with the hint that fits it.
 pub fn report(failure: &RemovalFailure) {
     match failure {
         RemovalFailure::NotInstalled(name) => {
-            eprintln!("Error: no installed package or group named {name}");
+            crate::i18n::print_error!("removal-not-installed", name = name.to_string());
         }
         RemovalFailure::WouldBreakSystem(diagnosis) => {
             crate::cmd::plan::print_diagnosis(diagnosis);
-            eprintln!("Note: pass -c to remove the dependents too");
+            crate::i18n::print_note!("removal-cascade-hint");
         }
         RemovalFailure::Planner(error) => crate::output::report(error.as_ref()),
         // A failure this frontend does not know yet.
-        other => eprintln!("Error: {other:?}"),
+        other => crate::i18n::print_error!("cli-unknown-failure", failure = format!("{other:?}")),
     }
 }
 

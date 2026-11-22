@@ -22,6 +22,14 @@ use std::{
     time::Duration,
 };
 
+/// A `piko` command in English, whatever the locale of the machine. The tests compare its
+/// output with English text.
+fn piko_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_piko"));
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// The same value as `piko_sig_write::admin::MASTER_KEY_USERID`, which is `pub(crate)`.
 /// Repeated here rather than exported. These tests must not be able to change the library's
 /// own identity string.
@@ -83,7 +91,7 @@ fn new_home() -> Option<PathBuf> {
 
 /// Runs `piko key --gpgdir <home> <args…>` and writes `stdin` to the confirmation prompt.
 fn run(home: &Path, args: &[&str], stdin: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_piko"))
+    let mut child = piko_command()
         .arg("key")
         .arg("--gpgdir")
         .arg(home)

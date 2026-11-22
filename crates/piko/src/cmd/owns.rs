@@ -36,7 +36,13 @@ fn owner_line(path: &str, name: impl std::fmt::Display, version: &str, quiet: bo
         format!("{name}")
     } else {
         let dim = console::Style::new().dim();
-        format!("{} is owned by {name} {version}", dim.apply_to(piko_db::printable(path)))
+        let path = dim.apply_to(piko_db::printable(path)).to_string();
+        crate::i18n::tr!(
+            "owns-owned-by",
+            path = path,
+            name = name.to_string(),
+            version = version.to_string()
+        )
     }
 }
 
@@ -69,7 +75,7 @@ pub fn owns(
             // The refused target is the one the resolution settled on, not the resolved path.
             // A refusal can be the resolution itself failing, and echoing a half-resolved path
             // would name something the user did not type.
-            eprintln!("Error: No package owns {}", answer.query.named);
+            crate::i18n::print_error!("owns-no-owner", path = answer.query.named.to_string());
             ok = false;
             continue;
         }

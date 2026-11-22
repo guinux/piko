@@ -12,19 +12,19 @@ use std::{fmt, path::PathBuf};
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// How many file conflicts [`Error::FileConflicts`] names before summarising the rest.
-const MAX_SHOWN: usize = 10;
+pub(crate) const MAX_SHOWN: usize = 10;
 
 /// A path in a message, with anything that could drive a terminal escaped.
 ///
 /// A member path, a `.PKGINFO` value quoted in a parse error and a file name on disk are all
 /// chosen outside piko, and every message here can reach a terminal. See
 /// [`fn@piko_db::printable`].
-fn shown(path: &std::path::Path) -> String {
+pub(crate) fn shown(path: &std::path::Path) -> String {
     piko_db::printable_path(path)
 }
 
 /// A reason in a message, escaped as [`shown`] escapes a path.
-fn said(reason: &str) -> String {
+pub(crate) fn said(reason: &str) -> String {
     piko_db::printable(reason)
 }
 
@@ -86,6 +86,164 @@ impl fmt::Display for IoAction {
     }
 }
 
+/// The type of a tar member piko does not extract.
+///
+/// The extraction writes regular files, directories, symbolic links and hard links only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MemberType {
+    /// A character device node.
+    CharacterDevice,
+    /// A block device node.
+    BlockDevice,
+    /// A named pipe.
+    Fifo,
+    /// A contiguous file, which tar defines and no Linux filesystem has.
+    ContiguousFile,
+    /// A GNU sparse file.
+    GnuSparseFile,
+    /// A pax global header, which applies to every member after it.
+    PaxGlobalHeader,
+    /// A type byte tar does not define.
+    Unknown,
+}
+
+impl fmt::Display for MemberType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CharacterDevice => "character device",
+            Self::BlockDevice => "block device",
+            Self::Fifo => "FIFO",
+            Self::ContiguousFile => "contiguous file",
+            Self::GnuSparseFile => "GNU sparse file",
+            Self::PaxGlobalHeader => "pax global header",
+            Self::Unknown => "member of an unknown type",
+        })
+    }
+}
+
+/// What a path component is, when a walk inside the installation root cannot go through it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Obstacle {
+    /// The component is a symbolic link, which the walk does not follow.
+    Symlink,
+    /// The component is not a directory.
+    NotADirectory,
+    /// The component changed while it was examined.
+    Unexaminable,
+}
+
+impl fmt::Display for Obstacle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Symlink => "it is a symlink",
+            Self::NotADirectory => "it is not a directory",
+            Self::Unexaminable => "it could not be examined",
+        })
+    }
+}
+
+/// The bound that [`Error::PackageLimitExceeded`] names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PackageLimit {
+    /// The size of the package file.
+    CompressedSize,
+    /// The total size read out of the package.
+    InflatedSize,
+    /// The installed size the plan declares for the package, its `%ISIZE%`.
+    DeclaredSize,
+    /// The number of members.
+    MemberCount,
+    /// The number of extended attributes of one member.
+    XattrCount,
+    /// The total size of the extended attributes of one member.
+    XattrSize,
+    /// The size of the install scriptlet.
+    ScriptletSize,
+    /// The size of the `.PKGINFO`.
+    PkgInfoSize,
+    /// The size of a file read as the base of a three-way merge.
+    MergeBaseSize,
+    /// The size of a backup file that is hashed.
+    BackupFileSize,
+    /// The size of a detached signature.
+    SignatureSize,
+}
+
+impl fmt::Display for PackageLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::CompressedSize => "compressed size",
+            Self::InflatedSize => "inflated size",
+            Self::DeclaredSize => "installed size the plan declares",
+            Self::MemberCount => "member count",
+            Self::XattrCount => "extended attribute count",
+            Self::XattrSize => "extended attribute size",
+            Self::ScriptletSize => "scriptlet size",
+            Self::PkgInfoSize => ".PKGINFO size",
+            Self::MergeBaseSize => "merge base size",
+            Self::BackupFileSize => "backup file size",
+            Self::SignatureSize => "signature size",
+        })
+    }
+}
+
+/// Why a package's signature was refused.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SignatureRefusal {
+    /// The configured `SigLevel` refused the signature, or the absence of one.
+    Policy(piko_sig::Rejection),
+    /// The repository database publishes a signature that is not base64.
+    NotBase64 {
+        /// What the decoder reported.
+        reason: String,
+    },
+}
+
+impl fmt::Display for SignatureRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Policy(rejection) => f.write_str(&said(&rejection.to_string())),
+            Self::NotBase64 { reason } => {
+                write!(f, "the repository database's signature is not base64: {}", said(reason))
+            }
+        }
+    }
+}
+
+/// What became of a refused package file in the cache.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Discarded {
+    /// The file stays where it is.
+    No,
+    /// The file was removed from the cache, so the next run downloads it again.
+    Removed,
+    /// Removing the file failed.
+    Failed {
+        /// Why.
+        reason: String,
+    },
+}
+
+impl fmt::Display for Discarded {
+    /// The clause that follows the refusal in its message, with its leading `; `, or nothing.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::No => Ok(()),
+            Self::Removed => {
+                f.write_str("; it was removed from the cache, so the next run downloads it again")
+            }
+            Self::Failed { reason } => {
+                write!(f, "; it could not be removed from the cache: {}", said(reason))
+            }
+        }
+    }
+}
+
 /// An error produced while committing a transaction.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -142,7 +300,7 @@ pub enum Error {
         /// The member's path, as the archive spells it.
         member: PathBuf,
         /// What the member's type byte names.
-        kind: &'static str,
+        kind: MemberType,
     },
 
     /// A hard link member names a target that is not a file the same package ships before it.
@@ -210,7 +368,7 @@ pub enum Error {
         /// The component that redirects it.
         component: PathBuf,
         /// Why that component cannot be descended through.
-        reason: &'static str,
+        reason: Obstacle,
     },
 
     /// A package archive exceeded one of [`crate::extract::PackageLimits`].
@@ -222,7 +380,7 @@ pub enum Error {
         /// The package that was too large.
         path: PathBuf,
         /// Which bound was hit.
-        limit: &'static str,
+        limit: PackageLimit,
         /// The configured maximum.
         max: u64,
     },
@@ -259,7 +417,7 @@ pub enum Error {
     /// Currently this is only the "a directory is in the way of a file" case. libalpm also
     /// treats that as fatal (`add.c:290`) rather than removing the directory. That directory
     /// may hold files belonging to another package, or to nobody.
-    #[error("cannot extract {}: {reason:?}", shown(path))]
+    #[error("cannot extract {}: {reason}", shown(path))]
     ExtractionRefused {
         /// The member's path as the archive spells it.
         path: PathBuf,
@@ -276,8 +434,8 @@ pub enum Error {
     /// The message shows the first few and counts the rest. A package that collides with
     /// another can collide on thousands of paths, and a wall of them buries the summary.
     #[error(
-        "the transaction would overwrite {} file(s) it does not own:\n  {}{}",
-        conflicts.len(),
+        "the transaction would overwrite {} it does not own:\n  {}{}",
+        match conflicts.len() { 1 => "1 file".to_owned(), count => format!("{count} files") },
         conflicts.iter().take(MAX_SHOWN).map(ToString::to_string).collect::<Vec<_>>().join("\n  "),
         match conflicts.len().saturating_sub(MAX_SHOWN) {
             0 => String::new(),
@@ -370,12 +528,14 @@ pub enum Error {
     /// The package is intact as far as piko knows. What failed is the *policy*. This is
     /// distinct from [`Error::SignatureUncheckable`] because the two call for opposite
     /// responses. This one means do not install the package. That one means fix the keyring.
-    #[error("{}: {}", shown(package), said(reason))]
+    #[error("{}: {refusal}{discarded}", shown(package))]
     SignatureRejected {
         /// The package file that was refused.
         package: PathBuf,
         /// Which rule refused it, and which key was involved.
-        reason: String,
+        refusal: SignatureRefusal,
+        /// What became of the file in the cache.
+        discarded: Discarded,
         /// Whether the refusal is that the package has no signature at all.
         ///
         /// libalpm's `ALPM_ERR_PKG_MISSING_SIG`, set apart from a signature that was read and
@@ -389,24 +549,31 @@ pub enum Error {
     /// deliberately **not** treated as a failed signature: doing so would refuse valid
     /// packages and blame them for a local misconfiguration. Equally it is not a pass. piko
     /// has no opinion on a package it could not check, so the transaction stops.
-    #[error("cannot check the signature of {}: {}", shown(package), said(reason))]
+    #[error("cannot check the signature of {}: {}", shown(package), said(&error.to_string()))]
     SignatureUncheckable {
         /// The package file that could not be checked.
         package: PathBuf,
         /// What went wrong.
-        reason: String,
+        error: piko_sig::Error,
     },
 
     /// A package file's SHA-256 is not the one its repository database publishes.
     ///
     /// libalpm's `ALPM_ERR_PKG_INVALID_CHECKSUM`. The file is damaged, or it is not the build
     /// the database describes. Either way, it is not installed.
-    #[error("{}: {}", shown(package), said(reason))]
+    #[error(
+        "{}: its SHA-256 is {found}, but the repository database publishes {published}{discarded}",
+        shown(package)
+    )]
     ChecksumMismatch {
         /// The package file that was refused.
         package: PathBuf,
-        /// Both digests, and what became of the file.
-        reason: String,
+        /// The SHA-256 of the file, in hexadecimal.
+        found: String,
+        /// The SHA-256 the repository database publishes, in hexadecimal.
+        published: String,
+        /// What became of the file in the cache.
+        discarded: Discarded,
     },
 
     /// Writing the local database entry failed.

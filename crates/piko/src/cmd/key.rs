@@ -38,11 +38,26 @@ fn init(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
     match KeyringAdmin::init(gpgdir) {
         Ok((_, outcome)) => {
             if outcome.master_key_created {
-                emit!(out, "Generated a new master signing key in {}", gpgdir.display());
+                emit!(
+                    out,
+                    "{}",
+                    crate::i18n::tr!("key-generated", path = gpgdir.display().to_string())
+                );
             } else if outcome.master_key_expiry_removed {
-                emit!(out, "Removed the expiry date of the master key in {}", gpgdir.display());
+                emit!(
+                    out,
+                    "{}",
+                    crate::i18n::tr!("key-expiry-removed", path = gpgdir.display().to_string())
+                );
             } else {
-                emit!(out, "{} is already initialized", gpgdir.display());
+                emit!(
+                    out,
+                    "{}",
+                    crate::i18n::tr!(
+                        "key-already-initialized",
+                        path = gpgdir.display().to_string()
+                    )
+                );
             }
             ExitCode::SUCCESS
         }
@@ -81,21 +96,26 @@ fn populate(
     };
 
     if names.is_empty() {
-        emit!(out, "No keyrings found under {}", keyring_dir.display());
+        emit!(
+            out,
+            "{}",
+            crate::i18n::tr!("key-no-keyrings", path = keyring_dir.display().to_string())
+        );
         return ExitCode::SUCCESS;
     }
 
     for name in &names {
         match admin.populate(keyring_dir, name) {
             Ok(summary) => {
-                emit!(
-                    out,
-                    "{name}: imported {}, locally signed {}, trusted {}, disabled {}",
-                    summary.imported.imported,
-                    summary.lsigned,
-                    summary.trust_set,
-                    summary.disabled,
+                let line = crate::i18n::tr!(
+                    "key-populated",
+                    name = name.as_str(),
+                    imported = summary.imported.imported,
+                    lsigned = summary.lsigned,
+                    trusted = summary.trust_set,
+                    disabled = summary.disabled
                 );
+                emit!(out, "{line}");
                 // `SkippedLine` names its own side file, so each entry prints as one location
                 // the user can open. A line number needs that name: both files can hold a bad
                 // line at the same number.
@@ -131,13 +151,13 @@ fn add(gpgdir: &Path, files: &[std::path::PathBuf], out: &mut impl std::io::Writ
     for file in files {
         match admin.import(file) {
             Ok(summary) => {
-                emit!(
-                    out,
-                    "{}: imported {}, unchanged {}",
-                    file.display(),
-                    summary.imported,
-                    summary.unchanged
+                let line = crate::i18n::tr!(
+                    "key-imported",
+                    file = file.display().to_string(),
+                    imported = summary.imported,
+                    unchanged = summary.unchanged
                 );
+                emit!(out, "{line}");
             }
             Err(error) => {
                 report(&error);
@@ -164,18 +184,29 @@ fn lsign_key(
     };
 
     for keyid in keyids {
-        let fingerprint = match confirm_trust_action(&admin, keyid, "locally sign", noconfirm, out)
-        {
+        let fingerprint = match confirm_trust_action(
+            &admin,
+            keyid,
+            &crate::i18n::tr!("key-prompt-lsign"),
+            noconfirm,
+            out,
+        ) {
             Decision::Proceed(fingerprint) => fingerprint,
             Decision::Declined => {
-                emit!(out, "Skipped {keyid}");
+                emit!(out, "{}", crate::i18n::tr!("key-skipped", key = keyid));
                 continue;
             }
             Decision::Failed => return ExitCode::FAILURE,
         };
         match admin.lsign(&fingerprint) {
-            Ok(true) => emit!(out, "Locally signed {fingerprint}"),
-            Ok(false) => emit!(out, "{fingerprint} is already locally signed"),
+            Ok(true) => {
+                emit!(out, "{}", crate::i18n::tr!("key-lsigned", key = fingerprint.as_str()))
+            }
+            Ok(false) => emit!(
+                out,
+                "{}",
+                crate::i18n::tr!("key-already-lsigned", key = fingerprint.as_str())
+            ),
             Err(error) => {
                 report(&error);
                 return ExitCode::FAILURE;
@@ -224,7 +255,7 @@ fn list_keys(gpgdir: &Path, keyids: &[String], out: &mut impl std::io::Write) ->
         }
     }
     if keys.is_empty() {
-        emit!(out, "No matching keys");
+        emit!(out, "{}", crate::i18n::tr!("key-no-match"));
         if !keyids.is_empty() {
             return ExitCode::FAILURE;
         }
@@ -232,16 +263,28 @@ fn list_keys(gpgdir: &Path, keyids: &[String], out: &mut impl std::io::Write) ->
     ExitCode::SUCCESS
 }
 
-fn disabled_suffix(key: &KeyInfo) -> &'static str {
-    if key.is_disabled { " [disabled]" } else { "" }
+fn disabled_suffix(key: &KeyInfo) -> String {
+    if key.is_disabled {
+        format!(" {}", crate::i18n::tr!("key-mark-disabled"))
+    } else {
+        String::new()
+    }
 }
 
-fn revoked_suffix(key: &KeyInfo) -> &'static str {
-    if key.is_revoked { " [revoked]" } else { "" }
+fn revoked_suffix(key: &KeyInfo) -> String {
+    if key.is_revoked {
+        format!(" {}", crate::i18n::tr!("key-mark-revoked"))
+    } else {
+        String::new()
+    }
 }
 
-fn expired_suffix(key: &KeyInfo) -> &'static str {
-    if key.is_expired { " [expired]" } else { "" }
+fn expired_suffix(key: &KeyInfo) -> String {
+    if key.is_expired {
+        format!(" {}", crate::i18n::tr!("key-mark-expired"))
+    } else {
+        String::new()
+    }
 }
 
 /// `piko key delete`.
@@ -266,10 +309,16 @@ fn delete(
     };
 
     for keyid in keyids {
-        let fingerprint = match confirm_trust_action(&admin, keyid, "delete", noconfirm, out) {
+        let fingerprint = match confirm_trust_action(
+            &admin,
+            keyid,
+            &crate::i18n::tr!("key-prompt-delete"),
+            noconfirm,
+            out,
+        ) {
             Decision::Proceed(fingerprint) => fingerprint,
             Decision::Declined => {
-                emit!(out, "Skipped {keyid}");
+                emit!(out, "{}", crate::i18n::tr!("key-skipped", key = keyid));
                 continue;
             }
             Decision::Failed => return ExitCode::FAILURE,
@@ -278,7 +327,7 @@ fn delete(
             report(&error);
             return ExitCode::FAILURE;
         }
-        emit!(out, "Deleted {fingerprint}");
+        emit!(out, "{}", crate::i18n::tr!("key-deleted", key = fingerprint.as_str()));
     }
     ExitCode::SUCCESS
 }
@@ -306,20 +355,28 @@ fn verify(
         }
     };
     for outcome in &checked.outcomes {
-        emit!(
-            out,
-            "{:?} (trust: {:?}){}",
-            outcome.status,
-            outcome.trust,
-            outcome.fingerprint.as_deref().map(|fpr| format!(", key {fpr}")).unwrap_or_default(),
-        );
+        let line = match outcome.fingerprint.as_deref() {
+            Some(key) => crate::i18n::tr!(
+                "key-verify-outcome-key",
+                status = format!("{:?}", outcome.status),
+                trust = format!("{:?}", outcome.trust),
+                key = key
+            ),
+            None => crate::i18n::tr!(
+                "key-verify-outcome",
+                status = format!("{:?}", outcome.status),
+                trust = format!("{:?}", outcome.trust)
+            ),
+        };
+        emit!(out, "{line}");
     }
     match checked.verdict {
         piko_sig::Verdict::Accepted { .. } => ExitCode::SUCCESS,
         piko_sig::Verdict::Rejected(rejection) => {
-            eprintln!(
-                "Error: the signature on {} was rejected: {rejection}",
-                checked.file.display()
+            crate::i18n::print_error!(
+                "error-signature-rejected",
+                archive = checked.file.display().to_string(),
+                reason = piko_i18n::Localize::message(&rejection)
             );
             ExitCode::FAILURE
         }
@@ -337,7 +394,7 @@ fn updatedb(gpgdir: &Path, out: &mut impl std::io::Write) -> ExitCode {
     };
     match admin.update_trustdb() {
         Ok(()) => {
-            emit!(out, "Trust database recomputed");
+            emit!(out, "{}", crate::i18n::tr!("key-trustdb-updated"));
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -373,7 +430,7 @@ enum Decision {
 fn confirm_trust_action(
     admin: &KeyringAdmin,
     keyid: &str,
-    verb: &str,
+    prompt: &str,
     noconfirm: bool,
     out: &mut impl std::io::Write,
 ) -> Decision {
@@ -386,7 +443,7 @@ fn confirm_trust_action(
     };
 
     let _ = writeln!(out, "{}", key_line(&key.fingerprint, &key.user_ids));
-    if noconfirm || confirm(out, &format!("{verb} this key? [y/N] "), false) {
+    if noconfirm || confirm(out, &format!("{prompt} "), false) {
         Decision::Proceed(key.fingerprint)
     } else {
         Decision::Declined

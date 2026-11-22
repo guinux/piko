@@ -56,13 +56,14 @@ impl ConfigCache {
                         }
                         // pacman reports each refusal of `alpm_register_syncdb` and continues.
                         for (repo, refusal) in config.unregistered_repositories() {
-                            crate::output::warn(format_args!(
-                                "repository [{}] is not used: {refusal}",
-                                repo.name
+                            crate::output::warn(crate::i18n::tr!(
+                                "context-repository-unused",
+                                name = repo.name.to_string(),
+                                reason = refusal.to_string()
                             ));
                         }
                     })
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| crate::output::describe(&error))
             })
             .as_ref()
             .map_err(String::as_str)
@@ -305,10 +306,11 @@ fn rooted_path(
         Ok(parsed) => configured(&parsed.options, root),
         Err(error) => {
             let path = default(root);
-            crate::output::warn(format_args!(
-                "failed to read {} ({error}); falling back to {}",
-                cli.config.display(),
-                path.display()
+            crate::output::warn(crate::i18n::tr!(
+                "context-config-fallback",
+                config = cli.config.display().to_string(),
+                reason = error,
+                fallback = path.display().to_string()
             ));
             path
         }
@@ -330,9 +332,11 @@ fn configured_path(
     match config.get(cli) {
         Ok(parsed) => field(&parsed.options).clone(),
         Err(error) => {
-            crate::output::warn(format_args!(
-                "failed to read {} ({error}); falling back to {default}",
-                cli.config.display()
+            crate::output::warn(crate::i18n::tr!(
+                "context-config-fallback",
+                config = cli.config.display().to_string(),
+                reason = error,
+                fallback = default
             ));
             PathBuf::from(default)
         }
@@ -595,7 +599,11 @@ pub fn open_all_repos(
         match open_repo_by_name(&dbpath, &repo.name, cli, config) {
             Ok(db) => opened.push((repo.usage, db)),
             Err(error) => {
-                crate::output::warn(format_args!("skipping repository {}: {error}", repo.name));
+                crate::output::warn(crate::i18n::tr!(
+                    "context-repository-skipped",
+                    name = repo.name.to_string(),
+                    reason = crate::output::describe(&error)
+                ));
             }
         }
     }
@@ -648,7 +656,11 @@ pub fn open_repos_for_packages(
                 opened.push(db);
             }
             Err(error) => {
-                crate::output::warn(format_args!("skipping repository {}: {error}", repo.name));
+                crate::output::warn(crate::i18n::tr!(
+                    "context-repository-skipped",
+                    name = repo.name.to_string(),
+                    reason = crate::output::describe(&error)
+                ));
             }
         }
     }
@@ -683,7 +695,12 @@ pub struct ConfigUnavailable {
 
 impl std::fmt::Display for ConfigUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "failed to read {}: {}", self.path, self.reason)
+        let text = crate::i18n::tr!(
+            "context-config-unavailable",
+            path = self.path.as_str(),
+            reason = self.reason.as_str()
+        );
+        f.write_str(&text)
     }
 }
 

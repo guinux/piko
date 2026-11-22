@@ -9,6 +9,14 @@
 
 use std::process::{Command, Output, Stdio};
 
+/// A `piko` command in English, whatever the locale of the machine. The tests compare its
+/// output with English text.
+fn piko_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_piko"));
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// Runs `piko` with `args` and a pacman.conf that does not exist, so each path falls back to
 /// its built-in default.
 ///
@@ -25,7 +33,7 @@ fn run_unprivileged_with(config: &std::path::Path, args: &[&str]) -> Option<Outp
     if rustix::process::geteuid().is_root() {
         return None;
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_piko"))
+    let output = piko_command()
         .args(args)
         .arg("--config")
         .arg(config)

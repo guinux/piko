@@ -52,14 +52,14 @@ pub fn check_selected(
         match db.get_str(name) {
             Some(package) => packages.push(package),
             None => {
-                eprintln!("Error: package {name} is not installed");
+                crate::i18n::print_error!("cli-not-installed", name = name.to_string());
                 missing = true;
             }
         }
     }
 
     let steplist = StepList::new();
-    let row = steplist.counted("Checking packages", packages.len());
+    let row = steplist.counted(&crate::i18n::tr!("check-row"), packages.len());
     let checked = run_checks(&packages, root, no_extract, &row);
     row.finish_and_clear();
 
@@ -78,7 +78,7 @@ pub fn check_all(
     let packages: Vec<&LocalPackage> = db.into_iter().collect();
 
     let steplist = StepList::new();
-    let row = steplist.counted("Checking packages", packages.len());
+    let row = steplist.counted(&crate::i18n::tr!("check-row"), packages.len());
     let checked = run_checks(&packages, root, no_extract, &row);
     row.finish_and_clear();
 
@@ -189,10 +189,14 @@ fn print_checked(steplist: &StepList, checked: &[Checked], out: &mut impl std::i
 
 fn summary(total: usize, with_problems: usize, out: &mut impl std::io::Write) -> ExitCode {
     if with_problems == 0 {
-        emit!(out, "{total} packages checked, no problems found");
+        emit!(out, "{}", crate::i18n::tr!("check-clean", total = total));
         ExitCode::SUCCESS
     } else {
-        emit!(out, "{total} packages checked, {with_problems} package(s) with problems");
+        emit!(
+            out,
+            "{}",
+            crate::i18n::tr!("check-problems", total = total, problems = with_problems)
+        );
         ExitCode::FAILURE
     }
 }
@@ -230,12 +234,21 @@ fn check(
             failed = true;
         }
         if files.defects_dropped() > 0 {
-            emit!(out, "{}: {} further files defect(s)", package.name(), files.defects_dropped());
+            let line = crate::i18n::tr!(
+                "check-defects-not-shown",
+                package = package.name().to_string(),
+                count = files.defects_dropped()
+            );
+            emit!(out, "{line}");
         }
     }
 
     match package.verify_files(root, no_extract) {
-        Ok(None) => emit!(out, "{}: no mtree file", package.name()),
+        Ok(None) => emit!(
+            out,
+            "{}",
+            crate::i18n::tr!("check-no-mtree", package = package.name().to_string())
+        ),
         Ok(Some(file_report)) => {
             for problem in file_report.problems.iter().filter(|problem| problem.is_error()) {
                 emit!(
@@ -248,12 +261,13 @@ fn check(
             }
             let altered = file_report.altered_files();
             if altered > 0 {
-                emit!(
-                    out,
-                    "{}: {} total files, {altered} altered files",
-                    package.name(),
-                    file_report.total
+                let line = crate::i18n::tr!(
+                    "check-altered",
+                    package = package.name().to_string(),
+                    total = file_report.total,
+                    altered = altered
                 );
+                emit!(out, "{line}");
             }
             failed = failed || altered > 0;
         }

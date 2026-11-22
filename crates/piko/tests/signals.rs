@@ -18,6 +18,14 @@ use std::{
 
 use rustix::process::{Pid, Signal};
 
+/// A `piko` command in English, whatever the locale of the machine. The tests compare its
+/// output with English text.
+fn piko_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_piko"));
+    command.env("LC_ALL", "C");
+    command
+}
+
 /// Starts a server that accepts every connection and never answers. Each accepted connection
 /// is reported on the returned channel, and kept open until the test process ends.
 fn silent_server() -> (u16, mpsc::Receiver<()>) {
@@ -48,7 +56,7 @@ fn start_refresh(dir: &Path, port: u16) -> Child {
     .unwrap();
     let dbpath = dir.join("db");
     std::fs::create_dir(&dbpath).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_piko"))
+    piko_command()
         .arg("refresh")
         .arg("--config")
         .arg(&config)

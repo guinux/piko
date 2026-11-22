@@ -324,13 +324,13 @@ impl RootDir {
     ///
     /// This is best-effort. If the `lstat` itself fails, the component changed underneath the
     /// caller. That is worth saying rather than papering over with a guess.
-    fn describe_blocker(&self, current: &OwnedFd, part: &OsStr) -> &'static str {
+    fn describe_blocker(&self, current: &OwnedFd, part: &OsStr) -> crate::Obstacle {
         match rustix::fs::statat(current, part, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) => match rustix::fs::FileType::from_raw_mode(stat.st_mode) {
-                rustix::fs::FileType::Symlink => "it is a symlink",
-                _ => "it is not a directory",
+                rustix::fs::FileType::Symlink => crate::Obstacle::Symlink,
+                _ => crate::Obstacle::NotADirectory,
             },
-            Err(_) => "it could not be examined",
+            Err(_) => crate::Obstacle::Unexaminable,
         }
     }
 

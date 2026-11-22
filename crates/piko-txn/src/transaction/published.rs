@@ -52,7 +52,8 @@ impl Published {
         base64::engine::general_purpose::STANDARD.decode(signature.as_str()).map(Some).map_err(
             |error| Error::SignatureRejected {
                 package: package.to_path_buf(),
-                reason: format!("the repository database's signature is not base64: {error}"),
+                refusal: crate::SignatureRefusal::NotBase64 { reason: error.to_string() },
+                discarded: crate::Discarded::No,
                 unsigned: false,
             },
         )
@@ -79,13 +80,11 @@ impl Published {
         if found.as_slice() == self.sha256.inner() {
             return Ok(());
         }
-        let found: String = found.iter().map(|byte| format!("{byte:02x}")).collect();
         Err(Error::ChecksumMismatch {
             package: package.to_path_buf(),
-            reason: format!(
-                "its SHA-256 is {found}, but the repository database publishes {}",
-                self.sha256
-            ),
+            found: found.iter().map(|byte| format!("{byte:02x}")).collect(),
+            published: self.sha256.to_string(),
+            discarded: crate::Discarded::No,
         })
     }
 }
@@ -123,10 +122,12 @@ mod tests {
         std::fs::write(&package, b"another package").unwrap();
 
         let error = published(PACKAGE_SHA256).check_checksum(&package).unwrap_err();
-        let Error::ChecksumMismatch { reason, .. } = &error else {
+        let Error::ChecksumMismatch { found, published, .. } = &error else {
             panic!("expected a checksum mismatch, got {error:?}");
         };
-        assert!(reason.contains(PACKAGE_SHA256), "{reason}");
+        assert_eq!(published, PACKAGE_SHA256);
+        assert_eq!(found.len(), PACKAGE_SHA256.len());
+        assert_ne!(found, published);
     }
 
     /// A FIFO in place of the package is refused without blocking on it.

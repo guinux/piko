@@ -707,7 +707,8 @@ impl Named {
             .map_err(|source| Error::io(&directory, IoAction::CreateDir, source))?;
         let staged = directory.join(name);
         let package_limit = crate::extract::PackageLimits::default().compressed_bytes;
-        let size = copy_bounded(original, &staged, package_limit, "compressed size")?;
+        let size =
+            copy_bounded(original, &staged, package_limit, crate::PackageLimit::CompressedSize)?;
 
         let signature = piko_sig::signature_path(original);
         match std::fs::metadata(&signature) {
@@ -720,7 +721,7 @@ impl Named {
                     &piko_sig::signature_path(&staged),
                     // The download path refuses a larger one at the same bound.
                     piko_sig::MAX_SIGNATURE_BYTES,
-                    "signature size",
+                    crate::PackageLimit::SignatureSize,
                 )?;
             }
         }
@@ -734,7 +735,7 @@ impl Named {
 /// may be a symlink, but a FIFO or a device node is refused rather than read. `to` is created
 /// with `O_EXCL` inside a directory this process just created, so nothing else can have put a
 /// file or a symlink there.
-fn copy_bounded(from: &Path, to: &Path, max: u64, limit: &'static str) -> Result<u64> {
+fn copy_bounded(from: &Path, to: &Path, max: u64, limit: crate::PackageLimit) -> Result<u64> {
     let source = piko_db::fs_util::open_following_symlinks(from).map_err(|error| {
         Error::UnusableSource { path: from.to_path_buf(), reason: error.to_string() }
     })?;

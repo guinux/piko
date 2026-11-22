@@ -15,6 +15,8 @@ console.workspace = true
 indicatif.workspace = true
 piko-db.workspace = true
 piko-db-write.workspace = true
+# The catalog every message is rendered with, in the language of the environment.
+piko-i18n = { workspace = true, features = ["catalog"] }
 piko-net.workspace = true
 piko-sig.workspace = true
 piko-sig-write.workspace = true

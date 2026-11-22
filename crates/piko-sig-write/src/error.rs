@@ -11,6 +11,103 @@ use std::path::PathBuf;
 /// A [`Result`](std::result::Result) with this crate's [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// The GnuPG operation an [`Error::Gpgme`] names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Operation {
+    /// Allocating a buffer GnuPG writes into.
+    AllocateBuffer,
+    /// Creating a configuration file of the keyring.
+    CreateConfFile,
+    /// Creating a file of the keyring.
+    CreateKeyringFile,
+    /// Creating the keyring directory.
+    CreateKeyringDir,
+    /// Deleting a key.
+    Delete,
+    /// Disabling a key.
+    Disable,
+    /// Generating the master key.
+    GenerateMasterKey,
+    /// Importing keys.
+    Import,
+    /// Listing the keys of the keyring.
+    ListKeys,
+    /// Signing a key locally with the master key.
+    LocallySign,
+    /// Opening a configuration file of the keyring.
+    OpenConfFile,
+    /// Opening the keyring.
+    OpenKeyring,
+    /// Reading a file.
+    Read,
+    /// Reading one key of a key listing.
+    ReadKey,
+    /// Reading a configuration file of the keyring.
+    ReadConfFile,
+    /// Reading the fingerprint of a key.
+    ReadFingerprint,
+    /// Removing the expiry date of the master key.
+    RemoveMasterKeyExpiry,
+    /// Searching for the master key.
+    SearchMasterKey,
+    /// Selecting the master key as the signer.
+    SelectSigner,
+    /// Setting the permissions of a configuration file of the keyring.
+    SetConfFileMode,
+    /// Setting the permissions of a file of the keyring.
+    SetKeyringFileMode,
+    /// Setting how GnuPG lists keys.
+    SetKeyListMode,
+    /// Choosing an ownertrust level the trust menu offers.
+    SetOwnertrustLevel,
+    /// Setting the ownertrust of a key.
+    SetOwnertrust,
+    /// Setting the permissions of the keyring directory.
+    SetKeyringDirMode,
+    /// Setting the permissions of the trust database.
+    SetTrustDbMode,
+    /// Using a file of the keyring.
+    UseKeyringFile,
+    /// Writing a configuration file of the keyring.
+    WriteConfFile,
+}
+
+impl std::fmt::Display for Operation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::AllocateBuffer => "allocate a scratch buffer",
+            Self::CreateConfFile => "create a keyring configuration file",
+            Self::CreateKeyringFile => "create a keyring file",
+            Self::CreateKeyringDir => "create the keyring directory",
+            Self::Delete => "delete",
+            Self::Disable => "disable",
+            Self::GenerateMasterKey => "generate the master key",
+            Self::Import => "import",
+            Self::ListKeys => "list keys in",
+            Self::LocallySign => "locally sign",
+            Self::OpenConfFile => "open a keyring configuration file",
+            Self::OpenKeyring => "open the keyring",
+            Self::Read => "read",
+            Self::ReadKey => "read a key from",
+            Self::ReadConfFile => "read a keyring configuration file",
+            Self::ReadFingerprint => "read the fingerprint of",
+            Self::RemoveMasterKeyExpiry => "remove the master key's expiry date",
+            Self::SearchMasterKey => "search for the master key",
+            Self::SelectSigner => "select the master key as signer",
+            Self::SetConfFileMode => "set a keyring configuration file's permissions",
+            Self::SetKeyringFileMode => "set a keyring file's permissions",
+            Self::SetKeyListMode => "set key list mode for",
+            Self::SetOwnertrustLevel => "set ownertrust",
+            Self::SetOwnertrust => "set ownertrust on",
+            Self::SetKeyringDirMode => "set the keyring directory's permissions",
+            Self::SetTrustDbMode => "set the trust database's permissions",
+            Self::UseKeyringFile => "use a keyring file",
+            Self::WriteConfFile => "write a keyring configuration file",
+        })
+    }
+}
+
 /// Something went wrong administering a keyring.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -33,7 +130,7 @@ pub enum Error {
         /// The file or key involved.
         path: PathBuf,
         /// What was being attempted.
-        action: &'static str,
+        action: Operation,
         /// What GnuPG said.
         message: String,
     },
@@ -91,7 +188,7 @@ impl From<piko_sig::Error> for Error {
             piko_sig::Error::KeyringUnusable { home, reason } => {
                 Error::KeyringUnusable { home, reason }
             }
-            other => Error::gpgme(PathBuf::new(), "open the keyring", other),
+            other => Error::gpgme(PathBuf::new(), Operation::OpenKeyring, other),
         }
     }
 }
@@ -100,7 +197,7 @@ impl Error {
     /// An [`Error::Gpgme`] that carries `source`'s message.
     pub(crate) fn gpgme(
         path: impl Into<PathBuf>,
-        action: &'static str,
+        action: Operation,
         source: impl std::fmt::Display,
     ) -> Self {
         Self::Gpgme { path: path.into(), action, message: source.to_string() }

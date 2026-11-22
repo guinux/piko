@@ -322,7 +322,7 @@ fn walk_members(
     if metadata.len() > limits.compressed_bytes {
         return Err(Error::PackageLimitExceeded {
             path: path.to_path_buf(),
-            limit: "compressed size",
+            limit: crate::PackageLimit::CompressedSize,
             max: limits.compressed_bytes,
         });
     }
@@ -352,7 +352,7 @@ fn walk_members(
         if seen > limits.max_members {
             return Err(Error::PackageLimitExceeded {
                 path: path.to_path_buf(),
-                limit: "member count",
+                limit: crate::PackageLimit::MemberCount,
                 max: to_u64(limits.max_members),
             });
         }
@@ -439,7 +439,7 @@ impl<R: Read> Read for Contents<'_, R> {
 /// `tar` has already consumed the extension headers that describe the next member (GNU long
 /// name and long link, pax local), so they never reach this test. A pax global header is
 /// yielded as a member, and is refused like any other type.
-fn unsupported_type(entry_type: tar::EntryType) -> Option<&'static str> {
+fn unsupported_type(entry_type: tar::EntryType) -> Option<crate::MemberType> {
     if entry_type.is_file()
         || entry_type.is_dir()
         || entry_type.is_symlink()
@@ -448,13 +448,13 @@ fn unsupported_type(entry_type: tar::EntryType) -> Option<&'static str> {
         return None;
     }
     Some(match entry_type {
-        tar::EntryType::Char => "character device",
-        tar::EntryType::Block => "block device",
-        tar::EntryType::Fifo => "FIFO",
-        tar::EntryType::Continuous => "contiguous file",
-        tar::EntryType::GNUSparse => "GNU sparse file",
-        tar::EntryType::XGlobalHeader => "pax global header",
-        _ => "member of an unknown type",
+        tar::EntryType::Char => crate::MemberType::CharacterDevice,
+        tar::EntryType::Block => crate::MemberType::BlockDevice,
+        tar::EntryType::Fifo => crate::MemberType::Fifo,
+        tar::EntryType::Continuous => crate::MemberType::ContiguousFile,
+        tar::EntryType::GNUSparse => crate::MemberType::GnuSparseFile,
+        tar::EntryType::XGlobalHeader => crate::MemberType::PaxGlobalHeader,
+        _ => crate::MemberType::Unknown,
     })
 }
 
@@ -531,7 +531,7 @@ const SCHILY_XATTR: &[u8] = b"SCHILY.xattr.";
 fn read_xattrs<R: Read>(
     entry: &mut tar::Entry<'_, R>,
     limits: &PackageLimits,
-) -> std::io::Result<std::result::Result<Vec<Xattr>, (&'static str, u64)>> {
+) -> std::io::Result<std::result::Result<Vec<Xattr>, (crate::PackageLimit, u64)>> {
     use std::os::unix::ffi::OsStrExt as _;
 
     let Some(extensions) = entry.pax_extensions()? else { return Ok(Ok(Vec::new())) };
@@ -563,11 +563,11 @@ fn read_xattrs<R: Read>(
         let Some(name) = key.strip_prefix(LIBARCHIVE_XATTR) else { continue };
         let value = extension.value_bytes();
         if xattrs.len() >= limits.max_xattrs {
-            return Ok(Err(("extended attribute count", to_u64(limits.max_xattrs))));
+            return Ok(Err((crate::PackageLimit::XattrCount, to_u64(limits.max_xattrs))));
         }
         bytes = bytes.saturating_add(name.len()).saturating_add(value.len());
         if bytes > limits.max_xattr_bytes {
-            return Ok(Err(("extended attribute size", to_u64(limits.max_xattr_bytes))));
+            return Ok(Err((crate::PackageLimit::XattrSize, to_u64(limits.max_xattr_bytes))));
         }
         xattrs.push(Xattr {
             name: std::ffi::OsStr::from_bytes(&url_decode(name)?).to_os_string(),
@@ -639,8 +639,8 @@ fn classify_io_error(
 /// The bound the walk's reader refused a read on, if one tripped.
 fn tripped_limit(path: &Path, budget: &Bounds, limits: &PackageLimits) -> Option<Error> {
     let (limit, max) = match budget.tripped()? {
-        Overrun::Limit => ("inflated size", limits.inflated_bytes),
-        Overrun::Declared => ("installed size the plan declares", budget.declared()),
+        Overrun::Limit => (crate::PackageLimit::InflatedSize, limits.inflated_bytes),
+        Overrun::Declared => (crate::PackageLimit::DeclaredSize, budget.declared()),
     };
     Some(Error::PackageLimitExceeded { path: path.to_path_buf(), limit, max })
 }
@@ -861,12 +861,12 @@ mod tests {
     #[test]
     fn a_member_of_an_unsupported_type_refuses_the_package() {
         for (entry_type, kind) in [
-            (tar::EntryType::Char, "character device"),
-            (tar::EntryType::Block, "block device"),
-            (tar::EntryType::Fifo, "FIFO"),
-            (tar::EntryType::Continuous, "contiguous file"),
-            (tar::EntryType::XGlobalHeader, "pax global header"),
-            (tar::EntryType::new(b'Z'), "member of an unknown type"),
+            (tar::EntryType::Char, crate::MemberType::CharacterDevice),
+            (tar::EntryType::Block, crate::MemberType::BlockDevice),
+            (tar::EntryType::Fifo, crate::MemberType::Fifo),
+            (tar::EntryType::Continuous, crate::MemberType::ContiguousFile),
+            (tar::EntryType::XGlobalHeader, crate::MemberType::PaxGlobalHeader),
+            (tar::EntryType::new(b'Z'), crate::MemberType::Unknown),
         ] {
             let path = tarball(|builder| {
                 file_entry(builder, "usr/bin/foo", b"x", 0o755);
@@ -879,7 +879,7 @@ mod tests {
             assert!(
                 matches!(&err, Error::UnsupportedMemberType { member, kind: found, .. }
                     if member == Path::new("dev/node") && *found == kind),
-                "{kind}: got {err:?}"
+                "{kind:?}: got {err:?}"
             );
         }
     }
@@ -1079,7 +1079,10 @@ mod tests {
 
         let err = walk(&path, &limits, |_, _| Ok(())).unwrap_err();
         assert!(
-            matches!(err, Error::PackageLimitExceeded { limit: "compressed size", .. }),
+            matches!(
+                err,
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::CompressedSize, .. }
+            ),
             "got {err:?}"
         );
     }
@@ -1100,7 +1103,10 @@ mod tests {
         })
         .unwrap_err();
         assert!(
-            matches!(err, Error::PackageLimitExceeded { limit: "inflated size", .. }),
+            matches!(
+                err,
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::InflatedSize, .. }
+            ),
             "got {err:?}"
         );
     }
@@ -1123,7 +1129,10 @@ mod tests {
         })
         .unwrap_err();
         assert!(
-            matches!(err, Error::PackageLimitExceeded { limit: "inflated size", .. }),
+            matches!(
+                err,
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::InflatedSize, .. }
+            ),
             "got {err:?}"
         );
     }
@@ -1146,7 +1155,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                Error::PackageLimitExceeded { limit: "installed size the plan declares", .. }
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::DeclaredSize, .. }
             ),
             "got {err:?}"
         );
@@ -1183,7 +1192,10 @@ mod tests {
 
         let err = walk(&path, &limits, |_, _| Ok(())).unwrap_err();
         assert!(
-            matches!(err, Error::PackageLimitExceeded { limit: "member count", .. }),
+            matches!(
+                err,
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::MemberCount, .. }
+            ),
             "got {err:?}"
         );
     }
@@ -1296,7 +1308,10 @@ mod tests {
 
         let err = walk(&path, &limits, |_, _| Ok(())).unwrap_err();
         assert!(
-            matches!(err, Error::PackageLimitExceeded { limit: "extended attribute count", .. }),
+            matches!(
+                err,
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::XattrCount, .. }
+            ),
             "got {err:?}"
         );
     }
@@ -1311,7 +1326,10 @@ mod tests {
 
         let err = walk(&path, &limits, |_, _| Ok(())).unwrap_err();
         assert!(
-            matches!(err, Error::PackageLimitExceeded { limit: "extended attribute size", .. }),
+            matches!(
+                err,
+                Error::PackageLimitExceeded { limit: crate::PackageLimit::XattrSize, .. }
+            ),
             "got {err:?}"
         );
     }
