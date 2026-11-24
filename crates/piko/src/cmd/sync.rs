@@ -169,13 +169,14 @@ mod tests {
         quiet: bool,
     ) -> Vec<String> {
         let mut out = Vec::new();
-        check_updates(
+        let code = check_updates(
             scenario.local(),
             scenario.repos(),
             &IgnoreList::new(ignore_pkg, ignore_group),
             quiet,
             &mut out,
         );
+        assert_eq!(code, ExitCode::SUCCESS);
         let text = String::from_utf8(out).unwrap();
         console::strip_ansi_codes(&text)
             .lines()

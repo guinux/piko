@@ -44,7 +44,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `piko_sig_write::Operation`; `piko_db_write::Unrepresentable`. `piko_txn::Error`'s and
   `piko_net::Error`'s signature errors hold the `piko_sig::Rejection` or `piko_sig::Error` itself,
   and a checksum mismatch holds both digests. Each still prints the same English text.
-
 - A file conflict counts its files, and a failed download its servers, with the singular or
   plural form (`1 file`, `2 servers`). A member a directory stands in the way of says
   `a directory is in the way`, not `DirectoryInTheWay`.
@@ -52,16 +51,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `1 transaction`, `2 groups`, `1 update available`, not `problem(s)`, `transaction(s)` or
   `group(s)`.
 
+### Security
+
+- piko builds with `zstd` 0.13.5, `zstd-safe` 7.4.1, `url` 2.5.9 and `rustix` 1.1.6. These
+  versions fix RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403, RUSTSEC-2026-0592 and
+  RUSTSEC-2026-0486.
+
 ## [1.0.0-rc.1] - 2026-11-14
 
 ### Changed
-
-- A reason a library error held as English text is now a type a frontend can match and
-  translate: `piko_txn::MemberType`, `Obstacle`, `PackageLimit`, `SignatureRefusal` and
-  `Discarded`; `piko_net::IoAction` and `Uncheckable`; `piko_sig::Operation` and
-  `piko_sig_write::Operation`; `piko_db_write::Unrepresentable`. `piko_txn::Error`'s and
-  `piko_net::Error`'s signature errors hold the `piko_sig::Rejection` or `piko_sig::Error` itself,
-  and a checksum mismatch holds both digests. Each still prints the same English text.
 
 - `--max-age` defaults to 40 days, up from 14. A database older than that is reported as
   stale. `--max-age 0` still turns the check off.

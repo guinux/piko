@@ -2,7 +2,10 @@
 
 mod confine;
 pub use confine::Confined;
+// rustfmt resolves a module file whatever its `cfg`, and a published tree has no `fuzzing.rs`.
+// `skip` keeps `cargo fmt` from looking for it there.
 #[cfg(feature = "fuzzing")]
+#[rustfmt::skip]
 #[doc(hidden)]
 pub mod fuzzing;
 pub(crate) mod protocol;

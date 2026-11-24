@@ -31,7 +31,7 @@ txn-error-unsupported-package-compression = impossible d'installer { $packages }
 txn-error-extraction-refused = impossible d'extraire { $path }{" "}: { $reason }
 txn-error-file-conflicts =
     la transaction écraserait { $count ->
-        [one] 1 fichier qui ne lui appartient pas
+        [one] { $count } fichier qui ne lui appartient pas
        *[other] { $count } fichiers qui ne lui appartiennent pas
     }{" "}:
     {"  "}{ $list }
