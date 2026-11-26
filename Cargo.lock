@@ -1510,7 +1510,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "piko"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "alpm-types",
  "clap",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "piko-db"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "alpm-common",
  "alpm-db",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "piko-db-write"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "alpm-types",
  "piko-db",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "piko-i18n"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "fluent-bundle",
  "fluent-syntax",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "piko-net"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "alpm-types",
  "landlock",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "piko-sig"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "gpgme",
  "piko-db",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "piko-sig-write"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "gpgme",
  "piko-db",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "piko-txn"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "alpm-pkginfo",
  "alpm-types",

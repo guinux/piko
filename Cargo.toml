@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0 OR MIT"
@@ -110,13 +110,13 @@ fluent-bundle = "0.16"
 fluent-syntax = "0.12"
 unic-langid = "0.9"
 
-piko-db = { path = "crates/piko-db", version = "1.0.0-rc.1" }
-piko-db-write = { path = "crates/piko-db-write", version = "1.0.0-rc.1" }
-piko-i18n = { path = "crates/piko-i18n", version = "1.0.0-rc.1" }
-piko-net = { path = "crates/piko-net", version = "1.0.0-rc.1" }
-piko-sig = { path = "crates/piko-sig", version = "1.0.0-rc.1" }
-piko-sig-write = { path = "crates/piko-sig-write", version = "1.0.0-rc.1" }
-piko-txn = { path = "crates/piko-txn", version = "1.0.0-rc.1" }
+piko-db = { path = "crates/piko-db", version = "1.0.0-rc.2" }
+piko-db-write = { path = "crates/piko-db-write", version = "1.0.0-rc.2" }
+piko-i18n = { path = "crates/piko-i18n", version = "1.0.0-rc.2" }
+piko-net = { path = "crates/piko-net", version = "1.0.0-rc.2" }
+piko-sig = { path = "crates/piko-sig", version = "1.0.0-rc.2" }
+piko-sig-write = { path = "crates/piko-sig-write", version = "1.0.0-rc.2" }
+piko-txn = { path = "crates/piko-txn", version = "1.0.0-rc.2" }
 
 [profile.release]
 # A package manager runs as root; keep overflow checks on in release builds.
